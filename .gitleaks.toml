@@ -1,0 +1,27 @@
+# gitleaks configuration: the default rules, plus an allowlist of exact literals that
+# only look like secrets — test-fixture token values and specific code lines the
+# generic-api-key rule misreads. Every entry must be an exact literal, never a
+# pattern broad enough to hide a real credential.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Fake fixture tokens in SDK/CLI tests, and code lines misread as keys"
+regexTarget = "line"
+regexes = [
+  '''lakana_pat_abc123_x_y-z_secret''',
+  '''lakana_pat_k9_newsecret''',
+  '''url=base_url, token=token, default_environment=environment''',
+  '''"local", url=url, token=token, default_environment="dev"''',
+  '''"local", url=url, token=token, default_environment=None''',
+  '''dGhpc2lzYXNlY3JldGtleQ==''',   # base64("thisisasecretkey"), a test-fixture master key
+  '''lakana_pat_m5aintegration_m5aintegrationsecret''',   # integration-test fixture token
+  '''lakana_pat_m5bintegration_m5bintegrationsecret''',   # integration-test fixture token
+  '''m5bintegrationsecret''',   # its secret half, hashed in the same fixture
+  '''lakana_pat_m5c1integration_m5c1integrationsecret''',   # integration-test fixture token
+  '''m5c1integrationsecret''',   # its secret half
+  '''lakana_pat_m5c2aintegration_m5c2aintegrationsecret''',   # integration-test fixture token
+  '''m5c2aintegrationsecret''',   # its secret half
+  # A grant in a test: the words TOKEN and kind= on one line are read as a key and its value.
+  '''principal_id=bob.id, action=Action.MANAGE_TOKEN, kind=SecurableKind.INSTANCE''',
+]

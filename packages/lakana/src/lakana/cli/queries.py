@@ -1,0 +1,933 @@
+"""`lakana sql` and `lakana query *`: run SQL against an environment."""
+
+from __future__ import annotations
+
+import contextlib
+import sys
+import time
+from collections.abc import Callable, Generator
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Annotated
+
+import pyarrow as pa
+import typer
+
+from lakana._models import QueryListEntry, QueryStatus, WaitingFor
+from lakana.cli import _files, _output
+from lakana.cli._break_glass import BREAK_GLASS, REASON, break_glass_reason
+from lakana.cli._state import CliError, CliState, resolve_environment, state_of
+from lakana.errors import (
+    AuthenticationError,
+    Conflict,
+    LakanaError,
+    NotFound,
+    PermissionDenied,
+    ValidationError,
+)
+from lakana.resources.queries import QueryRun
+
+query_app = typer.Typer(
+    help="Submit queries and fetch their results step by step.", no_args_is_help=True
+)
+
+_ENV = Annotated[str | None, typer.Option("--env", help="Environment (default: the profile's).")]
+OUT = Annotated[Path | None, typer.Option("--out", help="Write the full result to this file.")]
+FORMAT = Annotated[
+    str | None,
+    typer.Option("--format", help="parquet, csv or arrow (default: from the extension)."),
+]
+MAX_ROWS = Annotated[int, typer.Option("--max-rows", min=0, help="Most rows to display.")]
+TIMEOUT = Annotated[
+    float | None, typer.Option("--timeout", help="Seconds to wait before giving up.")
+]
+_INTO = Annotated[
+    str | None,
+    typer.Option("--into", help="Write the result into this table or view instead of printing it."),
+]
+_MODE = Annotated[
+    str | None, typer.Option("--mode", help="create, replace, append or view (needs --into).")
+]
+_INCREMENTAL_KEY = Annotated[
+    str | None,
+    typer.Option(
+        "--incremental-key", help="Append only rows past the target's max of this column."
+    ),
+]
+_EVOLVE_SCHEMA = Annotated[
+    bool,
+    typer.Option("--evolve-schema", help="Let the target adopt the result's schema."),
+]
+_WRITE_MODES = ("create", "replace", "append", "view")
+_LIST_COLUMNS = ["id", "submitter", "kind", "status", "age", "waiting_for"]
+_LIST_DROPPABLE = ["age", "kind", "submitter"]
+"""What `query list` leaves out first on a narrow terminal: the id, status and reason stay."""
+_LIST_MOST = 200
+"""The most rows the server returns; the `--limit` bound."""
+
+
+def _check_write_flags(
+    into: str | None,
+    mode: str | None,
+    incremental_key: str | None,
+    evolve_schema: bool,
+    out: Path | None,
+) -> None:
+    """Refuse write flags that don't go together, before anything is sent.
+
+    Parameters
+    ----------
+    into
+        `--into`.
+    mode
+        `--mode`.
+    incremental_key
+        `--incremental-key`.
+    evolve_schema
+        `--evolve-schema`.
+    out
+        `--out`.
+
+    Raises
+    ------
+    CliError
+        For every invalid combination (exit 2).
+    """
+    if (into is None) != (mode is None):
+        raise CliError("--into and --mode go together.")
+    if into is None:
+        if incremental_key is not None or evolve_schema:
+            raise CliError("--incremental-key and --evolve-schema need --into.")
+        return
+    if mode not in _WRITE_MODES:
+        raise CliError(f"--mode must be one of {', '.join(_WRITE_MODES)}, not {mode!r}.")
+    if incremental_key is not None and mode != "append":
+        raise CliError("--incremental-key needs --mode append.")
+    if evolve_schema and mode not in ("replace", "append"):
+        raise CliError("--evolve-schema needs --mode replace or append.")
+    if out is not None:
+        raise CliError("--out has nothing to write: a run with --into has no result.")
+
+
+def _written(environment: str, into: str, mode: str, status: QueryStatus) -> str:
+    """Describe a finished write run in one line.
+
+    Parameters
+    ----------
+    environment
+        The environment.
+    into
+        The target.
+    mode
+        The mode.
+    status
+        The finished run's status.
+
+    Returns
+    -------
+    str
+        For example ``"Wrote 3 rows to dev/gold.daily (snapshot 7)"``.
+    """
+    if mode == "view":
+        return f"Created view {_output.inline(environment)}/{_output.inline(into)}"
+    message = (
+        f"Wrote {status.rows_written} rows to {_output.inline(environment)}/{_output.inline(into)}"
+    )
+    if status.snapshot_id is not None:
+        message += f" (snapshot {status.snapshot_id})"
+    if status.watermark is not None:
+        message += f"; watermark {_output.inline(str(status.watermark))}"
+    return message
+
+
+@dataclass(frozen=True)
+class Submitted:
+    """What `query submit` reports.
+
+    Parameters
+    ----------
+    id
+        The query run's id.
+    environment
+        The environment it runs in.
+    """
+
+    id: str
+    environment: str
+
+
+@dataclass(frozen=True)
+class Written:
+    """What `--out` reports.
+
+    Parameters
+    ----------
+    rows
+        Rows written.
+    path
+        The file written.
+    """
+
+    rows: int
+    path: str
+
+
+def out_format(out: Path | None, fmt: str | None) -> str | None:
+    """Resolve `--out`'s format up front, before any query runs.
+
+    Parameters
+    ----------
+    out
+        The destination file, if any.
+    fmt
+        The `--format` value, if given.
+
+    Returns
+    -------
+    str or None
+        One of `_files.FORMATS`, or `None` without `--out`.
+    """
+    return None if out is None else _files.infer_format(out, fmt)
+
+
+def _render(
+    state: CliState, table: pa.Table, out: Path | None, fmt: str | None, max_rows: int
+) -> None:
+    """Print a result, or write it to `out`.
+
+    Parameters
+    ----------
+    state
+        The CLI state.
+    table
+        The result.
+    out
+        The destination file, if any.
+    fmt
+        Its format, already resolved by `out_format`.
+    max_rows
+        The display cap.
+    """
+    if out is None or fmt is None:
+        _output.emit_arrow(state, table, max_rows)
+        return
+    _files.write_table(table, out, fmt)
+    _output.done(
+        state,
+        f"Wrote {table.num_rows} rows to {_output.inline(str(out))}",
+        Written(rows=table.num_rows, path=str(out)),
+    )
+
+
+_INTERRUPTED = 130
+"""The exit status of a Ctrl-C (128 + SIGINT), as a shell reports it."""
+
+_REFUSALS = (AuthenticationError, NotFound, PermissionDenied, ValidationError)
+"""Errors that mean the server answered and said no, as against not being reached."""
+
+
+def _cancel_message(status: QueryStatus, environment: str) -> str:
+    """Say what a cancel request did, by the status the server answered with.
+
+    Parameters
+    ----------
+    status
+        The status the server answered the cancel with.
+    environment
+        The environment of the query.
+
+    Returns
+    -------
+    str
+        One line for `lakana query cancel`.
+    """
+    query = _output.inline(status.id)
+    if status.status == "CANCELLED":
+        return f"Cancelled query {query}."
+    if status.status in ("QUEUED", "RUNNING"):
+        return (
+            f"Asked query {query} to stop. A running query ends within the grace period (10 s "
+            f"unless the operator changed it); check with 'lakana query status {query} "
+            f"--env {_output.inline(environment)}'."
+        )
+    return f"Query {query} had already ended ({status.status}); nothing was changed."
+
+
+def _interrupted(run: QueryRun, environment: str) -> str:
+    """Cancel the query the user stopped waiting for, and say what happened.
+
+    A second Ctrl-C while the request is on its way ends the attempt at once and says that
+    the query may still be running.
+
+    Parameters
+    ----------
+    run
+        The query the user interrupted.
+    environment
+        The environment of the query.
+
+    Returns
+    -------
+    str
+        The line for standard error.
+    """
+    query, env = _output.inline(run.id), _output.inline(environment)
+    later = f"cancel it with 'lakana query cancel {query} --env {env}'"
+    try:
+        with contextlib.suppress(KeyboardInterrupt):  # a Ctrl-C in the announcement still cancels
+            typer.echo(
+                _output.safe_text(
+                    f"Interrupted. Cancelling query {query}; press Ctrl-C again to stop waiting "
+                    "for it."
+                ),
+                err=True,
+            )
+        status = run.cancel()
+    except KeyboardInterrupt:
+        return f"Interrupted again. Query {query} may still be running; {later}."
+    except Conflict:
+        # The server's text names the same two commands, but `inline` cuts it before the second.
+        return (
+            f"Interrupted. Query {query} was not cancelled: it is being started or is finishing. "
+            f"Check it with 'lakana query status {query} --env {env}'; if it is still running, "
+            f"cancel it with 'lakana query cancel {query} --env {env}'."
+        )
+    except _REFUSALS as exc:
+        return f"Interrupted. Query {query} was not cancelled: {_output.inline(str(exc))}"
+    except LakanaError as exc:
+        return (
+            f"Interrupted. The query could not be cancelled ({_output.inline(str(exc))}) and may "
+            f"still be running; {later}."
+        )
+    if status.status == "CANCELLED":
+        return f"Interrupted. Cancelled query {query}."
+    if status.status in ("QUEUED", "RUNNING"):
+        return (
+            f"Interrupted. Asked query {query} to stop; check with 'lakana query status {query} "
+            f"--env {env}'."
+        )
+    return f"Interrupted. Query {query} had already ended ({_output.inline(status.status)})."
+
+
+WAIT_LINE_AFTER_SECONDS = 3.0
+"""How long a query must have been QUEUED before `lakana sql` and `query wait` say why."""
+
+_WAIT_LINE_LIMIT = 400
+"""The most characters of a reason's sentence the wait line keeps, before a ``…``."""
+
+_STATUS_COLUMNS = ["id", "status", "waiting_for", "error_message"]
+"""What `query status` and `query wait` show; the reason is empty for a query not waiting."""
+
+
+def _clock() -> float:
+    """Read the clock the wait line counts its seconds on (a seam for the tests).
+
+    Returns
+    -------
+    float
+        A monotonic time in seconds.
+    """
+    return time.monotonic()
+
+
+def _cut(reason: WaitingFor | None) -> str:
+    """Make a reason's sentence safe and short for a table cell.
+
+    Parameters
+    ----------
+    reason
+        The reason, or `None`.
+
+    Returns
+    -------
+    str
+        The sentence on one line, escaped and cut at `_WAIT_LINE_LIMIT` characters; nothing
+        for no reason.
+    """
+    return "" if reason is None else _output.inline(reason.message, _WAIT_LINE_LIMIT)
+
+
+def _reason(status: QueryStatus) -> str:
+    """Show the sentence that says why a queued query waits.
+
+    Parameters
+    ----------
+    status
+        The query's status.
+
+    Returns
+    -------
+    str
+        The reason's message, or nothing (the table cell escapes it).
+    """
+    return _cut(status.waiting_for)
+
+
+class _WaitLine:
+    """Say on standard error why a query still waits, once per reason.
+
+    Used as the `on_update` of `QueryRun.wait`: it prints ``Waiting: <message>`` after the
+    query has been queued for `WAIT_LINE_AFTER_SECONDS`, and again only when the reason's
+    *code* changes. The numbers in the sentence change on every poll and never print it again,
+    and the decision never reads the sentence. Nothing is printed with ``--output json``, for a
+    status that is not QUEUED or has no reason, or for an empty sentence. The seconds count from
+    the first QUEUED status this command saw, so the CLI compares no clock of its own with the
+    server's. Standard output is never touched.
+
+    Parameters
+    ----------
+    state
+        The CLI state (for the output mode).
+    monotonic
+        The clock, in seconds.
+    """
+
+    def __init__(self, state: CliState, monotonic: Callable[[], float] = time.monotonic) -> None:
+        self._state = state
+        self._monotonic = monotonic
+        self._queued_since: float | None = None
+        self._printed: str | None = None
+
+    def __call__(self, status: QueryStatus) -> None:
+        """Print the reason if it is time and it is a new one.
+
+        Parameters
+        ----------
+        status
+            The status just polled.
+        """
+        if self._state.output == "json" or status.status != "QUEUED":
+            return
+        now = self._monotonic()
+        if self._queued_since is None:
+            self._queued_since = now
+        reason = status.waiting_for
+        if reason is None or now - self._queued_since < WAIT_LINE_AFTER_SECONDS:
+            return
+        if reason.code == self._printed or not reason.message.strip():
+            return
+        self._printed = reason.code
+        message = _output.inline(reason.message, _WAIT_LINE_LIMIT)
+        typer.echo(_output.safe_text(f"Waiting: {message}"), err=True)
+
+
+def _wait(run: QueryRun, environment: str, timeout: float | None, state: CliState) -> QueryStatus:
+    """Wait for a query; on Ctrl-C cancel it, say so on standard error, and exit with 130.
+
+    While the query is queued, a line on standard error says why (see `_WaitLine`).
+
+    Parameters
+    ----------
+    run
+        The query to wait for.
+    environment
+        The environment of the query.
+    timeout
+        Seconds to wait before giving up, or `None`.
+    state
+        The CLI state.
+
+    Returns
+    -------
+    QueryStatus
+        The query's status, once it has succeeded.
+
+    Raises
+    ------
+    typer.Exit
+        With status 130 after a Ctrl-C.
+    """
+    try:
+        return run.wait(timeout=timeout, on_update=_WaitLine(state, monotonic=_clock))
+    except KeyboardInterrupt as exc:
+        typer.echo(_output.safe_text(_interrupted(run, environment)), err=True)
+        raise typer.Exit(_INTERRUPTED) from exc
+
+
+@contextlib.contextmanager
+def _fetching(run: QueryRun, environment: str) -> Generator[None]:
+    """Turn a Ctrl-C while the result of a finished query is fetched into exit 130.
+
+    Parameters
+    ----------
+    run
+        The query that has succeeded.
+    environment
+        The environment of the query.
+
+    Yields
+    ------
+    None
+        Control, for the fetch.
+
+    Raises
+    ------
+    typer.Exit
+        With status 130 after a Ctrl-C.
+    """
+    try:
+        yield
+    except KeyboardInterrupt as exc:
+        query, env = _output.inline(run.id), _output.inline(environment)
+        typer.echo(
+            f"Interrupted. Query {query} had finished; fetch its result with "
+            f"'lakana query result {query} --env {env}'.",
+            err=True,
+        )
+        raise typer.Exit(_INTERRUPTED) from exc
+
+
+@contextlib.contextmanager
+def _unsubmitted(environment: str) -> Generator[None]:
+    """Turn a Ctrl-C while a query is being submitted into a clean exit with 130.
+
+    No query id is known then, so there is nothing to cancel and no request is made. The
+    message names the command that finds the query if the request did arrive.
+
+    Parameters
+    ----------
+    environment
+        The environment the query was meant for.
+
+    Yields
+    ------
+    None
+        Control, for the submission.
+
+    Raises
+    ------
+    typer.Exit
+        With status 130 after a Ctrl-C.
+    """
+    env = _output.inline(environment)
+    try:
+        yield
+    except KeyboardInterrupt as exc:
+        typer.echo(
+            "Interrupted before the server confirmed the query. No query id is known, so "
+            "nothing was cancelled. If the request had already reached the server, the query "
+            "may still be queued or running: list your queries with "
+            f"'lakana query list --env {env}' (add --all for the ones that just ended) and "
+            f"cancel it with 'lakana query cancel ID --env {env}'.",
+            err=True,
+        )
+        raise typer.Exit(_INTERRUPTED) from exc
+
+
+def show_result(
+    state: CliState,
+    environment: str,
+    submit: Callable[[], QueryRun],
+    *,
+    out: Path | None,
+    fmt: str | None,
+    max_rows: int,
+    timeout: float | None,
+) -> None:
+    """Submit a read query, wait for it, and print its rows or write them to a file.
+
+    This is what `lakana sql` does for a read, and what `lakana check rows` does after it has
+    queued its query: one implementation, so the two behave alike (the wait line, Ctrl-C, a
+    failed query's message and exit status, the output options).
+
+    Parameters
+    ----------
+    state
+        The CLI state.
+    environment
+        The environment the query runs in.
+    submit
+        Queues the query and returns its handle; called inside the guard that turns a Ctrl-C
+        before the server confirmed it into exit 130.
+    out
+        Write the full result here instead of printing.
+    fmt
+        The file's format, already resolved by `out_format`.
+    max_rows
+        The most rows to display.
+    timeout
+        Seconds to wait for the query.
+    """
+    with _unsubmitted(environment):
+        run = submit()
+    _wait(run, environment, timeout, state)
+    with _fetching(run, environment):
+        table = run.result()
+    _render(state, table, out, fmt, max_rows)
+
+
+def sql(
+    ctx: typer.Context,
+    query: Annotated[str, typer.Argument(help="The SQL, or - to read it from stdin.")],
+    env: _ENV = None,
+    out: OUT = None,
+    file_format: FORMAT = None,
+    max_rows: MAX_ROWS = 50,
+    timeout: TIMEOUT = None,
+    into: _INTO = None,
+    mode: _MODE = None,
+    incremental_key: _INCREMENTAL_KEY = None,
+    evolve_schema: _EVOLVE_SCHEMA = False,
+    break_glass: BREAK_GLASS = False,
+    reason: REASON = None,
+) -> None:
+    """Run SQL and print (or save) the result, or write it into a table.
+
+    A query that stays queued for 3 seconds prints a line on standard error that says why
+    ('Waiting: ...'), and again when the reason changes; the result still goes to standard
+    output only. Nothing is printed about waiting with --output json.
+
+    Parameters
+    ----------
+    ctx
+        The Typer context.
+    query
+        The SQL text, or `-` for stdin.
+    env
+        The environment.
+    out
+        Write the full result here instead of printing.
+    file_format
+        The output file's format.
+    max_rows
+        The most rows to display.
+    timeout
+        Seconds to wait for the query.
+    into
+        Write the result into this table or view.
+    mode
+        `create`, `replace`, `append` or `view`.
+    incremental_key
+        With `--mode append`, the incremental key.
+    evolve_schema
+        Let the target adopt the result's schema.
+    break_glass
+        `--break-glass`.
+    reason
+        `--reason`.
+
+    Raises
+    ------
+    CliError
+        If `--break-glass` is given without `--into` (exit 2).
+    """
+    state = state_of(ctx)
+    _check_write_flags(into, mode, incremental_key, evolve_schema, out)
+    if break_glass and into is None:
+        raise CliError("--break-glass applies only to writes (--into)")
+    fmt = out_format(out, file_format)
+    text = sys.stdin.read() if query == "-" else query
+    environment = resolve_environment(state, env)
+    glass = break_glass_reason(break_glass, reason, environment)
+    client = state.client()
+    if into is not None and mode is not None:
+        with _unsubmitted(environment):
+            run = client.queries.submit(
+                text,
+                environment,
+                into=into,
+                mode=mode,
+                incremental_key=incremental_key,
+                evolve_schema=evolve_schema,
+                break_glass_reason=glass,
+            )
+        status = _wait(run, environment, timeout, state)
+        _output.done(state, _written(environment, into, mode, status), status)
+        return
+    show_result(
+        state,
+        environment,
+        lambda: client.queries.submit(text, environment),
+        out=out,
+        fmt=fmt,
+        max_rows=max_rows,
+        timeout=timeout,
+    )
+
+
+def _now() -> datetime:
+    """Return the current time (a seam for the tests of the `age` column).
+
+    Returns
+    -------
+    datetime
+        The current UTC time.
+    """
+    return datetime.now(UTC)
+
+
+def _age(entry: QueryListEntry) -> str:
+    """Write the time since a query was submitted in its largest whole unit.
+
+    Parameters
+    ----------
+    entry
+        The listed query.
+
+    Returns
+    -------
+    str
+        `12s`, `3m`, `2h` or `1d`; `0s` for a time ahead of this machine's clock.
+    """
+    seconds = max(0, int((_now() - entry.created_at).total_seconds()))
+    for unit, size in (("d", 86_400), ("h", 3_600), ("m", 60)):
+        if seconds >= size:
+            return f"{seconds // size}{unit}"
+    return f"{seconds}s"
+
+
+def _kind(entry: QueryListEntry) -> str:
+    """Write what a listed query does: `read`, `append to T`, `maintenance of T`.
+
+    Parameters
+    ----------
+    entry
+        The listed query.
+
+    Returns
+    -------
+    str
+        The kind in words; a kind this CLI does not know is shown as the server sent it.
+    """
+    if entry.target is None:
+        return entry.kind
+    target = _output.inline(entry.target)
+    prefix = {"append": "append to", "maintain": "maintenance of"}.get(entry.kind, entry.kind)
+    return f"{prefix} {target}"
+
+
+def _waiting(entry: QueryListEntry) -> str:
+    """Show the sentence that says why a queued query waits.
+
+    Parameters
+    ----------
+    entry
+        The listed query.
+
+    Returns
+    -------
+    str
+        The reason's message, or nothing.
+    """
+    return _cut(entry.waiting_for)
+
+
+@query_app.command("list")
+def list_queries(
+    ctx: typer.Context,
+    env: _ENV = None,
+    all_: Annotated[
+        bool,
+        typer.Option("--all", help="Also the queries that ended in the last 24 hours."),
+    ] = False,
+    limit: Annotated[
+        int, typer.Option("--limit", min=1, max=_LIST_MOST, help="Most queries to list.")
+    ] = 100,
+) -> None:
+    """List the queued and running queries of an environment.
+
+    Running queries come first, then queued ones in the order they will be taken, with the
+    reason each waits. You see your own queries; with MANAGE_ENVIRONMENT on the environment,
+    everyone's. The SQL and the error text are not listed: read them with 'lakana query
+    status ID'.
+
+    Parameters
+    ----------
+    ctx
+        The Typer context.
+    env
+        The environment.
+    all_
+        Add the queries that ended in the last 24 hours, newest first, after the others.
+    limit
+        Most queries listed (1 to 200).
+    """
+    state = state_of(ctx)
+    environment = resolve_environment(state, env)
+    # One row more than asked for tells whether the list was cut; at the most the server
+    # returns, the extra row cannot be asked for and a full answer only says "may be more".
+    asked = min(limit + 1, _LIST_MOST)
+    found = state.client().queries.list(environment, include_ended=all_, limit=asked)
+    entries = found[:limit]
+    if not entries and state.output != "json":
+        where = _output.inline(environment)
+        typer.echo(
+            f"No queries in {where} in the last 24 hours."
+            if all_
+            else f"No queued or running queries in {where}."
+        )
+        return
+    _output.emit(
+        state,
+        entries,
+        columns=_LIST_COLUMNS,
+        droppable=_LIST_DROPPABLE,
+        derived={"kind": _kind, "age": _age, "waiting_for": _waiting},
+        flexible=["waiting_for"],
+    )
+    if (
+        state.output != "json"
+        and len(found) >= asked
+        and (len(found) > limit or limit == _LIST_MOST)
+    ):
+        typer.echo(_cut_line(limit, all_))
+
+
+def _cut_line(limit: int, include_ended: bool) -> str:
+    """Say that a listing was cut and what to do about it.
+
+    Parameters
+    ----------
+    limit
+        The `--limit` the user gave.
+    include_ended
+        Whether `--all` was given.
+
+    Returns
+    -------
+    str
+        One sentence with the next step.
+    """
+    if limit < _LIST_MOST:
+        return (
+            f"Showing the first {limit} queries; there are more. "
+            f"Use --limit N (at most {_LIST_MOST}) to see more."
+        )
+    advice = (
+        "Leave out --all to list only the queued and running ones."
+        if include_ended
+        else "Cancel the ones you no longer need with 'lakana query cancel ID', or wait."
+    )
+    return f"Showing {_LIST_MOST} queries, the most one call returns; there may be more. {advice}"
+
+
+@query_app.command("submit")
+def submit(ctx: typer.Context, query: str, env: _ENV = None) -> None:
+    """Submit SQL without waiting; prints the query id.
+
+    Parameters
+    ----------
+    ctx
+        The Typer context.
+    query
+        The SQL text, or `-` for stdin.
+    env
+        The environment.
+    """
+    state = state_of(ctx)
+    environment = resolve_environment(state, env)
+    text = sys.stdin.read() if query == "-" else query
+    run = state.client().queries.submit(text, environment)
+    _output.done(state, f"Submitted query {run.id}", Submitted(id=run.id, environment=environment))
+
+
+@query_app.command("status")
+def status(ctx: typer.Context, query_id: str, env: _ENV = None) -> None:
+    """Show a query's status; for a queued query, waiting_for says why it has not started.
+
+    Parameters
+    ----------
+    ctx
+        The Typer context.
+    query_id
+        The query id.
+    env
+        The environment.
+    """
+    state = state_of(ctx)
+    run = state.client().queries.get(query_id, resolve_environment(state, env))
+    _output.emit(state, run.status(), columns=_STATUS_COLUMNS, derived={"waiting_for": _reason})
+
+
+@query_app.command("wait")
+def wait(ctx: typer.Context, query_id: str, env: _ENV = None, timeout: TIMEOUT = None) -> None:
+    """Wait for a query to finish.
+
+    After 3 seconds in the queue, a line on standard error says why the query waits ('Waiting:
+    ...'), and again when the reason changes. Ctrl-C cancels the query, also one of someone
+    else's if you hold MANAGE_ENVIRONMENT.
+
+    Parameters
+    ----------
+    ctx
+        The Typer context.
+    query_id
+        The query id.
+    env
+        The environment.
+    timeout
+        Seconds to wait before giving up (exit 9). Ctrl-C cancels the query and exits 130.
+    """
+    state = state_of(ctx)
+    environment = resolve_environment(state, env)
+    run = state.client().queries.get(query_id, environment)
+    _output.emit(
+        state,
+        _wait(run, environment, timeout, state),
+        columns=_STATUS_COLUMNS,
+        derived={"waiting_for": _reason},
+    )
+
+
+@query_app.command("cancel")
+def cancel(ctx: typer.Context, query_id: str, env: _ENV = None) -> None:
+    """Cancel a queued query, or ask the worker to stop a running one.
+
+    Parameters
+    ----------
+    ctx
+        The Typer context.
+    query_id
+        The query id.
+    env
+        The environment.
+    """
+    state = state_of(ctx)
+    environment = resolve_environment(state, env)
+    status = state.client().queries.cancel(query_id, environment)
+    _output.done(state, _cancel_message(status, environment), status)
+
+
+@query_app.command("result")
+def result(
+    ctx: typer.Context,
+    query_id: str,
+    env: _ENV = None,
+    out: OUT = None,
+    file_format: FORMAT = None,
+    max_rows: MAX_ROWS = 50,
+) -> None:
+    """Fetch a finished query's result.
+
+    Parameters
+    ----------
+    ctx
+        The Typer context.
+    query_id
+        The query id.
+    env
+        The environment.
+    out
+        Write the full result here instead of printing.
+    file_format
+        The output file's format.
+    max_rows
+        The most rows to display.
+    """
+    state = state_of(ctx)
+    fmt = out_format(out, file_format)
+    run = state.client().queries.get(query_id, resolve_environment(state, env))
+    _render(state, run.result(), out, fmt, max_rows)
+
+
+def register(app: typer.Typer) -> None:
+    """Add `sql` and the `query` group to the root app.
+
+    Parameters
+    ----------
+    app
+        The root app.
+    """
+    app.command("sql")(sql)
+    app.add_typer(query_app, name="query")

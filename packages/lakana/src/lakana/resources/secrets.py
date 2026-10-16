@@ -1,0 +1,170 @@
+"""The `secrets` resource: `Client.secrets`.
+
+Secrets are always addressed through their environment, matching
+`lakana_server.api.platform.secrets`'s own nesting — a secret has no meaning
+outside the environment it is scoped to.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any
+
+from lakana._http import HttpTransport
+from lakana._models import Secret, SecretCreate
+from lakana._routes import ROUTES
+
+
+def _secret_from_json(data: dict[str, Any]) -> Secret:
+    """Build a `Secret` from the platform API's JSON response body.
+
+    Parameters
+    ----------
+    data
+        The decoded `SecretOut` JSON body. Structurally cannot carry a
+        value or ciphertext field. A server that predates the stored-format
+        fields sends neither `format_version` nor `key_id`; they read as `1`
+        and `env`, which is how such a server stores every secret.
+
+    Returns
+    -------
+    Secret
+        The parsed secret metadata.
+    """
+    return Secret(
+        id=data["id"],
+        name=data["name"],
+        environment=data["environment"],
+        created_by=data["created_by"],
+        created_at=datetime.fromisoformat(data["created_at"]),
+        format_version=data.get("format_version", 1),
+        key_id=data.get("key_id", "env"),
+    )
+
+
+_SecretList = list[Secret]
+"""Alias for `list[Secret]`, resolved at module scope.
+
+`Secrets` defines a method named `list`, which shadows the builtin `list`
+for any bare `list[...]` annotation written *inside* the class body — this
+alias is resolved before that happens, and referenced by name instead.
+"""
+
+
+class Secrets:
+    """The `secrets` resource of the platform API.
+
+    Parameters
+    ----------
+    transport
+        The HTTP transport to send requests through.
+    """
+
+    def __init__(self, transport: HttpTransport) -> None:
+        self._transport = transport
+
+    def create(self, environment: str, name: str, values: dict[str, str]) -> Secret:
+        """Create a secret.
+
+        Parameters
+        ----------
+        environment
+            The environment this secret is scoped to.
+        name
+            The secret's name, unique within its environment.
+        values
+            The plaintext key-value bag to encrypt and store. Sent only in
+            the request body — never echoed back in any response, and never
+            held by the SDK afterward.
+
+        Returns
+        -------
+        Secret
+            The created secret's metadata.
+
+        Raises
+        ------
+        lakana.errors.NotFound
+            If the environment does not exist.
+        lakana.errors.Conflict
+            If a secret of this name already exists in this environment.
+        """
+        request = SecretCreate(name=name, values=values)
+        response = self._transport.request(
+            ROUTES["secrets.create"],
+            path_params={"environment_name": environment},
+            json={"name": request.name, "values": request.values},
+        )
+        return _secret_from_json(response.json())
+
+    def list(self, environment: str) -> _SecretList:
+        """List an environment's active secrets.
+
+        Parameters
+        ----------
+        environment
+            The environment whose secrets to list.
+
+        Returns
+        -------
+        list of Secret
+            Every active secret in this environment.
+
+        Raises
+        ------
+        lakana.errors.NotFound
+            If the environment does not exist.
+        """
+        response = self._transport.request(
+            ROUTES["secrets.list"], path_params={"environment_name": environment}
+        )
+        return [_secret_from_json(item) for item in response.json()]
+
+    def rotate(self, environment: str, name: str, values: dict[str, str]) -> Secret:
+        """Rotate a secret's value.
+
+        Parameters
+        ----------
+        environment
+            The environment the secret is scoped to.
+        name
+            The secret's name.
+        values
+            The new plaintext key-value bag.
+
+        Returns
+        -------
+        Secret
+            The rotated secret's metadata.
+
+        Raises
+        ------
+        lakana.errors.NotFound
+            If the environment or the secret name doesn't exist.
+        """
+        response = self._transport.request(
+            ROUTES["secrets.rotate"],
+            path_params={"environment_name": environment, "secret_name": name},
+            json={"values": values},
+        )
+        return _secret_from_json(response.json())
+
+    def revoke(self, environment: str, name: str) -> None:
+        """Revoke a secret.
+
+        Parameters
+        ----------
+        environment
+            The environment the secret is scoped to.
+        name
+            The secret's name.
+
+        Raises
+        ------
+        lakana.errors.NotFound
+            If the environment or the secret name doesn't exist.
+        """
+        self._transport.request(
+            ROUTES["secrets.revoke"],
+            path_params={"environment_name": environment, "secret_name": name},
+        )

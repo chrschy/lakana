@@ -1,0 +1,1 @@
+{"text":"Lakana: test message for job `notify-test` in `test`\nRepository `notify-test`, commit `000000000000`\nRun `00000000-0000-0000-0000-000000000000`, trigger `manual`, status `succeeded`, finished `2000-01-01T00:00:00+00:00`\nDetails: `lakana runs show 00000000-0000-0000-0000-000000000000 --env test`\nDelivery `99999999-8888-7777-6666-555555555555`"}

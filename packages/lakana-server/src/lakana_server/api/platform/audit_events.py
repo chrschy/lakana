@@ -1,0 +1,211 @@
+"""The audit-events resource of the platform API.
+
+A top-level resource, not scoped under an environment prefix — reading the
+audit log, like managing grants, is instance-scoped rather than tied to one
+environment.
+
+The listing pages by keyset: `next_cursor` is an opaque token encoding the
+`(occurred_at, id)` of a page's last event, and passing it back as
+`?cursor=` resumes strictly after that event. Filters are not part of the
+cursor; send the same ones with every page.
+"""
+
+from __future__ import annotations
+
+import base64
+import binascii
+import json
+import uuid
+from datetime import UTC, datetime
+
+from fastapi import APIRouter, Depends, Query
+
+from lakana_core.audit.service import AuditCursor, AuditService
+from lakana_core.auth import PrincipalRef
+from lakana_core.errors import ValidationError
+from lakana_core.identifiers import NamespacePath
+from lakana_core.models import AuditEvent, AuditEventType
+from lakana_server.api.platform.schemas import AuditEventOut, AuditEventPage
+from lakana_server.api.routing import AuthenticateFirstRoute
+from lakana_server.deps import get_audit_service, get_principal
+
+router = APIRouter(
+    route_class=AuthenticateFirstRoute, prefix="/api/v1/audit-events", tags=["audit"]
+)
+
+_BAD_CURSOR = (
+    "The cursor is not valid. Start the listing again without `cursor`; pass the `next_cursor` of "
+    "a page only to continue that listing."
+)
+
+
+def _joined_to_dotted(namespace: str | None) -> str | None:
+    """Convert a stored unit-separator namespace path to its dotted form.
+
+    Duplicated from `grants.py`'s identical private helper rather than
+    imported — this codebase's established convention (see
+    `row_filters.py`/`column_masks.py`'s own copies) is a small private
+    helper per router, not a shared cross-router utility.
+
+    Parameters
+    ----------
+    namespace
+        The unit-separator-joined storage form, or `None`.
+
+    Returns
+    -------
+    str or None
+        The dot-joined display form, or `None`.
+    """
+    if namespace is None:
+        return None
+    return ".".join(NamespacePath.parse(namespace).parts)
+
+
+def _encode_cursor(event: AuditEvent) -> str:
+    """Encode an event's position as an opaque, URL-safe cursor.
+
+    Parameters
+    ----------
+    event
+        The last event of the page being returned.
+
+    Returns
+    -------
+    str
+        Unpadded base64url of `{"o": occurred_at, "i": id}`.
+    """
+    raw = json.dumps({"o": event.occurred_at.isoformat(), "i": str(event.id)}).encode()
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+
+def _decode_cursor(cursor: str) -> AuditCursor:
+    """Decode a cursor produced by `_encode_cursor`.
+
+    Parameters
+    ----------
+    cursor
+        The `?cursor=` value a client sent back.
+
+    Returns
+    -------
+    AuditCursor
+        The position to resume after.
+
+    Raises
+    ------
+    ValidationError
+        If `cursor` is not one this server could have issued: not base64url,
+        not the expected JSON shape, or carrying a timestamp without an
+        offset or one that cannot be converted to UTC.
+    """
+    try:
+        raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
+        data = json.loads(raw)
+        if not (
+            isinstance(data, dict)
+            and isinstance(data.get("o"), str)
+            and isinstance(data.get("i"), str)
+        ):
+            raise ValidationError(_BAD_CURSOR)
+        occurred_at = datetime.fromisoformat(data["o"])
+        if occurred_at.tzinfo is None:
+            raise ValidationError(_BAD_CURSOR)
+        # the database binds UTC: a time that cannot be converted would fail there, as a 500
+        occurred_at = occurred_at.astimezone(UTC)
+        event_id = uuid.UUID(data["i"])
+    except (binascii.Error, ValueError, OverflowError) as exc:
+        raise ValidationError(_BAD_CURSOR) from exc
+    return AuditCursor(occurred_at=occurred_at, id=event_id)
+
+
+def _to_out(event: AuditEvent) -> AuditEventOut:
+    """Build a response body from an AuditEvent row.
+
+    Parameters
+    ----------
+    event
+        The row to convert.
+
+    Returns
+    -------
+    AuditEventOut
+        The response body, with `securable_namespace` converted to its
+        dotted form.
+    """
+    return AuditEventOut(
+        id=event.id,
+        occurred_at=event.occurred_at,
+        principal_id=event.principal_id,
+        event_type=event.event_type,
+        securable_kind=event.securable_kind,
+        securable_environment=event.securable_environment,
+        securable_namespace=_joined_to_dotted(event.securable_namespace),
+        securable_table=event.securable_table,
+        detail=event.detail,
+    )
+
+
+@router.get("", response_model=AuditEventPage)
+def list_audit_events(
+    event_type: AuditEventType | None = None,
+    environment: str | None = None,
+    principal_id: uuid.UUID | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+    cursor: str | None = Query(default=None, max_length=512),
+    p: PrincipalRef = Depends(get_principal),
+    audit: AuditService = Depends(get_audit_service),
+) -> AuditEventPage:
+    """List one page of audit events, newest first, optionally filtered.
+
+    Parameters
+    ----------
+    event_type
+        Only return events of this type, if given.
+    environment
+        Only return events whose securable environment matches, if given.
+    principal_id
+        Only return events attributed to this principal, if given.
+    since
+        Only return events at or after this time, if given.
+    until
+        Only return events at or before this time, if given.
+    limit
+        The maximum number of events to return. Defaults to 100, must be
+        between 1 and 500 inclusive; an out-of-range value is rejected with
+        a 422 rather than silently clamped or ignored.
+    cursor
+        A previous page's `next_cursor`, to fetch the page after it.
+    p
+        The acting principal.
+    audit
+        The audit service.
+
+    Returns
+    -------
+    AuditEventPage
+        Up to `limit` matching events, and the cursor for the next page.
+
+    Raises
+    ------
+    PermissionDenied
+        If `p` may not read the audit log.
+    ValidationError
+        If `cursor` is malformed; mapped to 422.
+    """
+    position = None if cursor is None else _decode_cursor(cursor)
+    events = audit.query(
+        p,
+        event_type=event_type,
+        environment=environment,
+        principal_id=principal_id,
+        since=since,
+        until=until,
+        limit=limit + 1,
+        cursor=position,
+    )
+    page = events[:limit]
+    next_cursor = _encode_cursor(page[-1]) if len(events) > limit else None
+    return AuditEventPage(items=[_to_out(event) for event in page], next_cursor=next_cursor)

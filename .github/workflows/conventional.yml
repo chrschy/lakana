@@ -1,0 +1,34 @@
+name: Conventional
+
+# Enforces Conventional Commits (PR title, via commitlint and the
+# conventional-changelog preset), Conventional Branch (head branch), and the
+# footer rules release-please's changelog depends on (PR description). PRs are
+# squash-merged with the title as subject and the description as body.
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  conventional:            # the required status check on main is named "conventional"
+    runs-on: ${{ (github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER) || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7
+        with:
+          node-version: "22"
+      - name: PR title follows Conventional Commits
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          printf '%s\n' "$PR_TITLE" | npx --yes \
+            -p @commitlint/cli@21.2.3 -p @commitlint/config-conventional@21.2.3 \
+            commitlint --config commitlint.config.mjs --verbose
+      - name: Branch name, breaking-change footer, issue references
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: python3 scripts/check_conventional.py

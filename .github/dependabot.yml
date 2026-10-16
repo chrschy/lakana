@@ -1,0 +1,33 @@
+version: 2
+
+updates:
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      python:                       # one pull request per week, not one per package
+        patterns: ["*"]
+        exclude-patterns: ["ruff", "ty"]   # pinned exactly; each upgrades in its own pull request
+    commit-message:
+      prefix: "deps"          # "Dependencies" section of the changelog
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      actions:                       # one pull request per week, not one per package
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"            # hidden from the changelog
+
+  - package-ecosystem: "docker"
+    directory: "/"                # the Dockerfile: the python base image and the pinned uv image
+    schedule:
+      interval: "weekly"
+    groups:
+      images:                       # one pull request per week, not one per package
+        patterns: ["*"]
+    commit-message:
+      prefix: "deps"

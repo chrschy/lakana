@@ -1,0 +1,77 @@
+name: Security
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  # Decides whether this pull request changes documentation only (`scripts/docs_only.py`).
+  # The jobs below skip their heavy work when it does. Every doubt and every error
+  # says "not docs-only", and a push to main always runs everything.
+  changes:
+    runs-on: ${{ (github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER) || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      docs_only: ${{ steps.scope.outputs.docs_only }}
+    steps:
+      # The classifier is fetched from the base commit, so a pull request cannot change the
+      # rule it is judged by. It is fetched, not checked out: a sparse checkout would stay
+      # configured in the workspace a self-hosted runner reuses for the next job.
+      - id: scope
+        shell: bash --noprofile --norc {0}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          verdict="false"
+          if [ "$EVENT" = "pull_request" ]; then
+            if gh api "repos/${GITHUB_REPOSITORY}/contents/scripts/docs_only.py?ref=${BASE_SHA}" \
+              -H "Accept: application/vnd.github.raw" > "$RUNNER_TEMP/docs_only.py" \
+              && gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/files" --paginate \
+              --jq '.[] | .filename, (.previous_filename // empty)' > "$RUNNER_TEMP/changed.txt"; then
+              if [ "$(python3 "$RUNNER_TEMP/docs_only.py" < "$RUNNER_TEMP/changed.txt")" = "true" ]; then
+                verdict="true"
+              fi
+            fi
+          fi
+          echo "docs_only=${verdict}" >> "$GITHUB_OUTPUT"
+
+  static:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
+    runs-on: ${{ (github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER) || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+        with:
+          enable-cache: true
+      - run: uv sync --all-packages --all-groups --locked
+      - name: bandit
+        run: uv run --with 'bandit[toml]' bandit -r packages -c pyproject.toml
+      - name: pip-audit
+        run: uv run --locked --all-groups --with pip-audit pip-audit
+      - name: Dependency licences
+        run: uv run python scripts/check_licenses.py
+
+  secrets:
+    runs-on: ${{ (github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER) || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e  # v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

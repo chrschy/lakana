@@ -1,0 +1,412 @@
+"""SQL front-matter: a `/* lakana … */` block, the first thing in an asset file."""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+
+import pydantic
+from pydantic import Field, StrictBool, field_validator
+
+from lakana_core.projects.issues import ProjectIssue, ProjectValidationError
+from lakana_core.projects.limits import DeployLimits
+from lakana_core.projects.project_config import (
+    FREE_TEXT_MESSAGE,
+    IDENTIFIER_MESSAGE,
+    MAX_RETRIES,
+    AssetDefaults,
+    Duration,
+    Materialize,
+    PositiveDuration,
+    SafeTextModel,
+    normalize_source,
+    pydantic_issues,
+    unsafe_free_text,
+    unsafe_identifier,
+)
+from lakana_core.projects.yaml_loader import YamlError, load_yaml
+
+_OPENING = re.compile(r"\A(\s*)/\*[ \t]*lakana[ \t]*\n")
+"""A lakana block at the very start, after optional whitespace."""
+
+_ANYWHERE = re.compile(r"/\*[ \t]*lakana[ \t]*\n")
+"""A lakana block opening anywhere — used to report one that is not first."""
+
+_PYTHON_ONLY_KEYS = {
+    "output": '@asset(output="artifact")',
+    "keep_versions": '@asset(output="artifact", keep_versions=N)',
+    "decimals": '@asset(decimals="exact")',
+}
+"""Decorator arguments of a Python asset that a SQL block lacks, and how to declare them."""
+
+_PYTHON_ONLY = (
+    "`{key}` applies only to a Python asset, not to a SQL file; declare the asset in a "
+    "`.py` file with `{declaration}`, or remove `{key}` from this block"
+)
+
+
+class AssetMetadata(SafeTextModel):
+    """What one asset's front-matter may say.
+
+    Parameters
+    ----------
+    description
+        Human description.
+    owner
+        Owning team or person.
+    tags
+        Free-form tags.
+    materialize
+        ``table``, ``view`` or ``incremental``.
+    incremental_key
+        The watermark column; required exactly when ``incremental``.
+    evolve_schema
+        Let an incremental append evolve the table's schema.
+    columns
+        Column name → description.
+    retries
+        Retries after a failed attempt, for this asset.
+    retry_delay
+        First retry delay for this asset; doubled per attempt.
+    timeout
+        Wall-clock limit of one attempt, for this asset.
+    """
+
+    description: str | None = None
+    owner: str | None = None
+    tags: tuple[str, ...] = ()
+    materialize: Materialize | None = None
+    incremental_key: str | None = None
+    evolve_schema: StrictBool | None = None
+    columns: dict[str, str] = Field(default_factory=dict)
+    retries: int | None = Field(default=None, ge=0, le=MAX_RETRIES, strict=True)
+    retry_delay: Duration | None = None
+    timeout: PositiveDuration | None = None
+
+    @field_validator("incremental_key")
+    @classmethod
+    def _incremental_key_is_safe(cls, value: str | None) -> str | None:
+        """Refuse an incremental key with an unsafe character.
+
+        Parameters
+        ----------
+        value
+            The field's value.
+
+        Returns
+        -------
+        str or None
+            `value`.
+
+        Raises
+        ------
+        ValueError
+            If it has an unsafe character.
+        """
+        if value is not None and unsafe_identifier(value):
+            raise ValueError(f"incremental_key {IDENTIFIER_MESSAGE}")
+        return value
+
+    @field_validator("columns")
+    @classmethod
+    def _columns_are_safe(cls, value: dict[str, str]) -> dict[str, str]:
+        """Refuse a column name or description with an unsafe character.
+
+        Parameters
+        ----------
+        value
+            The field's value.
+
+        Returns
+        -------
+        dict
+            `value`.
+
+        Raises
+        ------
+        ValueError
+            If it has an unsafe character.
+        """
+        if any(unsafe_identifier(name) for name in value):
+            raise ValueError(f"a column name {IDENTIFIER_MESSAGE}")
+        if any(unsafe_free_text(text) for text in value.values()):
+            raise ValueError(f"a column description {FREE_TEXT_MESSAGE}")
+        return value
+
+
+@dataclass(frozen=True)
+class FrontMatter:
+    """An asset file split into its metadata and its SQL body.
+
+    Parameters
+    ----------
+    metadata
+        The block's metadata, or an empty `AssetMetadata` with no block.
+    body
+        Everything after the block (the whole file with no block).
+    body_line
+        1-based file line on which `body` starts.
+    block_line
+        1-based file line of ``/* lakana``, or `None` with no block.
+    cut_hint
+        Set when text after the block hints that a ``*/`` inside the YAML ended
+        it early. Only a hint: the body may be valid SQL (``'*/'`` in a string),
+        so it is shown only if the body then fails to parse.
+    """
+
+    metadata: AssetMetadata
+    body: str
+    body_line: int
+    block_line: int | None
+    cut_hint: str | None = None
+
+
+def _cut_hint(text: str, close: int) -> str | None:
+    """Suggest that a stray ``*/`` inside the YAML ended the block early.
+
+    The block closes at the first ``*/`` whatever YAML says, so a ``*/`` in a
+    string or scalar leaves the rest of the block in the SQL body. A ``*/``
+    before the body's first ``/*`` is only a hint of that: valid SQL can hold
+    one too (``'*/'`` in a string literal, a ``--`` comment). Callers use it
+    to explain a failure, never to cause one.
+
+    Parameters
+    ----------
+    text
+        The normalized file.
+    close
+        Offset of the ``*/`` that closed the block.
+
+    Returns
+    -------
+    str or None
+        The message, or `None` when no ``*/`` precedes the body's first ``/*``.
+    """
+    rest = text[close + 2 :]
+    stray = rest.find("*/")
+    opens = rest.find("/*")
+    if stray == -1 or (opens != -1 and opens < stray):
+        return None
+    line = text.count("\n", 0, close) + 1
+    return (
+        f"the block ends at the first `*/`, on line {line}, even inside a string or scalar; "
+        "another `*/` follows, so the YAML may have been cut short"
+    )
+
+
+@dataclass(frozen=True)
+class RawFrontMatter:
+    """A file split into its block's mapping and its SQL body, before any key is checked.
+
+    Parameters
+    ----------
+    raw
+        The block's mapping; empty with no block or an empty one.
+    body
+        Everything after the block (the whole file with no block).
+    body_line
+        1-based file line on which `body` starts.
+    block_line
+        1-based file line of ``/* lakana``, or `None` with no block.
+    cut_hint
+        As `FrontMatter.cut_hint`.
+    """
+
+    raw: dict[str, object]
+    body: str
+    body_line: int
+    block_line: int | None
+    cut_hint: str | None
+
+
+def split_front_matter(
+    text: str, *, path: str, limits: DeployLimits | None = None
+) -> RawFrontMatter:
+    """Split a file into its `/* lakana */` block's mapping and its body.
+
+    Parameters
+    ----------
+    text
+        The file's decoded content.
+    path
+        Repository-relative path, for issues.
+    limits
+        Supplies the per-block YAML size limit; the defaults when `None`.
+
+    Returns
+    -------
+    RawFrontMatter
+        The mapping, unvalidated, and the body.
+
+    Raises
+    ------
+    ProjectValidationError
+        If the block is not first, is unterminated, too large, not a
+        mapping, or uses an anchor, alias, merge key or duplicate key.
+    """
+    limits = limits or DeployLimits()
+    text = normalize_source(text)
+    opening = _OPENING.match(text)
+    if opening is None:
+        stray = _ANYWHERE.search(text)
+        if stray is not None:
+            line = text.count("\n", 0, stray.start()) + 1
+            raise ProjectValidationError(
+                [
+                    ProjectIssue(
+                        path, line, "the /* lakana */ block must be the first thing in the file"
+                    )
+                ]
+            )
+        return RawFrontMatter(raw={}, body=text, body_line=1, block_line=None, cut_hint=None)
+    block_line = text.count("\n", 0, opening.end(1)) + 1
+    close = text.find("*/", opening.end())
+    if close == -1:
+        raise ProjectValidationError(
+            [ProjectIssue(path, block_line, "the /* lakana block is never closed")]
+        )
+    block = text[opening.end() : close]
+    cut_hint = _cut_hint(text, close)
+    try:
+        raw = load_yaml(block, what=f"{path} front-matter", max_bytes=limits.yaml_bytes)
+    except YamlError as exc:
+        line = block_line + exc.line if exc.line is not None else block_line
+        message = str(exc) + (f" ({cut_hint})" if cut_hint is not None else "")
+        raise ProjectValidationError([ProjectIssue(path, line, message)]) from exc
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise ProjectValidationError(
+            [ProjectIssue(path, block_line, "front-matter must be a mapping")]
+        )
+    body_start = close + 2
+    return RawFrontMatter(
+        raw=raw,
+        body=text[body_start:],
+        body_line=text.count("\n", 0, body_start) + 1,
+        block_line=block_line,
+        cut_hint=cut_hint,
+    )
+
+
+def parse_front_matter(text: str, *, path: str, limits: DeployLimits | None = None) -> FrontMatter:
+    """Split and validate an asset file's front-matter.
+
+    Parameters
+    ----------
+    text
+        The file's decoded content.
+    path
+        Repository-relative path, for issues.
+    limits
+        Supplies the per-block YAML size limit; the defaults when `None`.
+
+    Returns
+    -------
+    FrontMatter
+        The metadata and the body.
+
+    Raises
+    ------
+    ProjectValidationError
+        If the block is not first, is unterminated, too large, not a
+        mapping, uses an anchor, alias, merge key or duplicate key, or has an unknown key.
+        `output` and `keep_versions` are refused with the way to declare a Python asset;
+        their values are never read or printed.
+        A cut-short block is not an error here; see `FrontMatter.cut_hint`.
+    """
+    split = split_front_matter(text, path=path, limits=limits)
+    if split.block_line is None:
+        return FrontMatter(metadata=AssetMetadata(), body=split.body, body_line=1, block_line=None)
+    block_line = split.block_line
+    raw = split.raw
+    python_only = [
+        ProjectIssue(path, block_line, _PYTHON_ONLY.format(key=key, declaration=declaration))
+        for key, declaration in _PYTHON_ONLY_KEYS.items()
+        if key in raw
+    ]
+    raw = {key: value for key, value in raw.items() if key not in _PYTHON_ONLY_KEYS}
+    try:
+        metadata = AssetMetadata.model_validate(raw)
+    except pydantic.ValidationError as exc:
+        raise ProjectValidationError(
+            [*python_only, *pydantic_issues(exc, path=path, line=block_line)]
+        ) from exc
+    if python_only:
+        raise ProjectValidationError(python_only)
+    return FrontMatter(
+        metadata=metadata,
+        body=split.body,
+        body_line=split.body_line,
+        block_line=block_line,
+        cut_hint=split.cut_hint,
+    )
+
+
+def merge_metadata(defaults: AssetDefaults, own: AssetMetadata) -> AssetMetadata:
+    """Apply `lakana.yaml` defaults under an asset's own front-matter.
+
+    Parameters
+    ----------
+    defaults
+        The resolved `defaults` section.
+    own
+        The asset's front-matter.
+
+    Returns
+    -------
+    AssetMetadata
+        Own values where set, defaults otherwise; `materialize` is never
+        `None` (``table`` when neither sets it).
+    """
+    return own.model_copy(
+        update={
+            "description": own.description if own.description is not None else defaults.description,
+            "owner": own.owner if own.owner is not None else defaults.owner,
+            "tags": own.tags or defaults.tags or (),
+            "materialize": own.materialize or defaults.materialize or "table",
+            "retries": own.retries if own.retries is not None else defaults.retries,
+            "retry_delay": (
+                own.retry_delay if own.retry_delay is not None else defaults.retry_delay
+            ),
+            "timeout": own.timeout if own.timeout is not None else defaults.timeout,
+        }
+    )
+
+
+def consistency_issues(
+    metadata: AssetMetadata, *, path: str, line: int | None
+) -> list[ProjectIssue]:
+    """Check the materialization options against each other.
+
+    Parameters
+    ----------
+    metadata
+        Merged metadata (`merge_metadata`).
+    path
+        Repository-relative path, for issues.
+    line
+        The block's line, if any.
+
+    Returns
+    -------
+    list of ProjectIssue
+        Empty when consistent.
+    """
+    issues: list[ProjectIssue] = []
+    incremental = metadata.materialize == "incremental"
+    if incremental and metadata.incremental_key is None:
+        issues.append(
+            ProjectIssue(path, line, "incremental_key is required for materialize: incremental")
+        )
+    if not incremental and metadata.incremental_key is not None:
+        issues.append(
+            ProjectIssue(
+                path, line, "incremental_key is allowed only with materialize: incremental"
+            )
+        )
+    if not incremental and metadata.evolve_schema is not None:
+        issues.append(
+            ProjectIssue(path, line, "evolve_schema is allowed only with materialize: incremental")
+        )
+    return issues

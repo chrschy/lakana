@@ -1,0 +1,143 @@
+"""The alias-refusing YAML loader."""
+
+from __future__ import annotations
+
+import pytest
+
+from lakana_core.errors import ValidationError
+from lakana_core.projects.yaml_loader import YamlError, key_line, load_yaml
+
+
+def test_loads_plain_mappings_and_lists() -> None:
+    """Ordinary YAML loads to Python values."""
+    assert load_yaml("a: 1\nb: [x, y]\n", what="t", max_bytes=1024) == {"a": 1, "b": ["x", "y"]}
+
+
+def test_empty_document_is_none() -> None:
+    """An empty file is `None`, which callers treat as an empty mapping."""
+    assert load_yaml("", what="t", max_bytes=10) is None
+
+
+def test_refuses_an_anchor() -> None:
+    """An anchor alone is refused: it is the first half of every alias bomb."""
+    with pytest.raises(YamlError, match="anchors and aliases are not allowed") as info:
+        load_yaml("a: &x 1\n", what="lakana.yaml", max_bytes=1024)
+    assert info.value.line == 1
+
+
+def test_refuses_an_alias() -> None:
+    """An alias is refused, wherever it appears."""
+    with pytest.raises(YamlError, match="anchors and aliases"):
+        load_yaml("a: 1\nb: *x\n", what="lakana.yaml", max_bytes=1024)
+
+
+def test_billion_laughs_is_refused_before_expansion() -> None:
+    """The classic bomb fails on its first anchor, without building anything."""
+    bomb = 'a: &a ["lol","lol","lol","lol","lol","lol","lol","lol","lol"]\n'
+    bomb += "".join(
+        f"{chr(98 + i)}: &{chr(98 + i)} [{','.join(['*' + chr(97 + i)] * 9)}]\n" for i in range(8)
+    )
+    with pytest.raises(YamlError, match="anchors and aliases"):
+        load_yaml(bomb, what="lakana.yaml", max_bytes=64 * 1024)
+
+
+def test_refuses_a_document_over_the_size_limit() -> None:
+    """The byte limit applies before parsing."""
+    with pytest.raises(YamlError, match="larger than 1 KiB"):
+        load_yaml("a: " + "x" * 2000, what="lakana.yaml", max_bytes=1024)
+
+
+def test_syntax_error_reports_its_line() -> None:
+    """A malformed document is a `ValidationError` carrying the 1-based line."""
+    with pytest.raises(ValidationError, match=r"lakana\.yaml is not valid YAML") as info:
+        load_yaml("a: 1\nb: [unclosed\n", what="lakana.yaml", max_bytes=1024)
+    assert isinstance(info.value, YamlError)
+    assert info.value.line is not None
+
+
+def test_refuses_python_tags() -> None:
+    """SafeLoader semantics: no arbitrary Python object construction."""
+    with pytest.raises(YamlError):
+        load_yaml("a: !!python/object/apply:os.system ['true']\n", what="t", max_bytes=1024)
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["a: 2024-13-45\n", "a: !!int abc\n", "a: !!float abc\n", "a: " + "9" * 5000 + "\n"],
+)
+def test_unconstructable_values_are_yaml_errors(text: str) -> None:
+    """PyYAML's bare `ValueError` from a constructor never escapes."""
+    with pytest.raises(YamlError, match="invalid value"):
+        load_yaml(text, what="lakana.yaml", max_bytes=64 * 1024)
+
+
+@pytest.mark.parametrize(
+    "text", ["[" * 2000 + "]" * 2000, "".join(f"{' ' * i}b:\n" for i in range(200))]
+)
+def test_deep_nesting_is_a_yaml_error(text: str) -> None:
+    """Nesting is bounded before Python's recursion limit is reachable."""
+    with pytest.raises(YamlError, match="nesting is deeper than 64") as info:
+        load_yaml(text, what="lakana.yaml", max_bytes=64 * 1024)
+    assert info.value.line is not None
+
+
+def test_moderate_nesting_still_loads() -> None:
+    """Realistic depth is unaffected."""
+    assert load_yaml("[[[[1]]]]", what="t", max_bytes=100) == [[[[1]]]]
+
+
+def test_refuses_a_duplicate_key_on_its_line() -> None:
+    """PyYAML keeps the last of two equal keys; a repository file must say which it means."""
+    with pytest.raises(YamlError, match=r"lakana\.yaml: duplicate key 'owner'") as info:
+        load_yaml(
+            "defaults:\n  owner: a\n  tags: []\n  owner: b\n", what="lakana.yaml", max_bytes=1024
+        )
+    assert info.value.line == 4
+
+
+def test_refuses_a_duplicate_key_at_the_top_level() -> None:
+    """Duplicates are refused at every depth, the first level included."""
+    with pytest.raises(YamlError, match="duplicate key 'repo'") as info:
+        load_yaml("repo: a\nrepo: b\n", what="lakana.yaml", max_bytes=1024)
+    assert info.value.line == 2
+
+
+def test_same_key_in_different_mappings_is_fine() -> None:
+    """Only keys of one mapping collide."""
+    assert load_yaml("a: {x: 1}\nb: {x: 2}\n", what="t", max_bytes=1024) == {
+        "a": {"x": 1},
+        "b": {"x": 2},
+    }
+
+
+def test_refuses_a_merge_key() -> None:
+    """`<<` would splice keys in from elsewhere, hiding which keys a mapping really has."""
+    with pytest.raises(YamlError, match=r"merge keys \(<<\) are not allowed") as info:
+        load_yaml("a:\n  <<: {x: 1}\n  y: 2\n", what="lakana.yaml", max_bytes=1024)
+    assert info.value.line == 2
+
+
+def test_an_unhashable_key_is_still_an_error() -> None:
+    """A list used as a key keeps PyYAML's own refusal, as a `YamlError`."""
+    with pytest.raises(YamlError):
+        load_yaml("? [a, b]\n: 1\n", what="t", max_bytes=1024)
+
+
+def test_key_line_finds_the_line_of_a_nested_key() -> None:
+    text = "a:\n  b:\n    c: 1\n  d: [x, y]\ne: 2\n"
+    assert key_line(text, ("a", "b", "c")) == 3
+    assert key_line(text, ("a", "d")) == 4
+    assert key_line(text, ("e",)) == 5
+
+
+def test_key_line_falls_back_to_the_deepest_key_that_exists() -> None:
+    text = "a:\n  b:\n    c: 1\n"
+    assert key_line(text, ("a", "b", "missing", "deeper")) == 2
+    assert key_line(text, ("a", "b", "c", "[key]")) == 3
+
+
+def test_key_line_is_none_for_a_missing_first_key_or_bad_yaml() -> None:
+    assert key_line("a: 1\n", ("z",)) is None
+    assert key_line("a: [\n", ("a",)) is None
+    assert key_line("a: &x 1\n", ("a",)) is None
+    assert key_line("- 1\n", ("a",)) is None

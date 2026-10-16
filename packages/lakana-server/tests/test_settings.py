@@ -1,0 +1,84 @@
+"""Tests for lakana-server's runtime settings."""
+
+from pathlib import Path
+
+import pydantic
+import pytest
+
+from lakana_core.config import ArtifactsConfig, DatabaseConfig, SecretsConfig
+from lakana_server.settings import Settings
+
+
+def test_settings_repr_redacts_nested_secrets() -> None:
+    """`Settings`'s repr inherits redaction from its nested config models."""
+    settings = Settings(
+        database=DatabaseConfig(url="postgresql+pg8000://user:hunter2@db.internal/lakana"),
+        secrets=SecretsConfig(master_key="dGhpc2lzYXNlY3JldGtleQ=="),
+    )
+
+    text = repr(settings)
+    as_str = str(settings)
+
+    for rendered in (text, as_str):
+        assert "hunter2" not in rendered
+        assert "dGhpc2lzYXNlY3JldGtleQ==" not in rendered
+        assert "db.internal" in rendered
+
+    # Behaviour is unchanged: the real values are still reachable.
+    assert settings.database.url == "postgresql+pg8000://user:hunter2@db.internal/lakana"
+    assert settings.secrets.master_key == "dGhpc2lzYXNlY3JldGtleQ=="
+
+
+def test_repo_roots_must_be_absolute(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The server validates `LAKANA_REPO_ROOTS` like the worker does."""
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{tmp_path}/p.db")
+    monkeypatch.setenv("LAKANA_REPO_ROOTS", '["/srv/repos"]')
+    assert Settings().repo_roots == ["/srv/repos"]
+    monkeypatch.setenv("LAKANA_REPO_ROOTS", '["relative"]')
+    with pytest.raises(pydantic.ValidationError, match="absolute"):
+        Settings()
+
+
+def test_repo_roots_default_to_empty(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """With `LAKANA_REPO_ROOTS` unset no local repository can be registered or deployed."""
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{tmp_path}/p.db")
+    monkeypatch.delenv("LAKANA_REPO_ROOTS", raising=False)
+    assert Settings().repo_roots == []
+
+
+def test_run_caps_settings_are_read_from_the_shared_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The server reads the same LAKANA_QUERY_LIMITS__/LAKANA_RUN__ variables as the worker."""
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{tmp_path}/p.db")
+    monkeypatch.setenv("LAKANA_QUERY_LIMITS__TIMEOUT_SECONDS", "120")
+    monkeypatch.setenv("LAKANA_RUN__MAX_RETRIES", "1")
+    settings = Settings()
+    assert (settings.query_limits.timeout_seconds, settings.run.max_retries) == (120, 1)
+
+
+def test_artifact_limits_have_defaults_and_read_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LAKANA_DATABASE__URL", "sqlite://")
+    assert Settings().artifacts == ArtifactsConfig(
+        max_file_bytes=2147483648, max_bytes=10737418240, max_files=10000, upload_ttl_seconds=3600
+    )
+    monkeypatch.setenv("LAKANA_ARTIFACTS__MAX_FILE_BYTES", "5")
+    monkeypatch.setenv("LAKANA_ARTIFACTS__MAX_BYTES", "6")
+    monkeypatch.setenv("LAKANA_ARTIFACTS__MAX_FILES", "7")
+    monkeypatch.setenv("LAKANA_ARTIFACTS__UPLOAD_TTL_SECONDS", "8")
+    assert Settings().artifacts == ArtifactsConfig(
+        max_file_bytes=5, max_bytes=6, max_files=7, upload_ttl_seconds=8
+    )
+
+
+@pytest.mark.parametrize("name", ["MAX_FILE_BYTES", "MAX_BYTES", "MAX_FILES", "UPLOAD_TTL_SECONDS"])
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_artifact_limits_must_be_positive(
+    monkeypatch: pytest.MonkeyPatch, name: str, value: str
+) -> None:
+    monkeypatch.setenv("LAKANA_DATABASE__URL", "sqlite://")
+    monkeypatch.setenv(f"LAKANA_ARTIFACTS__{name}", value)
+    with pytest.raises(pydantic.ValidationError):
+        Settings()

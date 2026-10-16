@@ -1,0 +1,110 @@
+<p align="center">
+  <img src="docs/assets/lakana-logo.png" alt="Lakana" width="220">
+</p>
+
+# Lakana
+
+Lakana is an open-source data lakehouse for small and medium teams: governed and reproducible
+by default, simple enough to run on one machine, professional enough to run an organisation's
+data platform. It covers analytics, data science and ML in SQL and Python, with code in git and
+every table, feature and model traceable to a commit. It runs anywhere containers run, on
+premises or in the cloud, and scales by adding workers, not by distributing queries.
+
+Principles:
+
+- **Governed by default:** catalog, row and column policies, secrets, audit and lineage in one
+  install.
+- **Reproducible:** production runs only deployed, versioned code.
+- **Two languages:** SQL and Python, nothing else.
+- **What works, not what is possible:** one proven way to do each thing.
+- **Easy to use,** with documentation that is part of the product.
+- **Usable by AI agents:** an MCP server is planned before v1.0.0.
+- **Self-hosted and flexible:** from a laptop to a cluster, with no hosted service to depend on.
+
+What is in scope, what is not, and who it is for:
+[Scope and philosophy](docs/site/explanation/scope.md). The plan to v1.0.0:
+[Roadmap](docs/site/explanation/roadmap.md).
+
+> A lakana is a Malagasy outrigger canoe: a narrow dugout hull, one float and a simple
+> sail — very little boat, taken a long way by a tiny crew. That is the idea here.
+
+> **Pre-beta.** The packages are on PyPI as 0.x releases so that people can try Lakana and tell
+> us what is missing. The API and the data layout may change between 0.x releases, and Lakana is
+> not ready for production data yet. The public beta follows later.
+
+`lakana-core`, `lakana-server`, and `lakana-worker` are
+substantially built — catalog, storage, authorization, policy, secrets, audit, the query
+executor, and the platform REST API are all real. `lakana` is the SDK and CLI on top of them,
+covering every platform route. There is no web interface yet: you work with Lakana through the
+CLI, the SDK or the REST API, and the interface is planned after the public beta. See
+[Scope and philosophy](docs/site/explanation/scope.md) and
+the [Roadmap](docs/site/explanation/roadmap.md) for where this is going.
+
+## Getting started
+
+**Solo, on your own machine, with no Docker and no Postgres:** the
+[Getting started](docs/site/tutorials/getting-started.md) tutorial takes you from installing
+Lakana to a built table, with the output of every command. It installs from PyPI:
+
+```bash
+pip install "lakana[server]"   # or: uv tool install "lakana[server]"
+```
+
+**A small team, sharing one instance — Docker Compose:**
+
+```bash
+pip install lakana
+lakana bundle init
+cd lakana-deploy && docker compose up -d --wait
+lakana sql "SELECT 42"
+```
+
+See [Deploying with Compose (team mode)](docs/site/how-to/deploy-with-compose.md) for
+prerequisites, exposing it beyond localhost with TLS, scaling workers, upgrading, and backups.
+
+## Python assets
+
+SQL transforms, Python at the edges: a Python asset receives its declared inputs as polars
+DataFrames and returns the DataFrame that replaces its table; see
+[Projects and deploys](docs/site/how-to/projects.md#python-assets). With `output="artifact"` it
+instead stores a file such as a trained model as a numbered version that another asset reads; see
+[Artifacts](docs/site/reference/artifacts.md).
+
+```python
+# assets/gold/station_scores.py  ->  table gold.station_scores
+import polars as pl
+from lakana import asset
+
+
+@asset(inputs={"readings": "bronze.readings", "stations": "bronze.stations"}, retries=2)
+def station_scores(readings: pl.DataFrame, stations: pl.DataFrame) -> pl.DataFrame:
+    """Temperature spread per station over the last week of readings."""
+    recent = readings.filter(pl.col("ts") > pl.col("ts").max() - pl.duration(days=7))
+    scored = recent.group_by("station_id").agg(score=pl.col("temp_c").std())
+    return scored.join(stations, on="station_id")
+```
+
+The inputs are tables other assets build (here two SQL assets, `bronze.readings` and
+`bronze.stations`). The full walk-through, with those two files, the `pyproject.toml` and the
+deploy steps, is in `docs/site/how-to/projects.md`, "Python assets".
+
+The project also needs a `pyproject.toml` that depends on `lakana[assets]` and a committed
+`uv.lock`. Python assets run as processes of the worker's user and are not sandboxed: one
+instance is one trust domain, so deploy only code you would run on the worker yourself.
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+Contributions require a Contributor License Agreement, a licence grant: you keep your
+copyright. See [`CONTRIBUTING.md`](.github/CONTRIBUTING.md) for what it means in plain words.
+
+## Governance
+
+- [`CONTRIBUTING.md`](.github/CONTRIBUTING.md) — workflow, gates, and code conventions
+- [`CODE_OF_CONDUCT.md`](.github/CODE_OF_CONDUCT.md) — expected behaviour in project spaces
+- [`SECURITY.md`](.github/SECURITY.md) — how to report a vulnerability
+- [`SUPPORT.md`](.github/SUPPORT.md) — support is best effort: no service level, no warranty, no response times
+- [`docs/legal/CLA.md`](docs/legal/CLA.md) — the Contributor License Agreement
+  ([corporate version](docs/legal/CLA-CORPORATE.md))
+- [`docs/legal/TRADEMARK.md`](docs/legal/TRADEMARK.md) — how the project name and logo may be used (not registered as trade marks)

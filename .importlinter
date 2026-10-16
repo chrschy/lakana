@@ -1,0 +1,59 @@
+[importlinter]
+root_packages =
+    lakana
+    lakana_core
+    lakana_server
+    lakana_worker
+# Required whenever a contract's forbidden_modules reference packages outside
+# root_packages (fastapi, starlette, pyiceberg, fsspec are all external here);
+# without it import-linter refuses to run those contracts at all.
+include_external_packages = True
+
+[importlinter:contract:core-is-framework-free]
+name = lakana-core must not depend on the web framework
+type = forbidden
+source_modules =
+    lakana_core
+forbidden_modules =
+    fastapi
+    starlette
+
+[importlinter:contract:server-goes-through-core]
+name = lakana-server must not touch storage or Iceberg directly
+type = forbidden
+source_modules =
+    lakana_server
+forbidden_modules =
+    pyiceberg
+    fsspec
+# lakana-server is expected to call lakana_core APIs (e.g. CatalogService,
+# StorageResolver) that use pyiceberg/fsspec internally — that is the point
+# of "it calls core" in the package table. Rather than allow_indirect_imports
+# (which would stop checking *any* indirect path, including a future
+# lakana_server -> some_third_party -> pyiceberg or a lakana_core re-export),
+# only the two specific legitimate paths are excused, so the transitive
+# check still catches everything else — this boundary is security-relevant
+# (architecture Constraint 2).
+ignore_imports =
+    lakana_core.** -> pyiceberg
+    lakana_core.** -> fsspec
+
+[importlinter:contract:sdk-is-independent]
+name = lakana must not depend on core, server or worker
+type = forbidden
+source_modules =
+    lakana
+forbidden_modules =
+    lakana_core
+    lakana_server
+    lakana_worker
+
+# lakana_server and lakana_worker communicate only by writing/reading query_runs and
+# deploy_runs rows through lakana_core — this line makes an import in either direction
+# between them a lint failure, not just an unwritten convention.
+[importlinter:contract:layers]
+name = Package layering
+type = layers
+layers =
+    lakana_server | lakana_worker
+    lakana_core

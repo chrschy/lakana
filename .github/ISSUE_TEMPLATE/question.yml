@@ -1,0 +1,21 @@
+name: Question
+description: Ask how to do something.
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please look in the [documentation](https://github.com/chrschy/lakana/tree/main/docs/site) first.
+        Support is best effort; see [SUPPORT.md](https://github.com/chrschy/lakana/blob/main/.github/SUPPORT.md).
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question
+      description: What you want to do, what you tried, and what happened.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The output of `lakana --version`.

@@ -1,0 +1,73 @@
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lakana-server"
+description = "Lakana control plane: REST API, Iceberg REST catalog, worker."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [{ name = "Christopher Schymura" }]
+keywords = ["lakehouse", "duckdb", "iceberg", "data-platform"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "License :: OSI Approved :: Apache Software License",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Database",
+]
+urls = { Homepage = "https://github.com/chrschy/lakana", Documentation = "https://github.com/chrschy/lakana/tree/main/docs/site", Repository = "https://github.com/chrschy/lakana", Issues = "https://github.com/chrschy/lakana/issues", Changelog = "https://github.com/chrschy/lakana/blob/main/CHANGELOG.md" }
+dynamic = ["version", "dependencies"]
+
+[project.scripts]
+lakana-server = "lakana_server.__main__:main"
+
+[dependency-groups]
+# The workspace `lakana` SDK, for the SDK contract test
+# (tests/sdk/test_sdk_contract.py) and the SDK end-to-end tests
+# (tests/sdk/), which drive the app only through `lakana.Client` -- never
+# imported by lakana_server itself (see server-goes-through-core and
+# sdk-is-independent in .importlinter; this is a dev-only, test-time
+# dependency, unrelated to either contract).
+dev = ["lakana"]
+
+[tool.uv.sources]
+lakana-core = { workspace = true }
+lakana = { workspace = true }
+
+[tool.hatch.version]
+source = "vcs"
+raw-options = { root = "../.." }
+
+[tool.hatch.metadata.hooks.custom]
+# Loads `hatch_build.py`'s `CoreDependencyMetadataHook`, which appends
+# `lakana-core==<this build's version>` to the `dependencies` list below,
+# pinning lakana-server to exactly this release's lakana-core -- the
+# same hatch-vcs-resolved version pattern as `packages/lakana/hatch_build.py`'s
+# `ServerExtraMetadataHook`. `dependencies` lives here, not under
+# `[project]`, because hatchling requires the hook to supply the *entire*
+# list once `dependencies` is dynamic; keeping the other pins and their
+# comments in this table (rather than hard-coding them into hatch_build.py)
+# keeps them visible and editable as ordinary TOML.
+dependencies = [
+    "fastapi>=0.141,<1",
+    # Decodes a caller-submitted Arrow IPC stream for the governed append
+    # route (lakana_server.api.platform.tables.append_table_data). Already
+    # arrives transitively through lakana-core's own pyiceberg/pyarrow
+    # dependency, but this package imports it directly now, so it is
+    # declared directly too rather than relying on another package's
+    # transitive dependency graph. Apache-2.0, same as lakana-core's own copy.
+    "pyarrow>=18.0.0",
+    # ASGI server for the `lakana-server` console script. BSD-3-Clause.
+    "uvicorn>=0.30",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lakana_server"]

@@ -1,0 +1,240 @@
+"""The workers of an instance: who registered, who is alive.
+
+Every time written here is the database's (`db_now`), never a worker's wall clock, and "alive"
+is only ever "heartbeat younger than the lease" by that same clock, so skew between hosts can
+neither keep a dead worker alive nor end the runs of a live one.
+
+None of the functions commits; the caller does.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta
+
+from sqlalchemy import ColumnElement, and_, delete, func, or_, select, update
+from sqlalchemy.orm import Session
+
+from lakana_core.db import db_now, rowcount
+from lakana_core.models import DeployRun, QueryRun, Worker
+
+WORKER_ROW_KEEP_SECONDS = 3600
+"""How long the row of a worker that stopped beating is kept (and listed as `lost`)."""
+
+
+def _heartbeat_is_younger_than(cutoff: datetime) -> ColumnElement[bool]:
+    """Build the one definition of "alive": the heartbeat is younger than the cutoff.
+
+    Parameters
+    ----------
+    cutoff
+        `now - lease`; a heartbeat exactly this old is not alive.
+
+    Returns
+    -------
+    ColumnElement[bool]
+        A condition on `Worker.heartbeat_at`.
+    """
+    return Worker.heartbeat_at > cutoff
+
+
+def register(
+    session: Session,
+    worker_id: str,
+    *,
+    host: str,
+    version: str,
+    started_at: datetime | None = None,
+    takes: str = "all",
+) -> datetime:
+    """Insert the worker's row, or refresh it.
+
+    Parameters
+    ----------
+    session
+        Database session; the caller commits.
+    worker_id
+        The worker's id.
+    host
+        The host name, cut to the column's 255 characters.
+    version
+        The worker's version, cut to the column's 64 characters.
+    started_at
+        The start time of a worker that comes back after its row was removed; ignored when the
+        row exists. The database's time when omitted.
+    takes
+        The work the worker takes (`all`, `interactive` or `pipeline`); written on insert and
+        on refresh.
+
+    Returns
+    -------
+    datetime
+        The row's `started_at`.
+    """
+    now = db_now(session)
+    row = session.get(Worker, worker_id)
+    if row is None:
+        row = Worker(
+            id=worker_id,
+            host=host[:255],
+            version=version[:64],
+            started_at=started_at or now,
+            heartbeat_at=now,
+            takes=takes,
+        )
+        session.add(row)
+    else:
+        row.host, row.version, row.heartbeat_at, row.takes = host[:255], version[:64], now, takes
+    return row.started_at
+
+
+def beat(session: Session, worker_id: str) -> bool:
+    """Set the worker's heartbeat to the database's time.
+
+    The time is read in the same transaction and bound, the way a task lease is renewed, not
+    written as `CURRENT_TIMESTAMP`: SQLite's is text without a fraction.
+
+    Parameters
+    ----------
+    session
+        Database session; the caller commits.
+    worker_id
+        The worker's id.
+
+    Returns
+    -------
+    bool
+        `False` when no row matched (it was removed), `True` otherwise.
+    """
+    result = session.execute(
+        update(Worker)
+        .where(Worker.id == worker_id)
+        .values(heartbeat_at=db_now(session))
+        .execution_options(synchronize_session=False)
+    )
+    return rowcount(result) == 1
+
+
+def remove(session: Session, worker_id: str) -> None:
+    """Delete the worker's row (a clean stop).
+
+    Parameters
+    ----------
+    session
+        Database session; the caller commits.
+    worker_id
+        The worker's id.
+    """
+    session.execute(delete(Worker).where(Worker.id == worker_id))
+
+
+def forget_lost(session: Session, now: datetime, lease_seconds: int = 0) -> int:
+    """Delete the rows of workers older than the larger of the keep time and the lease.
+
+    A lease above `WORKER_ROW_KEEP_SECONDS` must not delete the row of a worker that is merely
+    stalled and still counts as alive.
+
+    Parameters
+    ----------
+    session
+        Database session; the caller commits.
+    now
+        The database's current time.
+    lease_seconds
+        The lease length (`LAKANA_RUN__LEASE_SECONDS`); `0` leaves the keep time alone.
+
+    Returns
+    -------
+    int
+        The number of rows deleted.
+    """
+    cutoff = now - timedelta(seconds=max(WORKER_ROW_KEEP_SECONDS, lease_seconds))
+    return rowcount(session.execute(delete(Worker).where(Worker.heartbeat_at < cutoff)))
+
+
+def alive_ids(session: Session, now: datetime, lease_seconds: int) -> set[str]:
+    """Return the ids of the workers whose heartbeat is younger than the lease.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    now
+        The database's current time.
+    lease_seconds
+        The lease length (`LAKANA_RUN__LEASE_SECONDS`).
+
+    Returns
+    -------
+    set[str]
+        The alive workers' ids.
+    """
+    cutoff = now - timedelta(seconds=lease_seconds)
+    return set(session.scalars(select(Worker.id).where(_heartbeat_is_younger_than(cutoff))))
+
+
+def alive_takes(session: Session, now: datetime, lease_seconds: int) -> dict[str, str]:
+    """Return what each alive worker takes, by worker id, in one statement.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    now
+        The database's current time.
+    lease_seconds
+        The lease length (`LAKANA_RUN__LEASE_SECONDS`).
+
+    Returns
+    -------
+    dict[str, str]
+        The ids of the workers whose heartbeat is younger than the lease, each with its `takes`.
+    """
+    cutoff = now - timedelta(seconds=lease_seconds)
+    rows = session.execute(
+        select(Worker.id, Worker.takes).where(_heartbeat_is_younger_than(cutoff))
+    )
+    return {worker_id: takes for worker_id, takes in rows}
+
+
+def without_alive_worker(
+    model: type[QueryRun] | type[DeployRun], now: datetime, lease_seconds: int
+) -> ColumnElement[bool]:
+    """Build the condition "no alive worker holds this run" for a query or deploy run.
+
+    A run with a worker id is held while that worker's heartbeat is younger than the lease. A
+    run without one was claimed by a release that did not record it: it counts as held until it
+    started a lease ago. That age compares the run's `started_at`, which a worker stamps with its
+    own wall clock at the claim, with a cutoff from the database's clock; a skewed worker clock
+    can make such a run look younger or older by the skew, which only moves the end of a run
+    that no new release produces.
+
+    There is no status filter: a `QUEUED` run has no worker id and an old `created_at`, so it
+    would match. The caller adds `status == RUNNING`.
+
+    Parameters
+    ----------
+    model
+        `QueryRun` or `DeployRun`.
+    now
+        The database's current time.
+    lease_seconds
+        The lease length (`LAKANA_RUN__LEASE_SECONDS`).
+
+    Returns
+    -------
+    ColumnElement[bool]
+        A condition to put in a `WHERE` clause.
+    """
+    cutoff = now - timedelta(seconds=lease_seconds)
+    alive = (
+        select(Worker.id)
+        .where(Worker.id == model.worker_id, _heartbeat_is_younger_than(cutoff))
+        .exists()
+    )
+    return or_(
+        and_(model.worker_id.is_not(None), ~alive),
+        and_(
+            model.worker_id.is_(None),
+            func.coalesce(model.started_at, model.created_at) <= cutoff,
+        ),
+    )

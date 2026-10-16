@@ -1,0 +1,14 @@
+jobs:
+  daily_silver:
+    select: ["silver.*"]
+    upstream: true
+    schedule:
+      cron: "0 6 * * *"
+      timezone: Europe/Berlin
+  hourly_bronze:
+    select: ["bronze.*"]
+    schedule: { cron: "15 * * * *" }
+environments:
+  dev:
+    jobs:
+      hourly_bronze: { schedule: null }

@@ -1,0 +1,338 @@
+name: CI
+
+on:
+  pull_request:
+    # `ready_for_review` is not a default type: without it, leaving draft would start nothing.
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# Runner: the repository variable CI_RUNNER (for example `self-hosted`) moves these jobs off
+# GitHub's runners; unset, they run on `ubuntu-latest`. Dependabot's pull requests and pull requests
+# from forks always run on GitHub's runners. See docs/agent/testing.md, "CI runners".
+jobs:
+  # Decides whether this pull request changes documentation only (`scripts/docs_only.py`).
+  # The jobs below skip their heavy work when it does. Every doubt and every error
+  # says "not docs-only". A push to main runs everything unless
+  # scripts/ci_already_tested.py proves its pull request was just tested on the same tree.
+  changes:
+    runs-on: ${{ (github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER) || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read           # scripts/ci_already_tested.py reads the pull request's runs
+    outputs:
+      docs_only: ${{ steps.scope.outputs.docs_only }}
+      draft: ${{ steps.draft.outputs.draft }}
+      # Only a push to main can say true, and only when scripts/ci_already_tested.py proved that
+      # the pull request that was merged has just been tested on this very tree. Every doubt,
+      # an empty output included, runs everything.
+      already_tested: ${{ github.event_name == 'push' && steps.tested.outputs.already_tested == 'true' && 'true' || 'false' }}
+      # The versions `test` runs on. A draft skips 3.11 by not having it in the matrix: the
+      # required check `test (3.11)` is then absent (pending), never green without a run.
+      # Every doubt, an empty output included, means both versions.
+      python_versions: ${{ steps.draft.outputs.draft == 'true' && '["3.14"]' || '["3.11","3.14"]' }}
+    steps:
+      # A draft pull request skips `integration`, `five-minute`, `compose-smoke` and the 3.11 leg
+      # of `test`; leaving draft (`ready_for_review`) starts the full run. Only an event that
+      # says "true" is a draft: anything else, an empty value included, runs everything.
+      - id: draft
+        shell: bash --noprofile --norc {0}
+        env:
+          EVENT: ${{ github.event_name }}
+          DRAFT: ${{ github.event.pull_request.draft }}
+        run: |
+          draft="false"
+          if [ "$EVENT" = "pull_request" ] && [ "$DRAFT" = "true" ]; then
+            draft="true"
+          fi
+          echo "draft=${draft}" >> "$GITHUB_OUTPUT"
+      # The classifier is fetched from the base commit, so a pull request cannot change the
+      # rule it is judged by. It is fetched, not checked out: a sparse checkout would stay
+      # configured in the workspace a self-hosted runner reuses for the next job.
+      - id: scope
+        shell: bash --noprofile --norc {0}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          verdict="false"
+          if [ "$EVENT" = "pull_request" ]; then
+            if gh api "repos/${GITHUB_REPOSITORY}/contents/scripts/docs_only.py?ref=${BASE_SHA}" \
+              -H "Accept: application/vnd.github.raw" > "$RUNNER_TEMP/docs_only.py" \
+              && gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/files" --paginate \
+              --jq '.[] | .filename, (.previous_filename // empty)' > "$RUNNER_TEMP/changed.txt"; then
+              if [ "$(python3 "$RUNNER_TEMP/docs_only.py" < "$RUNNER_TEMP/changed.txt")" = "true" ]; then
+                verdict="true"
+              fi
+            fi
+          fi
+          echo "docs_only=${verdict}" >> "$GITHUB_OUTPUT"
+
+      # A push to main: the squash merge of an up-to-date pull request has the tree CI has just
+      # tested on that pull request, so `test`, `integration`, `five-minute`, `compose-smoke` and
+      # `docs-examples` skip. The script is fetched from the pushed commit itself (it is main's
+      # own code, not a pull request's). It prints its reason to the log; anything but a clean
+      # `already_tested=true` on its standard output, a failing fetch included, means false.
+      - id: tested
+        if: github.event_name == 'push'
+        shell: bash --noprofile --norc {0}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          verdict="already_tested=false"
+          if gh api "repos/${GITHUB_REPOSITORY}/contents/scripts/ci_already_tested.py?ref=${GITHUB_SHA}" \
+            -H "Accept: application/vnd.github.raw" > "$RUNNER_TEMP/ci_already_tested.py"; then
+            answer="$(python3 "$RUNNER_TEMP/ci_already_tested.py")"
+            if [ $? -eq 0 ] && [ "$answer" = "already_tested=true" ]; then
+              verdict="$answer"
+            fi
+          else
+            echo "not already tested: could not fetch scripts/ci_already_tested.py"
+          fi
+          echo "$verdict" >> "$GITHUB_OUTPUT"
+
+  lint:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
+    runs-on: ${{ (github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER) || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          fetch-depth: 0          # hatch-vcs needs tags to compute a version
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+        with:
+          enable-cache: true
+      - run: uv sync --all-packages --locked
+      - name: ruff (lint)
+        run: uv run ruff check --output-format=github .
+      - name: ruff (format)
+        run: uv run ruff format --check .
+      - name: ty
+        run: uv run ty check packages
+      - name: import contracts
+        run: uv run lint-imports
+
+  # `test (3.11)` and `test (3.14)` are required checks, so this job always runs and
+  # reports; for a docs-only change it runs the tests that read the documentation.
+  # On a draft the matrix holds 3.14 alone (see `python_versions` above).
+  test:
+    needs: changes
+    # Not skipped for a pull request, whose `test (3.11)` and `test (3.14)` are required checks.
+    if: ${{ !cancelled() && needs.changes.outputs.already_tested != 'true' }}
+    timeout-minutes: 30
+    runs-on: ${{ (github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER) || 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ${{ fromJSON(needs.changes.outputs.python_versions || '["3.11","3.14"]') }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          fetch-depth: 0          # hatch-vcs needs tags to compute a version
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python-version }}
+      - run: uv sync --all-packages --locked
+      - name: Documentation tests
+        if: needs.changes.outputs.docs_only == 'true'
+        run: uv run pytest scripts/tests
+      # Both runs are parallel, a test file never split across processes. The 3.14 run
+      # measures coverage and stops at two processes: with coverage's C tracer (`core = "ctrace"`
+      # in pyproject.toml) it peaks at 4.2 GB with two, 5.0 GB with three, and is killed under
+      # 6 GB with four (measured 2026-10-11). Without that setting it does not fit at all.
+      # Only the 3.14 run measures coverage: the ratchet reads that report and nothing reads
+      # the other one, and measuring costs about a third of a run.
+      - name: Unit tests (with coverage)
+        if: matrix.python-version == '3.14' && needs.changes.outputs.docs_only != 'true'
+        run: uv run pytest -n auto --maxprocesses 2 --dist loadfile --cov --cov-report=json --cov-report=term-missing:skip-covered
+      - name: Unit tests
+        if: matrix.python-version != '3.14' && needs.changes.outputs.docs_only != 'true'
+        run: uv run pytest -n auto --maxprocesses 4 --dist loadfile
+      - name: Unit tests on the oldest supported Polars
+        # `lakana[assets]` accepts polars>=1.30 and the lock holds 2.x. The tests that touch
+        # Polars run once more on 1.30 (about 30 s); a type that exists only in Polars 2 is
+        # skipped there. The first command fails the step if `--with` ever stops shadowing the
+        # locked Polars. A test file that imports Polars must be in this list or in the
+        # exclusions of scripts/tests/test_workflows.py (docs/agent/testing.md, "Polars 1 and 2").
+        if: matrix.python-version == '3.11' && needs.changes.outputs.docs_only != 'true'
+        run: |
+          uv run --with 'polars==1.30.*' python -c "import polars; assert polars.__version__.startswith('1.30.'), polars.__version__"
+          uv run --with 'polars==1.30.*' pytest -p no:cacheprovider \
+            packages/lakana-core/tests/test_projects_lockfile.py \
+            packages/lakana-core/tests/test_projects_python_assets.py \
+            packages/lakana-server/tests/sdk/test_sdk_data_plane.py \
+            packages/lakana/tests/test_resources_data.py \
+            packages/lakana/tests/test_runner.py \
+            packages/lakana-worker/tests/test_python_tasks.py \
+            packages/lakana-worker/tests/test_runners.py \
+            packages/lakana-worker/tests/test_harness_server_messages.py \
+            packages/lakana-worker/tests/test_discovery_harness_parity.py
+      - name: Coverage ratchet
+        if: matrix.python-version == '3.14' && needs.changes.outputs.docs_only != 'true'
+        run: uv run python scripts/coverage_ratchet.py
+
+  # The documentation site: every code block checked, the site built in strict mode.
+  # Fast, and it guards a documentation-only change, so it has no condition.
+  docs:
+    runs-on: ${{ (github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER) || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          fetch-depth: 0          # hatch-vcs needs tags to compute a version
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+        with:
+          enable-cache: true
+      - run: uv sync --locked --all-packages --group docs
+      - name: Code blocks (sync check and guard)
+        # Without --fix: a page that differs from its source fails, and the tool's own
+        # messages (page, line, what to do) are the job log.
+        run: uv run python scripts/docs_blocks.py
+      - name: Build the site
+        # Zensical prints a Python traceback after its own message when strict mode fails.
+        run: uv run --group docs zensical build --strict
+      - name: Built site (no external resources, no missing files)
+        run: uv run python scripts/check_built_site.py site-build
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7
+        with:
+          name: docs-site
+          path: site-build
+          if-no-files-found: error
+          retention-days: 7
+
+  # Runs the example projects the site shows, each against a fresh local instance.
+  docs-examples:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.already_tested != 'true' }}
+    runs-on: ${{ (github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER) || 'ubuntu-latest' }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          fetch-depth: 0          # hatch-vcs needs tags to compute a version
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+        with:
+          enable-cache: true
+      - run: uv sync --locked --all-packages
+      # The example "train-and-predict" runs a Python asset: its project carries the lakana wheel
+      # of this commit in a folder, and every other package comes from the public package index.
+      - name: Build the lakana wheel for the Python-asset example
+        run: uv build --package lakana --wheel --out-dir "$RUNNER_TEMP/wheelhouse"
+      - name: Run the documentation's example projects
+        env:
+          LAKANA_TEST_WHEELHOUSE: ${{ runner.temp }}/wheelhouse
+          LAKANA_DOCS_EXAMPLE_BUDGET: "240"
+        run: uv run bash scripts/run_docs_examples.sh
+
+  integration:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.draft != 'true' && needs.changes.outputs.already_tested != 'true' }}
+    runs-on: ${{ (github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER) || 'ubuntu-latest' }}
+    # No test waits without a bound, and nothing here may hold a runner if one does.
+    timeout-minutes: 30
+    # A separate job, rather than folded into `test` above, so a Docker or
+    # testcontainers hiccup shows up as its own failure instead of masking
+    # unit test results in the same job.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          fetch-depth: 0          # hatch-vcs needs tags to compute a version
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+        with:
+          enable-cache: true
+      - run: uv sync --all-packages --locked
+      # First, and on their own, the tests that install no packages: a package index
+      # outage must not take them down with the Python-asset tests.
+      - name: Integration tests
+        run: >-
+          uv run pytest -m integration
+          --ignore=packages/lakana-server/tests/test_python_assets_integration.py
+      # The Python-asset tests install from an offline wheel directory. Building it is
+      # the only step that may ask a package index, and only for wheels the cache does
+      # not hold: the locked wheels are cached by uv.lock, the lakana wheel is rebuilt
+      # from this checkout every time. Its own step, so its failure is named as such.
+      - name: Restore the wheel index
+        if: ${{ !cancelled() }}
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6
+        with:
+          path: ${{ runner.temp }}/wheelhouse
+          key: wheelhouse-${{ runner.os }}-${{ hashFiles('uv.lock', '.python-version') }}
+      - name: Build the wheel index for the Python-asset tests
+        id: wheelhouse
+        if: ${{ !cancelled() }}
+        run: bash scripts/build_wheelhouse.sh "$RUNNER_TEMP/wheelhouse"
+      # Without LAKANA_TEST_WHEELHOUSE these tests skip locally and fail here.
+      # Only when the index was built: otherwise its failure above is the one cause.
+      - name: Python-asset integration tests
+        if: ${{ !cancelled() && steps.wheelhouse.outcome == 'success' }}
+        env:
+          LAKANA_TEST_WHEELHOUSE: ${{ runner.temp }}/wheelhouse
+        run: >-
+          uv run pytest -m integration
+          packages/lakana-server/tests/test_python_assets_integration.py
+
+  five-minute:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.draft != 'true' && needs.changes.outputs.already_tested != 'true' }}
+    runs-on: ${{ (github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER) || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with: {fetch-depth: 0}
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+      - run: uv build --all-packages -o dist
+      - name: Five-minute exit test (clean python:3.13-slim container)
+        # Pinned to this job's own build: an
+        # unpinned "lakana[server]" lets pip prefer a final release on PyPI
+        # over these dev pre-releases, so once any `lakana` is ever published
+        # there -- by this project or a name-squatter -- this job silently
+        # starts testing that package instead of the PR's own wheels. `uv
+        # build`'s dev version always carries a local segment (`+g<sha>`),
+        # which PyPI's upload API rejects outright, so pinning to exactly
+        # that version (still combined with --find-links, not --no-index,
+        # so ordinary third-party dependencies still resolve from PyPI as a
+        # real install would) can only ever be satisfied by /dist.
+        run: |
+          version=$(basename dist/lakana-[0-9]*.whl | cut -d- -f2)
+          docker run --rm -e GITHUB_STEP_SUMMARY=/summary/out.md -e LAKANA_EXPECTED_VERSION="$version" \
+            -v "$PWD/dist:/dist:ro" -v "$PWD/scripts:/scripts:ro" -v "$RUNNER_TEMP:/summary" \
+            python:3.13-slim bash /scripts/five_minute_test.sh --find-links /dist "lakana[server]==$version"
+          cat "$RUNNER_TEMP/out.md" >> "$GITHUB_STEP_SUMMARY"
+
+  # Starts the real console scripts in containers: it runs for any change under packages/*/src/
+  # and for the files listed in the filter below.
+  compose-smoke:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.draft != 'true' && needs.changes.outputs.already_tested != 'true' }}
+    runs-on: ${{ (github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER) || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with: {fetch-depth: 0}
+      - id: changes
+        name: Did the bundle change?
+        run: |
+          base=${{ github.event.pull_request.base.sha || 'HEAD~1' }}
+          # The root commit has no parent: nothing to compare with, so everything counts as changed.
+          if ! git rev-parse --verify --quiet "$base" > /dev/null; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          elif git diff --name-only "$base" HEAD | grep -qE '^(Dockerfile|packages/[^/]+/src/|\.dockerignore|packages/[^/]+/pyproject\.toml|packages/[^/]+/hatch_build\.py|uv\.lock|scripts/(compose_smoke_test|build_wheelhouse|python_asset_project)\.sh|\.github/workflows/(ci|release)\.yml)'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.changes.outputs.run == 'true'
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+      - if: steps.changes.outputs.run == 'true'
+        run: |
+          uv build --all-packages -o dist
+          uv export --frozen --no-dev --all-packages --no-emit-workspace --no-hashes -o dist/constraints.txt
+          docker build -t lakana:ci .
+          uv run --locked bash scripts/compose_smoke_test.sh lakana:ci

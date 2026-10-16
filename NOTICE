@@ -1,0 +1,8 @@
+Lakana
+Copyright 2026 Christopher Schymura
+
+This product includes software developed at the Lakana project
+(https://github.com/chrschy/lakana).
+
+The container image also ships these programs, unmodified, under their own licences:
+- uv (MIT OR Apache-2.0), https://github.com/astral-sh/uv, builds the venvs of Python assets.

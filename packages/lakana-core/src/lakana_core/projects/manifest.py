@@ -1,0 +1,584 @@
+"""The project version manifest: everything M5c needs to run a commit, as JSON."""
+
+from __future__ import annotations
+
+import logging
+import re
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, cast
+
+from lakana_core.identifiers import NOTIFY_FORMATS
+from lakana_core.projects.asset_model import DEFAULT_DECIMALS, MAX_KEEP_VERSIONS
+from lakana_core.projects.dag import ProjectGraph
+from lakana_core.projects.parse import ParsedAsset
+from lakana_core.projects.project_config import JobConfig, ResolvedProjectConfig
+from lakana_core.projects.run_policy import RunCaps, resolve_run_policy
+
+if TYPE_CHECKING:
+    from lakana_core.projects.checks import ParsedCheck
+
+MANIFEST_VERSION = 6
+"""Bumped when the manifest's shape changes. Version 2 adds `kind` per asset and
+`lock_sha256`; a version-1 manifest is read as all-SQL. Version 3 adds `output`,
+`keep_versions` and `input_kinds` per Python asset; versions 1 and 2 are read as all-table.
+Version 4 adds the `checks` list, and is written only for a project that has checks
+(`VERSION_WITHOUT_CHECKS` otherwise), so that a worker of the previous release refuses a manifest
+whose checks it would skip. Version 5 adds `jobs` and is written only for a project that
+declares jobs, so that a worker of an earlier release refuses a manifest whose jobs it would
+ignore; it then always carries a `checks` list, empty if need be, so that reading "version 5
+without `checks`" stays a damaged manifest. A project with checks and no jobs stays version 4.
+Version 6 is written only when a job declares `notify` in the environment the manifest is built
+for, so that a worker of an earlier release refuses a manifest whose notifications it would
+never send; any other project keeps its version.
+The `decimals` key is optional and read with a default (`entry_decimals`), so it needed
+no bump: an entry without it means ``float``. The `package_indexes` key is optional in
+the same way: a manifest without it uses no registered package index."""
+
+VERSION_WITHOUT_CHECKS = 3
+"""The version of a manifest that has no `checks` list: a project without `checks/` is unchanged."""
+
+CHECKS_VERSION = 4
+"""The version of a manifest that has checks but no jobs."""
+
+JOBS_VERSION = 5
+"""The version of a manifest that has jobs and no notification."""
+
+NOTIFY_VERSION = 6
+"""The version of a manifest in which a job notifies."""
+
+_SHA256 = re.compile(r"\A[0-9a-f]{64}\Z")
+
+WRITE_MODES: dict[str, tuple[str, str]] = {
+    "table": ("replace", "create"),
+    "view": ("view", "view"),
+    "incremental": ("append", "create"),
+}
+"""Materialization → (M5a write mode, write mode when the table does not exist yet).
+
+An incremental asset's first run creates its table with every row its SELECT returns;
+the runs after it append the rows past the watermark.
+"""
+
+
+def _policy(asset: ParsedAsset, caps: RunCaps) -> dict[str, int]:
+    """Serialize an asset's resolved run policy.
+
+    Parameters
+    ----------
+    asset
+        The parsed asset.
+    caps
+        Supplies the default timeout.
+
+    Returns
+    -------
+    dict
+        ``retries``, ``retry_delay_seconds``, ``timeout_seconds``.
+    """
+    policy = resolve_run_policy(asset.metadata, caps)
+    return {
+        "retries": policy.retries,
+        "retry_delay_seconds": policy.retry_delay_seconds,
+        "timeout_seconds": policy.timeout_seconds,
+    }
+
+
+def _entry(asset: ParsedAsset, caps: RunCaps, artifacts: frozenset[str]) -> dict[str, Any]:
+    """Serialize one asset.
+
+    Parameters
+    ----------
+    asset
+        The parsed asset.
+    caps
+        Supplies the default timeout.
+    artifacts
+        Names of every artifact the asset may read, for `input_kinds`.
+
+    Returns
+    -------
+    dict
+        The manifest entry.
+    """
+    materialize = asset.metadata.materialize or "table"
+    write_mode, first_write_mode = WRITE_MODES[materialize]
+    entry: dict[str, Any] = {
+        "table": asset.table,
+        "path": asset.path,
+        "kind": asset.kind,
+        "materialize": materialize,
+        "write_mode": write_mode,
+        "first_write_mode": first_write_mode,
+        "incremental_key": asset.metadata.incremental_key,
+        "evolve_schema": bool(asset.metadata.evolve_schema),
+        **_policy(asset, caps),
+        "metadata": {
+            "description": asset.metadata.description,
+            "owner": asset.metadata.owner,
+            "tags": list(asset.metadata.tags),
+            "columns": dict(asset.metadata.columns),
+        },
+        "sql": asset.sql,
+        "normalized_sql": asset.normalized_sql,
+        "references": list(asset.references),
+        "columns": list(asset.columns) if asset.columns is not None else None,
+        "lineage": asset.lineage,
+    }
+    if asset.kind == "python":
+        entry["inputs"] = dict(asset.inputs)
+        entry["output"] = asset.output
+        entry["keep_versions"] = asset.keep_versions if asset.output == "artifact" else None
+        entry["decimals"] = asset.decimals
+        entry["input_kinds"] = {
+            parameter: "artifact" if table in artifacts else "table"
+            for parameter, table in asset.inputs
+        }
+        if asset.output == "artifact":
+            entry["materialize"] = entry["write_mode"] = entry["first_write_mode"] = "artifact"
+    return entry
+
+
+def _unset_notify(job: JobConfig) -> set[str]:
+    """Name the job fields a manifest entry leaves out.
+
+    Parameters
+    ----------
+    job
+        The job.
+
+    Returns
+    -------
+    set of str
+        ``notify`` when the job has none, so that a manifest of a project without notifications
+        keeps the shape of version 5.
+    """
+    return set() if job.notify is not None else {"notify"}
+
+
+def _version(config: ResolvedProjectConfig, *, has_checks: bool) -> int:
+    """Pick the lowest manifest version that carries everything the project declares.
+
+    Parameters
+    ----------
+    config
+        `lakana.yaml` resolved for the target environment.
+    has_checks
+        Whether the project has checks.
+
+    Returns
+    -------
+    int
+        `NOTIFY_VERSION` when a job notifies, else `JOBS_VERSION` with jobs, `CHECKS_VERSION`
+        with checks, `VERSION_WITHOUT_CHECKS` otherwise.
+    """
+    if any(job.notify is not None for job in config.jobs.values()):
+        return NOTIFY_VERSION
+    if config.jobs:
+        return JOBS_VERSION
+    return CHECKS_VERSION if has_checks else VERSION_WITHOUT_CHECKS
+
+
+def build_manifest(
+    assets: Sequence[ParsedAsset],
+    graph: ProjectGraph,
+    config: ResolvedProjectConfig,
+    *,
+    caps: RunCaps | None = None,
+    lock_sha256: str | None = None,
+    artifacts: frozenset[str] = frozenset(),
+    package_indexes: Sequence[str] = (),
+    checks: Sequence[ParsedCheck] = (),
+) -> dict[str, Any]:
+    """Build the manifest stored on a project version.
+
+    Parameters
+    ----------
+    assets
+        The validated assets.
+    graph
+        Their DAG.
+    config
+        `lakana.yaml` resolved for the target environment.
+    caps
+        Operator maximums; `RunCaps()` when `None`.
+    lock_sha256
+        SHA-256 of `uv.lock`; given exactly when a Python asset exists.
+    artifacts
+        Inputs from the catalog that are artifacts; the project's own artifact
+        assets are added to it.
+    package_indexes
+        Names of the registered package indexes the lock takes packages from;
+        recorded so that a project version shows what it depends on.
+    checks
+        The validated checks; the manifest has a `checks` list, sorted by name, and version
+        `CHECKS_VERSION` (`JOBS_VERSION` with jobs), only when there are any.
+
+    Returns
+    -------
+    dict
+        JSON-serializable manifest, assets sorted by table.
+    """
+    caps = caps or RunCaps()
+    known = artifacts | {asset.table for asset in assets if asset.output == "artifact"}
+    manifest: dict[str, Any] = {
+        "version": _version(config, has_checks=bool(checks)),
+        "assets": [_entry(asset, caps, known) for asset in sorted(assets, key=lambda a: a.table)],
+        "edges": [list(edge) for edge in graph.edges],
+        "external_inputs": list(graph.external_inputs),
+        "config": config.model_dump(mode="json", exclude={"jobs"}),
+    }
+    if config.jobs:
+        manifest["jobs"] = {
+            # `notify` only when set, so a project without one keeps the version 5 shape
+            name: job.model_dump(mode="json", exclude=_unset_notify(job))
+            for name, job in sorted(config.jobs.items())
+        }
+    if lock_sha256 is not None:
+        manifest["lock_sha256"] = lock_sha256
+    if package_indexes:
+        manifest["package_indexes"] = sorted(package_indexes)
+    if checks or config.jobs:
+        manifest["checks"] = [
+            {
+                "name": check.name,
+                "table": check.table,
+                "check": check.check,
+                "path": check.path,
+                "on_failure": check.on_failure,
+                "description": check.description,
+                "sql": check.sql,
+                "references": list(check.references),
+            }
+            for check in sorted(checks, key=lambda c: c.name)
+        ]
+    return manifest
+
+
+logger = logging.getLogger(__name__)
+
+
+def manifest_assets(manifest: object) -> dict[str, dict[str, Any]]:
+    """Index a manifest's assets by table name.
+
+    A stored manifest is untrusted: another repository's damaged one must never
+    break this deploy, so whatever is not a well-formed entry is skipped; one
+    WARNING per call says how many were.
+
+    Parameters
+    ----------
+    manifest
+        A manifest.
+
+    Returns
+    -------
+    dict
+        Table → entry, for each entry that is a mapping with a string `table`;
+        empty when the manifest is not a mapping or its `assets` is not a list.
+    """
+    assets = manifest.get("assets") if isinstance(manifest, Mapping) else None
+    entries = assets if isinstance(assets, list) else []
+    well_formed = [
+        entry
+        for entry in entries
+        if isinstance(entry, dict) and isinstance(entry.get("table"), str)
+    ]
+    if len(well_formed) < len(entries):
+        logger.warning(
+            "A stored deploy manifest has %d malformed asset entries, which are skipped; deploy "
+            "the repository again to replace it.",
+            len(entries) - len(well_formed),
+        )
+    return {entry["table"]: entry for entry in well_formed}
+
+
+def manifest_jobs(manifest: object) -> dict[str, dict[str, Any]]:
+    """Index a manifest's jobs by name.
+
+    Parameters
+    ----------
+    manifest
+        A manifest; untrusted, like a stored one.
+
+    Returns
+    -------
+    dict
+        Name → entry, for each entry that is a mapping under a string name; empty for a manifest
+        from before jobs or one whose `jobs` is not a mapping.
+    """
+    jobs = manifest.get("jobs") if isinstance(manifest, Mapping) else None
+    if not isinstance(jobs, dict):
+        return {}
+    return {
+        name: job for name, job in jobs.items() if isinstance(name, str) and isinstance(job, dict)
+    }
+
+
+def job_schedule(entry: Mapping[str, Any]) -> tuple[str, str] | None:
+    """Read the cron expression and zone of a manifest's job entry.
+
+    Parameters
+    ----------
+    entry
+        The job's entry.
+
+    Returns
+    -------
+    tuple of (str, str) or None
+        The expression and the zone (``UTC`` when the zone is missing or not a string); `None`
+        for a job without a schedule.
+    """
+    schedule = entry.get("schedule")
+    if isinstance(schedule, dict) and isinstance(schedule.get("cron"), str):
+        zone = schedule.get("timezone")
+        return schedule["cron"], zone if isinstance(zone, str) else "UTC"
+    return None
+
+
+@dataclass(frozen=True)
+class JobNotify:
+    """Where a job of a deployed manifest reports a failed or recovered run.
+
+    Parameters
+    ----------
+    webhook
+        The name of the secret of the environment that holds the URL.
+    format
+        ``json``, ``slack`` or ``teams``.
+    """
+
+    webhook: str
+    format: str
+
+
+def job_notify(manifest: object, job: str) -> JobNotify | None:
+    """Read the notification of one job from a stored manifest.
+
+    Parameters
+    ----------
+    manifest
+        A manifest; untrusted, like a stored one.
+    job
+        The job's name.
+
+    Returns
+    -------
+    JobNotify or None
+        The notification; `None` for a job that is not in the manifest, has none, or has one
+        that is damaged (a webhook that is not text, or a format Lakana does not send).
+    """
+    entry = manifest_jobs(manifest).get(job)
+    raw = entry.get("notify") if entry is not None else None
+    if not isinstance(raw, dict):
+        return None
+    webhook, notify_format = raw.get("webhook"), raw.get("format")
+    if not isinstance(webhook, str) or notify_format not in NOTIFY_FORMATS:
+        return None
+    return JobNotify(webhook, cast("str", notify_format))
+
+
+def manifest_tables(manifest: object) -> set[str]:
+    """List the tables a manifest produces.
+
+    Parameters
+    ----------
+    manifest
+        A manifest.
+
+    Returns
+    -------
+    set of str
+        Dotted table names.
+    """
+    return set(manifest_assets(manifest))
+
+
+def manifest_artifacts(manifest: object) -> set[str]:
+    """List the artifacts a manifest produces.
+
+    Parameters
+    ----------
+    manifest
+        A manifest; untrusted.
+
+    Returns
+    -------
+    set of str
+        Dotted names of its artifact assets; empty for a manifest from an older release.
+    """
+    return {
+        table
+        for table, entry in manifest_assets(manifest).items()
+        if entry_output(entry) == "artifact"
+    }
+
+
+def asset_kind(entry: object) -> str:
+    """Read an asset's kind from a stored manifest entry.
+
+    Parameters
+    ----------
+    entry
+        One element of `manifest_json["assets"]`; anything that is not a mapping
+        reads as ``sql``.
+
+    Returns
+    -------
+    str
+        ``python`` for a Python asset; ``sql`` otherwise, including for an
+        entry deployed by an older release, which has no `kind`.
+    """
+    return "python" if isinstance(entry, Mapping) and entry.get("kind") == "python" else "sql"
+
+
+def entry_inputs(entry: object) -> dict[str, str]:
+    """Read a Python asset's declared inputs from a stored manifest entry.
+
+    Parameters
+    ----------
+    entry
+        One element of `manifest_json["assets"]`; anything that is not a mapping
+        reads as having none.
+
+    Returns
+    -------
+    dict
+        Parameter to table; empty when the entry has none or they are malformed.
+    """
+    raw = entry.get("inputs") if isinstance(entry, Mapping) else None
+    if not isinstance(raw, dict):
+        return {}
+    inputs: dict[str, str] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            return {}
+        inputs[key] = value
+    return inputs
+
+
+def python_entry(manifest: object, asset: str) -> Mapping[str, object] | None:
+    """Find a Python asset's entry in a stored manifest.
+
+    Parameters
+    ----------
+    manifest
+        the `manifest_json` of a project version; untrusted.
+    asset
+        The dotted table name.
+
+    Returns
+    -------
+    Mapping or None
+        The first entry whose `table` is `asset`, if it is a mapping of kind
+        ``python``; `None` for no such entry, a malformed manifest or an
+        entry of another kind.
+    """
+    assets = manifest.get("assets") if isinstance(manifest, dict) else None
+    for entry in assets if isinstance(assets, list) else []:
+        if isinstance(entry, dict) and entry.get("table") == asset:
+            return entry if entry.get("kind") == "python" else None
+    return None
+
+
+def entry_output(entry: object) -> str:
+    """Read what an asset produces from a stored manifest entry.
+
+    Parameters
+    ----------
+    entry
+        One element of `manifest_json["assets"]`; untrusted.
+
+    Returns
+    -------
+    str
+        ``artifact`` for a Python asset declared with ``output="artifact"``;
+        ``table`` otherwise, including for an entry deployed by an older release.
+    """
+    is_artifact = (
+        asset_kind(entry) == "python"
+        and isinstance(entry, Mapping)
+        and entry.get("output") == "artifact"
+    )
+    return "artifact" if is_artifact else "table"
+
+
+def entry_keep_versions(entry: object) -> int | None:
+    """Read an artifact asset's retention from a stored manifest entry.
+
+    Parameters
+    ----------
+    entry
+        One element of `manifest_json["assets"]`; untrusted.
+
+    Returns
+    -------
+    int or None
+        How many live versions to keep; `None` (keep all) unless the entry is
+        an artifact asset whose `keep_versions` is an integer from 1 to
+        `MAX_KEEP_VERSIONS` (2**31 - 1). A larger value, like any other
+        malformed one, reads as "keep all".
+    """
+    value = entry.get("keep_versions") if isinstance(entry, Mapping) else None
+    if entry_output(entry) != "artifact" or isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if 1 <= value <= MAX_KEEP_VERSIONS else None
+
+
+def entry_decimals(entry: object) -> str:
+    """Read how SQL decimals reach a Python asset from a stored manifest entry.
+
+    Parameters
+    ----------
+    entry
+        One element of `manifest_json["assets"]`; untrusted.
+
+    Returns
+    -------
+    str
+        ``exact`` for a Python entry that says so; ``float`` for every other
+        entry, including one deployed before the option existed and one whose
+        value is anything but ``exact``.
+    """
+    value = entry.get("decimals") if isinstance(entry, Mapping) else None
+    return "exact" if asset_kind(entry) == "python" and value == "exact" else DEFAULT_DECIMALS
+
+
+def entry_input_kinds(entry: object) -> dict[str, str]:
+    """Read the kind of each declared input from a stored manifest entry.
+
+    Parameters
+    ----------
+    entry
+        One element of `manifest_json["assets"]`; untrusted.
+
+    Returns
+    -------
+    dict
+        Parameter to ``table`` or ``artifact``, for exactly the parameters
+        of `entry_inputs`. Anything but the string ``artifact`` reads as
+        ``table``.
+    """
+    raw = entry.get("input_kinds") if isinstance(entry, Mapping) else None
+    kinds = raw if isinstance(raw, dict) else {}
+    return {
+        parameter: "artifact" if kinds.get(parameter) == "artifact" else "table"
+        for parameter in entry_inputs(entry)
+    }
+
+
+def manifest_lock_sha256(manifest: Mapping[str, object]) -> str | None:
+    """Read the lock digest from a stored manifest.
+
+    Parameters
+    ----------
+    manifest
+        A manifest.
+
+    Returns
+    -------
+    str or None
+        The digest, or `None` when absent or not a lower-case SHA-256 hex
+        string (it becomes a directory name in the venv cache).
+    """
+    value = manifest.get("lock_sha256")
+    return value if isinstance(value, str) and _SHA256.match(value) else None

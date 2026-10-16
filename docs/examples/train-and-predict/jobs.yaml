@@ -1,0 +1,5 @@
+jobs:
+  refresh_forecasts:
+    select: ["gold.*"]
+    upstream: true
+    schedule: { cron: "* * * * *" }

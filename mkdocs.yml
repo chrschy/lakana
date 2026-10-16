@@ -1,0 +1,60 @@
+# The Lakana documentation site. Pages are plain Markdown under docs/site.
+# Build: uv run --group docs zensical build --strict
+# Serve: uv run --group docs zensical serve
+# Generator: Zensical (reads this file). Strict mode fails on a broken link or anchor; it does
+# not check navigation (see the comment at `nav`).
+site_name: Lakana
+site_description: A data lakehouse for small and medium teams.
+docs_dir: docs/site
+site_dir: site-build
+theme:
+  # No web font: the site makes no request to a third party, so it works on an internal network.
+  font: false
+  features:
+    - content.code.copy
+    - navigation.sections
+markdown_extensions:
+  - admonition
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+# Navigation completeness (every page listed, every entry a page) is enforced by
+# scripts/tests/test_docs_site.py, because the generator does not check it.
+nav:
+  - Home: index.md
+  - Tutorials:
+      - tutorials/index.md
+      - tutorials/getting-started.md
+      - tutorials/train-a-model.md
+  - How-to guides:
+      - how-to/index.md
+      - how-to/projects.md
+      - how-to/check-your-data.md
+      - how-to/run-a-job-on-a-schedule.md
+      - how-to/get-told-when-a-job-fails.md
+      - how-to/deploy-with-compose.md
+      - how-to/upgrade-to-artifacts.md
+      - how-to/manage-secrets.md
+      - how-to/private-package-index.md
+      - how-to/models-with-scikit-learn.md
+      - how-to/inspect-and-download-artifact-versions.md
+      - how-to/limit-artifact-versions.md
+      - how-to/delete-an-artifact-version.md
+      - how-to/filter-rows.md
+      - how-to/mask-a-column.md
+      - how-to/stop-a-query.md
+      - how-to/why-is-it-waiting.md
+      - how-to/withdraw-an-artifact-upload.md
+  - Reference:
+      - reference/index.md
+      - reference/artifacts.md
+      - reference/package-indexes.md
+      - reference/checks.md
+  - Explanation:
+      - explanation/index.md
+      - explanation/scope.md
+      - explanation/roadmap.md
+      - explanation/support.md
+      - explanation/upgrades.md
+      - explanation/what-leaves-the-machine.md
+      - explanation/artifacts.md

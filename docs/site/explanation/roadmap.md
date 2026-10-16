@@ -1,0 +1,156 @@
+# Roadmap
+
+This is a plan, not a promise. Order and content change as we learn. The issues and milestones
+on GitHub are the source of detail; this page gives the shape. What Lakana is for, and what it
+will not do, is in [`scope.md`](scope.md).
+
+Releases before v1.0.0 may change the API. **v1.0.0 is the API freeze.**
+
+## Done
+
+Foundation, catalog, security, SDK and CLI (M0 to M4), materialisation (M5a), projects and
+deploy (M5b) and the run engine (M5c1). Python assets (M5c2a) followed in 0.9.0.
+The artifact store (M5c2b) followed in 0.11.0: a run stores a trained model
+or another file as a numbered version tied to its commit, and another asset reads it. See
+[Artifacts](../reference/artifacts.md).
+Private package indexes and the delegation rule (M5c2c) are built in 0.12.0:
+an administrator registers a package index, with a password if it needs one, and a project's
+Python assets install their own packages from it. A git dependency is not supported: it is
+refused with a message that says to publish it to an index. The permissions that hand out access,
+manage groups and issue tokens now work only for the `ADMIN` role. See
+[Use a private package index](../how-to/private-package-index.md) and the
+[upgrade notes](upgrades.md#notes-for-0120).
+The first half of M5c3 (M5c3a) is built too: every query runs in a process the worker can stop,
+with a hard time limit, a cancel (`lakana query cancel`, or Ctrl-C) and a memory limit that ends one
+query before it stops the worker. See [Stop a query](../how-to/stop-a-query.md).
+The second half (M5c3b) is built as well, in 0.12.0: a query or a deploy can no
+longer stay `RUNNING` when its worker is gone. Each worker registers and writes a heartbeat; the
+platform ends what a lost worker held after about a minute, with the cause `worker_lost`, and a
+write that was already committed ends `SUCCEEDED`. Every wait shows its reason (a `Waiting:` line
+in the CLI, `waiting_for` in the SDK and the REST API), and `lakana query list` and `lakana worker
+list` show what is queued and running and which workers are alive. See
+[Why is my query or task waiting?](../how-to/why-is-it-waiting.md), [A worker that is
+lost](../how-to/stop-a-query.md#a-worker-that-is-lost) and the [upgrade notes](upgrades.md#notes-for-0120).
+The third part (M5c3c) is built too, in the same release, and with it the whole of M5c3: a
+worker takes interactive work (ad-hoc queries), pipeline work (deploys, tasks and table
+maintenance) or both, set with `LAKANA_WORKER__TAKES`, and the Compose bundle has two optional
+services for them. One user runs only so many ad-hoc queries at once
+(`LAKANA_QUERY_LIMITS__RUNNING_PER_PRINCIPAL`; by default one worker is kept for others once three
+workers take ad-hoc queries). A query that waits for either reason says so: `no_worker_of_kind`
+and `user_limit`. A worker still runs one query at a time; several queries per worker (#81) come
+after v1.0.0, and a wait reason for a deploy is issue #92. See [Separate workers for ad-hoc
+queries and
+pipelines](../how-to/deploy-with-compose.md#separate-workers-for-ad-hoc-queries-and-pipelines) and the
+[upgrade notes](upgrades.md#workers-for-one-kind-of-work-and-a-limit-per-user).
+The first part of M5d (M5d-a1) is built: a project keeps data quality checks under `checks/`, as
+SQL files that return the rows that are wrong. A run counts them after it writes a table, keeps the
+result, and a check that fails sets the table back to what it was before the run and stops the
+assets that read it; a table built for the first time is left not published. A check can warn
+instead, or keep (`on_failure: keep`): the failing data then stays in the table, marked as
+kept, and nothing that reads it is built until its checks pass. A project sets the default for its
+checks in `lakana.yaml`. The failing rows can be looked at with `lakana check rows`. See
+[Check your data](../how-to/check-your-data.md), [Checks](../reference/checks.md) and the
+[upgrade notes](upgrades.md#data-quality-checks).
+Jobs and their triggers (M5d-b) are built too: a job is a named selection in `lakana.yaml` that
+starts by hand, through the API from CI, or on a cron schedule in a time zone. A scheduled run
+writes as a bound service account; a start that meets an active run waits, one start per job;
+after downtime a job runs once, for the latest missed time. See
+[Run a job on a schedule](../how-to/run-a-job-on-a-schedule.md) and the
+[upgrade notes](upgrades.md#jobs-and-the-triggers-that-start-them).
+Notifications (M5d-c) complete M5d: a job can name a webhook, and a run that fails, and the
+first run that succeeds after it, send a message in `json`, `slack` or `teams` format. The worker
+sends only to a public `https` address unless an operator allows a host, tries up to five times,
+and never changes the run. See [Get told when a job fails](../how-to/get-told-when-a-job-fails.md)
+and the [upgrade notes](upgrades.md#notifications-for-jobs). The next element is the move to DuckDB 2 (item 2 below).
+
+## To v1.0.0
+
+The public beta comes before the web interface. The beta's purpose is that
+real users try Lakana and its documentation early, and what they report should shape the
+interface, which is the project's first front-end code and the least certain piece of work. The
+first testers are people at home in a terminal. The beta also comes before
+ingestion (M6): beta users load data with a Python asset and the SDK as it is today, and the
+helpers and named connections of M6 follow as ordinary 0.x releases during the beta. Task
+isolation (M7b) stays before the beta.
+
+1. **M5d, triggers, data quality checks and notifications (built).** Runs start by hand, on a schedule
+   or through an API call. A check, a SQL file that must return no rows, can block, keep or
+   warn, and a project can set the default in `lakana.yaml`; jobs start by hand, through the API
+   or on a cron schedule (both built: see above). A job notifies a webhook when a run or a
+   check fails and when it recovers (built). Triggers by other jobs or by events
+   come after v1.0.0. Done when a failing check stops a downstream build, its result is kept, and the
+   failure is announced.
+2. **The move to DuckDB 2.** Lakana runs on DuckDB 1.5 and moves to DuckDB 2 before M7b. It is a
+   migration, not a milestone; it is tracked in #96. DuckDB 1.5 will reach its end of life
+   ([release calendar](https://duckdb.org/release_calendar)). On a 2.0 development build, reading Parquet over HTTP was 2 to 14
+   times faster in the way Lakana queries it, and about equal on local files. Until the move the
+   worker requires `duckdb<2`.
+3. **M7b, task isolation.** A Docker runner executes each Python task in its own container. A
+   short design trial comes first: how the worker reaches a container runtime without gaining
+   root on the host. Done when a task cannot read the worker's credentials or another project's
+   environment, its memory and CPU limits are enforced by the container runtime, and a stopped
+   task leaves no process behind. It comes before the public beta so that the first public
+   release can isolate one project's code from another's.
+4. **M7c, public beta.** The repository is open and the packages are on PyPI as a pre-beta from
+   0.12.0; the beta is the 0.x release that says it is ready to try.
+   The beta is the CLI, the SDK and the REST API; it has no web interface yet, and the README and
+   these pages say so. Sign-in is by token: an administrator issues a token for each further
+   user with the CLI. The API may still change. Done when a stranger can install it from PyPI and
+   follow the documentation to a working instance, and a second person can be given access with
+   the documented token steps. The documentation carries one worked example of a Python asset
+   that loads from a SQL database or a JSON API with the SDK as it is today; M6 replaces it with
+   its helpers.
+5. **M6, ingestion, during the beta.** Python helpers in `lakana[assets]` for files, SQL
+   databases and JSON REST APIs, plus `lakana load` for a local file, which stays as a
+   convenience for exploration and tests. Named connections (#85): an administrator registers a source's address and
+   credentials once under a name, and a Python asset or `lakana load` uses the name. They are
+   managed through the CLI and the API; managing them in the web interface comes with M7. A
+   connection is only a name for an address and a secret: Lakana runs no connectors, and the
+   asset's helper does the reading. Done when a new team loads data from each kind of source with
+   a short asset, or loads a local file with `lakana load`.
+6. **M7, web interface and sign-in.** Designed with what beta users report; the design (#66)
+   happens before or right after the beta, so that M7 starts with feedback in hand. A web
+   interface with OIDC sign-in, or an invite link and a passkey for teams without an identity
+   provider. It shows the catalog, lineage, runs with logs and check results and deploys, and has
+   a one-query SQL editor, administration of users, groups, grants, tokens and connections,
+   loading a file, and a first-run tour. No file browser, dashboards or notebooks. The Compose
+   bundle can set up a TLS proxy, because passkeys need HTTPS. CI can deploy without a stored
+   secret, through OIDC token exchange. Done when a new user can sign in and answer a question
+   without the CLI. A second security review is due when the interface and sign-in arrive.
+7. **M8, ML.** Experiment tracking, the model registry, and the offline feature store, all
+    queryable and tied to commits. The registry is the artifact store of M5c2b. It adds named
+    pointers such as `production`, pinned versions that a consumer can name, and metrics on a
+    version. Done when a model can be traced to the
+    exact code, data and parameters that produced it.
+8. **M8b, agents.** An MCP server so AI agents can operate Lakana under the same authorization
+    and audit as a person. Done when an agent can run a deploy and a query and both appear in
+    the audit log under its own identity.
+9. **M8c, BI tools.** A read-only governed SQL endpoint over the PostgreSQL wire protocol, with
+    a token as the password. A service account is refused on a table that has a row filter or
+    column mask; a dashboard on restricted data reads a table built for its audience. Done when
+    each tool on the tested list connects and sees only what its identity may.
+10. **M9, performance and multi-host workers.** Measured query performance, and workers that
+    run on more than one host. Done when adding a host increases throughput as documented.
+11. **M10, hardening and v1.0.0.** Security review, upgrade paths, documentation pass and the
+    API freeze. A table or a whole environment can expire (#87), so that development tables do
+    not stay for ever. Done when the release criteria are met and v1.0.0 is tagged.
+
+## After v1.0.0
+
+- Model serving, starting with a discussion of whether and how.
+- Kubernetes and a Helm chart.
+- Arrow Flight SQL, for Python, R and other clients.
+- More databases for ingestion, starting with the ones teams ask for most.
+- SFTP as a file source.
+- Merge (upsert) as a way to build a table, for sources whose rows change or disappear.
+- Data contracts: the schema, freshness and checks a published table promises its consumers.
+- Cloud file-sharing services as file sources.
+- No-code loads: configuring a recurring load without writing an asset (#86). Nothing no-code
+  is in scope up to v1.0.0.
+
+## Out of scope
+
+Distributed query execution, real-time streaming, AutoML and GPU scheduling, hosting notebooks,
+languages other than SQL and Python, custom roles, a plugin ecosystem and registry, an online
+feature store and a semantic layer. The reasons are in [`scope.md`](scope.md). Unstructured data
+is parked.

@@ -1,0 +1,46 @@
+"""The task harness and the server agree on the schema-mismatch message.
+
+The harness (`lakana.runner`, in the SDK) rewords the server's refusal of a
+changed output schema: it keeps the server's description of what differs and
+cuts the server's advice to pass ``evolve_schema``, which a Python asset
+cannot follow. It finds that advice by its opening words. The SDK must not
+import core, so this test lives here: if the server's message is reworded,
+it fails without needing a real run.
+
+The SDK's artifact client compares the server's answers with three more texts, and this file
+pins two of them: `_UPLOAD_GONE` and `_NOT_STORED`. The third, `_BUSY_TYPE`, names a server
+class, which this package may not import; `test_artifacts_read.py` of `lakana-server` pins it.
+"""
+
+from __future__ import annotations
+
+from lakana import runner
+from lakana.errors import ValidationError
+from lakana.resources import artifacts
+from lakana_core.artifacts.service import FILES_NOT_STORED, UPLOAD_GONE
+from lakana_core.catalog.schema_compat import ColumnType, SchemaDiff, SchemaMismatchError
+
+
+def test_the_harness_cuts_exactly_the_advice_the_server_really_gives() -> None:
+    diff = SchemaDiff(dropped=(ColumnType("region", "string"),))
+    server = SchemaMismatchError("gold.scores", diff)
+    text = str(server)
+    assert text.count(runner._SERVER_ADVICE) == 1
+    assert text.split(runner._SERVER_ADVICE)[0].endswith(f"({diff.describe()}).")
+    refusal = ValidationError(text, status=422, error_type=type(server).__name__)
+    assert runner._upload_message(refusal, "gold.scores") == (
+        "the asset's output no longer matches the schema of gold.scores. Server detail: The "
+        f"result does not match gold.scores's schema ({diff.describe()}). Restore the columns "
+        "and types the table has, or drop gold.scores and run the asset again so it is "
+        "recreated with the new schema. A Python asset cannot pass evolve_schema."
+    )
+
+
+def test_the_sdk_recognises_the_servers_expired_upload_text() -> None:
+    assert artifacts._UPLOAD_GONE == UPLOAD_GONE
+
+
+def test_the_sdk_recognises_the_servers_files_not_stored_text() -> None:
+    text = FILES_NOT_STORED.format(count=3)
+    assert artifacts._NOT_STORED in text
+    assert text == "3 of this upload's files are not stored yet; upload them and commit again."

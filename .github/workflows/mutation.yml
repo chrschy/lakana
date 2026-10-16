@@ -1,0 +1,40 @@
+name: Mutation testing
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * 1"   # weekly, Monday 03:00 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  mutmut:
+    runs-on: ${{ (github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER) || 'ubuntu-latest' }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          fetch-depth: 0          # hatch-vcs needs tags to compute a version
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+        with:
+          enable-cache: true
+      - run: uv sync --all-packages --locked
+      - name: Run mutmut
+        working-directory: packages/lakana-core
+        shell: bash
+        run: uv run mutmut run --max-children 4
+      - name: Every non-killed mutant is recorded as equivalent
+        working-directory: packages/lakana-core
+        # `shell: bash` matters here, not just for style: GitHub Actions only
+        # runs bash with `-o pipefail` when the shell is named explicitly
+        # (https://docs.github.com/actions/using-workflows/workflow-syntax-for-github-actions#exit-codes-and-error-action-preference).
+        # Without it, a crashed `mutmut results` still lets this pipeline
+        # exit 0 on check_mutants.py's own exit code, even though its input
+        # was truncated garbage. `--all true` (not plain `mutmut results`) is
+        # required too: check_mutants.py's missing_targets() needs killed
+        # mutants in the input to tell "every mutant in a target was killed"
+        # apart from "no mutants ran for that target at all" — matches the
+        # command documented in docs/security/mutation-testing.md.
+        shell: bash
+        run: uv run mutmut results --all true | uv run python ../../scripts/check_mutants.py ../../docs/security/mutation-testing.md

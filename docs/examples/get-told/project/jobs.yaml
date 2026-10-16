@@ -1,0 +1,7 @@
+jobs:
+  daily_bronze:
+    select: ["bronze.*"]
+    schedule: { cron: "0 6 * * *", timezone: Europe/Berlin }
+    notify:
+      webhook: team-alerts   # the name of a secret, never the URL
+      format: slack          # json (the default), slack or teams

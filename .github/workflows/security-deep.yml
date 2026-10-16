@@ -1,0 +1,62 @@
+name: Security (deep)
+
+on:
+  schedule:
+    - cron: "0 3 * * 1"     # Mondays 03:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  semgrep:
+    runs-on: ${{ (github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER) || 'ubuntu-latest' }}
+    container:
+      image: semgrep/semgrep
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+      - run: semgrep scan --config=p/python --config=p/security-audit --sarif --output=semgrep.sarif
+      # SARIF upload to code scanning is free on a public repository; enable it when wanted.
+      #
+      # - uses: github/codeql-action/upload-sarif@v3
+      #   with:
+      #     sarif_file: semgrep.sarif
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7
+        if: always()
+        with:
+          name: semgrep-sarif
+          path: semgrep.sarif
+
+  trivy:
+    runs-on: ${{ (github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER) || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+      - name: Build wheels
+        run: uv build --all-packages -o dist
+      - name: Generate the pinned constraints file for the image build
+        run: uv export --frozen --no-dev --all-packages --no-emit-workspace --no-hashes -o dist/constraints.txt
+      - name: Build the image to scan
+        run: docker build -t lakana:scan .
+      # Pinned by commit SHA, not the mutable v0.36.0 tag: trivy-action tags
+      # were force-pushed to malicious commits in a March 2026 supply-chain
+      # attack that stole CI secrets from downstream repos.
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          image-ref: lakana:scan
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: 1
+
+  # CodeQL is free on a public repository; enable this job when wanted.
+  #
+  # codeql:
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+  #     - uses: github/codeql-action/init@v3
+  #       with:
+  #         languages: python
+  #     - uses: github/codeql-action/analyze@v3

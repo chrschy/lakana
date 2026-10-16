@@ -1,0 +1,2547 @@
+"""Tests that the Alembic migration matches the ORM models.
+
+`pyproject.toml`'s `[tool.coverage.run]` omit comment for
+`lakana_core/migrations` claims migrations "are verified instead by applying
+and reversing them against a real SQLite database." Before this test that
+described a manual step performed once during development, not anything
+repeatable in CI. This test makes that claim true: it applies `0001_initial`
+to a fresh SQLite file and asserts that Alembic's own schema-comparison
+finds no drift against `Base.metadata`, so a future model change that is
+not reflected in a migration (or vice versa) fails here.
+"""
+
+import json
+import logging
+import uuid
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import cast
+
+import pytest
+import sqlalchemy as sa
+from alembic import command
+from alembic.autogenerate import compare_metadata
+from alembic.config import Config
+from alembic.migration import MigrationContext
+from core_test_helpers import assert_loads_as_pre_m5a, seed_m5a_rows
+from sqlalchemy import create_engine, inspect
+from sqlalchemy.exc import IntegrityError
+
+from lakana_core.identifiers import NAMESPACE_SEPARATOR
+from lakana_core.models import Base
+
+ALEMBIC_INI = Path(__file__).resolve().parents[1] / "alembic.ini"
+_REVISION_0010 = "a3f7c2e9b4d1"
+
+
+def test_upgraded_schema_matches_the_orm_models(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Applying every migration yields exactly the schema the models declare.
+
+    Parameters
+    ----------
+    tmp_path
+        Pytest-provided temporary directory, holding the throwaway SQLite
+        file the migration is applied to.
+    monkeypatch
+        Used to point `lakana_core.config.Settings` (read by
+        `migrations/env.py`) at that file for the duration of the test.
+    """
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, "head")
+
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        with engine.connect() as connection:
+            context = MigrationContext.configure(connection)
+            diff = compare_metadata(context, Base.metadata)
+    finally:
+        engine.dispose()
+
+    assert diff == []
+
+
+def test_env_py_fallback_survives_a_percent_sign_in_the_database_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`env.py`'s `Settings()` fallback also escapes `%`.
+
+    This path (`alembic.ini` plus `LAKANA_DATABASE__URL`, as tests and `alembic
+    upgrade` from a checkout use) sets `sqlalchemy.url` on the same
+    `ConfigParser`-backed `Config` that `lakana_core.migrate.alembic_config`
+    does, and is exposed to the identical `ValueError: invalid
+    interpolation syntax` for a `%` in the URL -- reproduced here with a
+    `%` in the data directory path, the local-mode shape.
+    """
+    weird_dir = tmp_path / "100%-local"
+    weird_dir.mkdir()
+    db_path = weird_dir / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, "head")
+
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        assert "environments" in inspect(engine).get_table_names()
+    finally:
+        engine.dispose()
+
+
+def test_0011_binds_grants_and_policies_to_ids_and_revokes_stale_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revision `0011` backfills id bindings and revokes unresolvable rows.
+
+    Reproduces the fixture directly against
+    SQLite: upgrading to `0010` (`a3f7c2e9b4d1`), inserting rows with raw
+    SQL that predate the id columns, upgrading to head, and asserting the
+    backfill's effect — then downgrading back to `0010` and asserting the
+    added columns are gone.
+
+    Beyond the brief's fixture, also covers: a `NAMESPACE`-kind grant on
+    an existing namespace is kept, one on a missing namespace is revoked;
+    a multi-level namespace path resolves; the same table name in two
+    different environments binds to each environment's own table id; a
+    stale row filter and a stale column mask are revoked; and a grant
+    already revoked before the migration keeps its original `revoked_at`
+    untouched.
+
+    Parameters
+    ----------
+    tmp_path
+        Pytest-provided temporary directory, holding the throwaway SQLite
+        file the migration is applied to.
+    monkeypatch
+        Used to point `lakana_core.config.Settings` (read by
+        `migrations/env.py`) at that file for the duration of the test.
+    """
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+
+    command.upgrade(config, _REVISION_0010)
+
+    engine = create_engine(f"sqlite:///{db_path}")
+    now = datetime.now(UTC)
+
+    principals = sa.table(
+        "principals",
+        sa.column("id", sa.Uuid()),
+        sa.column("type", sa.String()),
+        sa.column("name", sa.String()),
+        sa.column("created_at", sa.DateTime(timezone=True)),
+        sa.column("updated_at", sa.DateTime(timezone=True)),
+    )
+    environments = sa.table(
+        "environments",
+        sa.column("id", sa.Uuid()),
+        sa.column("name", sa.String()),
+        sa.column("storage_root", sa.String()),
+        sa.column("storage_options", sa.JSON()),
+        sa.column("is_protected", sa.Boolean()),
+        sa.column("properties", sa.JSON()),
+        sa.column("created_at", sa.DateTime(timezone=True)),
+        sa.column("updated_at", sa.DateTime(timezone=True)),
+    )
+    namespaces = sa.table(
+        "namespaces",
+        sa.column("id", sa.Uuid()),
+        sa.column("environment_id", sa.Uuid()),
+        sa.column("path", sa.String()),
+        sa.column("properties", sa.JSON()),
+        sa.column("owner_id", sa.Uuid()),
+    )
+    tables = sa.table(
+        "tables",
+        sa.column("id", sa.Uuid()),
+        sa.column("namespace_id", sa.Uuid()),
+        sa.column("name", sa.String()),
+        sa.column("table_type", sa.String()),
+        sa.column("created_at", sa.DateTime(timezone=True)),
+        sa.column("updated_at", sa.DateTime(timezone=True)),
+    )
+    grants = sa.table(
+        "grants",
+        sa.column("id", sa.Uuid()),
+        sa.column("principal_id", sa.Uuid()),
+        sa.column("role", sa.String()),
+        sa.column("kind", sa.String()),
+        sa.column("environment", sa.String()),
+        sa.column("namespace", sa.String()),
+        sa.column("table", sa.String()),
+        sa.column("granted_by", sa.Uuid()),
+        sa.column("granted_at", sa.DateTime(timezone=True)),
+        sa.column("revoked_by", sa.Uuid()),
+        sa.column("revoked_at", sa.DateTime(timezone=True)),
+    )
+    row_filters = sa.table(
+        "row_filters",
+        sa.column("id", sa.Uuid()),
+        sa.column("principal_id", sa.Uuid()),
+        sa.column("environment", sa.String()),
+        sa.column("namespace", sa.String()),
+        sa.column("table", sa.String()),
+        sa.column("expression", sa.String()),
+        sa.column("created_by", sa.Uuid()),
+        sa.column("created_at", sa.DateTime(timezone=True)),
+    )
+    column_masks = sa.table(
+        "column_masks",
+        sa.column("id", sa.Uuid()),
+        sa.column("principal_id", sa.Uuid()),
+        sa.column("environment", sa.String()),
+        sa.column("namespace", sa.String()),
+        sa.column("table", sa.String()),
+        sa.column("column", sa.String()),
+        sa.column("expression", sa.String()),
+        sa.column("created_by", sa.Uuid()),
+        sa.column("created_at", sa.DateTime(timezone=True)),
+    )
+
+    admin_id = uuid.uuid4()
+    dev_id = uuid.uuid4()
+    gold_id = uuid.uuid4()
+    orders_id = uuid.uuid4()
+    nested_ns_id = uuid.uuid4()
+    deep_table_id = uuid.uuid4()
+    prod_id = uuid.uuid4()
+    prod_gold_id = uuid.uuid4()
+    prod_orders_id = uuid.uuid4()
+    table_grant_id = uuid.uuid4()
+    env_grant_id = uuid.uuid4()
+    instance_grant_id = uuid.uuid4()
+    ghost_grant_id = uuid.uuid4()
+    already_revoked_grant_id = uuid.uuid4()
+    nested_table_grant_id = uuid.uuid4()
+    prod_table_grant_id = uuid.uuid4()
+    namespace_grant_ok_id = uuid.uuid4()
+    namespace_grant_missing_id = uuid.uuid4()
+    row_filter_id = uuid.uuid4()
+    stale_row_filter_id = uuid.uuid4()
+    column_mask_id = uuid.uuid4()
+    stale_column_mask_id = uuid.uuid4()
+    already_revoked_at = datetime(2020, 1, 1, tzinfo=UTC)
+    nested_path = f"gold{NAMESPACE_SEPARATOR}nested"
+
+    with engine.begin() as connection:
+        connection.execute(
+            principals.insert().values(
+                id=admin_id,
+                type="USER",
+                name="admin",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        connection.execute(
+            environments.insert().values(
+                id=dev_id,
+                name="dev",
+                storage_root="s3://bucket/dev",
+                storage_options={},
+                is_protected=False,
+                properties={},
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        connection.execute(
+            namespaces.insert().values(
+                id=gold_id, environment_id=dev_id, path="gold", properties={}, owner_id=None
+            )
+        )
+        connection.execute(
+            namespaces.insert().values(
+                id=nested_ns_id,
+                environment_id=dev_id,
+                path=nested_path,
+                properties={},
+                owner_id=None,
+            )
+        )
+        connection.execute(
+            tables.insert().values(
+                id=orders_id,
+                namespace_id=gold_id,
+                name="orders",
+                table_type="ICEBERG",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        connection.execute(
+            tables.insert().values(
+                id=deep_table_id,
+                namespace_id=nested_ns_id,
+                name="deep",
+                table_type="ICEBERG",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        connection.execute(
+            environments.insert().values(
+                id=prod_id,
+                name="prod",
+                storage_root="s3://bucket/prod",
+                storage_options={},
+                is_protected=False,
+                properties={},
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        connection.execute(
+            namespaces.insert().values(
+                id=prod_gold_id, environment_id=prod_id, path="gold", properties={}, owner_id=None
+            )
+        )
+        connection.execute(
+            tables.insert().values(
+                id=prod_orders_id,
+                namespace_id=prod_gold_id,
+                name="orders",
+                table_type="ICEBERG",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        connection.execute(
+            grants.insert().values(
+                id=table_grant_id,
+                principal_id=admin_id,
+                role="VIEWER",
+                kind="TABLE",
+                environment="dev",
+                namespace="gold",
+                table="orders",
+                granted_by=admin_id,
+                granted_at=now,
+            )
+        )
+        connection.execute(
+            grants.insert().values(
+                id=env_grant_id,
+                principal_id=admin_id,
+                role="VIEWER",
+                kind="ENVIRONMENT",
+                environment="dev",
+                namespace=None,
+                table=None,
+                granted_by=admin_id,
+                granted_at=now,
+            )
+        )
+        connection.execute(
+            grants.insert().values(
+                id=instance_grant_id,
+                principal_id=admin_id,
+                role="ADMIN",
+                kind="INSTANCE",
+                environment=None,
+                namespace=None,
+                table=None,
+                granted_by=admin_id,
+                granted_at=now,
+            )
+        )
+        connection.execute(
+            grants.insert().values(
+                id=ghost_grant_id,
+                principal_id=admin_id,
+                role="VIEWER",
+                kind="TABLE",
+                environment="dev",
+                namespace="gold",
+                table="ghost",
+                granted_by=admin_id,
+                granted_at=now,
+            )
+        )
+        connection.execute(
+            grants.insert().values(
+                id=already_revoked_grant_id,
+                principal_id=admin_id,
+                role="VIEWER",
+                kind="TABLE",
+                environment="dev",
+                namespace="gold",
+                table="ghost",
+                granted_by=admin_id,
+                granted_at=now,
+                revoked_by=admin_id,
+                revoked_at=already_revoked_at,
+            )
+        )
+        connection.execute(
+            grants.insert().values(
+                id=nested_table_grant_id,
+                principal_id=admin_id,
+                role="VIEWER",
+                kind="TABLE",
+                environment="dev",
+                namespace=nested_path,
+                table="deep",
+                granted_by=admin_id,
+                granted_at=now,
+            )
+        )
+        connection.execute(
+            grants.insert().values(
+                id=prod_table_grant_id,
+                principal_id=admin_id,
+                role="VIEWER",
+                kind="TABLE",
+                environment="prod",
+                namespace="gold",
+                table="orders",
+                granted_by=admin_id,
+                granted_at=now,
+            )
+        )
+        connection.execute(
+            grants.insert().values(
+                id=namespace_grant_ok_id,
+                principal_id=admin_id,
+                role="VIEWER",
+                kind="NAMESPACE",
+                environment="dev",
+                namespace="gold",
+                table=None,
+                granted_by=admin_id,
+                granted_at=now,
+            )
+        )
+        connection.execute(
+            grants.insert().values(
+                id=namespace_grant_missing_id,
+                principal_id=admin_id,
+                role="VIEWER",
+                kind="NAMESPACE",
+                environment="dev",
+                namespace="ghost_ns",
+                table=None,
+                granted_by=admin_id,
+                granted_at=now,
+            )
+        )
+        connection.execute(
+            row_filters.insert().values(
+                id=row_filter_id,
+                principal_id=admin_id,
+                environment="dev",
+                namespace="gold",
+                table="orders",
+                expression="1=1",
+                created_by=admin_id,
+                created_at=now,
+            )
+        )
+        connection.execute(
+            row_filters.insert().values(
+                id=stale_row_filter_id,
+                principal_id=admin_id,
+                environment="dev",
+                namespace="gold",
+                table="ghost",
+                expression="1=1",
+                created_by=admin_id,
+                created_at=now,
+            )
+        )
+        connection.execute(
+            column_masks.insert().values(
+                id=column_mask_id,
+                principal_id=admin_id,
+                environment="dev",
+                namespace="gold",
+                table="orders",
+                column="ssn",
+                expression="'***'",
+                created_by=admin_id,
+                created_at=now,
+            )
+        )
+        connection.execute(
+            column_masks.insert().values(
+                id=stale_column_mask_id,
+                principal_id=admin_id,
+                environment="dev",
+                namespace="gold",
+                table="ghost",
+                column="ssn",
+                expression="'***'",
+                created_by=admin_id,
+                created_at=now,
+            )
+        )
+    engine.dispose()
+
+    command.upgrade(config, "head")
+
+    engine = create_engine(f"sqlite:///{db_path}")
+    grants_after = sa.table(
+        "grants",
+        sa.column("id", sa.Uuid()),
+        sa.column("environment_id", sa.Uuid()),
+        sa.column("table_id", sa.Uuid()),
+        sa.column("revoked_at", sa.DateTime(timezone=True)),
+        sa.column("revoked_by", sa.Uuid()),
+    )
+    row_filters_after = sa.table(
+        "row_filters",
+        sa.column("id", sa.Uuid()),
+        sa.column("environment_id", sa.Uuid()),
+        sa.column("table_id", sa.Uuid()),
+        sa.column("revoked_at", sa.DateTime(timezone=True)),
+    )
+    column_masks_after = sa.table(
+        "column_masks",
+        sa.column("id", sa.Uuid()),
+        sa.column("environment_id", sa.Uuid()),
+        sa.column("table_id", sa.Uuid()),
+        sa.column("revoked_at", sa.DateTime(timezone=True)),
+    )
+    audit_events_after = sa.table(
+        "audit_events",
+        sa.column("id", sa.Uuid()),
+        sa.column("occurred_at", sa.DateTime(timezone=True)),
+        sa.column("event_type", sa.String()),
+        sa.column("detail", sa.JSON()),
+    )
+
+    with engine.begin() as connection:
+        table_grant_row = connection.execute(
+            sa.select(grants_after.c.environment_id, grants_after.c.table_id).where(
+                grants_after.c.id == table_grant_id
+            )
+        ).one()
+        assert table_grant_row.environment_id == dev_id
+        assert table_grant_row.table_id == orders_id
+
+        env_grant_row = connection.execute(
+            sa.select(grants_after.c.environment_id, grants_after.c.table_id).where(
+                grants_after.c.id == env_grant_id
+            )
+        ).one()
+        assert env_grant_row.environment_id == dev_id
+        assert env_grant_row.table_id is None
+
+        instance_grant_row = connection.execute(
+            sa.select(grants_after.c.environment_id, grants_after.c.table_id).where(
+                grants_after.c.id == instance_grant_id
+            )
+        ).one()
+        assert instance_grant_row.environment_id is None
+        assert instance_grant_row.table_id is None
+
+        ghost_grant_row = connection.execute(
+            sa.select(grants_after.c.revoked_at, grants_after.c.revoked_by).where(
+                grants_after.c.id == ghost_grant_id
+            )
+        ).one()
+        assert ghost_grant_row.revoked_at is not None
+        assert ghost_grant_row.revoked_by is None
+
+        # A grant already revoked before the migration keeps its original
+        # revoked_at/revoked_by untouched, rather than being overwritten.
+        already_revoked_row = connection.execute(
+            sa.select(grants_after.c.revoked_at, grants_after.c.revoked_by).where(
+                grants_after.c.id == already_revoked_grant_id
+            )
+        ).one()
+        # Plain `sa.DateTime(timezone=True)` (not the app's `UTCDateTime`)
+        # reads back naive on SQLite, so reattach UTC before comparing.
+        assert already_revoked_row.revoked_at.replace(tzinfo=UTC) == already_revoked_at
+        assert already_revoked_row.revoked_by == admin_id
+
+        # A multi-level (unit-separator-joined) namespace path resolves.
+        nested_table_grant_row = connection.execute(
+            sa.select(grants_after.c.environment_id, grants_after.c.table_id).where(
+                grants_after.c.id == nested_table_grant_id
+            )
+        ).one()
+        assert nested_table_grant_row.environment_id == dev_id
+        assert nested_table_grant_row.table_id == deep_table_id
+
+        # The same table name in two environments binds to each
+        # environment's own table id.
+        prod_table_grant_row = connection.execute(
+            sa.select(grants_after.c.environment_id, grants_after.c.table_id).where(
+                grants_after.c.id == prod_table_grant_id
+            )
+        ).one()
+        assert prod_table_grant_row.environment_id == prod_id
+        assert prod_table_grant_row.table_id == prod_orders_id
+        assert prod_table_grant_row.table_id != orders_id
+
+        # A NAMESPACE-kind grant on an existing namespace is kept.
+        namespace_grant_ok_row = connection.execute(
+            sa.select(
+                grants_after.c.environment_id, grants_after.c.table_id, grants_after.c.revoked_at
+            ).where(grants_after.c.id == namespace_grant_ok_id)
+        ).one()
+        assert namespace_grant_ok_row.environment_id == dev_id
+        assert namespace_grant_ok_row.table_id is None
+        assert namespace_grant_ok_row.revoked_at is None
+
+        # A NAMESPACE-kind grant on a missing namespace is revoked.
+        namespace_grant_missing_row = connection.execute(
+            sa.select(grants_after.c.revoked_at, grants_after.c.revoked_by).where(
+                grants_after.c.id == namespace_grant_missing_id
+            )
+        ).one()
+        assert namespace_grant_missing_row.revoked_at is not None
+        assert namespace_grant_missing_row.revoked_by is None
+
+        row_filter_row = connection.execute(
+            sa.select(row_filters_after.c.environment_id, row_filters_after.c.table_id).where(
+                row_filters_after.c.id == row_filter_id
+            )
+        ).one()
+        assert row_filter_row.environment_id == dev_id
+        assert row_filter_row.table_id == orders_id
+
+        stale_row_filter_row = connection.execute(
+            sa.select(
+                row_filters_after.c.environment_id,
+                row_filters_after.c.table_id,
+                row_filters_after.c.revoked_at,
+            ).where(row_filters_after.c.id == stale_row_filter_id)
+        ).one()
+        assert stale_row_filter_row.environment_id is None
+        assert stale_row_filter_row.table_id is None
+        assert stale_row_filter_row.revoked_at is not None
+
+        column_mask_row = connection.execute(
+            sa.select(column_masks_after.c.environment_id, column_masks_after.c.table_id).where(
+                column_masks_after.c.id == column_mask_id
+            )
+        ).one()
+        assert column_mask_row.environment_id == dev_id
+        assert column_mask_row.table_id == orders_id
+
+        stale_column_mask_row = connection.execute(
+            sa.select(
+                column_masks_after.c.environment_id,
+                column_masks_after.c.table_id,
+                column_masks_after.c.revoked_at,
+            ).where(column_masks_after.c.id == stale_column_mask_id)
+        ).one()
+        assert stale_column_mask_row.environment_id is None
+        assert stale_column_mask_row.table_id is None
+        assert stale_column_mask_row.revoked_at is not None
+
+        # `audit_events.event_type` accepts a 30-character value.
+        long_event_type = "ENVIRONMENT_PROTECTION_CHANGED"
+        assert len(long_event_type) == 30
+        connection.execute(
+            audit_events_after.insert().values(
+                id=uuid.uuid4(),
+                occurred_at=now,
+                event_type=long_event_type,
+                detail={},
+            )
+        )
+        stored_event_type = connection.execute(
+            sa.select(audit_events_after.c.event_type).where(
+                audit_events_after.c.event_type == long_event_type
+            )
+        ).scalar_one()
+        assert stored_event_type == long_event_type
+    engine.dispose()
+
+    command.downgrade(config, _REVISION_0010)
+
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        inspector = inspect(engine)
+        grant_columns = {col["name"] for col in inspector.get_columns("grants")}
+        row_filter_columns = {col["name"] for col in inspector.get_columns("row_filters")}
+        column_mask_columns = {col["name"] for col in inspector.get_columns("column_masks")}
+        table_columns = {col["name"] for col in inspector.get_columns("tables")}
+        query_run_columns = {col["name"] for col in inspector.get_columns("query_runs")}
+
+        assert "environment_id" not in grant_columns
+        assert "table_id" not in grant_columns
+        assert "environment_id" not in row_filter_columns
+        assert "table_id" not in row_filter_columns
+        assert "environment_id" not in column_mask_columns
+        assert "table_id" not in column_mask_columns
+        assert "external_claim" not in table_columns
+        assert "task_token_id" not in query_run_columns
+
+        # `event_type` stays widened on downgrade: audit rows already
+        # recorded with a >24-character event type must not become
+        # unrepresentable, and older code only validates the enum value
+        # in Python, never the column's SQL length.
+        event_type_column = next(
+            col for col in inspector.get_columns("audit_events") if col["name"] == "event_type"
+        )
+        event_type = event_type_column["type"]
+        assert isinstance(event_type, sa.String)
+        assert event_type.length == 64
+    finally:
+        engine.dispose()
+
+
+def test_0011_backfills_external_claim_for_parseable_legacy_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revision `0011` backfills `tables.external_claim` for pre-existing `EXTERNAL` rows.
+
+    `external_claim` is a brand-new nullable column, so every `EXTERNAL`
+    row that predates it starts `NULL` — a fail-closed state
+    (`check_claim_free`, `lakana_worker.pipeline`) that would otherwise
+    strand every table created before this fix. This reproduces three
+    such rows inserted directly at revision `0010` (before the column
+    exists): one whose stored `location_pattern` parses under the new
+    `raw/<dir...>/<glob>` rule and should be backfilled, one whose pattern
+    does not parse (outside `raw/`) and must be left `NULL` rather than
+    guessed at, and an `ICEBERG` row (no `external_config` at all) to prove
+    the backfill does not choke on a row that was never external.
+
+    Parameters
+    ----------
+    tmp_path
+        Pytest-provided temporary directory, holding the throwaway SQLite
+        file the migration is applied to.
+    monkeypatch
+        Used to point `lakana_core.config.Settings` (read by
+        `migrations/env.py`) at that file for the duration of the test.
+    """
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+
+    command.upgrade(config, _REVISION_0010)
+
+    engine = create_engine(f"sqlite:///{db_path}")
+    now = datetime.now(UTC)
+
+    environments = sa.table(
+        "environments",
+        sa.column("id", sa.Uuid()),
+        sa.column("name", sa.String()),
+        sa.column("storage_root", sa.String()),
+        sa.column("storage_options", sa.JSON()),
+        sa.column("is_protected", sa.Boolean()),
+        sa.column("properties", sa.JSON()),
+        sa.column("created_at", sa.DateTime(timezone=True)),
+        sa.column("updated_at", sa.DateTime(timezone=True)),
+    )
+    namespaces = sa.table(
+        "namespaces",
+        sa.column("id", sa.Uuid()),
+        sa.column("environment_id", sa.Uuid()),
+        sa.column("path", sa.String()),
+        sa.column("properties", sa.JSON()),
+        sa.column("owner_id", sa.Uuid()),
+    )
+    tables = sa.table(
+        "tables",
+        sa.column("id", sa.Uuid()),
+        sa.column("namespace_id", sa.Uuid()),
+        sa.column("name", sa.String()),
+        sa.column("table_type", sa.String()),
+        sa.column("external_config", sa.JSON()),
+        sa.column("created_at", sa.DateTime(timezone=True)),
+        sa.column("updated_at", sa.DateTime(timezone=True)),
+    )
+
+    dev_id = uuid.uuid4()
+    raw_ns_id = uuid.uuid4()
+    conforming_id = uuid.uuid4()
+    nonconforming_id = uuid.uuid4()
+    iceberg_id = uuid.uuid4()
+
+    with engine.begin() as connection:
+        connection.execute(
+            environments.insert().values(
+                id=dev_id,
+                name="dev",
+                storage_root="s3://bucket/dev",
+                storage_options={},
+                is_protected=False,
+                properties={},
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        connection.execute(
+            namespaces.insert().values(
+                id=raw_ns_id, environment_id=dev_id, path="raw", properties={}, owner_id=None
+            )
+        )
+        connection.execute(
+            tables.insert().values(
+                id=conforming_id,
+                namespace_id=raw_ns_id,
+                name="customers",
+                table_type="EXTERNAL",
+                external_config={
+                    "location_pattern": "raw/customers/*.parquet",
+                    "format": "parquet",
+                    "schema": {"id": "int64"},
+                },
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        connection.execute(
+            tables.insert().values(
+                id=nonconforming_id,
+                namespace_id=raw_ns_id,
+                name="gold_customers",
+                table_type="EXTERNAL",
+                external_config={
+                    "location_pattern": "gold/customers/*.parquet",
+                    "format": "parquet",
+                    "schema": {"id": "int64"},
+                },
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        connection.execute(
+            tables.insert().values(
+                id=iceberg_id,
+                namespace_id=raw_ns_id,
+                name="orders",
+                table_type="ICEBERG",
+                external_config=None,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    engine.dispose()
+
+    command.upgrade(config, "head")
+
+    engine = create_engine(f"sqlite:///{db_path}")
+    tables_after = sa.table(
+        "tables", sa.column("id", sa.Uuid()), sa.column("external_claim", sa.String())
+    )
+    try:
+        with engine.begin() as connection:
+            conforming_claim = connection.execute(
+                sa.select(tables_after.c.external_claim).where(tables_after.c.id == conforming_id)
+            ).scalar_one()
+            assert conforming_claim == "raw/customers"
+
+            nonconforming_claim = connection.execute(
+                sa.select(tables_after.c.external_claim).where(
+                    tables_after.c.id == nonconforming_id
+                )
+            ).scalar_one()
+            assert nonconforming_claim is None
+
+            iceberg_claim = connection.execute(
+                sa.select(tables_after.c.external_claim).where(tables_after.c.id == iceberg_id)
+            ).scalar_one()
+            assert iceberg_claim is None
+    finally:
+        engine.dispose()
+
+
+_REVISION_0011 = "75c7a7bb948a"
+_REVISION_0012 = "c8d4e2f1a6b3"
+_REVISION_0013 = "d1e5f3a7b9c2"
+
+
+def test_0012_adds_the_m5a_schema_and_downgrades_cleanly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revision `0012` adds `lineage_edges`, the write-run columns and `view_definition`.
+
+    Parameters
+    ----------
+    tmp_path
+        Pytest-provided temporary directory, holding the throwaway SQLite file.
+    monkeypatch
+        Used to point `lakana_core.config.Settings` at that file.
+    """
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, "head")
+
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        inspector = inspect(engine)
+        assert "lineage_edges" in inspector.get_table_names()
+        run_columns = {column["name"] for column in inspector.get_columns("query_runs")}
+        assert {
+            "write_mode",
+            "target_name",
+            "target_table_id",
+            "incremental_key",
+            "evolve_schema",
+            "watermark",
+            "rows_written",
+            "snapshot_id",
+            "schema_diff",
+            "maintenance",
+        } <= run_columns
+        assert "view_definition" in {c["name"] for c in inspector.get_columns("tables")}
+        edge_indexes = {index["name"] for index in inspector.get_indexes("lineage_edges")}
+        assert {
+            "ix_lineage_edges_source_table_id",
+            "ix_lineage_edges_target_table_id",
+        } <= edge_indexes
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, _REVISION_0011)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        inspector = inspect(engine)
+        assert "lineage_edges" not in inspector.get_table_names()
+        assert "write_mode" not in {c["name"] for c in inspector.get_columns("query_runs")}
+        assert "view_definition" not in {c["name"] for c in inspector.get_columns("tables")}
+    finally:
+        engine.dispose()
+
+
+def test_0012_downgrade_leaves_nothing_the_previous_release_cannot_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Final review I2: a `MAINTAIN_TABLE` grant must not survive `downgrade -1`.
+
+    0.4.x loads every active grant of a subject through a non-native enum
+    with no `MAINTAIN_TABLE` member, so a leftover one raises `LookupError`
+    and breaks every request by that principal.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    """
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, _REVISION_0012)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        with engine.begin() as connection:
+            principal_id = seed_m5a_rows(connection)
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, "-1")
+
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        with engine.connect() as connection:
+            assert_loads_as_pre_m5a(connection, principal_id)
+            assert "lineage_edges" not in inspect(engine).get_table_names()
+    finally:
+        engine.dispose()
+
+
+def test_0013_adds_the_m5b_schema_and_downgrades_cleanly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revision `0013` adds the four M5b tables and its downgrade removes them and M5b grants.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    """
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, _REVISION_0013)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        names = set(inspect(engine).get_table_names())
+        assert {"repositories", "deploy_runs", "job_versions", "environment_deployments"} <= names
+        with engine.begin() as connection:
+            principal_id = seed_m5a_rows(connection)
+            for action in ("DEPLOY", "MANAGE_REPOSITORY", "READ_ENVIRONMENT"):
+                connection.execute(
+                    sa.text(
+                        "INSERT INTO grants (id, principal_id, action, kind, granted_by, "
+                        "granted_at) VALUES (:id, :p, :a, 'INSTANCE', :p, :t)"
+                    ),
+                    {
+                        "id": uuid.uuid4().hex,
+                        "p": principal_id.hex,
+                        "a": action,
+                        "t": datetime.now(UTC),
+                    },
+                )
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, _REVISION_0012)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        names = set(inspect(engine).get_table_names())
+        assert (
+            not {"repositories", "deploy_runs", "job_versions", "environment_deployments"} & names
+        )
+        with engine.connect() as connection:
+            actions = connection.execute(sa.text("SELECT action FROM grants")).scalars().all()
+        assert "DEPLOY" not in actions
+        assert "MANAGE_REPOSITORY" not in actions
+        assert "READ_ENVIRONMENT" in actions
+    finally:
+        engine.dispose()
+
+
+_M5C1_TABLES = {"runs", "task_runs", "task_attempts", "scheduler_lease"}
+
+
+def test_0014_adds_the_m5c1_schema_and_downgrades_cleanly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revision `0014` adds the run tables and columns; its downgrade removes them and RUN grants.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    """
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, _REVISION_0014)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        inspector = inspect(engine)
+        assert set(inspector.get_table_names()) >= _M5C1_TABLES
+        assert "run_as_principal_id" in {
+            c["name"] for c in inspector.get_columns("environment_deployments")
+        }
+        assert {"task_run_id", "break_glass_reason"} <= {
+            c["name"] for c in inspector.get_columns("query_runs")
+        }
+        assert "ready_at" in {c["name"] for c in inspector.get_columns("task_runs")}
+        assert "ix_runs_one_active" in {i["name"] for i in inspector.get_indexes("runs")}
+        with engine.begin() as connection:
+            lease = connection.execute(sa.text("SELECT id, holder FROM scheduler_lease")).all()
+            assert [tuple(row) for row in lease] == [(1, None)]
+            principal_id = seed_m5a_rows(connection)
+            connection.execute(
+                sa.text(
+                    "INSERT INTO grants (id, principal_id, action, kind, granted_by, granted_at) "
+                    "VALUES (:id, :p, 'RUN', 'INSTANCE', :p, :t)"
+                ),
+                {"id": uuid.uuid4().hex, "p": principal_id.hex, "t": datetime.now(UTC)},
+            )
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, _REVISION_0013)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        inspector = inspect(engine)
+        assert not _M5C1_TABLES & set(inspector.get_table_names())
+        assert "run_as_principal_id" not in {
+            c["name"] for c in inspector.get_columns("environment_deployments")
+        }
+        assert not {"task_run_id", "break_glass_reason"} & {
+            c["name"] for c in inspector.get_columns("query_runs")
+        }
+        with engine.connect() as connection:
+            actions = connection.execute(sa.text("SELECT action FROM grants")).scalars().all()
+        assert "RUN" not in actions
+    finally:
+        engine.dispose()
+
+
+_REVISION_0014 = "e7f2a9c4b1d3"
+
+
+def test_0015_adds_the_claim_counter_seeded_from_attempt_and_downgrades_cleanly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revision `0015` adds `task_runs.claim_count` (= `attempt` for existing rows).
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    """
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, _REVISION_0014)
+    engine = create_engine(f"sqlite:///{db_path}")
+    task_id = uuid.uuid4().hex
+    try:
+        assert "claim_count" not in {c["name"] for c in inspect(engine).get_columns("task_runs")}
+        with engine.begin() as connection:
+            connection.execute(sa.text("PRAGMA foreign_keys=OFF"))
+            connection.execute(
+                sa.text(
+                    "INSERT INTO task_runs (id, run_id, asset, status, attempt, max_attempts, "
+                    "timeout_seconds, retry_delay_seconds, upstream_json, conflict_retried) "
+                    "VALUES (:id, :run, 'silver.a', 'RUNNING', 3, 5, 60, 0, '[]', 0)"
+                ),
+                {"id": task_id, "run": uuid.uuid4().hex},
+            )
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        with engine.connect() as connection:
+            rows = connection.execute(sa.text("SELECT attempt, claim_count FROM task_runs")).all()
+        assert [tuple(row) for row in rows] == [(3, 3)]
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, _REVISION_0014)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        assert "claim_count" not in {c["name"] for c in inspect(engine).get_columns("task_runs")}
+        with engine.connect() as connection:
+            assert connection.execute(sa.text("SELECT attempt FROM task_runs")).scalar_one() == 3
+    finally:
+        engine.dispose()
+
+
+def test_running_migrations_leaves_existing_loggers_enabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`env.py` configures logging without disabling loggers that already exist.
+
+    A worker or server that migrates in-process would otherwise lose every
+    module logger created before the migration ran.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    """
+    existing = logging.getLogger("lakana_test.created_before_the_migration")
+    existing.disabled = False
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{tmp_path / 'migrated.db'}")
+    command.upgrade(Config(str(ALEMBIC_INI)), "head")
+    assert existing.disabled is False
+
+
+_REVISION_0015 = "f4b8d2a6c9e1"
+
+
+def test_0016_adds_the_bound_token_columns_and_its_downgrade_deletes_bound_tokens(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revision `0016`: two nullable columns, a CHECK, and a downgrade that drops bound tokens.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    """
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, _REVISION_0015)
+    engine = create_engine(f"sqlite:///{db_path}")
+
+    def columns() -> set[str]:
+        return {c["name"] for c in inspect(engine).get_columns("task_tokens")}
+
+    insert = sa.text(
+        "INSERT INTO task_tokens (id, principal_id, environment, asset_scope, key_id, "
+        "secret_hash, issued_at, expires_at) "
+        "VALUES (:id, :p, 'dev', '[]', :key, :hash, :now, :now)"
+    )
+    now = datetime.now(UTC)
+    try:
+        assert not {"task_run_id", "claim"} & columns()
+        with engine.begin() as connection:
+            connection.execute(sa.text("PRAGMA foreign_keys=OFF"))
+            for key in ("plain", "bound"):
+                connection.execute(
+                    insert,
+                    {
+                        "id": uuid.uuid4().hex,
+                        "p": uuid.uuid4().hex,
+                        "key": key,
+                        "hash": "0" * 64,
+                        "now": now,
+                    },
+                )
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        assert {"task_run_id", "claim"} <= columns()
+        with engine.begin() as connection:
+            connection.execute(sa.text("PRAGMA foreign_keys=OFF"))
+            rows = connection.execute(sa.text("SELECT task_run_id, claim FROM task_tokens")).all()
+            assert [tuple(row) for row in rows] == [(None, None), (None, None)]
+            connection.execute(
+                sa.text(
+                    "UPDATE task_tokens SET task_run_id = :t, claim = 1 WHERE key_id = 'bound'"
+                ),
+                {"t": uuid.uuid4().hex},
+            )
+            with pytest.raises(IntegrityError):
+                connection.execute(
+                    sa.text("UPDATE task_tokens SET claim = 1 WHERE key_id = 'plain'")
+                )
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, _REVISION_0015)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        assert not {"task_run_id", "claim"} & columns()
+        with engine.connect() as connection:
+            keys = connection.execute(sa.text("SELECT key_id FROM task_tokens")).scalars().all()
+        assert keys == ["plain"]
+    finally:
+        engine.dispose()
+
+
+_REVISION_0016 = "a6c3e9d1f7b2"
+
+
+def test_0017_adds_the_nullable_error_cause_and_downgrades_cleanly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revision `0017`: `query_runs.error_cause` is nullable; existing rows keep `NULL`.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    """
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, _REVISION_0016)
+    engine = create_engine(f"sqlite:///{db_path}")
+    run_id = uuid.uuid4().hex
+
+    def columns() -> set[str]:
+        return {c["name"] for c in inspect(engine).get_columns("query_runs")}
+
+    try:
+        assert "error_cause" not in columns()
+        with engine.begin() as connection:
+            connection.execute(sa.text("PRAGMA foreign_keys=OFF"))
+            connection.execute(
+                sa.text(
+                    "INSERT INTO query_runs (id, environment_id, sql_text, status, error_message,"
+                    " created_at, updated_at) VALUES (:id, :env, 'SELECT 1', 'FAILED', 'old',"
+                    " :now, :now)"
+                ),
+                {"id": run_id, "env": uuid.uuid4().hex, "now": "2026-10-05 09:00:00"},
+            )
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        assert "error_cause" in columns()
+        nullable = {c["name"]: c["nullable"] for c in inspect(engine).get_columns("query_runs")}[
+            "error_cause"
+        ]
+        assert nullable is True
+        with engine.connect() as connection:
+            row = connection.execute(
+                sa.text("SELECT error_message, error_cause FROM query_runs")
+            ).one()
+        assert tuple(row) == ("old", None)
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, _REVISION_0016)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        assert "error_cause" not in columns()
+        with engine.connect() as connection:
+            stored = connection.execute(
+                sa.text("SELECT error_message FROM query_runs")
+            ).scalar_one()
+        assert stored == "old"
+    finally:
+        engine.dispose()
+
+
+_REVISION_0017 = "c8e1a5d7f3b9"
+
+
+def test_0018_adds_the_artifact_tables_and_its_downgrade_removes_artifact_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revision `0018`: three tables; the downgrade deletes `ARTIFACT` rows of `tables`.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    """
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    new = {"artifact_versions", "artifact_uploads", "artifact_blobs"}
+
+    def tables() -> set[str]:
+        engine = create_engine(f"sqlite:///{db_path}")
+        try:
+            return set(inspect(engine).get_table_names())
+        finally:
+            engine.dispose()
+
+    command.upgrade(config, _REVISION_0017)
+    assert not new & tables()
+    command.upgrade(config, "head")
+    assert new <= tables()
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        with engine.begin() as connection:
+            connection.execute(sa.text("PRAGMA foreign_keys=OFF"))
+            for name, kind in (("model", "ARTIFACT"), ("events", "ICEBERG")):
+                connection.execute(
+                    sa.text(
+                        "INSERT INTO tables (id, namespace_id, name, table_type, created_at,"
+                        " updated_at) VALUES (:id, :ns, :name, :kind, :now, :now)"
+                    ),
+                    {
+                        "id": uuid.uuid4().hex,
+                        "ns": uuid.uuid4().hex,
+                        "name": name,
+                        "kind": kind,
+                        "now": "2026-10-04 09:00:00",
+                    },
+                )
+    finally:
+        engine.dispose()
+    command.downgrade(config, _REVISION_0017)
+    assert not new & tables()
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        with engine.connect() as connection:
+            left = connection.execute(sa.text("SELECT name FROM tables")).scalars().all()
+        assert left == ["events"]
+    finally:
+        engine.dispose()
+
+
+_REVISION_0018 = "e2a7c4f1b6d8"
+
+
+def test_0019_adds_the_format_version_and_key_id_and_downgrade_drops_new_format_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revision `0019`: old rows become format 1 under the bare `env` key id.
+
+    The downgrade deletes every row of a newer format first (the previous release cannot
+    read one) and leaves the format-1 rows byte for byte.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    """
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    old_id, new_id = uuid.uuid4().hex, uuid.uuid4().hex
+
+    def row(row_id: str) -> dict[str, object]:
+        return {
+            "id": row_id,
+            "env": uuid.uuid4().hex,
+            "name": row_id[:8],
+            "ct": b"ct",
+            "n": b"n" * 12,
+            "w": b"w",
+            "by": uuid.uuid4().hex,
+            "now": "2026-10-04 09:00:00",
+        }
+
+    def columns() -> set[str]:
+        engine = create_engine(f"sqlite:///{db_path}")
+        try:
+            return {c["name"] for c in inspect(engine).get_columns("secrets")}
+        finally:
+            engine.dispose()
+
+    command.upgrade(config, _REVISION_0018)
+    assert not {"format_version", "key_id"} & columns()
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        with engine.begin() as connection:
+            connection.execute(sa.text("PRAGMA foreign_keys=OFF"))
+            connection.execute(
+                sa.text(
+                    "INSERT INTO secrets (id, environment_id, name, ciphertext, nonce,"
+                    " wrapped_data_key, created_by, created_at) VALUES"
+                    " (:id, :env, :name, :ct, :n, :w, :by, :now)"
+                ),
+                row(old_id),
+            )
+        command.upgrade(config, "head")
+        assert {"format_version", "key_id"} <= columns()
+        with engine.begin() as connection:
+            connection.execute(sa.text("PRAGMA foreign_keys=OFF"))
+            connection.execute(
+                sa.text(
+                    "INSERT INTO secrets (id, environment_id, name, ciphertext, nonce,"
+                    " wrapped_data_key, created_by, created_at, format_version, key_id) VALUES"
+                    " (:id, :env, :name, :ct, :n, :w, :by, :now, 2, :kid)"
+                ),
+                {**row(new_id), "kid": "env:0123456789abcdef"},
+            )
+            rows = connection.execute(
+                sa.text("SELECT id, format_version, key_id FROM secrets ORDER BY format_version")
+            ).all()
+        assert [(r[0], r[1], r[2]) for r in rows] == [
+            (old_id, 1, "env"),
+            (new_id, 2, "env:0123456789abcdef"),
+        ]
+        command.downgrade(config, _REVISION_0018)
+        assert not {"format_version", "key_id"} & columns()
+        with engine.connect() as connection:
+            left = connection.execute(sa.text("SELECT id, ciphertext FROM secrets")).all()
+        assert [(r[0], bytes(r[1])) for r in left] == [(old_id, b"ct")]
+        command.upgrade(config, "head")
+        with engine.connect() as connection:
+            version = connection.execute(sa.text("SELECT format_version FROM secrets")).scalar()
+        assert version == 1
+    finally:
+        engine.dispose()
+
+
+_REVISION_0019 = "b5d9f2a8c4e7"
+
+
+def _utc_text() -> str:
+    """Say now as the text SQLite stores a datetime as.
+
+    Returns
+    -------
+    str
+        The current UTC time, which avoids the deprecated default datetime adapter.
+    """
+    return datetime.now(UTC).replace(tzinfo=None).isoformat(sep=" ")
+
+
+def test_0020_adds_package_indexes_and_widens_the_action_column(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revision `0020`: the registry of indexes, and room for `MANAGE_PACKAGE_INDEX`."""
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, _REVISION_0019)
+    engine = create_engine(f"sqlite:///{db_path}")
+    principal = uuid.uuid4().hex
+    grant = (
+        "INSERT INTO grants (id, principal_id, action, kind, granted_by, granted_at) "
+        "VALUES (:id, :p, :a, 'INSTANCE', :p, :t)"
+    )
+    try:
+        assert "package_indexes" not in inspect(engine).get_table_names()
+        with engine.begin() as connection:
+            connection.execute(
+                sa.text(
+                    "INSERT INTO principals (id, type, name, is_active, created_at, updated_at) "
+                    "VALUES (:id, 'USER', 'ada', 1, :t, :t)"
+                ),
+                {"id": principal, "t": _utc_text()},
+            )
+            connection.execute(
+                sa.text(grant),
+                {
+                    "id": uuid.uuid4().hex,
+                    "p": principal,
+                    "a": "READ_AUDIT_LOG",
+                    "t": _utc_text(),
+                },
+            )
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = create_engine(f"sqlite:///{db_path}")
+    insert = (
+        "INSERT INTO package_indexes (id, name, url, credential_secret, created_by, "
+        "created_at, updated_at) VALUES (:id, :n, :u, NULL, :p, :t, :t)"
+    )
+    try:
+        columns = {c["name"]: c for c in inspect(engine).get_columns("package_indexes")}
+        assert set(columns) == {
+            "id",
+            "name",
+            "url",
+            "credential_secret",
+            "created_by",
+            "created_at",
+            "updated_at",
+        }
+        assert cast(sa.String, columns["url"]["type"]).length == 1024
+        action = next(c for c in inspect(engine).get_columns("grants") if c["name"] == "action")
+        assert cast(sa.String, action["type"]).length == 20
+        with engine.begin() as connection:
+            now = _utc_text()
+            connection.execute(
+                sa.text(insert),
+                {
+                    "id": uuid.uuid4().hex,
+                    "n": "team",
+                    "u": "https://a/simple",
+                    "p": principal,
+                    "t": now,
+                },
+            )
+            connection.execute(
+                sa.text(grant),
+                {"id": uuid.uuid4().hex, "p": principal, "a": "MANAGE_PACKAGE_INDEX", "t": now},
+            )
+        for name, url in (("team", "https://b/simple"), ("other", "https://a/simple")):
+            with pytest.raises(IntegrityError), engine.begin() as connection:
+                connection.execute(
+                    sa.text(insert),
+                    {
+                        "id": uuid.uuid4().hex,
+                        "n": name,
+                        "u": url,
+                        "p": principal,
+                        "t": _utc_text(),
+                    },
+                )
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, _REVISION_0019)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        assert "package_indexes" not in inspect(engine).get_table_names()
+        action = next(c for c in inspect(engine).get_columns("grants") if c["name"] == "action")
+        assert cast(sa.String, action["type"]).length == 18
+        with engine.connect() as connection:
+            actions = connection.execute(sa.text("SELECT action FROM grants")).scalars().all()
+        assert actions == ["READ_AUDIT_LOG"]
+    finally:
+        engine.dispose()
+
+
+_REVISION_0020 = "c3f8a6d1e9b4"
+
+
+def test_0021_adds_cancel_requested_and_its_downgrade_turns_cancelled_runs_into_failed_ones(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revision `0021`: `cancel_requested` is false for old rows; the downgrade maps `CANCELLED`.
+
+    A release before this one cannot load the status `CANCELLED`, so the downgrade records such
+    a run as `FAILED` with the cause `cancelled`, which is how that release recorded a cancel.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    """
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, _REVISION_0020)
+    engine = create_engine(f"sqlite:///{db_path}")
+    first, second = uuid.uuid4().hex, uuid.uuid4().hex
+
+    def columns() -> dict[str, dict[str, object]]:
+        return {c["name"]: dict(c) for c in inspect(engine).get_columns("query_runs")}
+
+    def insert(connection: sa.Connection, run_id: str, status: str, *, cancel: bool) -> None:
+        names = "id, environment_id, sql_text, status, created_at, updated_at"
+        values = ":id, :env, 'SELECT 1', :status, :now, :now"
+        if cancel:
+            names, values = names + ", cancel_requested", values + ", 1"
+        connection.execute(
+            sa.text(f"INSERT INTO query_runs ({names}) VALUES ({values})"),
+            {"id": run_id, "env": uuid.uuid4().hex, "status": status, "now": _utc_text()},
+        )
+
+    try:
+        assert "cancel_requested" not in columns()
+        with engine.begin() as connection:
+            connection.execute(sa.text("PRAGMA foreign_keys=OFF"))
+            insert(connection, first, "SUCCEEDED", cancel=False)
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        assert columns()["cancel_requested"]["nullable"] is False
+        with engine.begin() as connection:
+            connection.execute(sa.text("PRAGMA foreign_keys=OFF"))
+            old = connection.execute(
+                sa.text("SELECT cancel_requested FROM query_runs WHERE id = :id"), {"id": first}
+            ).scalar_one()
+            assert not old
+            insert(connection, second, "CANCELLED", cancel=True)
+            # A server of the previous release inserts without the column during an upgrade.
+            insert(connection, uuid.uuid4().hex, "QUEUED", cancel=False)
+            assert not connection.execute(
+                sa.text("SELECT max(cancel_requested) FROM query_runs WHERE status = 'QUEUED'")
+            ).scalar_one()
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, _REVISION_0020)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        assert "cancel_requested" not in columns()
+        with engine.connect() as connection:
+            rows = {
+                row[0]: tuple(row[1:])
+                for row in connection.execute(
+                    sa.text("SELECT id, status, error_message, error_cause FROM query_runs")
+                )
+            }
+        assert rows[second] == ("FAILED", "The query was cancelled.", "cancelled")
+        assert rows[first] == ("SUCCEEDED", None, None)
+    finally:
+        engine.dispose()
+
+
+_REVISION_0021 = "e4b7d2a9c6f1"
+
+
+def test_0022_adds_workers_the_worker_ids_and_the_status_index_and_downgrades_cleanly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revision `0022`: the `workers` table, nullable `worker_id` columns and the status index.
+
+    Old rows get `NULL`; the downgrade removes all of it and keeps the rows.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    """
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, _REVISION_0021)
+    engine = create_engine(f"sqlite:///{db_path}")
+    query_id, deploy_id = uuid.uuid4().hex, uuid.uuid4().hex
+
+    def column_names(table: str) -> set[str]:
+        return {c["name"] for c in inspect(engine).get_columns(table)}
+
+    try:
+        assert not inspect(engine).has_table("workers")
+        assert "worker_id" not in column_names("query_runs")
+        with engine.begin() as connection:
+            connection.execute(sa.text("PRAGMA foreign_keys=OFF"))
+            connection.execute(
+                sa.text(
+                    "INSERT INTO query_runs (id, environment_id, sql_text, status, created_at,"
+                    " updated_at) VALUES (:id, :env, 'SELECT 1', 'RUNNING', :now, :now)"
+                ),
+                {"id": query_id, "env": uuid.uuid4().hex, "now": _utc_text()},
+            )
+            connection.execute(
+                sa.text(
+                    "INSERT INTO deploy_runs (id, environment_id, repository_id, kind, status,"
+                    " created_at) VALUES (:id, :env, :repo, 'deploy', 'RUNNING', :now)"
+                ),
+                {
+                    "id": deploy_id,
+                    "env": uuid.uuid4().hex,
+                    "repo": uuid.uuid4().hex,
+                    "now": _utc_text(),
+                },
+            )
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        assert column_names("workers") == {
+            "id",
+            "host",
+            "started_at",
+            "version",
+            "heartbeat_at",
+            "takes",
+        }
+        for table in ("query_runs", "deploy_runs"):
+            column = {c["name"]: c for c in inspect(engine).get_columns(table)}["worker_id"]
+            assert column["nullable"] is True
+        indexes = {i["name"]: i for i in inspect(engine).get_indexes("query_runs")}
+        assert indexes["ix_query_runs_status_created_at"]["column_names"] == [
+            "status",
+            "created_at",
+        ]
+        assert indexes["ix_query_runs_environment_id_finished_at"]["column_names"] == [
+            "environment_id",
+            "finished_at",
+        ]
+        with engine.connect() as connection:
+            for table, run_id in (("query_runs", query_id), ("deploy_runs", deploy_id)):
+                found = connection.execute(
+                    sa.text(f"SELECT worker_id FROM {table} WHERE id = :id"), {"id": run_id}
+                ).all()
+                assert found == [(None,)]
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, _REVISION_0021)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        assert not inspect(engine).has_table("workers")
+        assert "worker_id" not in column_names("query_runs")
+        assert "worker_id" not in column_names("deploy_runs")
+        assert not {
+            "ix_query_runs_status_created_at",
+            "ix_query_runs_environment_id_finished_at",
+        } & {i["name"] for i in inspect(engine).get_indexes("query_runs")}
+        with engine.connect() as connection:
+            for table, run_id in (("query_runs", query_id), ("deploy_runs", deploy_id)):
+                assert (
+                    connection.execute(
+                        sa.text(f"SELECT count(*) FROM {table} WHERE id = :id"), {"id": run_id}
+                    ).scalar_one()
+                    == 1
+                )
+    finally:
+        engine.dispose()
+
+
+_REVISION_0022 = "f6c1a8d3b5e2"
+
+
+def test_0023_adds_takes_and_a_worker_registered_before_it_reads_all(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revision `0023`: `workers.takes`, string 16, not null, server default `all`.
+
+    A row written before it, and a row written without the column afterwards (a worker of the
+    previous release), both read `all`; the downgrade drops the column and keeps the row.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    """
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, _REVISION_0022)
+    engine = create_engine(f"sqlite:///{db_path}")
+    insert = sa.text(
+        "INSERT INTO workers (id, host, started_at, version, heartbeat_at)"
+        " VALUES (:id, 'h', :now, '1', :now)"
+    )
+
+    def column_names() -> set[str]:
+        return {c["name"] for c in inspect(engine).get_columns("workers")}
+
+    try:
+        assert "takes" not in column_names()
+        with engine.begin() as connection:
+            connection.execute(insert, {"id": "before", "now": _utc_text()})
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        column = {c["name"]: c for c in inspect(engine).get_columns("workers")}["takes"]
+        assert (str(column["type"]), column["nullable"]) == ("VARCHAR(16)", False)
+        with engine.begin() as connection:
+            connection.execute(insert, {"id": "after", "now": _utc_text()})
+        with engine.connect() as connection:
+            rows = dict(connection.execute(sa.text("SELECT id, takes FROM workers")).all())
+        assert rows == {"before": "all", "after": "all"}
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, _REVISION_0022)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        assert "takes" not in column_names()
+        with engine.connect() as connection:
+            assert connection.execute(sa.text("SELECT count(*) FROM workers")).scalar_one() == 2
+    finally:
+        engine.dispose()
+
+
+_REVISION_0023 = "a7d3c9e1f4b6"
+
+_COLUMNS_0024_ADDS: dict[str, dict[str, tuple[str, bool]]] = {
+    "tables": {"unpublished_run_id": ("CHAR(32)", True)},
+    "query_runs": {"snapshot_before": ("BIGINT", True)},
+    "task_runs": {
+        "has_checks": ("BOOLEAN", False),
+        "written_table_id": ("CHAR(32)", True),
+        "written_snapshot_before": ("BIGINT", True),
+        "written_snapshot_after": ("BIGINT", True),
+        "written_publishes": ("BOOLEAN", True),
+    },
+}
+
+
+def test_0024_adds_what_checks_need_and_older_rows_read_as_no_checks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revision `0024`: the checks of a deploy, the kind of a task, and `check_results`.
+
+    A `deploy_runs` row written before it has no checks; a `task_runs` row written before it
+    reads kind `asset`. The downgrade drops the new columns and the table and keeps the rows.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    """
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, _REVISION_0023)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        assert "checks_json" not in {c["name"] for c in inspect(engine).get_columns("deploy_runs")}
+        assert "kind" not in {c["name"] for c in inspect(engine).get_columns("task_runs")}
+        assert "check_results" not in inspect(engine).get_table_names()
+        for table, names in _COLUMNS_0024_ADDS.items():
+            assert not names.keys() & {c["name"] for c in inspect(engine).get_columns(table)}
+        with engine.begin() as connection:
+            connection.execute(sa.text("PRAGMA foreign_keys=OFF"))
+            connection.execute(
+                sa.text(
+                    "INSERT INTO tables (id, namespace_id, name, table_type, created_at,"
+                    " updated_at) VALUES (:id, :ns, 'orders', 'ICEBERG', :now, :now)"
+                ),
+                {"id": uuid.uuid4().hex, "ns": uuid.uuid4().hex, "now": _utc_text()},
+            )
+            connection.execute(
+                sa.text(
+                    "INSERT INTO query_runs (id, environment_id, sql_text, status, created_at,"
+                    " updated_at) VALUES (:id, :env, 'SELECT 1', 'RUNNING', :now, :now)"
+                ),
+                {"id": uuid.uuid4().hex, "env": uuid.uuid4().hex, "now": _utc_text()},
+            )
+            connection.execute(
+                sa.text(
+                    "INSERT INTO deploy_runs (id, environment_id, repository_id, kind, status,"
+                    " created_at) VALUES (:id, :env, :repo, 'deploy', 'RUNNING', :now)"
+                ),
+                {
+                    "id": uuid.uuid4().hex,
+                    "env": uuid.uuid4().hex,
+                    "repo": uuid.uuid4().hex,
+                    "now": _utc_text(),
+                },
+            )
+            connection.execute(
+                sa.text(
+                    "INSERT INTO task_runs (id, run_id, asset, status, attempt, claim_count,"
+                    " max_attempts, timeout_seconds, retry_delay_seconds, upstream_json,"
+                    " conflict_retried) VALUES (:id, :run, 'silver.a', 'PENDING', 0, 0, 1, 60, 0,"
+                    " '[]', 0)"
+                ),
+                {"id": uuid.uuid4().hex, "run": uuid.uuid4().hex},
+            )
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        column = {c["name"]: c for c in inspect(engine).get_columns("deploy_runs")}["checks_json"]
+        assert column["nullable"] is True
+        kind = {c["name"]: c for c in inspect(engine).get_columns("task_runs")}["kind"]
+        assert (str(kind["type"]), kind["nullable"]) == ("VARCHAR(16)", False)
+        inspector = inspect(engine)
+        assert [u["column_names"] for u in inspector.get_unique_constraints("check_results")] == [
+            ["task_run_id", "check_name"]
+        ]
+        indexes = {i["name"]: i["column_names"] for i in inspector.get_indexes("check_results")}
+        assert indexes["ix_check_results_environment_id_finished_at"] == [
+            "environment_id",
+            "finished_at",
+            "id",
+        ]
+        assert "ix_check_results_run_id" in indexes
+        assert "ix_check_results_table_id" in indexes
+        for table, names in _COLUMNS_0024_ADDS.items():
+            found = {c["name"]: c for c in inspector.get_columns(table)}
+            for name, (type_text, nullable) in names.items():
+                assert (str(found[name]["type"]), found[name]["nullable"]) == (type_text, nullable)
+        with engine.connect() as connection:
+            row = connection.execute(sa.text("SELECT checks_json FROM deploy_runs")).scalar_one()
+            assert row is None
+            assert connection.execute(sa.text("SELECT kind FROM task_runs")).scalar_one() == "asset"
+            stamp = connection.execute(
+                sa.text(
+                    "SELECT has_checks, written_table_id, written_snapshot_before,"
+                    " written_snapshot_after, written_publishes FROM task_runs"
+                )
+            ).one()
+            assert tuple(stamp) == (False, None, None, None, None)
+            assert (
+                connection.execute(sa.text("SELECT unpublished_run_id FROM tables")).scalar_one()
+                is None
+            )
+            assert (
+                connection.execute(sa.text("SELECT snapshot_before FROM query_runs")).scalar_one()
+                is None
+            )
+            default = connection.execute(
+                sa.text(
+                    "SELECT dflt_value FROM pragma_table_info('task_runs')"
+                    " WHERE name = 'has_checks'"
+                )
+            ).scalar_one()
+            assert str(default).lower() in {"0", "false"}
+        tables_fks = {tuple(f["constrained_columns"]) for f in inspector.get_foreign_keys("tables")}
+        assert ("unpublished_run_id",) not in tables_fks
+        task_fks = {
+            tuple(f["constrained_columns"]) for f in inspector.get_foreign_keys("task_runs")
+        }
+        assert ("written_table_id",) not in task_fks
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, _REVISION_0023)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        assert "checks_json" not in {c["name"] for c in inspect(engine).get_columns("deploy_runs")}
+        assert "kind" not in {c["name"] for c in inspect(engine).get_columns("task_runs")}
+        assert "check_results" not in inspect(engine).get_table_names()
+        for table, names in _COLUMNS_0024_ADDS.items():
+            assert not names.keys() & {c["name"] for c in inspect(engine).get_columns(table)}
+        with engine.connect() as connection:
+            assert connection.execute(sa.text("SELECT count(*) FROM deploy_runs")).scalar_one() == 1
+            assert connection.execute(sa.text("SELECT count(*) FROM task_runs")).scalar_one() == 1
+            assert connection.execute(sa.text("SELECT count(*) FROM tables")).scalar_one() == 1
+            assert connection.execute(sa.text("SELECT count(*) FROM query_runs")).scalar_one() == 1
+    finally:
+        engine.dispose()
+
+
+_REVISION_0024 = "b8e2c5f7a1d4"
+_COLUMNS_0025_ADDS = {
+    "kept_run_id": "CHAR(32)",
+    "kept_task_run_id": "CHAR(32)",
+    "kept_check": "VARCHAR(1024)",
+}
+
+
+def test_0025_adds_the_note_of_a_kept_table(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revision `0025`: the three columns of the note a table keeps after a failed check.
+
+    The columns are nullable and have no foreign key; a `tables` row written before them reads
+    as having no note. The downgrade drops them and keeps the rows.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    """
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, _REVISION_0024)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        assert not _COLUMNS_0025_ADDS.keys() & {
+            c["name"] for c in inspect(engine).get_columns("tables")
+        }
+        with engine.begin() as connection:
+            connection.execute(sa.text("PRAGMA foreign_keys=OFF"))
+            connection.execute(
+                sa.text(
+                    "INSERT INTO tables (id, namespace_id, name, table_type, created_at,"
+                    " updated_at) VALUES (:id, :ns, 'orders', 'ICEBERG', :now, :now)"
+                ),
+                {"id": uuid.uuid4().hex, "ns": uuid.uuid4().hex, "now": _utc_text()},
+            )
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        inspector = inspect(engine)
+        found = {c["name"]: c for c in inspector.get_columns("tables")}
+        for name, type_text in _COLUMNS_0025_ADDS.items():
+            assert (str(found[name]["type"]), found[name]["nullable"]) == (type_text, True)
+        constrained = {
+            tuple(f["constrained_columns"]) for f in inspector.get_foreign_keys("tables")
+        }
+        assert not {(name,) for name in _COLUMNS_0025_ADDS} & constrained
+        with engine.connect() as connection:
+            row = connection.execute(
+                sa.text("SELECT kept_run_id, kept_task_run_id, kept_check FROM tables")
+            ).one()
+            assert tuple(row) == (None, None, None)
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, _REVISION_0024)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        assert not _COLUMNS_0025_ADDS.keys() & {
+            c["name"] for c in inspect(engine).get_columns("tables")
+        }
+        with engine.connect() as connection:
+            assert connection.execute(sa.text("SELECT count(*) FROM tables")).scalar_one() == 1
+    finally:
+        engine.dispose()
+
+
+_REVISION_0025 = "c9f3d6a8b2e5"
+
+
+def test_0026_adds_the_binding_of_a_query_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revision `0026`: `query_runs.check_result_id`, nullable and without a foreign key.
+
+    A query run written before it reads as bound to no check result. Without a foreign key a
+    result that was removed with its run leaves the id on the query run, so the worker fails
+    the query with a message instead of reading the table as it is now. The downgrade drops
+    the column and keeps the rows.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    """
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, _REVISION_0025)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        assert "check_result_id" not in {
+            c["name"] for c in inspect(engine).get_columns("query_runs")
+        }
+        with engine.begin() as connection:
+            connection.execute(sa.text("PRAGMA foreign_keys=OFF"))
+            connection.execute(
+                sa.text(
+                    "INSERT INTO query_runs (id, environment_id, sql_text, status, created_at,"
+                    " updated_at) VALUES (:id, :env, 'SELECT 1', 'QUEUED', :now, :now)"
+                ),
+                {"id": uuid.uuid4().hex, "env": uuid.uuid4().hex, "now": _utc_text()},
+            )
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        inspector = inspect(engine)
+        found = {c["name"]: c for c in inspector.get_columns("query_runs")}
+        column = found["check_result_id"]
+        assert (str(column["type"]), column["nullable"]) == ("CHAR(32)", True)
+        constrained = {
+            tuple(f["constrained_columns"]) for f in inspector.get_foreign_keys("query_runs")
+        }
+        assert ("check_result_id",) not in constrained
+        with engine.connect() as connection:
+            assert (
+                connection.execute(sa.text("SELECT check_result_id FROM query_runs")).scalar_one()
+                is None
+            )
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, _REVISION_0025)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        assert "check_result_id" not in {
+            c["name"] for c in inspect(engine).get_columns("query_runs")
+        }
+        with engine.connect() as connection:
+            assert connection.execute(sa.text("SELECT count(*) FROM query_runs")).scalar_one() == 1
+    finally:
+        engine.dispose()
+
+
+_REVISION_0026 = "d1a4e7b9c3f6"
+_REVISION_0027 = "e2b5f8c1d4a7"
+
+
+def test_0027_adds_the_set_back_columns_of_a_task_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revision `0027`: `task_runs.setting_back` and `set_back_claims`, both not null.
+
+    A task run written before it reads as not setting its table back and with no set-back
+    claim taken. The downgrade drops both columns and keeps the rows.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    """
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, _REVISION_0026)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        names = {c["name"] for c in inspect(engine).get_columns("task_runs")}
+        assert not names & {"setting_back", "set_back_claims"}
+        with engine.begin() as connection:
+            connection.execute(sa.text("PRAGMA foreign_keys=OFF"))
+            connection.execute(
+                sa.text(
+                    "INSERT INTO task_runs (id, run_id, asset, status, attempt, claim_count,"
+                    " max_attempts, timeout_seconds, retry_delay_seconds, upstream_json,"
+                    " conflict_retried) VALUES (:id, :run, 'silver.a', 'PENDING', 0, 0, 1, 60, 0,"
+                    " '[]', 0)"
+                ),
+                {"id": uuid.uuid4().hex, "run": uuid.uuid4().hex},
+            )
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        found = {c["name"]: c for c in inspect(engine).get_columns("task_runs")}
+        assert found["setting_back"]["nullable"] is False
+        assert found["set_back_claims"]["nullable"] is False
+        with engine.connect() as connection:
+            row = connection.execute(
+                sa.text("SELECT setting_back, set_back_claims FROM task_runs")
+            ).one()
+        assert (bool(row[0]), row[1]) == (False, 0)
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, _REVISION_0026)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        names = {c["name"] for c in inspect(engine).get_columns("task_runs")}
+        assert not names & {"setting_back", "set_back_claims"}
+        with engine.connect() as connection:
+            assert connection.execute(sa.text("SELECT count(*) FROM task_runs")).scalar_one() == 1
+    finally:
+        engine.dispose()
+
+
+_REVISION_0028 = "f3c6a9d2e5b8"
+
+
+def test_0028_adds_the_job_tables_and_the_run_columns_and_downgrades_cleanly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revision `0028`: `job_schedules`, `job_fires` and four columns of `runs`.
+
+    A run written before it belongs to no job and no trigger, and missed nothing. The
+    downgrade drops the tables and the columns and keeps the runs.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    """
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, _REVISION_0027)
+    engine = create_engine(f"sqlite:///{db_path}")
+    new_columns = {"job", "trigger", "scheduled_for", "missed"}
+    run_id = uuid.uuid4().hex
+    try:
+        assert not new_columns & {c["name"] for c in inspect(engine).get_columns("runs")}
+        assert "job_schedules" not in inspect(engine).get_table_names()
+        with engine.begin() as connection:
+            connection.execute(sa.text("PRAGMA foreign_keys=OFF"))
+            connection.execute(
+                sa.text(
+                    "INSERT INTO runs (id, environment_id, repository_id, job_version_id, kind,"
+                    " selection_json, status, cancel_requested, created_at) VALUES (:id, :a, :b,"
+                    " :c, 'FULL', '{}', 'SUCCEEDED', 0, '2026-10-13 00:00:00')"
+                ),
+                {"id": run_id, "a": uuid.uuid4().hex, "b": uuid.uuid4().hex, "c": uuid.uuid4().hex},
+            )
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, _REVISION_0028)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        inspector = inspect(engine)
+        columns = {c["name"]: c for c in inspector.get_columns("runs")}
+        assert new_columns <= set(columns)
+        assert "ix_runs_job" in {i["name"] for i in inspector.get_indexes("runs")}
+        assert [columns[n]["nullable"] for n in ("job", "trigger", "scheduled_for", "missed")] == [
+            True,
+            True,
+            True,
+            False,
+        ]
+        assert {c["name"] for c in inspector.get_columns("job_schedules")} == {
+            "id",
+            "environment_id",
+            "repository_id",
+            "job",
+            "next_fire_at",
+            "paused",
+            "paused_by",
+            "paused_at",
+            "pending_start",
+            "last_fired_for",
+        }
+        assert {c["name"] for c in inspector.get_columns("job_fires")} == {
+            "id",
+            "job_schedule_id",
+            "scheduled_for",
+            "run_id",
+            "created_at",
+        }
+        with engine.connect() as connection:
+            row = connection.execute(
+                sa.text("SELECT job, trigger, scheduled_for, missed FROM runs")
+            ).one()
+        assert tuple(row) == (None, None, None, 0)
+        deploy_columns = {c["name"]: c for c in inspector.get_columns("deploy_runs")}
+        assert deploy_columns["warnings_json"]["nullable"] is True
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, _REVISION_0027)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        inspector = inspect(engine)
+        assert not new_columns & {c["name"] for c in inspector.get_columns("runs")}
+        assert "ix_runs_job" not in {i["name"] for i in inspector.get_indexes("runs")}
+        assert "warnings_json" not in {c["name"] for c in inspector.get_columns("deploy_runs")}
+        assert not {"job_schedules", "job_fires"} & set(inspector.get_table_names())
+        with engine.connect() as connection:
+            assert connection.execute(sa.text("SELECT count(*) FROM runs")).scalar_one() == 1
+    finally:
+        engine.dispose()
+
+
+_REVISION_0029 = "a4d7b0e3f6c9"
+_DELIVERY_COLUMNS = {
+    "id",
+    "run_id",
+    "environment_id",
+    "repository_id",
+    "job",
+    "event",
+    "format",
+    "secret_name",
+    "state",
+    "attempts",
+    "next_attempt_at",
+    "lease_owner",
+    "lease_expires_at",
+    "last_result",
+    "created_at",
+    "delivered_at",
+}
+
+
+def test_0029_adds_the_notification_deliveries_and_downgrades_cleanly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revision `0029`: `notification_deliveries`, unique on (run, event), indexed for the loop.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    """
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, _REVISION_0028)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        assert "notification_deliveries" not in inspect(engine).get_table_names()
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, _REVISION_0029)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        inspector = inspect(engine)
+        columns = {c["name"]: c for c in inspector.get_columns("notification_deliveries")}
+        assert set(columns) == _DELIVERY_COLUMNS
+        assert columns["run_id"]["nullable"] is True
+        assert [columns[n]["nullable"] for n in ("job", "event", "state", "attempts")] == [
+            False
+        ] * 4
+        indexes = {i["name"]: i for i in inspector.get_indexes("notification_deliveries")}
+        assert indexes["ix_notification_deliveries_state_next_attempt_at"]["column_names"] == [
+            "state",
+            "next_attempt_at",
+        ]
+        uniques = inspector.get_unique_constraints("notification_deliveries")
+        assert [u["column_names"] for u in uniques] == [["run_id", "event"]]
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, _REVISION_0028)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        assert "notification_deliveries" not in inspect(engine).get_table_names()
+    finally:
+        engine.dispose()
+
+
+_REVISION_0030 = "b5e8c1f4a7d0"
+
+
+def test_0030_adds_the_unchecked_mark_of_a_kept_table(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revision `0030`: `tables.kept_unchecked`, not null; an older note reads as a failed check.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    """
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, _REVISION_0029)
+    engine = create_engine(f"sqlite:///{db_path}")
+    table_id = uuid.uuid4().hex
+    try:
+        assert "kept_unchecked" not in {c["name"] for c in inspect(engine).get_columns("tables")}
+        with engine.begin() as connection:
+            connection.execute(sa.text("PRAGMA foreign_keys=OFF"))
+            connection.execute(
+                sa.text(
+                    "INSERT INTO tables (id, namespace_id, name, table_type, created_at,"
+                    " updated_at, kept_run_id, kept_check) VALUES (:id, :ns, 'x', 'ICEBERG',"
+                    " '2026-10-15 00:00:00', '2026-10-15 00:00:00', :run, 'x/old')"
+                ),
+                {"id": table_id, "ns": uuid.uuid4().hex, "run": uuid.uuid4().hex},
+            )
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, _REVISION_0030)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        found = {c["name"]: c for c in inspect(engine).get_columns("tables")}
+        assert found["kept_unchecked"]["nullable"] is False
+        with engine.connect() as connection:
+            row = connection.execute(
+                sa.text("SELECT kept_unchecked FROM tables WHERE id = :id"), {"id": table_id}
+            ).one()
+        assert bool(row[0]) is False  # an older note reads as a failed check
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, _REVISION_0029)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        assert "kept_unchecked" not in {c["name"] for c in inspect(engine).get_columns("tables")}
+    finally:
+        engine.dispose()
+
+
+_REVISION_0031 = "c6f9d2a5b8e1"
+
+
+def test_0031_adds_the_stack_of_earlier_marks_of_a_kept_table(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revision `0031`: `tables.kept_earlier`, not null; an existing row starts with no entries.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    """
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, _REVISION_0030)
+    engine = create_engine(f"sqlite:///{db_path}")
+    table_id = uuid.uuid4().hex
+    kept_run = uuid.uuid4().hex
+    in_flight, idle = uuid.uuid4().hex, uuid.uuid4().hex
+    try:
+        assert "kept_earlier" not in {c["name"] for c in inspect(engine).get_columns("tables")}
+        with engine.begin() as connection:
+            connection.execute(sa.text("PRAGMA foreign_keys=OFF"))
+            connection.execute(
+                sa.text(
+                    "INSERT INTO tables (id, namespace_id, name, table_type, created_at,"
+                    " updated_at, kept_run_id, kept_check) VALUES (:id, :ns, 'x', 'ICEBERG',"
+                    " '2026-10-16 00:00:00', '2026-10-16 00:00:00', :run, 'x/old')"
+                ),
+                {"id": table_id, "ns": uuid.uuid4().hex, "run": kept_run},
+            )
+            for name, identifier in (("in_flight", in_flight), ("idle", idle)):
+                connection.execute(
+                    sa.text(
+                        "INSERT INTO tables (id, namespace_id, name, table_type, created_at,"
+                        " updated_at) VALUES (:id, :ns, :name, 'ICEBERG',"
+                        " '2026-10-15 00:00:00', '2026-10-15 00:00:00')"
+                    ),
+                    {"id": identifier, "ns": uuid.uuid4().hex, "name": name},
+                )
+            connection.execute(  # a write that is stamped and not yet judged by its checks
+                sa.text(
+                    "INSERT INTO task_runs (id, run_id, asset, status, attempt, claim_count,"
+                    " max_attempts, timeout_seconds, retry_delay_seconds, upstream_json,"
+                    " conflict_retried, written_table_id) VALUES (:id, :run, 'silver.a',"
+                    " 'RUNNING', 1, 1, 1, 60, 0, '[]', 0, :written)"
+                ),
+                {"id": uuid.uuid4().hex, "run": uuid.uuid4().hex, "written": in_flight},
+            )
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, _REVISION_0031)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        found = {c["name"]: c for c in inspect(engine).get_columns("tables")}
+        assert found["kept_earlier"]["nullable"] is False
+        assert found["kept_snapshot_id"]["nullable"] is True
+        with engine.connect() as connection:
+            row = connection.execute(
+                sa.text(
+                    "SELECT kept_run_id, kept_earlier, kept_snapshot_id FROM tables WHERE id = :id"
+                ),
+                {"id": table_id},
+            ).one()
+            verdicts = dict(
+                connection.execute(
+                    sa.text("SELECT id, kept_snapshot_id FROM tables WHERE id IN (:a, :b)"),
+                    {"a": in_flight, "b": idle},
+                ).all()
+            )
+        assert row[0] == kept_run
+        assert json.loads(row[1]) == []  # an older note has no history to restore
+        assert row[2] is None  # and no verdict on any snapshot
+        # An unmarked table with a write in flight may have been judged by a clear that ran before
+        # the upgrade: its state is unknown. A table with no such write has no history at all.
+        assert verdicts == {in_flight: -1, idle: None}
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, _REVISION_0030)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        assert "kept_earlier" not in {c["name"] for c in inspect(engine).get_columns("tables")}
+    finally:
+        engine.dispose()
+
+
+_REVISION_0032 = "d7a0e3b6c9f2"
+
+
+def test_0032_adds_the_unknown_mark_of_a_kept_table(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revision `0032`: `tables.kept_unknown`, not null; an older mark reads as a known one.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    """
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, _REVISION_0031)
+    engine = create_engine(f"sqlite:///{db_path}")
+    table_id = uuid.uuid4().hex
+    try:
+        assert "kept_unknown" not in {c["name"] for c in inspect(engine).get_columns("tables")}
+        with engine.begin() as connection:
+            connection.execute(sa.text("PRAGMA foreign_keys=OFF"))
+            connection.execute(
+                sa.text(
+                    "INSERT INTO tables (id, namespace_id, name, table_type, created_at,"
+                    " updated_at, kept_run_id, kept_check) VALUES (:id, :ns, 'x', 'ICEBERG',"
+                    " '2026-10-16 00:00:00', '2026-10-16 00:00:00', :run, 'x/old')"
+                ),
+                {"id": table_id, "ns": uuid.uuid4().hex, "run": uuid.uuid4().hex},
+            )
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, _REVISION_0032)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        found = {c["name"]: c for c in inspect(engine).get_columns("tables")}
+        assert found["kept_unknown"]["nullable"] is False
+        with engine.connect() as connection:
+            row = connection.execute(
+                sa.text("SELECT kept_unknown FROM tables WHERE id = :id"), {"id": table_id}
+            ).one()
+        assert bool(row[0]) is False  # an older mark names a failed check
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, _REVISION_0031)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        assert "kept_unknown" not in {c["name"] for c in inspect(engine).get_columns("tables")}
+    finally:
+        engine.dispose()

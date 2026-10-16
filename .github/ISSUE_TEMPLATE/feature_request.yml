@@ -1,0 +1,27 @@
+name: Feature request
+description: Suggest a change or an addition.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check [Scope and philosophy](https://github.com/chrschy/lakana/blob/main/docs/site/explanation/scope.md)
+        and the [Roadmap](https://github.com/chrschy/lakana/blob/main/docs/site/explanation/roadmap.md) first:
+        they say what Lakana leaves out and what is planned.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The problem, not the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like Lakana to do?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What do you do today instead?

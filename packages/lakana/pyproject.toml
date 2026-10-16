@@ -1,0 +1,52 @@
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lakana"
+description = "Lakana SDK and command-line interface."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [{ name = "Christopher Schymura" }]
+keywords = ["lakehouse", "duckdb", "iceberg", "data-platform"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "License :: OSI Approved :: Apache Software License",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Database",
+]
+urls = { Homepage = "https://github.com/chrschy/lakana", Documentation = "https://github.com/chrschy/lakana/tree/main/docs/site", Repository = "https://github.com/chrschy/lakana", Issues = "https://github.com/chrschy/lakana/issues", Changelog = "https://github.com/chrschy/lakana/blob/main/CHANGELOG.md" }
+dynamic = ["version", "optional-dependencies"]
+dependencies = ["httpx>=0.28,<1", "pyarrow>=26.0.0", "pyyaml>=6.0.3", "rich>=13.8", "typer>=0.27,<1"]
+
+[project.scripts]
+lakana = "lakana.cli.app:main"
+
+[tool.uv.sources]
+# Workspace-local resolution for `uv sync`/`uv run` only; this has no effect
+# on `pip install "lakana[server]"` from a built wheel, which resolves
+# `lakana-server`/`lakana-worker` from PyPI like any other dependency.
+lakana-server = { workspace = true }
+lakana-worker = { workspace = true }
+
+[tool.hatch.version]
+source = "vcs"
+raw-options = { root = "../.." }
+
+[tool.hatch.metadata.hooks.custom]
+# Loads `hatch_build.py`'s `ServerExtraMetadataHook`, which sets
+# `optional-dependencies.server` to `["lakana-server==<this version>",
+# "lakana-worker==<this version>"]` -- hatchling resolves `project.version`
+# before this hook runs, so the pin always matches this exact build with no
+# hand-edited version (rule 3). See the README's "Local mode" section.
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lakana"]

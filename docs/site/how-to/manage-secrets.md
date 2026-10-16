@@ -1,0 +1,108 @@
+# Manage secrets
+
+A secret holds credentials, such as the keys of a storage backend or a repository's token. Lakana
+stores it encrypted in its database, and no route, command or page returns its value again. This
+page is for the person who runs the instance. It shows which secrets are stored in an older format
+and how to bring them up to date.
+
+## Webhook secrets
+
+A job's `notify:` names a secret that holds its webhook. The secret is a JSON object with the key
+`url`, the address of the receiver, and, for the `json` format, an optional `signing_key` that
+signs each message. The command that creates one is in
+[Get told when a job fails](get-told-when-a-job-fails.md#create-the-secret).
+
+The worker decrypts the secret only while it sends an attempt. Nothing shows the URL or the key
+afterwards: not a log, not the audit log, not the state of a delivery. To change either, set the
+secret again with `lakana secret rotate NAME --env ENV --values-stdin`. Anyone who may deploy to an
+environment can name any secret of it as a webhook, but that reveals no value: the worker only
+posts the message to it. What a message holds, how to test the webhook and how a receiver checks
+the signature are in the same guide.
+
+## See how each secret is stored
+
+List the secrets of an environment, and set one again to store it in the current format (it needs no read of the old value):
+
+<!-- not tested: needs a running instance with a secret, and NAME and ENV are placeholders -->
+```bash
+lakana secret list --env ENV
+lakana secret rotate NAME --env ENV --values-stdin < values.json
+```
+
+The listing shows, for each secret:
+
+| Column | What it says |
+|---|---|
+| `name`, `environment` | Which secret it is. |
+| `format_version` | `2` is the current format. `1` is the original one, from before the format was recorded; Lakana refuses it unless `LAKANA_SECRETS__ACCEPT_FORMAT_1` is on (see below). |
+| `key_id` | Which key provider and which key wrapped the secret's data key: `env:` and 16 characters for a master key from `LAKANA_SECRETS__MASTER_KEY`, or just `env` for a secret stored in the original format. It does not reveal the key. |
+| `created_by`, `created_at` | Who created it and when. |
+
+## Secrets stored in the old format
+
+A secret at format 2 is tied to its own row: its encrypted value and its encrypted data key cannot
+be copied onto another secret and still decrypt, even by someone who can write to the database.
+A secret at format 1 is not tied to anything. The format is a column of the row, so someone who can
+write to the database could copy an old-format secret onto any row and mark it as format 1. Lakana
+therefore **does not read a secret at format 1 by default**. After an upgrade from a release that
+stored secrets in the old format, the first deploy or query that needs such a secret fails with:
+
+<!-- output -->
+```text
+Secret 'git-token' in environment 'dev' is stored in the old format (1), which Lakana does not read by default. Set it again with `lakana secret rotate git-token --env dev --values-stdin`; that needs no read of the old value. To keep old secrets working until you have, start the server and the workers with LAKANA_SECRETS__ACCEPT_FORMAT_1=true, and remove the setting afterwards.
+```
+
+You have two ways forward, in this order:
+
+1. **Set each secret again** (`lakana secret rotate`, as in the first section). It takes the values
+   you give it, stores them at format 2, and needs no read of the old value, so it works with the
+   setting off. Do this for every secret whose `format_version` is `1`. If you can do this before
+   anything needs the secrets, you never need the setting.
+2. **Or keep the old secrets working while you do it.** Start the server and every worker with
+   `LAKANA_SECRETS__ACCEPT_FORMAT_1=true` (in the bundle, see
+   [Secrets settings](deploy-with-compose.md#secrets-settings)), set the secrets again, then
+   remove the setting and restart. While it is on, the server and each worker log a `WARNING` at
+   start-up, because the binding is weaker: any old-format ciphertext written under your master key
+   is accepted on any row, even for a secret you have already set again. The setting only
+   goes off when you remove it.
+
+A Compose bundle sets its own storage secret (`seaweedfs-s3` in `dev`) again at its next start,
+because it knows the values; every secret you created yourself is yours to set again. Lakana does
+not do that by itself: it could not tell an old secret from an
+old-format ciphertext that someone pasted onto a row, and the migration has no master key to read
+the secrets with. If a credential mattered, also rotate it at its provider (a new access key, a new
+token): that is the one step that makes a copy of the old ciphertext worthless.
+
+Lakana does not count how often a secret was set. Someone who can write to the database can still
+put back an older row of the same secret from a backup, and it decrypts. Treat database write access
+as access to the secrets that were ever stored there under the same master key.
+
+## When a secret cannot be decrypted
+
+A secret that no longer decrypts is refused with a message that names it:
+
+<!-- output -->
+```text
+Secret 'git-token' in environment 'dev' could not be decrypted. If LAKANA_SECRETS__MASTER_KEY was changed, put back the key the secret was stored under. Otherwise restore it from a backup, or set it again with `lakana secret rotate git-token --env dev --values-stdin`.
+```
+
+Check the master key first: it is the usual cause, and putting back the key the secret was stored
+under is the fix. Otherwise restore the database from a backup, or set the secret again with its
+values. Other causes are a row that was altered or restored from another database, and a row copied
+from another secret.
+
+The log of the process that failed has one `WARNING` line with the secret's id, `format_version`,
+`key_id` and `configured_key_id`. For a deploy that process is the worker (`docker compose logs
+worker`), for a query or a storage request it is the server (`docker compose logs server`). For a
+secret at format 2, a `key_id` that differs from `configured_key_id` means the master key is not the
+one the secret was stored under; equal ids mean the row was altered or moved. The message you see
+never says which.
+
+A secret written by a newer Lakana than the one that reads it is refused with a message that says
+so; upgrade Lakana, and do not set the secret again.
+
+## See also
+
+- [Upgrade to the release with artifacts](upgrade-to-artifacts.md): the migration that records the
+  format and the key, and what going back does to secrets.
+- [Deploying with Compose](deploy-with-compose.md): the master key and backups.

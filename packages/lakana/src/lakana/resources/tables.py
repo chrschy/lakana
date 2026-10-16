@@ -1,0 +1,878 @@
+"""The `tables` resource: `Client.tables`.
+
+A table is addressed as a dot-joined `"namespace.table"` string, such as
+`"bronze.sales"` or `"gold.finance.sales"` (the namespace itself may be
+dotted; only the final component is the table name) — matching how the
+platform API splits a table's namespace path from its name across two
+distinct path parameters.
+"""
+
+from __future__ import annotations
+
+import io
+from collections.abc import Mapping, Sequence
+from datetime import datetime
+from typing import Any, Protocol
+
+import httpx
+import pyarrow as pa
+import pyarrow.ipc
+
+from lakana._arrow import (
+    cast_timestamp_ns_columns_to_us,
+    normalize_view_columns,
+    schema_to_columns,
+)
+from lakana._http import HttpTransport
+from lakana._models import (
+    AppendResult,
+    Column,
+    ExternalTable,
+    Lineage,
+    LineageEdge,
+    LineageNode,
+    Table,
+    TableReference,
+    WriteResult,
+)
+from lakana._routes import ROUTES
+from lakana.errors import Conflict, ValidationError
+from lakana.resources.queries import QueryRun
+
+_APPEND_CONTENT_TYPE = "application/vnd.apache.arrow.stream"
+_APPEND_TIMEOUT_SECONDS = 300.0
+"""Per-request timeout override for `Tables.append`.
+
+Separate from `Client`'s general `timeout` (default 30s): an append body can
+be large enough that 30s is not a reasonable bound on its own. A timeout
+here is ambiguous, not a clean failure — the server may have already
+committed the append by the time the client gives up waiting for the
+response — so a caller that retries blindly on a timeout can duplicate
+rows; only a `Conflict` (409) is safe to retry automatically, which is what
+`append` already does below."""
+
+_MAX_APPEND_BATCH_ROWS = 65_536
+"""Largest batch `Tables.append` writes per Arrow IPC message. Bounding rows-per-batch bounds how
+many batches a normal
+SDK upload produces, keeping it far below the server's
+`Settings.append.max_arrays` cap without a caller needing to think about
+batching at all."""
+
+
+def _add_source_versions(
+    params: dict[str, object], source_versions: Mapping[str, int] | None
+) -> None:
+    """Add the `source_version` parameters of an Arrow write, sorted by name.
+
+    Parameters
+    ----------
+    params
+        The query parameters, extended in place.
+    source_versions
+        Artifact version by dotted name; nothing is added when empty or `None`.
+    """
+    if source_versions:
+        params["source_version"] = [
+            f"{version}:{name}" for name, version in sorted(source_versions.items())
+        ]
+
+
+def _split_namespace_table(qualified_name: str) -> tuple[str, str]:
+    """Split a `"namespace.table"` string into its namespace and table name.
+
+    Parameters
+    ----------
+    qualified_name
+        A dot-joined `"namespace.table"` string. Split on the *last* `.`,
+        so a dotted namespace (`"gold.finance.sales"` -> namespace
+        `"gold.finance"`, table `"sales"`) is handled correctly.
+
+    Returns
+    -------
+    tuple of str
+        `(namespace, name)`.
+
+    Raises
+    ------
+    ValidationError
+        If `qualified_name` has no `.` separator at all.
+    """
+    namespace, separator, name = qualified_name.rpartition(".")
+    if not separator:
+        raise ValidationError(f"Expected a dotted 'namespace.table' name, got {qualified_name!r}.")
+    return namespace, name
+
+
+def _table_from_json(data: dict[str, Any]) -> Table:
+    """Build a `Table` from the platform API's JSON response body.
+
+    Parameters
+    ----------
+    data
+        The decoded `TableOut` JSON body. An older server sends no
+        `schema`; `columns` is then empty. An older server
+        sends no `kind`.
+
+    Returns
+    -------
+    Table
+        The parsed table.
+    """
+    return Table(
+        name=data["name"],
+        namespace=data["namespace"],
+        uuid=data["uuid"],
+        metadata_location=data.get("metadata_location"),
+        columns=[
+            Column(name=c["name"], type=c["type"], nullable=c["nullable"])
+            for c in data.get("schema", [])
+        ],
+        kind=data.get("kind", "TABLE"),
+        sql=data.get("sql"),
+        references=[
+            TableReference(id=r["id"], name=r["name"]) for r in data.get("references") or []
+        ],
+        hidden_references=data.get("hidden_references", 0),
+        snapshot_id=data.get("snapshot_id"),
+        state=data.get("state", "published"),
+        state_message=data.get("state_message"),
+    )
+
+
+def _external_table_from_json(data: dict[str, Any]) -> ExternalTable:
+    """Build an `ExternalTable` from the platform API's JSON response body.
+
+    Parameters
+    ----------
+    data
+        The decoded `ExternalTableOut` JSON body.
+
+    Returns
+    -------
+    ExternalTable
+        The parsed external table.
+    """
+    return ExternalTable(
+        name=data["name"],
+        namespace=data["namespace"],
+        location_pattern=data["location_pattern"],
+        format=data["format"],
+        schema=data["schema"],
+    )
+
+
+def _append_result_from_json(data: dict[str, Any]) -> AppendResult:
+    """Build an `AppendResult` from the platform API's JSON response body.
+
+    Parameters
+    ----------
+    data
+        The decoded `AppendOut` JSON body.
+
+    Returns
+    -------
+    AppendResult
+        The parsed append result.
+    """
+    return AppendResult(rows=data["rows"], files=data["files"], snapshot_id=data["snapshot_id"])
+
+
+def _write_result_from_json(data: dict[str, Any]) -> WriteResult:
+    """Build a `WriteResult` from the platform API's JSON response body.
+
+    Parameters
+    ----------
+    data
+        The decoded `ReplaceOut` JSON body.
+
+    Returns
+    -------
+    WriteResult
+        The parsed result.
+    """
+    return WriteResult(
+        rows=data["rows"],
+        files=data["files"],
+        snapshot_id=data["snapshot_id"],
+        schema_diff=data.get("schema_diff"),
+    )
+
+
+_TableList = list[Table]
+"""Alias for `list[Table]`, resolved at module scope.
+
+`Tables` defines a method named `list`, which shadows the builtin `list`
+for any bare `list[...]` annotation written *inside* the class body — this
+alias (and `_ColumnSchema` below) are resolved before that happens, and
+referenced by name instead.
+"""
+
+_ColumnSchema = list[dict[str, Any]]
+"""Alias for a JSON-shaped column list, for the same reason as `_TableList`."""
+
+
+def _lineage_from_json(data: dict[str, Any]) -> Lineage:
+    """Build a `Lineage` from the platform API's JSON response body.
+
+    Parameters
+    ----------
+    data
+        The decoded `LineageOut` JSON body. `truncated` may be missing from
+        an older server's body and then reads as `False`.
+
+    Returns
+    -------
+    Lineage
+        The parsed graph.
+    """
+    return Lineage(
+        root_id=data["root_id"],
+        direction=data["direction"],
+        depth=data["depth"],
+        nodes=[
+            LineageNode(id=n["id"], name=n["name"], kind=n["kind"], dropped=n["dropped"])
+            for n in data["nodes"]
+        ],
+        edges=[
+            LineageEdge(
+                source_id=e["source_id"],
+                target_id=e["target_id"],
+                source_snapshot_id=e["source_snapshot_id"],
+                target_snapshot_id=e["target_snapshot_id"],
+                query_run_id=e["query_run_id"],
+                created_at=datetime.fromisoformat(e["created_at"]),
+            )
+            for e in data["edges"]
+        ],
+        hidden_nodes=data["hidden_nodes"],
+        truncated=data.get("truncated", False),
+    )
+
+
+class _ArrowSchemaLike(Protocol):
+    """Anything exposing the Arrow PyCapsule schema interface, e.g. a polars `Schema`."""
+
+    def __arrow_c_schema__(self) -> object:
+        """Export the schema as an Arrow C schema capsule.
+
+        Returns
+        -------
+        object
+            The PyCapsule.
+        """
+        ...
+
+
+def _coerce_to_table(data: pa.Table | pa.RecordBatch | object) -> pa.Table:
+    """Coerce append data to a `pyarrow.Table`.
+
+    Parameters
+    ----------
+    data
+        A `pa.Table`, a `pa.RecordBatch`, or anything `pyarrow.table()`
+        accepts (e.g. a dict of columns).
+
+    Returns
+    -------
+    pa.Table
+        The data as a table.
+    """
+    if isinstance(data, pa.Table):
+        return data
+    if isinstance(data, pa.RecordBatch):
+        return pa.Table.from_batches([data])
+    return pa.table(data)
+
+
+def _serialize_ipc_stream(table: pa.Table) -> bytes:
+    """Serialize a table to an uncompressed Arrow IPC stream, batched at a bounded size.
+
+    Writes each of `table.to_batches(max_chunksize=_MAX_APPEND_BATCH_ROWS)`
+    as its own IPC message, rather than `write_table`'s default chunking,
+    so a normal SDK upload never produces more record batches than
+    necessary — the caller (`Tables.append`)
+    calls `table.combine_chunks()` first, so `to_batches` here starts from
+    as few input chunks as possible and splits only where a batch would
+    otherwise exceed the row bound.
+
+    Parameters
+    ----------
+    table
+        The table to serialize.
+
+    Returns
+    -------
+    bytes
+        The IPC stream bytes, as the platform API's append route expects.
+    """
+    sink = io.BytesIO()
+    with pyarrow.ipc.new_stream(sink, table.schema) as writer:
+        for batch in table.to_batches(max_chunksize=_MAX_APPEND_BATCH_ROWS):
+            writer.write_batch(batch)
+    return sink.getvalue()
+
+
+_POLARS_SCHEMA_TOO_OLD = (
+    "A polars Schema as the table's schema needs Polars 1.37 or newer; the installed Polars "
+    "cannot hand its schema to Arrow. Upgrade Polars, or pass `pyarrow.schema(...)` or a list of "
+    "columns instead."
+)
+
+
+class Tables:
+    """The `tables` resource of the platform API.
+
+    Parameters
+    ----------
+    transport
+        The HTTP transport to send requests through.
+    """
+
+    def __init__(self, transport: HttpTransport) -> None:
+        self._transport = transport
+
+    def list(self, environment: str, namespace: str) -> _TableList:
+        """List the tables in a namespace.
+
+        Parameters
+        ----------
+        environment
+            The environment name.
+        namespace
+            Dot-joined namespace path.
+
+        Returns
+        -------
+        list of Table
+            Every table in the namespace.
+
+        Raises
+        ------
+        lakana.errors.NotFound
+            If the namespace does not exist.
+        """
+        response = self._transport.request(
+            ROUTES["tables.list"], path_params={"env": environment, "path": namespace}
+        )
+        return [_table_from_json(item) for item in response.json()]
+
+    def get(self, environment: str, qualified_name: str) -> Table:
+        """Fetch a table by its `"namespace.table"` name.
+
+        Parameters
+        ----------
+        environment
+            The environment name.
+        qualified_name
+            Dot-joined `"namespace.table"` name, such as `"bronze.sales"`.
+
+        Returns
+        -------
+        Table
+            The table.
+
+        Raises
+        ------
+        lakana.errors.NotFound
+            If no such table exists.
+        """
+        namespace, name = _split_namespace_table(qualified_name)
+        response = self._transport.request(
+            ROUTES["tables.get"], path_params={"env": environment, "path": namespace, "name": name}
+        )
+        return _table_from_json(response.json())
+
+    def delete(
+        self, environment: str, qualified_name: str, *, break_glass_reason: str | None = None
+    ) -> None:
+        """Drop a table, leaving its files in place.
+
+        Parameters
+        ----------
+        environment
+            The environment name.
+        qualified_name
+            Dot-joined `"namespace.table"` name.
+        break_glass_reason
+            Write to a protected environment outside a run: 10-500 characters, needs
+            `MANAGE_ENVIRONMENT`, audited. The next run of the deployed code may overwrite
+            the fix.
+
+        Raises
+        ------
+        lakana.errors.NotFound
+            If no such table exists.
+        """
+        namespace, name = _split_namespace_table(qualified_name)
+        self._transport.request(
+            ROUTES["tables.delete"],
+            path_params={"env": environment, "path": namespace, "name": name},
+            params={"break_glass_reason": break_glass_reason}
+            if break_glass_reason is not None
+            else None,
+        )
+
+    def create(
+        self,
+        environment: str,
+        qualified_name: str,
+        schema: pa.Schema | _ArrowSchemaLike | _ColumnSchema,
+        *,
+        break_glass_reason: str | None = None,
+    ) -> Table:
+        """Create a managed (Iceberg) table from a schema.
+
+        Parameters
+        ----------
+        environment
+            The environment name.
+        qualified_name
+            Dot-joined `"namespace.table"` name.
+        schema
+            The table's columns: a `pyarrow.Schema`, anything exposing the
+            Arrow C schema interface such as a polars `Schema` (both
+            converted via `lakana._arrow.schema_to_columns`), or an
+            already-JSON-shaped list of `{"name", "type", "nullable"}` dicts. A polars
+            `Schema` needs Polars 1.37 or newer; with an older Polars pass
+            `pyarrow.schema(...)` or a list of columns instead.
+        break_glass_reason
+            Write to a protected environment outside a run: 10-500 characters, needs
+            `MANAGE_ENVIRONMENT`, audited. The next run of the deployed code may overwrite
+            the fix.
+
+        Returns
+        -------
+        Table
+            The created table.
+
+        Raises
+        ------
+        lakana.errors.NotFound
+            If the namespace does not exist.
+        lakana.errors.Conflict
+            If a table of this name already exists.
+        lakana.errors.ValidationError
+            If `schema` names a column type the SDK or server cannot
+            represent, or is a polars `Schema` and the installed Polars is older than 1.37
+            (it cannot export its schema to Arrow).
+        TypeError
+            If `schema` is neither a list nor anything `pyarrow.schema` accepts (and is not a
+            polars `Schema`).
+        """
+        namespace, name = _split_namespace_table(qualified_name)
+        if isinstance(schema, list):
+            columns = schema
+        else:
+            try:
+                arrow_schema = pa.schema(schema)
+            except TypeError as exc:
+                if type(schema).__module__.split(".")[0] != "polars":
+                    raise
+                raise ValidationError(_POLARS_SCHEMA_TOO_OLD) from exc
+            columns = schema_to_columns(arrow_schema)
+        body: dict[str, object] = {"name": name, "schema": columns}
+        if break_glass_reason is not None:
+            body["break_glass_reason"] = break_glass_reason
+        response = self._transport.request(
+            ROUTES["tables.create"], path_params={"env": environment, "path": namespace}, json=body
+        )
+        return _table_from_json(response.json())
+
+    def create_external(
+        self,
+        environment: str,
+        qualified_name: str,
+        location_pattern: str,
+        format: str,
+        *,
+        break_glass_reason: str | None = None,
+    ) -> ExternalTable:
+        """Register a raw-zone table backed by files already on storage.
+
+        Parameters
+        ----------
+        environment
+            The environment name.
+        qualified_name
+            Dot-joined `"namespace.table"` name.
+        location_pattern
+            A pattern shaped `"raw/<dir...>/<basename-glob>"`.
+        format
+            `"parquet"`, `"csv"`, or `"json"`.
+        break_glass_reason
+            Write to a protected environment outside a run: 10-500 characters, needs
+            `MANAGE_ENVIRONMENT`, audited. The next run of the deployed code may overwrite
+            the fix.
+
+        Returns
+        -------
+        ExternalTable
+            The registered table and its inferred schema.
+
+        Raises
+        ------
+        lakana.errors.NotFound
+            If the namespace does not exist.
+        lakana.errors.ValidationError
+            If `location_pattern` or `format` is invalid.
+        """
+        namespace, name = _split_namespace_table(qualified_name)
+        body: dict[str, object] = {
+            "name": name,
+            "location_pattern": location_pattern,
+            "format": format,
+        }
+        if break_glass_reason is not None:
+            body["break_glass_reason"] = break_glass_reason
+        response = self._transport.request(
+            ROUTES["tables.create_external"],
+            path_params={"env": environment, "path": namespace},
+            json=body,
+        )
+        return _external_table_from_json(response.json())
+
+    def append(
+        self,
+        environment: str,
+        qualified_name: str,
+        data: pa.Table | pa.RecordBatch | object,
+        *,
+        sources: Sequence[str] | None = None,
+        source_versions: Mapping[str, int] | None = None,
+        break_glass_reason: str | None = None,
+        expected_snapshot_id: int | str | None = None,
+    ) -> AppendResult:
+        """Append rows to a managed table.
+
+        Serialises `data` as an uncompressed Arrow IPC stream and retries
+        the request exactly once if the server reports a `Conflict` (409) —
+        another writer committed to the table first, and a retry against
+        the table's now-current state is a reasonable default for a client
+        that just wants its rows written.
+
+        Sent with its own `_APPEND_TIMEOUT_SECONDS` (300s) timeout, longer
+        than `Client`'s general default, since an append body can be large
+        enough that the general default is not a reasonable bound. **A timeout here is ambiguous,
+        not a clean
+        failure**: the server may have already committed the append by the
+        time the client gives up waiting for a response, so a caller that
+        blindly retries a timed-out append can duplicate rows — unlike the
+        `Conflict` retry below, which is safe precisely because a conflict
+        response proves nothing was committed by *this* request.
+
+        Parameters
+        ----------
+        environment
+            The environment name.
+        qualified_name
+            Dot-joined `"namespace.table"` name.
+        data
+            The rows to append: a `pa.Table`, a `pa.RecordBatch`, or
+            anything `pyarrow.table()` accepts.
+        sources
+            Dotted names of the tables `data` was derived from, recorded as
+            lineage. Each must exist and be readable by the caller.
+        source_versions
+            The version of each source that is an artifact, by dotted name, when the caller
+            read a specific one; the lineage records it instead of the current version.
+        break_glass_reason
+            Write to a protected environment outside a run: 10-500 characters, needs
+            `MANAGE_ENVIRONMENT`, audited. The next run of the deployed code may overwrite
+            the fix.
+        expected_snapshot_id
+            The table's current snapshot as you read it (`Table.snapshot_id`),
+            or ``"none"`` for "no snapshot yet". The write commits only while
+            that still holds; otherwise `Conflict` is raised and nothing is
+            retried.
+
+        Returns
+        -------
+        AppendResult
+            How many rows and files were written, and the committed
+            snapshot's id.
+
+        Raises
+        ------
+        lakana.errors.NotFound
+            If the table does not exist.
+        lakana.errors.PermissionDenied
+            If the caller may not write to this table.
+        lakana.errors.Conflict
+            If a second attempt, after one retry, still conflicts; or at once
+            when `expected_snapshot_id` no longer matches.
+        lakana.errors.ValidationError
+            If the data's schema does not match the table's; an unsupported
+            Arrow type is used; or a nanosecond-precision timestamp column
+            would be truncated by the platform API's microsecond precision.
+        """
+        params: dict[str, object] = {"source": list(sources)} if sources else {}
+        _add_source_versions(params, source_versions)
+        if break_glass_reason is not None:
+            params["break_glass_reason"] = break_glass_reason
+        if expected_snapshot_id is not None:
+            params["expected_snapshot_id"] = str(expected_snapshot_id)
+        response = self._send_arrow(
+            "tables.append",
+            environment,
+            qualified_name,
+            data,
+            params,
+            retry_conflict=expected_snapshot_id is None,
+        )
+        return _append_result_from_json(response.json())
+
+    def replace(
+        self,
+        environment: str,
+        qualified_name: str,
+        data: pa.Table | pa.RecordBatch | object,
+        *,
+        evolve_schema: bool = False,
+        sources: Sequence[str] | None = None,
+        source_versions: Mapping[str, int] | None = None,
+        break_glass_reason: str | None = None,
+        expected_snapshot_id: int | str | None = None,
+    ) -> WriteResult:
+        """Replace every row of a managed table.
+
+        One snapshot: readers see the old rows or the new ones, never a mix,
+        and time travel keeps the old data. Serialised and retried exactly
+        like `append`; a timeout is just as ambiguous here.
+
+        Parameters
+        ----------
+        environment
+            The environment name.
+        qualified_name
+            Dot-joined `"namespace.table"` name.
+        data
+            The new rows: a `pa.Table`, a `pa.RecordBatch`, or anything
+            `pyarrow.table()` accepts.
+        evolve_schema
+            Let the table adopt `data`'s schema instead of refusing a
+            mismatch.
+        sources
+            Dotted names of the tables `data` was derived from.
+        source_versions
+            The version of each source that is an artifact, by dotted name, when the caller
+            read a specific one.
+        break_glass_reason
+            Write to a protected environment outside a run: 10-500 characters, needs
+            `MANAGE_ENVIRONMENT`, audited. The next run of the deployed code may overwrite
+            the fix.
+        expected_snapshot_id
+            The table's current snapshot as you read it (`Table.snapshot_id`),
+            or ``"none"`` for "no snapshot yet". The write commits only while
+            that still holds; otherwise `Conflict` is raised and nothing is
+            retried. On `replace`, ``"none"`` also creates a missing
+            table from `data`.
+
+        Returns
+        -------
+        WriteResult
+            What was written, and how the schema changed.
+
+        Raises
+        ------
+        lakana.errors.NotFound
+            If the table or a source does not exist.
+        lakana.errors.PermissionDenied
+            If the caller may not write the table or read a source.
+        lakana.errors.Conflict
+            If a second attempt, after one retry, still conflicts; or at once
+            when `expected_snapshot_id` no longer matches.
+        lakana.errors.ValidationError
+            If `data` doesn't match the table and `evolve_schema` is off.
+        """
+        params: dict[str, object] = {"evolve_schema": "true" if evolve_schema else "false"}
+        if sources:
+            params["source"] = list(sources)
+        _add_source_versions(params, source_versions)
+        if break_glass_reason is not None:
+            params["break_glass_reason"] = break_glass_reason
+        if expected_snapshot_id is not None:
+            params["expected_snapshot_id"] = str(expected_snapshot_id)
+        response = self._send_arrow(
+            "tables.replace",
+            environment,
+            qualified_name,
+            data,
+            params,
+            retry_conflict=expected_snapshot_id is None,
+        )
+        return _write_result_from_json(response.json())
+
+    def lineage(
+        self,
+        environment: str,
+        qualified_name: str,
+        *,
+        direction: str = "upstream",
+        depth: int = 3,
+    ) -> Lineage:
+        """Walk a table's persisted lineage.
+
+        Nodes the caller can't read are left out and counted in
+        `hidden_nodes`; the walk never passes through one.
+
+        Parameters
+        ----------
+        environment
+            The environment name.
+        qualified_name
+            Dot-joined `"namespace.table"` name.
+        direction
+            `"upstream"` (what fed it) or `"downstream"` (what it fed).
+        depth
+            Hops to walk, 1 to 10.
+
+        Returns
+        -------
+        Lineage
+            The graph.
+
+        Raises
+        ------
+        lakana.errors.NotFound
+            If the table does not exist.
+        lakana.errors.PermissionDenied
+            If the caller can't read the table.
+        lakana.errors.ValidationError
+            If `direction` or `depth` is out of range.
+        """
+        namespace, name = _split_namespace_table(qualified_name)
+        response = self._transport.request(
+            ROUTES["tables.lineage"],
+            path_params={"env": environment, "path": namespace, "name": name},
+            params={"direction": direction, "depth": depth},
+        )
+        return _lineage_from_json(response.json())
+
+    def maintain(
+        self,
+        environment: str,
+        qualified_name: str,
+        *,
+        keep_days: int = 7,
+        keep_last: int = 5,
+        dry_run: bool = False,
+        older_than_hours: int = 72,
+    ) -> QueryRun:
+        """Queue maintenance for a table: expire old snapshots, delete orphans.
+
+        A worker runs it; poll the returned handle, whose finished status
+        carries `maintenance["report"]`. The report's `conflict` is `True`
+        when the table changed during maintenance and nothing was applied
+        (retry); its `note` says in words why part of the run was skipped;
+        its `tags_removed` lists the tags of failed checks (older than seven
+        days) that were removed.
+
+        Parameters
+        ----------
+        environment
+            The environment name.
+        qualified_name
+            Dot-joined `"namespace.table"` name.
+        keep_days
+            Snapshots younger than this many days are kept.
+        keep_last
+            The most recent this many snapshots are kept.
+        dry_run
+            Report what would happen without changing anything.
+        older_than_hours
+            Unreferenced files younger than this many hours are never deleted
+            (default 72, at least 1, at most 87600).
+
+        Returns
+        -------
+        QueryRun
+            A handle to the maintenance run.
+
+        Raises
+        ------
+        lakana.errors.NotFound
+            If the table does not exist.
+        lakana.errors.PermissionDenied
+            Without MAINTAIN_TABLE on the table or SUBMIT_QUERY on the
+            environment.
+        lakana.errors.ValidationError
+            If `keep_days` is negative, `keep_last` is below 1, or
+            `older_than_hours` is outside 1 to 87600.
+        """
+        namespace, name = _split_namespace_table(qualified_name)
+        response = self._transport.request(
+            ROUTES["tables.maintain"],
+            path_params={"env": environment, "path": namespace, "name": name},
+            json={
+                "keep_days": keep_days,
+                "keep_last": keep_last,
+                "dry_run": dry_run,
+                "older_than_hours": older_than_hours,
+            },
+        )
+        return QueryRun(self._transport, id=response.json()["query_id"], environment=environment)
+
+    def _send_arrow(
+        self,
+        route: str,
+        environment: str,
+        qualified_name: str,
+        data: pa.Table | pa.RecordBatch | object,
+        params: dict[str, object],
+        retry_conflict: bool = True,
+    ) -> httpx.Response:
+        """Serialise `data` as an Arrow IPC stream and send it, retrying once on a conflict.
+
+        Parameters
+        ----------
+        route
+            `"tables.append"` or `"tables.replace"`.
+        environment
+            The environment name.
+        qualified_name
+            Dot-joined `"namespace.table"` name.
+        data
+            The rows.
+        params
+            Query parameters.
+        retry_conflict
+            Retry once on a `Conflict`; off when the caller gave a
+            precondition, because the conflict is then the answer.
+
+        Returns
+        -------
+        httpx.Response
+            The successful response.
+
+        Raises
+        ------
+        Conflict
+            If the write conflicts twice, or once when `retry_conflict` is off.
+        """
+        namespace, name = _split_namespace_table(qualified_name)
+        table = normalize_view_columns(
+            cast_timestamp_ns_columns_to_us(_coerce_to_table(data))
+        ).combine_chunks()
+        body = _serialize_ipc_stream(table)
+        path_params = {"env": environment, "path": namespace, "name": name}
+        headers = {"Content-Type": _APPEND_CONTENT_TYPE}
+        try:
+            return self._transport.request(
+                ROUTES[route],
+                path_params=path_params,
+                params=params,
+                content=body,
+                headers=headers,
+                timeout=_APPEND_TIMEOUT_SECONDS,
+            )
+        except Conflict:
+            if not retry_conflict:
+                raise
+            return self._transport.request(
+                ROUTES[route],
+                path_params=path_params,
+                params=params,
+                content=body,
+                headers=headers,
+                timeout=_APPEND_TIMEOUT_SECONDS,
+            )

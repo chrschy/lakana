@@ -1,0 +1,226 @@
+"""Tests for the tokens resource of the platform API."""
+
+import uuid
+from datetime import UTC, datetime
+
+from fastapi.testclient import TestClient
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from lakana_core.auth import Action, AllowAllAuthorization, PrincipalRef, SecurableKind
+from lakana_core.db import create_engine
+from lakana_core.grants.roles import Role
+from lakana_core.grants.service import GrantService
+from lakana_core.models import Grant, Principal
+from lakana_server.settings import Settings
+from tests.conftest import AUTH_HEADER
+
+
+def _admin_ref(session: Session) -> PrincipalRef:
+    """Build a `PrincipalRef` for the bootstrap admin, for a direct service call.
+
+    Parameters
+    ----------
+    session
+        Database session to look up the real admin row on.
+
+    Returns
+    -------
+    PrincipalRef
+        A reference naming the bootstrap admin, backed by its real row's
+        id. `Grant.granted_by` is a non-nullable foreign key onto
+        `principals.id` (unlike the identity checks `AllowAllAuthorization`
+        skips), so the id must match a real, already-persisted principal —
+        the bootstrap admin, created at app startup, is exactly that row.
+    """
+    admin_row = session.execute(select(Principal).where(Principal.name == "admin")).scalar_one()
+    return PrincipalRef(id=admin_row.id, name=admin_row.name, type=admin_row.type)
+
+
+def _grant_admin(settings: Settings, principal_name: str) -> None:
+    """Grant `principal_name` `admin` at instance scope, via a direct service call.
+
+    Bypasses the grants HTTP API (not built until a later task) and goes
+    straight to `GrantService` against the same database the running
+    `client` fixture's app uses, mirroring the direct-service-call pattern
+    `test_task_tokens.py` already uses for out-of-router operations.
+
+    Parameters
+    ----------
+    settings
+        The same settings the `client` fixture's app was built from.
+    principal_name
+        The principal to grant `admin` to.
+    """
+    engine = create_engine(settings.database)
+    with Session(engine) as session:
+        principal = session.execute(
+            select(Principal).where(Principal.name == principal_name)
+        ).scalar_one()
+        GrantService(session, AllowAllAuthorization()).grant(
+            _admin_ref(session),
+            principal=principal.name,
+            role=Role.ADMIN,
+            kind=SecurableKind.INSTANCE,
+        )
+    engine.dispose()
+
+
+def test_issue_list_and_revoke_a_token(client: TestClient) -> None:
+    """A token can be issued, appears in the list without its secret, then revoked."""
+    client.post(
+        "/api/v1/principals",
+        headers=AUTH_HEADER,
+        json={"name": "ci-bot", "type": "SERVICE_ACCOUNT"},
+    )
+    issued = client.post(
+        "/api/v1/principals/ci-bot/tokens", headers=AUTH_HEADER, json={"name": "ci"}
+    )
+    assert issued.status_code == 201, issued.text
+    body = issued.json()
+    assert body["token"].startswith("lakana_pat_")
+    key_id = body["key_id"]
+
+    listed = client.get("/api/v1/principals/ci-bot/tokens", headers=AUTH_HEADER)
+    assert listed.status_code == 200
+    assert listed.json() == [{"key_id": key_id, "name": "ci", "last_used_at": None}]
+
+    revoked = client.delete(f"/api/v1/principals/ci-bot/tokens/{key_id}", headers=AUTH_HEADER)
+    assert revoked.status_code == 204
+
+
+def test_issued_token_authenticates(client: TestClient, settings: Settings) -> None:
+    """The token issue returns is a real, verifiable credential for its principal."""
+    client.post(
+        "/api/v1/principals",
+        headers=AUTH_HEADER,
+        json={"name": "ci-bot", "type": "SERVICE_ACCOUNT"},
+    )
+    _grant_admin(settings, "ci-bot")
+    issued = client.post(
+        "/api/v1/principals/ci-bot/tokens", headers=AUTH_HEADER, json={"name": "ci"}
+    )
+    token = issued.json()["token"]
+
+    response = client.get("/api/v1/principals", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200
+
+
+def test_listing_a_used_token_succeeds_with_a_populated_last_used_at(
+    client: TestClient, settings: Settings
+) -> None:
+    """Listing a PAT that has actually authenticated a request must not 500.
+
+    `TokenOut.last_used_at` was typed `str | None`, but the underlying ORM
+    column is a real `datetime` — Pydantic v2 does not coerce `datetime` to
+    `str` under `from_attributes=True`, so `model_validate` raised for any
+    row with a non-`None` `last_used_at`. This is every PAT that has ever
+    successfully authenticated, including the bootstrap admin's own,
+    exercised on every other request in this suite via `AUTH_HEADER`.
+    """
+    client.post(
+        "/api/v1/principals",
+        headers=AUTH_HEADER,
+        json={"name": "ci-bot", "type": "SERVICE_ACCOUNT"},
+    )
+    _grant_admin(settings, "ci-bot")
+    issued = client.post(
+        "/api/v1/principals/ci-bot/tokens", headers=AUTH_HEADER, json={"name": "ci"}
+    )
+    token = issued.json()["token"]
+
+    used = client.get("/api/v1/principals", headers={"Authorization": f"Bearer {token}"})
+    assert used.status_code == 200
+
+    listed = client.get("/api/v1/principals/ci-bot/tokens", headers=AUTH_HEADER)
+    assert listed.status_code == 200, listed.text
+    [pat] = listed.json()
+    assert pat["last_used_at"] is not None
+
+
+def test_a_deactivated_principals_pat_is_rejected(client: TestClient, settings: Settings) -> None:
+    """Deactivating a principal immediately revokes its PAT's ability to authenticate.
+
+    This behaviour already has unit coverage at the service level
+    (`PatService.verify` against a deactivated principal); this is the
+    missing HTTP-level proof of the same headline security property,
+    through the real `DELETE /principals/{name}` endpoint.
+    """
+    client.post(
+        "/api/v1/principals",
+        headers=AUTH_HEADER,
+        json={"name": "ci-bot", "type": "SERVICE_ACCOUNT"},
+    )
+    _grant_admin(settings, "ci-bot")
+    issued = client.post(
+        "/api/v1/principals/ci-bot/tokens", headers=AUTH_HEADER, json={"name": "ci"}
+    )
+    token = issued.json()["token"]
+
+    authenticated = client.get("/api/v1/principals", headers={"Authorization": f"Bearer {token}"})
+    assert authenticated.status_code == 200
+
+    deactivated = client.delete("/api/v1/principals/ci-bot", headers=AUTH_HEADER)
+    assert deactivated.status_code == 204
+
+    rejected = client.get("/api/v1/principals", headers={"Authorization": f"Bearer {token}"})
+    assert rejected.status_code == 401
+
+
+def test_revoke_404s_for_an_unknown_key_id(client: TestClient) -> None:
+    """Revoking a key_id that was never issued is a 404."""
+    client.post(
+        "/api/v1/principals",
+        headers=AUTH_HEADER,
+        json={"name": "ci-bot", "type": "SERVICE_ACCOUNT"},
+    )
+    response = client.delete("/api/v1/principals/ci-bot/tokens/nonexistent", headers=AUTH_HEADER)
+    assert response.status_code == 404
+
+
+def _holder_of(client: TestClient, action: Action) -> dict[str, str]:
+    """Create the principal `bob` with a token and one single-action grant at instance scope.
+
+    Parameters
+    ----------
+    client
+        The test client of the app; its engine receives the grant row.
+    action
+        The single action to grant at instance scope.
+
+    Returns
+    -------
+    dict[str, str]
+        The `Authorization` header carrying bob's token.
+    """
+    client.post(
+        "/api/v1/principals", headers=AUTH_HEADER, json={"name": "bob", "type": "SERVICE_ACCOUNT"}
+    )
+    issued = client.post("/api/v1/principals/bob/tokens", headers=AUTH_HEADER, json={"name": "t"})
+    with Session(client.app.state.engine) as session:
+        bob = session.execute(select(Principal).where(Principal.name == "bob")).scalar_one()
+        session.add(
+            Grant(
+                id=uuid.uuid4(),
+                principal_id=bob.id,
+                action=action,
+                kind=SecurableKind.INSTANCE,
+                granted_by=bob.id,
+                granted_at=datetime.now(UTC),
+            )
+        )
+        session.commit()
+    return {"Authorization": f"Bearer {issued.json()['token']}"}
+
+
+def test_manage_token_as_a_single_action_is_a_403_on_every_route(client: TestClient) -> None:
+    header = _holder_of(client, Action.MANAGE_TOKEN)
+    answers = [
+        client.post("/api/v1/principals/bob/tokens", headers=header, json={"name": "mine"}),
+        client.get("/api/v1/principals/bob/tokens", headers=header),
+        client.delete("/api/v1/principals/bob/tokens/nokey", headers=header),
+    ]
+    for answer in answers:
+        assert answer.status_code == 403, (answer.request.method, str(answer.request.url))
+        assert "MANAGE_TOKEN needs the ADMIN role on the instance" in answer.text
+    assert client.get("/api/v1/principals/bob/tokens", headers=AUTH_HEADER).status_code == 200

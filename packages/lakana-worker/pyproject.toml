@@ -1,0 +1,58 @@
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lakana-worker"
+description = "Lakana's DuckDB query executor and dequeue loop."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [{ name = "Christopher Schymura" }]
+keywords = ["lakehouse", "duckdb", "iceberg", "data-platform"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "License :: OSI Approved :: Apache Software License",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Database",
+]
+urls = { Homepage = "https://github.com/chrschy/lakana", Documentation = "https://github.com/chrschy/lakana/tree/main/docs/site", Repository = "https://github.com/chrschy/lakana", Issues = "https://github.com/chrschy/lakana/issues", Changelog = "https://github.com/chrschy/lakana/blob/main/CHANGELOG.md" }
+dynamic = ["version", "dependencies"]
+
+[project.scripts]
+lakana-worker = "lakana_worker.__main__:main"
+
+[tool.uv.sources]
+lakana-core = { workspace = true }
+
+[tool.hatch.version]
+source = "vcs"
+raw-options = { root = "../.." }
+
+[tool.hatch.metadata.hooks.custom]
+# Loads `hatch_build.py`'s `CoreDependencyMetadataHook`, which appends
+# `lakana-core==<this build's version>` to the `dependencies` list below,
+# pinning lakana-worker to exactly this release's lakana-core -- the
+# same hatch-vcs-resolved version pattern as `packages/lakana/hatch_build.py`'s
+# `ServerExtraMetadataHook`. `dependencies` lives here, not under
+# `[project]`, because hatchling requires the hook to supply the *entire*
+# list once `dependencies` is dynamic; keeping the other pins and their
+# comments in this table (rather than hard-coding them into hatch_build.py)
+# keeps them visible and editable as ordinary TOML.
+dependencies = [
+    # MIT. Capped below 2: on a DuckDB 2.0 development build, the tests of the
+    # query guard and of DuckDB's error texts fail. Lifted by issue #96.
+    "duckdb>=1.1,<2",
+    # BSD-3-Clause. Sends webhooks (`egress.py`); the lakana SDK already depends on it.
+    "httpx>=0.28,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lakana_worker"]

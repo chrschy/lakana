@@ -1,0 +1,2 @@
+checks:
+  on_failure: warn

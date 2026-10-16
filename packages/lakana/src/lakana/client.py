@@ -1,0 +1,291 @@
+"""The SDK's top-level entry point."""
+
+from __future__ import annotations
+
+from typing import Literal, overload
+
+import httpx
+import pyarrow as pa
+
+from lakana._config import resolve_config
+from lakana._http import HttpTransport
+from lakana._models import InstanceInfo, QueryStatus, TaskTokenScope, Whoami
+from lakana._routes import ROUTES
+from lakana._tokens import mask_token
+from lakana.errors import InvalidResponse
+from lakana.resources.artifacts import Artifacts
+from lakana.resources.audit_events import AuditEvents
+from lakana.resources.checks import Checks
+from lakana.resources.column_masks import ColumnMasks
+from lakana.resources.deploys import Deployments, Deploys, OrphanTables, ProjectVersions
+from lakana.resources.environments import Environments
+from lakana.resources.grants import Grants
+from lakana.resources.groups import Groups
+from lakana.resources.jobs import Jobs
+from lakana.resources.namespaces import Namespaces
+from lakana.resources.package_indexes import PackageIndexes
+from lakana.resources.principals import Principals
+from lakana.resources.queries import Queries
+from lakana.resources.repositories import Repositories
+from lakana.resources.row_filters import RowFilters
+from lakana.resources.runs import Runs, Scheduler, Workers
+from lakana.resources.secrets import Secrets
+from lakana.resources.tables import Tables
+from lakana.resources.task_tokens import TaskTokens
+from lakana.resources.tokens import Tokens
+
+
+class Client:
+    """The Lakana SDK's entry point.
+
+    Parameters
+    ----------
+    url
+        The platform API's base URL. See `lakana._config.resolve_config` for
+        how this is resolved when omitted.
+    token
+        A PAT or task token.
+    profile
+        A named profile to select from the profile file, when `url`/`token`
+        are not given explicitly and no `LAKANA_URL`/`LAKANA_TOKEN` are set.
+    timeout
+        Request timeout in seconds.
+    verify
+        TLS verification setting: `True` (the default), `False`, or a CA
+        bundle path.
+    http_client
+        An existing `httpx.Client` to use instead of building one — for
+        example in tests, or Starlette's `TestClient`.
+    """
+
+    def __init__(
+        self,
+        url: str | None = None,
+        token: str | None = None,
+        *,
+        profile: str | None = None,
+        timeout: float = 30.0,
+        verify: bool | str = True,
+        http_client: httpx.Client | None = None,
+    ) -> None:
+        self._config = resolve_config(url, token, profile)
+        self._transport = HttpTransport(
+            self._config, timeout=timeout, verify=verify, http_client=http_client
+        )
+        self.environments = Environments(self._transport)
+        self.namespaces = Namespaces(self._transport)
+        self.tables = Tables(self._transport)
+        self.artifacts = Artifacts(self._transport)
+        self.queries = Queries(self._transport)
+        self.principals = Principals(self._transport)
+        self.groups = Groups(self._transport)
+        self.tokens = Tokens(self._transport)
+        self.task_tokens = TaskTokens(self._transport)
+        self.grants = Grants(self._transport)
+        self.row_filters = RowFilters(self._transport)
+        self.column_masks = ColumnMasks(self._transport)
+        self.secrets = Secrets(self._transport)
+        self.repositories = Repositories(self._transport)
+        self.package_indexes = PackageIndexes(self._transport)
+        self.audit_events = AuditEvents(self._transport)
+        self.deploys = Deploys(self._transport)
+        self.deployments = Deployments(self._transport)
+        self.project_versions = ProjectVersions(self._transport)
+        self.orphans = OrphanTables(self._transport)
+        self.runs = Runs(self._transport)
+        self.jobs = Jobs(self._transport)
+        self.checks = Checks(self._transport)
+        self.scheduler = Scheduler(self._transport)
+        self.workers = Workers(self._transport)
+
+    @property
+    def url(self) -> str:
+        """The platform base URL this client talks to.
+
+        Returns
+        -------
+        str
+            The resolved URL.
+        """
+        return self._config.url
+
+    @overload
+    def sql(
+        self,
+        sql: str,
+        environment: str,
+        timeout: float | None = None,
+        *,
+        into: None = None,
+        mode: None = None,
+        incremental_key: str | None = None,
+        evolve_schema: Literal[False] = False,
+        break_glass_reason: None = None,
+    ) -> pa.Table: ...
+
+    @overload
+    def sql(
+        self,
+        sql: str,
+        environment: str,
+        timeout: float | None = None,
+        *,
+        into: str,
+        mode: str,
+        incremental_key: str | None = None,
+        evolve_schema: bool = False,
+        break_glass_reason: str | None = None,
+    ) -> QueryStatus: ...
+
+    def sql(
+        self,
+        sql: str,
+        environment: str,
+        timeout: float | None = None,
+        *,
+        into: str | None = None,
+        mode: str | None = None,
+        incremental_key: str | None = None,
+        evolve_schema: bool = False,
+        break_glass_reason: str | None = None,
+    ) -> pa.Table | QueryStatus:
+        """Submit a query, wait for it to finish, and return its result or its write status.
+
+        Parameters
+        ----------
+        sql
+            The SQL text to run.
+        environment
+            The environment to run the query against.
+        timeout
+            Seconds to wait before giving up, or `None` to wait
+            indefinitely. Passed straight through to `QueryRun.wait`.
+        into
+            Write the result into this table or view instead.
+        mode
+            `create`, `replace`, `append` or `view`; required with `into`.
+        incremental_key
+            With `mode="append"`, append only rows past the target's maximum
+            of this column.
+        evolve_schema
+            With `replace`/`append`, let the target adopt the result's schema.
+        break_glass_reason
+            Write to a protected environment outside a run: 10-500 characters, needs
+            `MANAGE_ENVIRONMENT`, audited. The next run of the deployed code may overwrite
+            the fix.
+
+        Returns
+        -------
+        pa.Table or QueryStatus
+            The result, or — with `into` — the finished run's status, which
+            carries `rows_written`, `snapshot_id`, `watermark` and
+            `schema_diff` (a write has no result set).
+
+        Raises
+        ------
+        lakana.errors.QueryFailed
+            If the query fails.
+        lakana.errors.ValidationError
+            If the write options don't go together.
+        TimeoutError
+            If `timeout` elapses before the query finishes.
+        """
+        run = self.queries.submit(
+            sql,
+            environment,
+            into=into,
+            mode=mode,
+            incremental_key=incremental_key,
+            evolve_schema=evolve_schema,
+            break_glass_reason=break_glass_reason,
+        )
+        status = run.wait(timeout=timeout)
+        return run.result() if into is None else status
+
+    def whoami(self) -> Whoami:
+        """Describe who this client's credential authenticates as.
+
+        Returns
+        -------
+        Whoami
+            The principal's name and type, and its task-token scope if the
+            credential is a task token.
+
+        Raises
+        ------
+        lakana.errors.AuthenticationError
+            If the credential is invalid, expired or revoked.
+        """
+        body = self._transport.request(ROUTES["whoami"]).json()
+        scope = body["task_token"]
+        return Whoami(
+            name=body["name"],
+            type=body["type"],
+            task_token=None
+            if scope is None
+            else TaskTokenScope(environment=scope["environment"], asset_scope=scope["asset_scope"]),
+        )
+
+    def info(self) -> InstanceInfo:
+        """Ask the instance which platform version it runs.
+
+        The request is sent once, without the transport's retries, so a dead server fails fast.
+
+        Returns
+        -------
+        InstanceInfo
+            The instance's version.
+
+        Raises
+        ------
+        lakana.errors.AuthenticationError
+            If the credential is invalid, expired or revoked.
+        lakana.errors.NotFound
+            If the server predates the endpoint.
+        lakana.errors.InvalidResponse
+            If the URL answers with something that is not Lakana's JSON.
+        """
+        response = self._transport.request(ROUTES["info"], retry=False)
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict) or not isinstance(body.get("version"), str):
+            raise InvalidResponse(f"{self.url} did not answer like a Lakana server")
+        return InstanceInfo(version=body["version"])
+
+    def close(self) -> None:
+        """Close the underlying HTTP transport."""
+        self._transport.close()
+
+    def __enter__(self) -> Client:
+        """Return this client for use as a context manager.
+
+        Returns
+        -------
+        Client
+            This client.
+        """
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        """Close the client on exit from a `with` block.
+
+        Parameters
+        ----------
+        *exc
+            The exception type, value, and traceback, if the block raised
+            one. Unused.
+        """
+        self.close()
+
+    def __repr__(self) -> str:
+        """Return a repr with the token masked.
+
+        Returns
+        -------
+        str
+            `"Client(url='...', token='lakana_pat_<key>_***')"`, never
+            including the token's secret part.
+        """
+        return f"Client(url={self._config.url!r}, token={mask_token(self._config.token)!r})"

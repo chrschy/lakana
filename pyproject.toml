@@ -1,0 +1,150 @@
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.169.0",
+    "polars>=1.30",
+    "import-linter>=2",
+    "pip-licenses>=5",
+    "pytest>=8",
+    "pytest-cov>=6",
+    "testcontainers[postgres,minio]>=4.15.0",
+    "pg8000>=1.31",
+    "ruff==0.17.0",
+    "ty==0.0.86",
+    "uvicorn>=0.54.0",
+    "httpx>=0.28",
+    "mutmut==3.8.0",
+    # Already an implicit PEP 517 build dependency of every package
+    # (`[build-system].requires`); declared explicitly too so
+    # `packages/lakana/hatch_build.py`'s metadata hook is importable from a
+    # unit test without a full `uv build`. MIT.
+    "hatchling>=1.27",
+    # Test-only here: parses the generated compose.yaml in test_deploy_init.py.
+    # lakana-core declares its own runtime dependency on it. MIT.
+    "pyyaml>=6",
+    "pytest-xdist>=3.8.0",
+]
+# The documentation site (docs/site). Built in CI; published at the public beta.
+docs = [
+    "zensical>=0.0.70",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["packages/lakana/src", "packages/lakana-core/src", "packages/lakana-server/src", "packages/lakana-worker/src"]
+# docs/ holds illustrative, intentionally compact pseudocode in fenced code
+# blocks; it is not part of the packages this gate covers, and `ruff format`
+# reformats markdown code fences by default, which would mangle that pseudocode.
+extend-exclude = ["docs"]
+
+[tool.ruff.lint]
+preview = true
+select = [
+    "E", "W",      # pycodestyle
+    "F",           # pyflakes
+    "I",           # isort
+    "UP",          # pyupgrade
+    "B",           # bugbear
+    "SIM",         # simplify
+    "RUF",         # ruff-specific
+    "ANN",         # annotations
+    "D",           # pydocstyle
+    "DOC",         # pydoclint — cross-checks docstrings against signatures
+]
+ignore = [
+    "undocumented-magic-method",   # D105: magic methods need no docstring
+    "undocumented-public-init",   # D107: __init__ documented on the class instead
+    "incorrect-blank-line-before-class",   # D203: conflicts with D211 (no blank line before class docstring)
+    "multi-line-summary-first-line",   # D212: numpydoc puts the summary on the line after """
+    "multi-line-summary-second-line",   # D213: counterpart of D212
+    "signature-in-docstring",   # D402: numpydoc summaries may repeat the signature
+    "missing-blank-line-after-last-section",   # D413: numpydoc does not require a blank line after the last section
+    "missing-terminal-punctuation",   # D415: numpydoc summaries need not end in a period
+    "missing-section-name-colon",   # D416: numpydoc section names are not followed by a colon
+    "docstring-extraneous-exception",   # DOC502: a delegating wrapper should document the
+                                         # exception its callee raises; DOC501 still catches
+                                         # raises that are undocumented
+]
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**" = ["undocumented-public-module", "undocumented-public-function"]   # D100, D103: test modules and functions read as their own docs
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's dependency-injection idiom calls Depends()/Header()/etc. in a
+# parameter default so the framework can introspect the call at import time;
+# these are not the mutable-default-argument bug B008 exists to catch.
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Header",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Body",
+    "fastapi.Cookie",
+]
+
+[tool.ty.environment]
+python-version = "3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["packages", "scripts"]
+markers = [
+    "unit: fast tests requiring no external services",
+    "integration: tests requiring Postgres or object storage",
+]
+# packages/conftest.py and scripts/conftest.py load `scripts.pytest_memory_limit`, which stops
+# a test run that uses too much resident memory (docs/agent/testing.md, "Memory limit").
+addopts = "-m 'not integration'"
+# Makes `scripts` importable for the two conftest.py files that load the plugin.
+pythonpath = ["."]
+filterwarnings = [
+    # `Tables.append`'s own per-request timeout is a real,
+    # production-safe `httpx.Client.request(timeout=...)` kwarg, but every SDK
+    # end-to-end test drives it through Starlette's `TestClient` as `http_client`
+    # (the established pattern in `tests/sdk/`), and `TestClient` warns whenever any
+    # caller passes `timeout=` to it at all, real server or not. Scoped to this exact
+    # message and category only -- every other `StarletteDeprecationWarning` (e.g. the
+    # unrelated httpx/httpx2 one `TestClient` itself emits at import) stays visible.
+    "ignore:You should not use the 'timeout' argument with the TestClient\\.:starlette.exceptions.StarletteDeprecationWarning",
+]
+
+[tool.coverage.run]
+source = [
+    "packages/lakana/src",
+    "packages/lakana-core/src",
+    "packages/lakana-server/src",
+    "packages/lakana-worker/src",
+    "scripts",
+]
+branch = true
+# On Python 3.14 coverage.py would pick its `sysmon` core, which keeps every code object the
+# suite compiles alive (the CLI tests compile about 1.7 million): 4.8 GB serially instead of
+# 1.9 GB, and out of memory in parallel. The C tracer is the default on 3.11 to 3.13.
+core = "ctrace"
+# Alembic migrations are executed by `alembic upgrade`/`downgrade`, not by unit
+# tests, so they would otherwise count as uncovered code. They are verified
+# instead by applying them to a real SQLite database and asserting Alembic's
+# own compare_metadata finds no drift against the ORM models
+# (packages/lakana-core/tests/test_migrations.py).
+# The tests under scripts/ are tests, not source.
+omit = ["*/lakana_core/migrations/*", "scripts/tests/*", "scripts/test_support/*"]
+
+[tool.coverage.report]
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    # The `if __name__ == "__main__":` line of a script runs only when Python executes the
+    # file as a program, never on import. The `main()` it calls is tested directly.
+    'if __name__ == "__main__":',
+]
+
+[tool.bandit]
+exclude_dirs = [
+    "packages/lakana/tests",
+    "packages/lakana-core/tests",
+    "packages/lakana-server/tests",
+    "packages/lakana-worker/tests",
+    "scripts/tests",
+]

@@ -1,0 +1,358 @@
+"""Deploys, deployments, project versions and orphans of the platform API.
+
+The server only queues and reads: the worker fetches, validates and records.
+"""
+
+from __future__ import annotations
+
+import uuid
+
+from fastapi import APIRouter, Depends, Response
+
+from lakana_core.auth import PrincipalRef
+from lakana_core.models import DeployKind
+from lakana_core.projects.deploys import DeploymentView, DeployRunView, DeployService
+from lakana_server.api.platform.schemas import (
+    DeployAccepted,
+    DeployCreate,
+    DeploymentOut,
+    DeployOut,
+    OrphanOut,
+    OrphansOut,
+    ProjectVersionOut,
+    RunAsIn,
+)
+from lakana_server.api.routing import AuthenticateFirstRoute
+from lakana_server.deps import get_deploy_service, get_principal
+
+router = APIRouter(
+    route_class=AuthenticateFirstRoute, prefix="/api/v1/environments/{env}", tags=["deploys"]
+)
+
+
+def _to_out(view: DeployRunView) -> DeployOut:
+    """Build a response body.
+
+    Parameters
+    ----------
+    view
+        The run's view.
+
+    Returns
+    -------
+    DeployOut
+        The body.
+    """
+    return DeployOut(
+        id=view.id,
+        environment=view.environment,
+        repository=view.repository,
+        kind=view.kind.value,
+        status=view.status.value,
+        requested_ref=view.requested_ref,
+        resolved_sha=view.resolved_sha,
+        rollback_to_project_version_id=view.rollback_to_job_version_id,
+        error_message=view.error_message,
+        diff=view.diff,
+        project_version_id=view.job_version_id,
+        principal_id=view.principal_id,
+        created_at=view.created_at,
+        started_at=view.started_at,
+        finished_at=view.finished_at,
+        hidden_adopted=view.hidden_adopted,
+        checks=view.checks,
+        warnings=view.warnings,
+    )
+
+
+@router.post("/deploys", response_model=DeployAccepted, status_code=202)
+def create_deploy(
+    env: str,
+    body: DeployCreate,
+    principal: PrincipalRef = Depends(get_principal),
+    service: DeployService = Depends(get_deploy_service),
+) -> DeployAccepted:
+    """Queue a deploy, dry run or rollback (needs `DEPLOY`).
+
+    Parameters
+    ----------
+    env
+        Environment name.
+    body
+        The request.
+    principal
+        The authenticated caller.
+    service
+        The deploy service.
+
+    Returns
+    -------
+    DeployAccepted
+        The queued run's id and status.
+    """
+    view = service.submit(
+        principal,
+        env,
+        repository=body.repository,
+        kind=DeployKind(body.kind),
+        ref=body.ref,
+        to_sha=body.to_sha,
+        to_previous=body.to_previous,
+    )
+    return DeployAccepted(id=view.id, status=view.status.value)
+
+
+@router.get("/deploys", response_model=list[DeployOut])
+def list_deploys(
+    env: str,
+    principal: PrincipalRef = Depends(get_principal),
+    service: DeployService = Depends(get_deploy_service),
+) -> list[DeployOut]:
+    """List an environment's deploy history, newest first.
+
+    Parameters
+    ----------
+    env
+        Environment name.
+    principal
+        The authenticated caller.
+    service
+        The deploy service.
+
+    Returns
+    -------
+    list of DeployOut
+        Newest first.
+    """
+    return [_to_out(view) for view in service.history(principal, env)]
+
+
+@router.get("/deploys/{deploy_id}", response_model=DeployOut)
+def get_deploy(
+    env: str,
+    deploy_id: uuid.UUID,
+    principal: PrincipalRef = Depends(get_principal),
+    service: DeployService = Depends(get_deploy_service),
+) -> DeployOut:
+    """Show one deploy run.
+
+    Parameters
+    ----------
+    env
+        Environment name.
+    deploy_id
+        The run's id.
+    principal
+        The authenticated caller.
+    service
+        The deploy service.
+
+    Returns
+    -------
+    DeployOut
+        The run.
+    """
+    return _to_out(service.get(principal, env, deploy_id))
+
+
+def _deployment_out(view: DeploymentView) -> DeploymentOut:
+    """Build a deployment body.
+
+    Parameters
+    ----------
+    view
+        The deployment.
+
+    Returns
+    -------
+    DeploymentOut
+        The body.
+    """
+    return DeploymentOut(
+        repository=view.repository,
+        project_version_id=view.job_version_id,
+        commit_sha=view.commit_sha,
+        updated_at=view.updated_at,
+        run_as=view.run_as,
+    )
+
+
+@router.get("/deployments", response_model=list[DeploymentOut])
+def list_deployments(
+    env: str,
+    principal: PrincipalRef = Depends(get_principal),
+    service: DeployService = Depends(get_deploy_service),
+) -> list[DeploymentOut]:
+    """List the current project version per repository.
+
+    Parameters
+    ----------
+    env
+        Environment name.
+    principal
+        The authenticated caller.
+    service
+        The deploy service.
+
+    Returns
+    -------
+    list of DeploymentOut
+        Sorted by repository.
+    """
+    return [_deployment_out(row) for row in service.deployments(principal, env)]
+
+
+@router.put("/deployments/{repo}/run-as", response_model=DeploymentOut)
+def set_run_as(
+    env: str,
+    repo: str,
+    body: RunAsIn,
+    principal: PrincipalRef = Depends(get_principal),
+    service: DeployService = Depends(get_deploy_service),
+) -> DeploymentOut:
+    """Bind the service account runs of this deployment write as (needs `MANAGE_ENVIRONMENT`).
+
+    Parameters
+    ----------
+    env
+        Environment name.
+    repo
+        Repository name.
+    body
+        The principal to bind.
+    principal
+        The authenticated caller.
+    service
+        The deploy service.
+
+    Returns
+    -------
+    DeploymentOut
+        The deployment with its binding.
+    """
+    return _deployment_out(service.set_run_as(principal, env, repo, body.principal))
+
+
+@router.delete("/deployments/{repo}/run-as", response_model=DeploymentOut)
+def clear_run_as(
+    env: str,
+    repo: str,
+    principal: PrincipalRef = Depends(get_principal),
+    service: DeployService = Depends(get_deploy_service),
+) -> DeploymentOut:
+    """Remove the run principal binding (needs `MANAGE_ENVIRONMENT`).
+
+    Parameters
+    ----------
+    env
+        Environment name.
+    repo
+        Repository name.
+    principal
+        The authenticated caller.
+    service
+        The deploy service.
+
+    Returns
+    -------
+    DeploymentOut
+        The deployment without a binding.
+    """
+    return _deployment_out(service.clear_run_as(principal, env, repo))
+
+
+@router.delete("/deployments/{repo}", status_code=204)
+def undeploy(
+    env: str,
+    repo: str,
+    principal: PrincipalRef = Depends(get_principal),
+    service: DeployService = Depends(get_deploy_service),
+) -> Response:
+    """Remove a repository's deployment and binding; data stays (needs `DEPLOY`).
+
+    Parameters
+    ----------
+    env
+        Environment name.
+    repo
+        Repository name.
+    principal
+        The authenticated caller.
+    service
+        The deploy service.
+
+    Returns
+    -------
+    Response
+        204, no body.
+    """
+    service.undeploy(principal, env, repo)
+    return Response(status_code=204)
+
+
+@router.get("/project-versions/{project_version_id}", response_model=ProjectVersionOut)
+def get_project_version(
+    env: str,
+    project_version_id: uuid.UUID,
+    principal: PrincipalRef = Depends(get_principal),
+    service: DeployService = Depends(get_deploy_service),
+) -> ProjectVersionOut:
+    """Show a project version's manifest, filtered for the caller.
+
+    Parameters
+    ----------
+    env
+        Environment name.
+    project_version_id
+        The project version.
+    principal
+        The authenticated caller.
+    service
+        The deploy service.
+
+    Returns
+    -------
+    ProjectVersionOut
+        The project version.
+    """
+    view = service.job_version(principal, env, project_version_id)
+    return ProjectVersionOut(
+        id=view.id,
+        environment=view.environment,
+        repository=view.repository,
+        commit_sha=view.commit_sha,
+        code_uri=view.code_uri,
+        code_sha256=view.code_sha256,
+        deployed_by=view.deployed_by,
+        created_at=view.created_at,
+        manifest=view.manifest,
+    )
+
+
+@router.get("/orphans", response_model=OrphansOut)
+def list_orphans(
+    env: str,
+    principal: PrincipalRef = Depends(get_principal),
+    service: DeployService = Depends(get_deploy_service),
+) -> OrphansOut:
+    """List tables earlier project versions produced and no current one does.
+
+    Parameters
+    ----------
+    env
+        Environment name.
+    principal
+        The authenticated caller.
+    service
+        The deploy service.
+
+    Returns
+    -------
+    OrphansOut
+        Readable orphans and a hidden count.
+    """
+    report = service.orphans(principal, env)
+    return OrphansOut(
+        orphans=[OrphanOut(repository=o.repository, table=o.table) for o in report.orphans],
+        hidden=report.hidden,
+    )
