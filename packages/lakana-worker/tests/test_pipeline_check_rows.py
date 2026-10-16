@@ -1026,6 +1026,9 @@ def test_a_check_that_names_a_column_that_is_not_shown_fails_with_the_reason(
         "SELECT id FROM gold.orders AS o WHERE o.note = 'n-1'",
         "SELECT o.id FROM gold.orders o WHERE o.NOTE = 'n-1'",
         "SELECT o.note FROM gold.orders o",
+        "SELECT orders.note FROM gold.orders",
+        "SELECT gold.orders.note FROM gold.orders",
+        "SELECT id FROM gold.orders WHERE orders.note = 'n-1'",
     ],
 )
 def test_a_withheld_column_named_in_another_case_or_through_an_alias_gets_the_reason(

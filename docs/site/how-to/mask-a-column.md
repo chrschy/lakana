@@ -43,7 +43,7 @@ Created column mask 49fa89ee-275a-4b86-a6fc-76b2b5b32b7e on dev/gold.customers.s
 The replacement is a small SQL expression. It may use:
 
 - literals (`NULL`, `'***'`, numbers) and comparisons and boolean logic;
-- the **bare** names of columns of the same table, which give the stored value (`ssn`, never `customers.ssn`; a field of a struct column such as `address.country` is not supported);
+- the **bare** names of columns of the same table, which give the stored value (`ssn`, never `customers.ssn`; a field of a struct column such as `address.country` is not supported; to cover a struct column, mask the column as a whole, for example `address` with the replacement `NULL`, and a query that reads a field of it gets `NULL`);
 - `current_user()` and `has_group('name')`;
 - `substr(...)` or `substring(...)`, the `||` operator that joins text, and `md5(...)`.
 

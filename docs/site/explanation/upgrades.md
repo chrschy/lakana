@@ -91,6 +91,20 @@ Each cell is a summary. The page named in the last column has the detail. The ch
 | 0.10.0 | A package index URL with a query string is refused; move a `uv.toml` into `pyproject.toml`; lineage and failure causes changed. | This row |
 | 0.9.0 | Upgrade every worker before you deploy Python assets; rewrite `asset(deps=...)` as `asset(inputs=...)`; move helper modules out of `assets/`; an older bundle needs three additions. | [Upgrading](../how-to/deploy-with-compose.md#upgrading), [Projects and deploys](../how-to/projects.md) |
 
+## Notes for the next release
+
+### Columns can be qualified with the table's name
+
+No migration. `SELECT orders.id FROM gold.orders`, `gold.orders.id` and `o.id` after
+`FROM gold.orders AS o` now work, also under a row filter or column mask; before, they failed with a
+message about a read called `__lakana_...`. The table's own name serves as the alias only when no
+other table, alias, CTE, derived table or view of the query has that name. The full name
+(`gold.orders.id`) works in the level of the query that reads the table; inside a subquery, a CTE,
+a derived table or a `LATERAL` join write `orders.id` or give the table an alias. When two
+tables share a name (`gold.orders JOIN silver.orders`, or a subquery over `silver.orders`
+inside a query over `gold.orders`), nothing changes: the query runs as before, and a column qualified with that name
+fails in the database as before. Give each table an alias.
+
 ## Notes for 0.12.0
 
 This release changed a lot: who may hand out access, which package sources a project may

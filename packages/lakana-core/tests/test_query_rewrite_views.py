@@ -67,6 +67,36 @@ def test_an_alias_on_the_view_reference_is_kept() -> None:
     assert "AS w" in expanded.sql
 
 
+def test_a_column_qualified_with_the_views_full_name_loses_the_schema_part() -> None:
+    """`gold.v.id` has to find the subquery that is only called `v` now."""
+    expanded = expand_views(
+        "SELECT gold.v.id, v.id, other.v.id FROM gold.v",
+        _lookup({"gold.v": "SELECT id FROM bronze.orders"}),
+    )
+
+    assert "SELECT v.id, v.id, other.v.id FROM" in expanded.sql
+
+
+def test_a_view_name_used_in_another_scope_keeps_its_qualifiers() -> None:
+    """`gold.v` outside and `silver.v` inside are both `v`: no qualifier is cut or rebound."""
+    expanded = expand_views(
+        "SELECT id FROM gold.v WHERE EXISTS (SELECT 1 FROM silver.v WHERE silver.v.id = gold.v.id)",
+        _lookup({"gold.v": "SELECT id FROM bronze.a", "silver.v": "SELECT id FROM bronze.b"}),
+    )
+
+    assert "silver.v.id = gold.v.id" in expanded.sql
+
+
+def test_the_schema_is_cut_off_a_view_column_only_in_the_views_own_scope() -> None:
+    """In a subquery the full name stays as written, as for a table."""
+    expanded = expand_views(
+        "SELECT gold.v.id, (SELECT gold.v.id) FROM gold.v",
+        _lookup({"gold.v": "SELECT id FROM bronze.orders"}),
+    )
+
+    assert "SELECT v.id, (SELECT gold.v.id) FROM" in expanded.sql
+
+
 def test_nested_views_expand_recursively_innermost_first() -> None:
     """A view may reference views; each is expanded once per reference."""
     expanded = expand_views(

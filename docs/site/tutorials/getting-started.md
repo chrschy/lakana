@@ -333,6 +333,9 @@ lines of the other outputs that stay the same: the tables of the deploy, and the
 counts of the run. Identifiers, commits, versions and durations differ on every machine and are
 not checked.
 
+A column may carry the name of its table or an alias, as in any SQL: `station_temperatures.station_id`,
+`silver.station_temperatures.station_id` or `t.station_id` after `FROM silver.station_temperatures AS t`.
+
 ## Stop the instance
 
 Go to the first terminal and press Ctrl-C. The instance shuts down. Your tables stay where they
