@@ -45,7 +45,8 @@ is a small SQL expression. It may use:
 
 - literals, comparisons (`=`, `<>`, `<`, `<=`, `>`, `>=`) and `AND`, `OR`, `NOT`;
 - the **bare** names of the table's columns: write `region`, never `customers.region` or
-  `t.region`. A field of a struct column (`address.country`) is not supported;
+  `t.region`. A field of a struct column (`address.country`) is not supported, but a filter on
+  another column works on a table that has a struct column, and the struct comes back whole;
 - `current_user()` and `has_group('name')`.
 
 Everything else is refused when you create the filter, for example `IN (...)`, `LIKE`, a function
@@ -100,6 +101,23 @@ someone's query later. The messages are the ones the commands print; the exit co
 | `'gold.names' is a view; row filters and column masks apply to tables. Attach them to the view's base tables.` (8) | A view has no data of its own: filter the table the view reads. |
 | `'gold.churn' is an artifact; row filters and column masks cannot be attached to an artifact. Whoever may read an artifact reads all of it.` (8) | A filter cannot cover a file. |
 | `The row-filter expression is 100001 characters long; the most Lakana accepts is 100000 (LAKANA_QUERY_LIMITS__MAX_STATEMENT_CHARS). ...` (8) | The condition is far longer than a filter needs. Shorten it. |
+
+## Columns of a table made outside Lakana
+
+Lakana's own writers make flat tables, but a table made by other tools can have a struct column
+or a column whose type was widened. A filter names top-level columns only:
+
+- **A struct column.** A filter on another column (`region = 'EU'`) works as on any table, and
+  the struct column is returned whole. A filter that names a field of it (`address.country`) is
+  refused, as the table above shows. To hide a struct column from someone, use a
+  [column mask](mask-a-column.md) on the column as a whole.
+- **A float column that was widened to double.** Rows written before the widening hold 32-bit
+  values and rows written after hold 64-bit ones, so `1.1` is not the same number in both. A
+  filter `price = 1.1` shows the rows of both files today, but the old value reads back as
+  `1.100000023841858`, and a comparison made on a value after it was read matches only the new
+  rows. Do not rely on an equality with a decimal literal for such a column. In a filter write a
+  range (`price > 1.09 AND price < 1.11`); in a query a range or a rounded value
+  (`round(price, 2) = 1.1`) matches both files the same way.
 
 ## When a table gains a column
 
