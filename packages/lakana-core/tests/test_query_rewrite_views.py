@@ -67,6 +67,16 @@ def test_an_alias_on_the_view_reference_is_kept() -> None:
     assert "AS w" in expanded.sql
 
 
+def test_a_column_qualified_with_the_views_full_name_loses_the_schema_part() -> None:
+    """`gold.v.id` has to find the subquery that is only called `v` now."""
+    expanded = expand_views(
+        "SELECT gold.v.id, v.id, other.v.id FROM gold.v",
+        _lookup({"gold.v": "SELECT id FROM bronze.orders"}),
+    )
+
+    assert "SELECT v.id, v.id, other.v.id FROM" in expanded.sql
+
+
 def test_nested_views_expand_recursively_innermost_first() -> None:
     """A view may reference views; each is expanded once per reference."""
     expanded = expand_views(

@@ -247,7 +247,7 @@ def test_rewrite_rewrites_only_the_outer_occurrence_of_a_shadowed_name() -> None
         sources={"raw.events": _parquet("a.parquet")},
     )
 
-    assert f"SELECT id FROM {_cte_alias('raw.events')} WHERE" in rewritten.sql
+    assert f"SELECT id FROM {_cte_alias('raw.events')} AS events WHERE" in rewritten.sql
     assert '"raw.events" AS (SELECT 1 AS id) SELECT id FROM "raw.events"' in rewritten.sql
     assert len(_READER_CALL.findall(rewritten.sql)) == 1
     assert list(rewritten.parameters.values()) == [["a.parquet"]]
@@ -297,6 +297,56 @@ def test_rewrite_keeps_the_original_table_alias() -> None:
     assert "e.id" in rewritten.sql
 
 
+def test_rewrite_aliases_an_unaliased_read_by_the_table_name() -> None:
+    """`orders.id` must find the read, which is only known by its generated name otherwise."""
+    rewritten = rewrite_query(
+        "SELECT orders.id FROM gold.orders", sources={"gold.orders": _parquet("a.parquet")}
+    )
+
+    assert f"FROM {_cte_alias('gold.orders')} AS orders" in rewritten.sql
+    assert rewritten.sql.endswith(
+        "SELECT orders.id FROM " + _cte_alias("gold.orders") + " AS orders"
+    )
+
+
+def test_rewrite_keeps_the_quoting_of_the_table_name_it_uses_as_alias() -> None:
+    """A table written with quotes keeps them, so `"Orders".id` still matches."""
+    rewritten = rewrite_query(
+        'SELECT "Orders".id FROM gold."Orders"', sources={"gold.Orders": _parquet("a.parquet")}
+    )
+
+    assert 'AS "Orders"' in rewritten.sql
+
+
+def test_rewrite_cuts_the_schema_off_a_fully_qualified_column() -> None:
+    """`gold.orders.id` becomes `orders.id`; other dotted columns stay as written."""
+    rewritten = rewrite_query(
+        "SELECT gold.orders.id, other.orders.id, orders.address.country FROM gold.orders",
+        sources={"gold.orders": _parquet("a.parquet")},
+    )
+
+    assert "SELECT orders.id, other.orders.id, orders.address.country FROM" in rewritten.sql
+
+
+def test_rewrite_cuts_the_catalog_and_schema_off_a_three_part_column() -> None:
+    """A table with a catalog part is reduced to its name the same way."""
+    rewritten = rewrite_query(
+        "SELECT a.b.c.id FROM a.b.c", sources={"a.b.c": _parquet("a.parquet")}
+    )
+
+    assert "SELECT c.id FROM" in rewritten.sql
+
+
+def test_rewrite_leaves_a_qualified_column_alone_when_the_table_has_an_alias() -> None:
+    """With an alias, `gold.orders.id` is not valid for the database either and stays as typed."""
+    rewritten = rewrite_query(
+        "SELECT gold.orders.id FROM gold.orders AS o",
+        sources={"gold.orders": _parquet("a.parquet")},
+    )
+
+    assert "SELECT gold.orders.id FROM" in rewritten.sql
+
+
 def test_rewrite_merges_its_ctes_ahead_of_the_querys_own() -> None:
     """A query's own CTE may read a rewritten table, so the generated CTE comes first."""
     rewritten = rewrite_query(
@@ -305,7 +355,7 @@ def test_rewrite_merges_its_ctes_ahead_of_the_querys_own() -> None:
     )
 
     assert rewritten.sql.index(f"{_cte_alias('raw.events')} AS (") < rewritten.sql.index("x AS (")
-    assert f"x AS (SELECT id FROM {_cte_alias('raw.events')})" in rewritten.sql
+    assert f"x AS (SELECT id FROM {_cte_alias('raw.events')} AS events)" in rewritten.sql
     assert list(rewritten.parameters.values()) == [["a.parquet"]]
 
 

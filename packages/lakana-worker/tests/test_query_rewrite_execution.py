@@ -131,3 +131,147 @@ def test_rewrite_keeps_two_sanitize_colliding_tables_apart_through_duckdb(
 
     rows = duckdb.connect().execute(rewritten.sql, rewritten.parameters).fetchall()
     assert sorted(rows) == [(1,), (2,)]
+
+
+def _orders(tmp_path: Path, name: str = "orders") -> Path:
+    """Write a small orders file.
+
+    Parameters
+    ----------
+    tmp_path
+        Directory to write into.
+    name
+        File stem.
+
+    Returns
+    -------
+    pathlib.Path
+        The parquet file, with the columns `id`, `region` and `note`.
+    """
+    path = tmp_path / f"{name}.parquet"
+    pq.write_table(
+        pa.table({"id": [1, 2, 3], "region": ["EU", "US", "EU"], "note": ["a", "b", "c"]}), path
+    )
+    return path
+
+
+def _run(sql: str, sources: dict[str, TableSource]) -> list[tuple[object, ...]]:
+    """Rewrite `sql` and execute it on a fresh DuckDB connection.
+
+    Parameters
+    ----------
+    sql
+        The query as the caller wrote it.
+    sources
+        The tables it reads.
+
+    Returns
+    -------
+    list of tuple
+        The fetched rows, sorted.
+    """
+    rewritten = rewrite_query(sql, sources)
+    rows = duckdb.connect().execute(rewritten.sql, rewritten.parameters).fetchall()
+    return sorted(rows, key=repr)
+
+
+@pytest.mark.parametrize(
+    ("sql", "expected"),
+    [
+        ("SELECT orders.id FROM gold.orders", [1, 2, 3]),
+        ("SELECT gold.orders.id FROM gold.orders", [1, 2, 3]),
+        ("SELECT o.id FROM gold.orders o", [1, 2, 3]),
+        ("SELECT o.id FROM gold.orders AS o", [1, 2, 3]),
+        ('SELECT "orders".id FROM gold.orders', [1, 2, 3]),
+        ("SELECT ORDERS.id FROM gold.orders", [1, 2, 3]),
+        ("SELECT id FROM gold.orders WHERE gold.orders.region = 'US'", [2]),
+    ],
+)
+def test_a_column_qualified_with_the_table_name_or_alias_runs(
+    tmp_path: Path, sql: str, expected: list[int]
+) -> None:
+    """The caller's own qualifier resolves; it never meets Lakana's internal read name."""
+    source = _parquet(str(_orders(tmp_path)))
+
+    rows = _run(sql, {"gold.orders": source})
+
+    assert [row[0] for row in rows] == expected
+
+
+def test_a_catalog_qualified_column_runs(tmp_path: Path) -> None:
+    """A three-part table name keeps all its parts out of the column qualifier."""
+    source = _parquet(str(_orders(tmp_path)))
+
+    rows = _run("SELECT gold.sales.orders.id FROM gold.sales.orders", {"gold.sales.orders": source})
+
+    assert rows == [(1,), (2,), (3,)]
+
+
+def test_a_qualified_column_under_a_filter_and_a_mask(tmp_path: Path) -> None:
+    """A masked column reached as `orders.note` is still masked; the filter still applies."""
+    source = TableSource(
+        urls=[str(_orders(tmp_path))],
+        file_format="parquet",
+        columns={"id": "BIGINT", "region": "VARCHAR", "note": "VARCHAR"},
+        row_filters=["region = 'EU'"],
+        column_masks={"note": "NULL"},
+    )
+
+    rows = _run(
+        "SELECT orders.id, orders.note, gold.orders.note FROM gold.orders", {"gold.orders": source}
+    )
+
+    assert rows == [(1, None, None), (3, None, None)]
+
+
+def test_a_qualified_column_the_read_does_not_list_is_refused_without_the_internal_name(
+    tmp_path: Path,
+) -> None:
+    """A column left out of the declared list fails, and the message names no `__lakana_` read."""
+    source = TableSource(
+        urls=[str(_orders(tmp_path))],
+        file_format="parquet",
+        columns={"id": "BIGINT", "region": "VARCHAR"},
+        declared_columns_only=True,
+    )
+
+    with pytest.raises(duckdb.BinderException) as raised:
+        _run("SELECT orders.note FROM gold.orders", {"gold.orders": source})
+
+    # The query echo further down is cut by the query child before a caller sees it.
+    first_line = str(raised.value).splitlines()[0]
+    assert "__lakana_" not in first_line
+    assert '"note"' in first_line
+
+
+def test_a_join_of_two_tables_with_one_column_name_resolves_each_qualifier(
+    tmp_path: Path,
+) -> None:
+    """`a.id` and `b.id` each reach their own table."""
+    first = tmp_path / "first.parquet"
+    second = tmp_path / "second.parquet"
+    pq.write_table(pa.table({"id": [1, 2], "x": ["p", "q"]}), first)
+    pq.write_table(pa.table({"id": [2, 3], "y": ["r", "s"]}), second)
+    sources = {"gold.a": _parquet(str(first)), "silver.b": _parquet(str(second))}
+
+    rows = _run("SELECT a.id, b.id, x, y FROM gold.a JOIN silver.b ON a.id = b.id", sources)
+    qualified = _run(
+        "SELECT gold.a.id, silver.b.id FROM gold.a JOIN silver.b ON gold.a.id = silver.b.id",
+        sources,
+    )
+
+    assert rows == [(2, 2, "q", "r")]
+    assert qualified == [(2, 2)]
+
+
+def test_two_tables_of_one_name_in_different_schemas_still_run_with_aliases(
+    tmp_path: Path,
+) -> None:
+    """Giving the tables aliases keeps working when both are called `orders`."""
+    first = _orders(tmp_path, "first")
+    second = _orders(tmp_path, "second")
+    sources = {"gold.orders": _parquet(str(first)), "silver.orders": _parquet(str(second))}
+
+    rows = _run("SELECT g.id FROM gold.orders g JOIN silver.orders s ON g.id = s.id", sources)
+
+    assert rows == [(1,), (2,), (3,)]

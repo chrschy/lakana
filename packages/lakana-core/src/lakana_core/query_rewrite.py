@@ -1131,6 +1131,7 @@ def _expand_into(
         As `expand_views` documents.
     """
     bound = _cte_reference_ids(parsed)
+    unaliased: set[tuple[str, str, str]] = set()
     for table in list(parsed.find_all(exp.Table)):
         if id(table) in bound:
             continue
@@ -1161,15 +1162,64 @@ def _expand_into(
             # The stored SQL may name tables the reader cannot see: name the view only.
             raise ValidationError(unreadable_view_message(dotted)) from exc
         _expand_into(inner, lookup, (*stack, dotted), expanded, max_depth, dialect)
-        alias = table.args.get("alias") or exp.TableAlias(this=exp.to_identifier(table.name))
+        alias = table.args.get("alias")
+        if alias is None:
+            alias = exp.TableAlias(this=exp.to_identifier(table.name))
+            unaliased.add(_qualifier_key(table))
         subquery = exp.Subquery(this=inner, alias=alias)
         for arg in extra_args:
             subquery.set(arg, table.args[arg])
         table.replace(subquery)
         expanded.append(dotted)
+    _drop_schema_from_qualified_columns(parsed, unaliased)
 
 
 _ALIAS_HASH_HEX_CHARS = 12
+
+
+def _qualifier_key(node: exp.Table | exp.Column) -> tuple[str, str, str]:
+    """Name the schema-qualified spelling of a table or of a column's table part.
+
+    Parameters
+    ----------
+    node
+        A table reference, or a column whose qualifier is read.
+
+    Returns
+    -------
+    tuple of str
+        The catalog, schema and table name, lower-cased (the database compares names
+        without regard to case); an absent part is an empty string.
+    """
+    return (
+        node.catalog.lower(),
+        node.db.lower(),
+        (node.name if isinstance(node, exp.Table) else node.table).lower(),
+    )
+
+
+def _drop_schema_from_qualified_columns(
+    parsed: exp.Expr, replaced: set[tuple[str, str, str]]
+) -> None:
+    """Cut the schema part off a column qualified with a replaced table's full name.
+
+    A reference such as `gold.orders` is replaced by a read that is only known by its table
+    name (or the caller's alias), so the column `gold.orders.id` has to become `orders.id`
+    or the database looks for a schema called `gold` and fails with a message about
+    Lakana's own read. Only a qualifier that spells a replaced reference in full is cut: any
+    other dotted column (a struct field, a table beside it) is left as written.
+
+    Parameters
+    ----------
+    parsed
+        The statement being rewritten; changed in place.
+    replaced
+        The `_qualifier_key` of each unaliased reference that was replaced.
+    """
+    for column in parsed.find_all(exp.Column):
+        if column.args.get("db") is not None and _qualifier_key(column) in replaced:
+            column.set("db", None)
+            column.set("catalog", None)
 
 
 def _cte_alias(dotted: str) -> str:
@@ -1248,6 +1298,7 @@ def rewrite_query(
     owners: dict[str, str] = {}
     parameters: dict[str, list[str]] = {}
     token = secrets.token_hex(_PARAMETER_TOKEN_BYTES)
+    unaliased: set[tuple[str, str, str]] = set()
     for table in list(parsed.find_all(exp.Table)):
         dotted = _dotted_table_name(table)
         if id(table) in bound or dotted not in sources:
@@ -1280,7 +1331,13 @@ def rewrite_query(
         original_alias = table.args.get("alias")
         if original_alias is not None:
             replacement.set("alias", original_alias)
+        else:
+            # The read is known to the database by its generated name; the caller refers to
+            # the table by its own, so that name is the alias (`orders.id` resolves).
+            replacement.set("alias", exp.TableAlias(this=table.this.copy()))
+            unaliased.add(_qualifier_key(table))
         table.replace(replacement)
+    _drop_schema_from_qualified_columns(parsed, unaliased)
     if not ctes:
         return RewrittenQuery(sql=parsed.sql(dialect=dialect), parameters=parameters)
     if not isinstance(parsed, exp.Query):
