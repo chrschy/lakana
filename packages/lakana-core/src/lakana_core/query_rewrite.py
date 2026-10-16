@@ -42,13 +42,14 @@ from __future__ import annotations
 import hashlib
 import re
 import secrets
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 import sqlglot
 import sqlglot.expressions as exp
 from sqlglot.optimizer.qualify import qualify
-from sqlglot.optimizer.scope import Scope, build_scope
+from sqlglot.optimizer.scope import Scope, build_scope, traverse_scope
 
 from lakana_core.errors import ValidationError
 from lakana_core.sql_syntax import SQL_SYNTAX_ERRORS
@@ -1057,11 +1058,23 @@ def expand_views(
             cache[dotted] = lookup(dotted)
         return cache[dotted]
 
+    named_views: list[tuple[tuple[str, str, str], exp.Expr]] = []
     _expand_into(
-        parsed, cached_lookup, () if root is None else (root,), expanded, max_depth, dialect
+        parsed,
+        cached_lookup,
+        () if root is None else (root,),
+        expanded,
+        named_views,
+        max_depth,
+        dialect,
     )
     if not expanded:
         return ExpandedQuery(sql=sql, views=())
+    counts = _bare_name_counts(parsed)
+    _drop_schema_from_qualified_columns(
+        list(traverse_scope(parsed)),
+        [(key, node) for key, node in named_views if counts[key[2]] == 1],
+    )
     return ExpandedQuery(sql=parsed.sql(dialect=dialect), views=tuple(expanded))
 
 
@@ -1105,6 +1118,7 @@ def _expand_into(
     lookup: Callable[[str], ViewDefinition | None],
     stack: tuple[str, ...],
     expanded: list[str],
+    named_views: list[tuple[tuple[str, str, str], exp.Expr]],
     max_depth: int,
     dialect: str,
 ) -> None:
@@ -1120,6 +1134,9 @@ def _expand_into(
         The views being expanded around this query, outermost first.
     expanded
         Appended with each view expanded, innermost first.
+    named_views
+        Appended with the `_qualifier_key` and subquery of each view reference that had no
+        alias and so took the view's name.
     max_depth
         As for `expand_views`.
     dialect
@@ -1160,9 +1177,14 @@ def _expand_into(
         except SQL_SYNTAX_ERRORS as exc:
             # The stored SQL may name tables the reader cannot see: name the view only.
             raise ValidationError(unreadable_view_message(dotted)) from exc
-        _expand_into(inner, lookup, (*stack, dotted), expanded, max_depth, dialect)
-        alias = table.args.get("alias") or exp.TableAlias(this=exp.to_identifier(table.name))
+        _expand_into(inner, lookup, (*stack, dotted), expanded, named_views, max_depth, dialect)
+        alias = table.args.get("alias")
+        key = _qualifier_key(table)
+        if alias is None:
+            alias = exp.TableAlias(this=exp.to_identifier(table.name))
         subquery = exp.Subquery(this=inner, alias=alias)
+        if table.args.get("alias") is None:
+            named_views.append((key, subquery))
         for arg in extra_args:
             subquery.set(arg, table.args[arg])
         table.replace(subquery)
@@ -1170,6 +1192,93 @@ def _expand_into(
 
 
 _ALIAS_HASH_HEX_CHARS = 12
+
+
+def _qualifier_key(node: exp.Table | exp.Column) -> tuple[str, str, str]:
+    """Name the schema-qualified spelling of a table or of a column's table part.
+
+    Parameters
+    ----------
+    node
+        A table reference, or a column whose qualifier is read.
+
+    Returns
+    -------
+    tuple of str
+        The catalog, schema and table name, lower-cased (the database compares names
+        without regard to case); an absent part is an empty string.
+    """
+    return (
+        node.catalog.lower(),
+        node.db.lower(),
+        (node.name if isinstance(node, exp.Table) else node.table).lower(),
+    )
+
+
+def _bare_name_counts(parsed: exp.Expr) -> Counter[str]:
+    """Count how often each bare name is taken by a source anywhere in a statement.
+
+    Parameters
+    ----------
+    parsed
+        The statement.
+
+    Returns
+    -------
+    collections.Counter of str
+        For each lower-cased name, the number of aliases (of tables, derived tables, CTEs and
+        table functions) and unaliased table references called so, in every scope.
+    """
+    counts = Counter(alias.name.lower() for alias in parsed.find_all(exp.TableAlias))
+    counts.update(
+        table.name.lower()
+        for table in parsed.find_all(exp.Table)
+        if table.args.get("alias") is None
+    )
+    return counts
+
+
+def _drop_schema_from_qualified_columns(
+    scopes: Sequence[Scope], named: Sequence[tuple[tuple[str, str, str], exp.Expr]]
+) -> None:
+    """Cut the schema part off a column qualified with the full name of a read named by its table.
+
+    A reference such as `gold.orders` is replaced by a read the database knows only by its
+    table name, so the column `gold.orders.id` has to become `orders.id`, or the database looks
+    for a schema called `gold`. Only a read whose bare name is used nowhere else in the
+    statement is named that way (see `_bare_name_counts`), and only a column of the read's own
+    scope is changed. In a nested scope the database would bind `orders.id` to a struct column
+    called `orders` of that scope's own sources before it reached the outer read, and sqlglot
+    makes a CTE body or a derived table a child of the scope around it although the read is not
+    visible there. Any other dotted column is therefore left as written and fails in the
+    database, as it always did, instead of binding to something else.
+
+    Parameters
+    ----------
+    scopes
+        The scopes of the statement, built while the reads were still in it.
+    named
+        The `_qualifier_key` of each read that took its bare name as alias, with the node.
+    """
+    owner = {id(node): scope for scope in scopes for node in (*scope.tables, *scope.derived_tables)}
+    roots = {id(scope.expression): scope for scope in scopes}
+    seen: set[int] = set()
+    for scope in scopes:
+        # A scope lists the correlated columns of its subqueries too, so each column is
+        # attributed to the scope whose expression it sits in directly.
+        for column in (*scope.columns, *scope.external_columns):
+            if id(column) in seen or column.args.get("db") is None:
+                continue
+            seen.add(id(column))
+            node: exp.Expr | None = column
+            while node is not None and id(node) not in roots:
+                node = node.parent
+            own = None if node is None else roots[id(node)]
+            key = _qualifier_key(column)
+            for named_key, read in named:
+                if named_key == key and own is owner.get(id(read)):
+                    column.set("db", None)
+                    column.set("catalog", None)
 
 
 def _cte_alias(dotted: str) -> str:
@@ -1248,6 +1357,9 @@ def rewrite_query(
     owners: dict[str, str] = {}
     parameters: dict[str, list[str]] = {}
     token = secrets.token_hex(_PARAMETER_TOKEN_BYTES)
+    named: list[tuple[tuple[str, str, str], exp.Expr]] = []
+    name_counts = _bare_name_counts(parsed)
+    scopes = list(traverse_scope(parsed))
     for table in list(parsed.find_all(exp.Table)):
         dotted = _dotted_table_name(table)
         if id(table) in bound or dotted not in sources:
@@ -1280,7 +1392,15 @@ def rewrite_query(
         original_alias = table.args.get("alias")
         if original_alias is not None:
             replacement.set("alias", original_alias)
+        elif name_counts[table.name.lower()] == 1:
+            # The caller refers to the table by its own name, so that name is the alias
+            # (`orders.id` resolves). Only when nothing else in the statement is called so:
+            # otherwise the read keeps its generated name, as it always did, and a clash
+            # fails in the database instead of binding to the wrong table.
+            replacement.set("alias", exp.TableAlias(this=table.this.copy()))
+            named.append((_qualifier_key(table), table))
         table.replace(replacement)
+    _drop_schema_from_qualified_columns(scopes, named)
     if not ctes:
         return RewrittenQuery(sql=parsed.sql(dialect=dialect), parameters=parameters)
     if not isinstance(parsed, exp.Query):
