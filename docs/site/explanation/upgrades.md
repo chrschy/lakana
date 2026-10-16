@@ -99,10 +99,10 @@ No migration. `SELECT orders.id FROM gold.orders`, `gold.orders.id` and `o.id` a
 `FROM gold.orders AS o` now work, also under a row filter or column mask; before, they failed with a
 message about a read called `__lakana_...`. The table's own name serves as the alias only when no
 other table, alias, CTE, derived table or view of the query has that name. The full name
-(`gold.orders.id`) works in the level of the query that reads the table; inside a subquery, a CTE
-or a derived table write `orders.id` or give the table an alias. When two tables share a name
-(`gold.orders JOIN silver.orders`, or a subquery over `silver.orders` inside a query over
-`gold.orders`), nothing changes: the query runs as before, and a column qualified with that name
+(`gold.orders.id`) works in the level of the query that reads the table; inside a subquery, a CTE,
+a derived table or a `LATERAL` join write `orders.id` or give the table an alias. When two
+tables share a name (`gold.orders JOIN silver.orders`, or a subquery over `silver.orders`
+inside a query over `gold.orders`), nothing changes: the query runs as before, and a column qualified with that name
 fails in the database as before. Give each table an alias.
 
 ## Notes for 0.12.0
