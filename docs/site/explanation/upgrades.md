@@ -91,6 +91,16 @@ Each cell is a summary. The page named in the last column has the detail. The ch
 | 0.10.0 | A package index URL with a query string is refused; move a `uv.toml` into `pyproject.toml`; lineage and failure causes changed. | This row |
 | 0.9.0 | Upgrade every worker before you deploy Python assets; rewrite `asset(deps=...)` as `asset(inputs=...)`; move helper modules out of `assets/`; an older bundle needs three additions. | [Upgrading](../how-to/deploy-with-compose.md#upgrading), [Projects and deploys](../how-to/projects.md) |
 
+## Notes for the next release
+
+### Columns can be qualified with the table's name
+
+No migration. `SELECT orders.id FROM gold.orders`, `gold.orders.id` and `o.id` after
+`FROM gold.orders AS o` now work, also under a row filter or column mask; before, they failed with a
+message about a read called `__lakana_...`. The rules are the same as before. When two tables
+without an alias share a name (`gold.orders JOIN silver.orders`), the query still runs, `gold.orders.id`
+picks its table, and `orders.id` is refused with a message that asks for aliases.
+
 ## Notes for 0.12.0
 
 This release changed a lot: who may hand out access, which package sources a project may

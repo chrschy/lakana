@@ -275,3 +275,57 @@ def test_two_tables_of_one_name_in_different_schemas_still_run_with_aliases(
     rows = _run("SELECT g.id FROM gold.orders g JOIN silver.orders s ON g.id = s.id", sources)
 
     assert rows == [(1,), (2,), (3,)]
+
+
+def _two_orders(tmp_path: Path) -> dict[str, TableSource]:
+    """Build two tables both called `orders`, in `gold` and `silver`.
+
+    Parameters
+    ----------
+    tmp_path
+        Directory to write into.
+
+    Returns
+    -------
+    dict of str to TableSource
+        The sources; the gold one has the ids 1 to 3, the silver one 2 to 4.
+    """
+    first = tmp_path / "gold.parquet"
+    second = tmp_path / "silver.parquet"
+    pq.write_table(pa.table({"id": [1, 2, 3], "g": ["a", "b", "c"]}), first)
+    pq.write_table(pa.table({"id": [2, 3, 4], "s": ["x", "y", "z"]}), second)
+    return {"gold.orders": _parquet(str(first)), "silver.orders": _parquet(str(second))}
+
+
+def test_two_unaliased_tables_of_one_name_keep_working_without_qualifiers(tmp_path: Path) -> None:
+    """The join worked before columns could be qualified, and it still does."""
+    rows = _run(
+        "SELECT g, s FROM gold.orders JOIN silver.orders ON g = g OR s = s WHERE g = 'b'",
+        _two_orders(tmp_path),
+    )
+
+    assert rows == [("b", "x"), ("b", "y"), ("b", "z")]
+
+
+def test_a_schema_qualified_column_picks_its_table_among_two_of_one_name(tmp_path: Path) -> None:
+    """`gold.orders.id` and `silver.orders.id` each reach their own table."""
+    rows = _run(
+        "SELECT gold.orders.id, silver.orders.id FROM gold.orders "
+        "JOIN silver.orders ON gold.orders.id = silver.orders.id",
+        _two_orders(tmp_path),
+    )
+
+    assert rows == [(2, 2), (3, 3)]
+
+
+def test_a_bare_table_name_among_two_of_one_name_is_refused_with_the_cause(
+    tmp_path: Path,
+) -> None:
+    """`orders.id` could be either table: the message says so and names the way out."""
+    with pytest.raises(ValidationError) as raised:
+        _run("SELECT orders.id FROM gold.orders JOIN silver.orders ON true", _two_orders(tmp_path))
+
+    message = str(raised.value)
+    assert "__lakana_" not in message
+    assert "'orders.id'" in message
+    assert "alias" in message

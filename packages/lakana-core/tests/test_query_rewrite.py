@@ -347,6 +347,36 @@ def test_rewrite_leaves_a_qualified_column_alone_when_the_table_has_an_alias() -
     assert "SELECT gold.orders.id FROM" in rewritten.sql
 
 
+def test_rewrite_keeps_the_internal_name_for_two_unaliased_tables_of_one_name() -> None:
+    """Both would be called `orders`, which the database refuses, so neither gets the alias."""
+    rewritten = rewrite_query(
+        "SELECT 1 FROM gold.orders JOIN silver.orders ON true",
+        sources={"gold.orders": _parquet("a.parquet"), "silver.orders": _parquet("b.parquet")},
+    )
+
+    assert " AS orders" not in rewritten.sql
+
+
+def test_rewrite_refuses_a_bare_table_name_that_two_reads_share() -> None:
+    """The message names the column and the remedy, never the generated read."""
+    with pytest.raises(ValidationError, match=r"'orders\.id' could be either") as raised:
+        rewrite_query(
+            "SELECT orders.id FROM gold.orders JOIN silver.orders ON true",
+            sources={"gold.orders": _parquet("a.parquet"), "silver.orders": _parquet("b.parquet")},
+        )
+
+    assert "__lakana_" not in str(raised.value)
+
+
+def test_rewrite_refuses_a_schema_qualified_column_of_a_table_listed_twice() -> None:
+    """`gold.orders` twice is as ambiguous as the bare name."""
+    with pytest.raises(ValidationError, match="could be either"):
+        rewrite_query(
+            "SELECT gold.orders.id FROM gold.orders JOIN gold.orders ON true",
+            sources={"gold.orders": _parquet("a.parquet")},
+        )
+
+
 def test_rewrite_merges_its_ctes_ahead_of_the_querys_own() -> None:
     """A query's own CTE may read a rewritten table, so the generated CTE comes first."""
     rewritten = rewrite_query(

@@ -42,13 +42,14 @@ from __future__ import annotations
 import hashlib
 import re
 import secrets
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 import sqlglot
 import sqlglot.expressions as exp
 from sqlglot.optimizer.qualify import qualify
-from sqlglot.optimizer.scope import Scope, build_scope
+from sqlglot.optimizer.scope import Scope, build_scope, traverse_scope
 
 from lakana_core.errors import ValidationError
 from lakana_core.sql_syntax import SQL_SYNTAX_ERRORS
@@ -1222,6 +1223,75 @@ def _drop_schema_from_qualified_columns(
             column.set("catalog", None)
 
 
+def _name_unaliased_reads(
+    parsed: exp.Expr, bound: set[int], sources: Mapping[str, TableSource]
+) -> set[int]:
+    """Settle the columns that name a table another read of the same query shares a name with.
+
+    Two unaliased reads such as `gold.orders` and `silver.orders` cannot both be called
+    `orders` once rewritten: the database refuses a name used twice in one `FROM`. Such reads
+    keep their generated name (the query ran that way before columns could be qualified).
+    A column written with the full name of one of them is pointed at that generated name; a
+    column written with the bare shared name could be either and is refused.
+
+    Parameters
+    ----------
+    parsed
+        The statement being rewritten; its ambiguous columns are changed in place.
+    bound
+        Ids of the table nodes that name a CTE of the query, not a catalog table.
+    sources
+        The tables being rewritten, by dotted name.
+
+    Returns
+    -------
+    set of int
+        The ids of the table nodes that must keep their generated name.
+
+    Raises
+    ------
+    ValidationError
+        If a column is qualified with a bare name shared by two reads of its scope, or with
+        a full name that two reads share.
+    """
+    keep: set[int] = set()
+    for scope in traverse_scope(parsed):
+        names = Counter((table.alias_or_name or "").lower() for table in scope.tables) + Counter(
+            (derived.alias or "").lower() for derived in scope.derived_tables
+        )
+        clashing = [
+            table
+            for table in scope.tables
+            if id(table) not in bound
+            and _dotted_table_name(table) in sources
+            and table.args.get("alias") is None
+            and names[table.name.lower()] > 1
+        ]
+        if not clashing:
+            continue
+        keep.update(id(table) for table in clashing)
+        by_key: dict[tuple[str, str, str], list[exp.Table]] = {}
+        for table in clashing:
+            by_key.setdefault(_qualifier_key(table), []).append(table)
+        shared = {table.name.lower() for table in clashing}
+        for column in scope.columns:
+            qualifier = column.table.lower()
+            if qualifier not in shared:
+                continue
+            matches = by_key.get(_qualifier_key(column), []) if column.args.get("db") else []
+            if len(matches) != 1:
+                raise ValidationError(
+                    f"The column '{column.sql()}' could be either of the tables called "
+                    f"'{column.table}' in this query. Give each of them an alias "
+                    f"(FROM schema_a.{column.table} AS a JOIN schema_b.{column.table} AS b) "
+                    f"and write a.{column.name} or b.{column.name}."
+                )
+            column.set("table", exp.to_identifier(_cte_alias(_dotted_table_name(matches[0]))))
+            column.set("db", None)
+            column.set("catalog", None)
+    return keep
+
+
 def _cte_alias(dotted: str) -> str:
     """Derive a table's CTE alias, distinct for every distinct dotted name.
 
@@ -1299,6 +1369,7 @@ def rewrite_query(
     parameters: dict[str, list[str]] = {}
     token = secrets.token_hex(_PARAMETER_TOKEN_BYTES)
     unaliased: set[tuple[str, str, str]] = set()
+    keep_generated_name = _name_unaliased_reads(parsed, bound, sources)
     for table in list(parsed.find_all(exp.Table)):
         dotted = _dotted_table_name(table)
         if id(table) in bound or dotted not in sources:
@@ -1331,7 +1402,7 @@ def rewrite_query(
         original_alias = table.args.get("alias")
         if original_alias is not None:
             replacement.set("alias", original_alias)
-        else:
+        elif id(table) not in keep_generated_name:
             # The read is known to the database by its generated name; the caller refers to
             # the table by its own, so that name is the alias (`orders.id` resolves).
             replacement.set("alias", exp.TableAlias(this=table.this.copy()))
