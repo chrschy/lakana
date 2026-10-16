@@ -181,10 +181,15 @@ def test_release_please_opens_its_pull_requests_with_the_dedicated_token() -> No
 
 
 def test_the_first_public_release_is_bootstrapped_to_0_12_0() -> None:
-    """Without a tag, release-please starts at 0.0.0 and proposes 0.12.0."""
+    """Without a tag, release-please starts at 0.0.0 and proposes 0.12.0.
+
+    The manifest holds 0.0.0 until the first release and the released version after it; its
+    own release pull request rewrites it, so either is right here.
+    """
     manifest = json.loads((ROOT / ".release-please-manifest.json").read_text())
     config = json.loads((ROOT / "release-please-config.json").read_text())
-    assert manifest == {".": "0.0.0"}
+    version = tuple(int(part) for part in manifest["."].split("."))
+    assert version == (0, 0, 0) or version >= (0, 12, 0)
     assert config["initial-version"] == "0.12.0"
     for key in ("bootstrap-sha", "last-release-sha", "release-as"):
         assert key not in config
