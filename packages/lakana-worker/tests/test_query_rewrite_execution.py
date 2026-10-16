@@ -307,25 +307,121 @@ def test_two_unaliased_tables_of_one_name_keep_working_without_qualifiers(tmp_pa
     assert rows == [("b", "x"), ("b", "y"), ("b", "z")]
 
 
-def test_a_schema_qualified_column_picks_its_table_among_two_of_one_name(tmp_path: Path) -> None:
-    """`gold.orders.id` and `silver.orders.id` each reach their own table."""
-    rows = _run(
-        "SELECT gold.orders.id, silver.orders.id FROM gold.orders "
-        "JOIN silver.orders ON gold.orders.id = silver.orders.id",
-        _two_orders(tmp_path),
-    )
+def test_two_tables_of_one_name_fail_loudly_when_a_column_is_qualified(tmp_path: Path) -> None:
+    """Neither `orders.id` nor `gold.orders.id` may bind to one of the two: the database refuses."""
+    sources = _two_orders(tmp_path)
 
-    assert rows == [(2, 2), (3, 3)]
+    for sql in (
+        "SELECT orders.id FROM gold.orders JOIN silver.orders ON true",
+        "SELECT gold.orders.id FROM gold.orders JOIN silver.orders ON true",
+    ):
+        with pytest.raises(duckdb.BinderException):
+            _run(sql, sources)
 
 
-def test_a_bare_table_name_among_two_of_one_name_is_refused_with_the_cause(
+def _gold_and_silver(tmp_path: Path) -> dict[str, TableSource]:
+    """Build `gold.orders` (ids 1, 2, 3) and `silver.orders` (ids 3, 4) with a `region`.
+
+    Parameters
+    ----------
+    tmp_path
+        Directory to write into.
+
+    Returns
+    -------
+    dict of str to TableSource
+        The sources.
+    """
+    first = tmp_path / "gold.parquet"
+    second = tmp_path / "silver.parquet"
+    pq.write_table(pa.table({"id": [1, 2, 3], "region": ["EU", "EU", "US"]}), first)
+    pq.write_table(pa.table({"id": [3, 4], "region": ["US", "EU"]}), second)
+    return {"gold.orders": _parquet(str(first)), "silver.orders": _parquet(str(second))}
+
+
+@pytest.mark.parametrize(
+    ("sql", "expected"),
+    [
+        (
+            "SELECT id FROM gold.orders WHERE EXISTS "
+            "(SELECT 1 FROM silver.orders WHERE silver.orders.id = gold.orders.id)",
+            [(3,)],
+        ),
+        (
+            "SELECT id FROM gold.orders WHERE NOT EXISTS "
+            "(SELECT 1 FROM silver.orders WHERE silver.orders.id = gold.orders.id)",
+            [(1,), (2,)],
+        ),
+        (
+            "SELECT id FROM gold.orders WHERE id IN "
+            "(SELECT id FROM silver.orders WHERE silver.orders.region = gold.orders.region)",
+            [(3,)],
+        ),
+        (
+            "SELECT id, (SELECT count(*) FROM silver.orders "
+            "WHERE silver.orders.id = gold.orders.id) AS n FROM gold.orders",
+            [(1, 0), (2, 0), (3, 1)],
+        ),
+    ],
+)
+def test_a_correlated_subquery_over_two_tables_of_one_name_is_right_or_refused(
+    tmp_path: Path, sql: str, expected: list[tuple[object, ...]]
+) -> None:
+    """The same bare name in an inner and an outer scope never makes both sides one table."""
+    try:
+        rows = _run(sql, _gold_and_silver(tmp_path))
+    except duckdb.BinderException:
+        return
+
+    assert rows == expected
+
+
+def test_a_correlated_subquery_over_an_inner_cte_named_like_the_table_is_right_or_refused(
     tmp_path: Path,
 ) -> None:
-    """`orders.id` could be either table: the message says so and names the way out."""
-    with pytest.raises(ValidationError) as raised:
-        _run("SELECT orders.id FROM gold.orders JOIN silver.orders ON true", _two_orders(tmp_path))
+    """An inner CTE called `orders` is another source with that name."""
+    sql = (
+        "SELECT id FROM gold.orders WHERE EXISTS "
+        "(WITH orders AS (SELECT 3 AS id) SELECT 1 FROM orders WHERE orders.id = gold.orders.id)"
+    )
+    try:
+        rows = _run(sql, _gold_and_silver(tmp_path))
+    except duckdb.BinderException:
+        return
 
-    message = str(raised.value)
-    assert "__lakana_" not in message
-    assert "'orders.id'" in message
-    assert "alias" in message
+    assert rows == [(3,)]
+
+
+def test_a_derived_table_named_like_the_table_never_gets_the_tables_rows(tmp_path: Path) -> None:
+    """`orders` is both a derived table and a read: no column may be bound to the wrong one."""
+    sql = (
+        "SELECT id FROM gold.orders WHERE EXISTS "
+        "(SELECT 1 FROM (SELECT 3 AS id) AS orders WHERE orders.id = gold.orders.id)"
+    )
+    try:
+        rows = _run(sql, _gold_and_silver(tmp_path))
+    except (duckdb.BinderException, ValidationError):
+        return
+
+    assert rows == [(3,)]
+
+
+def test_a_cte_named_like_a_table_beside_that_table_keeps_working(tmp_path: Path) -> None:
+    """Worked before columns could be qualified: `orders.note` is the CTE's."""
+    sources = {"gold.orders": _parquet(str(_orders(tmp_path)))}
+
+    rows = _run(
+        "WITH orders AS (SELECT 'cte' AS note) SELECT orders.note FROM orders, gold.orders",
+        sources,
+    )
+
+    assert rows == [("cte",)] * 3
+
+
+def test_an_explicit_alias_named_like_another_table_keeps_working(tmp_path: Path) -> None:
+    """Worked before: `orders.x` is the silver table aliased `orders`."""
+    sources = _two_orders(tmp_path)
+
+    rows = _run("SELECT orders.s FROM silver.orders AS orders JOIN gold.orders ON true", sources)
+
+    assert len(rows) == 9

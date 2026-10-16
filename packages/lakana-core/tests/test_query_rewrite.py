@@ -357,24 +357,65 @@ def test_rewrite_keeps_the_internal_name_for_two_unaliased_tables_of_one_name() 
     assert " AS orders" not in rewritten.sql
 
 
-def test_rewrite_refuses_a_bare_table_name_that_two_reads_share() -> None:
-    """The message names the column and the remedy, never the generated read."""
-    with pytest.raises(ValidationError, match=r"'orders\.id' could be either") as raised:
-        rewrite_query(
-            "SELECT orders.id FROM gold.orders JOIN silver.orders ON true",
-            sources={"gold.orders": _parquet("a.parquet"), "silver.orders": _parquet("b.parquet")},
-        )
+def test_rewrite_leaves_qualifiers_alone_when_two_reads_share_a_name() -> None:
+    """A clash fails in the database as it always did; nothing is bound to one of the two."""
+    rewritten = rewrite_query(
+        "SELECT orders.id, gold.orders.id FROM gold.orders JOIN silver.orders ON true",
+        sources={"gold.orders": _parquet("a.parquet"), "silver.orders": _parquet("b.parquet")},
+    )
 
-    assert "__lakana_" not in str(raised.value)
+    assert "SELECT orders.id, gold.orders.id FROM" in rewritten.sql
 
 
-def test_rewrite_refuses_a_schema_qualified_column_of_a_table_listed_twice() -> None:
-    """`gold.orders` twice is as ambiguous as the bare name."""
-    with pytest.raises(ValidationError, match="could be either"):
-        rewrite_query(
-            "SELECT gold.orders.id FROM gold.orders JOIN gold.orders ON true",
-            sources={"gold.orders": _parquet("a.parquet")},
-        )
+def test_rewrite_gives_no_alias_when_the_name_is_used_in_another_scope() -> None:
+    """The outer read and the inner one are both `orders`: neither takes the name."""
+    rewritten = rewrite_query(
+        "SELECT id FROM gold.orders WHERE EXISTS "
+        "(SELECT 1 FROM silver.orders WHERE silver.orders.id = gold.orders.id)",
+        sources={"gold.orders": _parquet("a.parquet"), "silver.orders": _parquet("b.parquet")},
+    )
+
+    assert " AS orders" not in rewritten.sql
+    assert "silver.orders.id = gold.orders.id" in rewritten.sql
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "WITH orders AS (SELECT 1 AS note) SELECT orders.note FROM orders, gold.orders",
+        "SELECT orders.x FROM silver.orders AS orders JOIN gold.orders ON true",
+        "SELECT 1 FROM gold.orders WHERE EXISTS (SELECT 1 FROM (SELECT 3 AS id) AS orders)",
+    ],
+)
+def test_rewrite_gives_no_alias_when_another_source_is_called_the_same(sql: str) -> None:
+    """A CTE, an explicit alias or a derived table of that name stays the only one."""
+    rewritten = rewrite_query(
+        sql,
+        sources={"gold.orders": _parquet("a.parquet"), "silver.orders": _parquet("b.parquet")},
+    )
+
+    assert _cte_alias("gold.orders") + " AS orders" not in rewritten.sql
+
+
+def test_rewrite_cuts_the_schema_only_in_the_scope_that_sees_the_read() -> None:
+    """A correlated subquery sees the outer read; a sibling subquery does not."""
+    rewritten = rewrite_query(
+        "SELECT (SELECT gold.orders.id) FROM gold.orders WHERE id IN (SELECT gold.orders.id)",
+        sources={"gold.orders": _parquet("a.parquet")},
+    )
+
+    assert rewritten.sql.count("orders.id") == 2
+    assert "gold.orders.id" not in rewritten.sql
+
+
+def test_rewrite_leaves_a_qualifier_alone_in_a_sibling_branch() -> None:
+    """The other branch of a UNION cannot see the read, so its column is not rebound."""
+    rewritten = rewrite_query(
+        "SELECT id FROM gold.orders UNION ALL SELECT gold.orders.id FROM raw.other",
+        sources={"gold.orders": _parquet("a.parquet")},
+    )
+
+    assert "SELECT gold.orders.id FROM raw.other" in rewritten.sql
 
 
 def test_rewrite_merges_its_ctes_ahead_of_the_querys_own() -> None:

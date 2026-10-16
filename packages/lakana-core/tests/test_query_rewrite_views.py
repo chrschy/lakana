@@ -77,6 +77,16 @@ def test_a_column_qualified_with_the_views_full_name_loses_the_schema_part() -> 
     assert "SELECT v.id, v.id, other.v.id FROM" in expanded.sql
 
 
+def test_a_view_name_used_in_another_scope_keeps_its_qualifiers() -> None:
+    """`gold.v` outside and `silver.v` inside are both `v`: no qualifier is cut or rebound."""
+    expanded = expand_views(
+        "SELECT id FROM gold.v WHERE EXISTS (SELECT 1 FROM silver.v WHERE silver.v.id = gold.v.id)",
+        _lookup({"gold.v": "SELECT id FROM bronze.a", "silver.v": "SELECT id FROM bronze.b"}),
+    )
+
+    assert "silver.v.id = gold.v.id" in expanded.sql
+
+
 def test_nested_views_expand_recursively_innermost_first() -> None:
     """A view may reference views; each is expanded once per reference."""
     expanded = expand_views(

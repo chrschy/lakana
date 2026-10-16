@@ -97,9 +97,11 @@ Each cell is a summary. The page named in the last column has the detail. The ch
 
 No migration. `SELECT orders.id FROM gold.orders`, `gold.orders.id` and `o.id` after
 `FROM gold.orders AS o` now work, also under a row filter or column mask; before, they failed with a
-message about a read called `__lakana_...`. The rules are the same as before. When two tables
-without an alias share a name (`gold.orders JOIN silver.orders`), the query still runs, `gold.orders.id`
-picks its table, and `orders.id` is refused with a message that asks for aliases.
+message about a read called `__lakana_...`. The table's own name serves as the alias only when no
+other table, alias, CTE or derived table of the query has that name. When two tables share a name
+(`gold.orders JOIN silver.orders`, or a subquery over `silver.orders` inside a query over
+`gold.orders`), nothing changes: the query runs as before, and a column qualified with that name
+fails in the database as before. Give each table an alias.
 
 ## Notes for 0.12.0
 

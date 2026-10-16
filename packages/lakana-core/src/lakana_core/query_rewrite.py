@@ -1058,11 +1058,23 @@ def expand_views(
             cache[dotted] = lookup(dotted)
         return cache[dotted]
 
+    named_views: list[tuple[tuple[str, str, str], exp.Expr]] = []
     _expand_into(
-        parsed, cached_lookup, () if root is None else (root,), expanded, max_depth, dialect
+        parsed,
+        cached_lookup,
+        () if root is None else (root,),
+        expanded,
+        named_views,
+        max_depth,
+        dialect,
     )
     if not expanded:
         return ExpandedQuery(sql=sql, views=())
+    counts = _bare_name_counts(parsed)
+    _drop_schema_from_qualified_columns(
+        list(traverse_scope(parsed)),
+        [(key, node) for key, node in named_views if counts[key[2]] == 1],
+    )
     return ExpandedQuery(sql=parsed.sql(dialect=dialect), views=tuple(expanded))
 
 
@@ -1106,6 +1118,7 @@ def _expand_into(
     lookup: Callable[[str], ViewDefinition | None],
     stack: tuple[str, ...],
     expanded: list[str],
+    named_views: list[tuple[tuple[str, str, str], exp.Expr]],
     max_depth: int,
     dialect: str,
 ) -> None:
@@ -1121,6 +1134,9 @@ def _expand_into(
         The views being expanded around this query, outermost first.
     expanded
         Appended with each view expanded, innermost first.
+    named_views
+        Appended with the `_qualifier_key` and subquery of each view reference that had no
+        alias and so took the view's name.
     max_depth
         As for `expand_views`.
     dialect
@@ -1132,7 +1148,6 @@ def _expand_into(
         As `expand_views` documents.
     """
     bound = _cte_reference_ids(parsed)
-    unaliased: set[tuple[str, str, str]] = set()
     for table in list(parsed.find_all(exp.Table)):
         if id(table) in bound:
             continue
@@ -1162,17 +1177,18 @@ def _expand_into(
         except SQL_SYNTAX_ERRORS as exc:
             # The stored SQL may name tables the reader cannot see: name the view only.
             raise ValidationError(unreadable_view_message(dotted)) from exc
-        _expand_into(inner, lookup, (*stack, dotted), expanded, max_depth, dialect)
+        _expand_into(inner, lookup, (*stack, dotted), expanded, named_views, max_depth, dialect)
         alias = table.args.get("alias")
+        key = _qualifier_key(table)
         if alias is None:
             alias = exp.TableAlias(this=exp.to_identifier(table.name))
-            unaliased.add(_qualifier_key(table))
         subquery = exp.Subquery(this=inner, alias=alias)
+        if table.args.get("alias") is None:
+            named_views.append((key, subquery))
         for arg in extra_args:
             subquery.set(arg, table.args[arg])
         table.replace(subquery)
         expanded.append(dotted)
-    _drop_schema_from_qualified_columns(parsed, unaliased)
 
 
 _ALIAS_HASH_HEX_CHARS = 12
@@ -1199,97 +1215,64 @@ def _qualifier_key(node: exp.Table | exp.Column) -> tuple[str, str, str]:
     )
 
 
-def _drop_schema_from_qualified_columns(
-    parsed: exp.Expr, replaced: set[tuple[str, str, str]]
-) -> None:
-    """Cut the schema part off a column qualified with a replaced table's full name.
-
-    A reference such as `gold.orders` is replaced by a read that is only known by its table
-    name (or the caller's alias), so the column `gold.orders.id` has to become `orders.id`
-    or the database looks for a schema called `gold` and fails with a message about
-    Lakana's own read. Only a qualifier that spells a replaced reference in full is cut: any
-    other dotted column (a struct field, a table beside it) is left as written.
+def _bare_name_counts(parsed: exp.Expr) -> Counter[str]:
+    """Count how often each bare name is taken by a source anywhere in a statement.
 
     Parameters
     ----------
     parsed
-        The statement being rewritten; changed in place.
-    replaced
-        The `_qualifier_key` of each unaliased reference that was replaced.
-    """
-    for column in parsed.find_all(exp.Column):
-        if column.args.get("db") is not None and _qualifier_key(column) in replaced:
-            column.set("db", None)
-            column.set("catalog", None)
-
-
-def _name_unaliased_reads(
-    parsed: exp.Expr, bound: set[int], sources: Mapping[str, TableSource]
-) -> set[int]:
-    """Settle the columns that name a table another read of the same query shares a name with.
-
-    Two unaliased reads such as `gold.orders` and `silver.orders` cannot both be called
-    `orders` once rewritten: the database refuses a name used twice in one `FROM`. Such reads
-    keep their generated name (the query ran that way before columns could be qualified).
-    A column written with the full name of one of them is pointed at that generated name; a
-    column written with the bare shared name could be either and is refused.
-
-    Parameters
-    ----------
-    parsed
-        The statement being rewritten; its ambiguous columns are changed in place.
-    bound
-        Ids of the table nodes that name a CTE of the query, not a catalog table.
-    sources
-        The tables being rewritten, by dotted name.
+        The statement.
 
     Returns
     -------
-    set of int
-        The ids of the table nodes that must keep their generated name.
-
-    Raises
-    ------
-    ValidationError
-        If a column is qualified with a bare name shared by two reads of its scope, or with
-        a full name that two reads share.
+    collections.Counter of str
+        For each lower-cased name, the number of aliases (of tables, derived tables, CTEs and
+        table functions) and unaliased table references called so, in every scope.
     """
-    keep: set[int] = set()
-    for scope in traverse_scope(parsed):
-        names = Counter((table.alias_or_name or "").lower() for table in scope.tables) + Counter(
-            (derived.alias or "").lower() for derived in scope.derived_tables
-        )
-        clashing = [
-            table
-            for table in scope.tables
-            if id(table) not in bound
-            and _dotted_table_name(table) in sources
-            and table.args.get("alias") is None
-            and names[table.name.lower()] > 1
-        ]
-        if not clashing:
-            continue
-        keep.update(id(table) for table in clashing)
-        by_key: dict[tuple[str, str, str], list[exp.Table]] = {}
-        for table in clashing:
-            by_key.setdefault(_qualifier_key(table), []).append(table)
-        shared = {table.name.lower() for table in clashing}
-        for column in scope.columns:
-            qualifier = column.table.lower()
-            if qualifier not in shared:
+    counts = Counter(alias.name.lower() for alias in parsed.find_all(exp.TableAlias))
+    counts.update(
+        table.name.lower()
+        for table in parsed.find_all(exp.Table)
+        if table.args.get("alias") is None
+    )
+    return counts
+
+
+def _drop_schema_from_qualified_columns(
+    scopes: Sequence[Scope], named: Sequence[tuple[tuple[str, str, str], exp.Expr]]
+) -> None:
+    """Cut the schema part off a column qualified with the full name of a read named by its table.
+
+    A reference such as `gold.orders` is replaced by a read the database knows only by its
+    table name, so the column `gold.orders.id` has to become `orders.id`, or the database looks
+    for a schema called `gold`. Only a read whose bare name is used nowhere else in the
+    statement is named that way (see `_bare_name_counts`), and only a column of the read's own
+    scope, or of a scope nested in it (a correlated subquery), is changed. Any other dotted
+    column (a struct field, a table beside it) is left as written, so a mistake still fails in
+    the database instead of binding to another table.
+
+    Parameters
+    ----------
+    scopes
+        The scopes of the statement, built while the reads were still in it.
+    named
+        The `_qualifier_key` of each read that took its bare name as alias, with the node.
+    """
+    owner = {id(node): scope for scope in scopes for node in (*scope.tables, *scope.derived_tables)}
+    for scope in scopes:
+        for column in (*scope.columns, *scope.external_columns):
+            if column.args.get("db") is None:
                 continue
-            matches = by_key.get(_qualifier_key(column), []) if column.args.get("db") else []
-            if len(matches) != 1:
-                raise ValidationError(
-                    f"The column '{column.sql()}' could be either of the tables called "
-                    f"'{column.table}' in this query. Give each of them an alias "
-                    f"(FROM schema_a.{column.table} AS a JOIN schema_b.{column.table} AS b) "
-                    f"and write a.{column.name} or b.{column.name}."
-                )
-            column.set("table", exp.to_identifier(_cte_alias(_dotted_table_name(matches[0]))))
-            column.set("db", None)
-            column.set("catalog", None)
-    return keep
+            key = _qualifier_key(column)
+            for named_key, node in named:
+                if named_key != key:
+                    continue
+                visible = scope
+                while visible is not None and visible is not owner.get(id(node)):
+                    visible = visible.parent
+                if visible is not None:
+                    column.set("db", None)
+                    column.set("catalog", None)
 
 
 def _cte_alias(dotted: str) -> str:
@@ -1368,8 +1351,9 @@ def rewrite_query(
     owners: dict[str, str] = {}
     parameters: dict[str, list[str]] = {}
     token = secrets.token_hex(_PARAMETER_TOKEN_BYTES)
-    unaliased: set[tuple[str, str, str]] = set()
-    keep_generated_name = _name_unaliased_reads(parsed, bound, sources)
+    named: list[tuple[tuple[str, str, str], exp.Expr]] = []
+    name_counts = _bare_name_counts(parsed)
+    scopes = list(traverse_scope(parsed))
     for table in list(parsed.find_all(exp.Table)):
         dotted = _dotted_table_name(table)
         if id(table) in bound or dotted not in sources:
@@ -1402,13 +1386,15 @@ def rewrite_query(
         original_alias = table.args.get("alias")
         if original_alias is not None:
             replacement.set("alias", original_alias)
-        elif id(table) not in keep_generated_name:
-            # The read is known to the database by its generated name; the caller refers to
-            # the table by its own, so that name is the alias (`orders.id` resolves).
+        elif name_counts[table.name.lower()] == 1:
+            # The caller refers to the table by its own name, so that name is the alias
+            # (`orders.id` resolves). Only when nothing else in the statement is called so:
+            # otherwise the read keeps its generated name, as it always did, and a clash
+            # fails in the database instead of binding to the wrong table.
             replacement.set("alias", exp.TableAlias(this=table.this.copy()))
-            unaliased.add(_qualifier_key(table))
+            named.append((_qualifier_key(table), table))
         table.replace(replacement)
-    _drop_schema_from_qualified_columns(parsed, unaliased)
+    _drop_schema_from_qualified_columns(scopes, named)
     if not ctes:
         return RewrittenQuery(sql=parsed.sql(dialect=dialect), parameters=parameters)
     if not isinstance(parsed, exp.Query):

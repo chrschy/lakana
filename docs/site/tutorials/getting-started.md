@@ -328,12 +328,13 @@ You will see this result:
 ```
 
 Station A1 read 4 and 6 degrees, which average 5. Station B2 read 1 and 3, which average 2.
-A column may carry the name of its table or an alias, as in any SQL: `station_temperatures.station_id`,
-`silver.station_temperatures.station_id` or `t.station_id` after `FROM silver.station_temperatures AS t`.
 CI runs every command on this page on every change. It checks the query result above and the
 lines of the other outputs that stay the same: the tables of the deploy, and the status and row
 counts of the run. Identifiers, commits, versions and durations differ on every machine and are
 not checked.
+
+A column may carry the name of its table or an alias, as in any SQL: `station_temperatures.station_id`,
+`silver.station_temperatures.station_id` or `t.station_id` after `FROM silver.station_temperatures AS t`.
 
 ## Stop the instance
 
