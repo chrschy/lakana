@@ -16,7 +16,13 @@ import pyarrow.parquet as pq
 import pytest
 
 from lakana_core.errors import ValidationError
-from lakana_core.query_rewrite import TableSource, check_blacklist, rewrite_query
+from lakana_core.query_rewrite import (
+    TableSource,
+    ViewDefinition,
+    check_blacklist,
+    expand_views,
+    rewrite_query,
+)
 
 
 def _parquet(*urls: str) -> TableSource:
@@ -400,7 +406,7 @@ def test_a_derived_table_named_like_the_table_never_gets_the_tables_rows(tmp_pat
     )
     try:
         rows = _run(sql, _gold_and_silver(tmp_path))
-    except (duckdb.BinderException, ValidationError):
+    except duckdb.BinderException:
         return
 
     assert rows == [(3,)]
@@ -425,3 +431,40 @@ def test_an_explicit_alias_named_like_another_table_keeps_working(tmp_path: Path
     rows = _run("SELECT orders.s FROM silver.orders AS orders JOIN gold.orders ON true", sources)
 
     assert len(rows) == 9
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT id FROM gold.orders WHERE EXISTS "
+        "(SELECT 1 FROM (SELECT {'id': 1} AS orders) d WHERE gold.orders.id = 3)",
+        "WITH x AS (SELECT {'id': 1} AS orders) "
+        "SELECT id FROM gold.orders WHERE EXISTS (SELECT 1 FROM x WHERE gold.orders.id = 3)",
+        "WITH x AS (SELECT gold.orders.id AS i FROM (SELECT 1) t) "
+        "SELECT id FROM gold.orders, x WHERE x.i = id",
+    ],
+)
+def test_a_full_name_in_a_nested_scope_never_binds_to_a_struct_column_of_that_scope(
+    tmp_path: Path, sql: str
+) -> None:
+    """`orders.id` would read the field `id` of a struct column `orders`; the full name may not."""
+    try:
+        rows = _run(sql, _gold_and_silver(tmp_path))
+    except duckdb.BinderException:
+        return
+
+    assert rows == [(3,)]
+
+
+def test_a_full_view_name_in_a_nested_scope_stays_as_written(tmp_path: Path) -> None:
+    """The view path follows the same rule: the cut happens only in the view's own scope."""
+    expanded = expand_views(
+        "SELECT id FROM gold.v WHERE EXISTS "
+        "(SELECT 1 FROM (SELECT {'id': 1} AS v) d WHERE gold.v.id = 3)",
+        lambda dotted: (
+            ViewDefinition(name=dotted, sql="SELECT 3 AS id") if dotted == "gold.v" else None
+        ),
+    )
+
+    with pytest.raises(duckdb.BinderException):
+        duckdb.connect().execute(expanded.sql)

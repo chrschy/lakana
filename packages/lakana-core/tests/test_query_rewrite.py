@@ -397,15 +397,17 @@ def test_rewrite_gives_no_alias_when_another_source_is_called_the_same(sql: str)
     assert _cte_alias("gold.orders") + " AS orders" not in rewritten.sql
 
 
-def test_rewrite_cuts_the_schema_only_in_the_scope_that_sees_the_read() -> None:
-    """A correlated subquery sees the outer read; a sibling subquery does not."""
+def test_rewrite_cuts_the_schema_only_in_the_scope_of_the_read() -> None:
+    """In a subquery or a CTE body the full name stays as written; the database refuses it."""
     rewritten = rewrite_query(
-        "SELECT (SELECT gold.orders.id) FROM gold.orders WHERE id IN (SELECT gold.orders.id)",
+        "WITH x AS (SELECT gold.orders.id FROM raw.items) "
+        "SELECT gold.orders.id, (SELECT gold.orders.id) FROM gold.orders "
+        "WHERE id IN (SELECT gold.orders.id)",
         sources={"gold.orders": _parquet("a.parquet")},
     )
 
-    assert rewritten.sql.count("orders.id") == 2
-    assert "gold.orders.id" not in rewritten.sql
+    assert rewritten.sql.count("gold.orders.id") == 3
+    assert "SELECT orders.id," in rewritten.sql
 
 
 def test_rewrite_leaves_a_qualifier_alone_in_a_sibling_branch() -> None:

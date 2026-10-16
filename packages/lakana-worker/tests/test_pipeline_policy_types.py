@@ -419,9 +419,9 @@ def test_a_float_equality_on_a_column_promoted_to_double(
     equality matches depends on the order of the table's files, on the filter pushdown and on
     how the filter is written (#104). This test describes the files listed newest first: there
     `price = 1.1` matches the rows of both files, `price = 1.1 OR id = 99` only the new one, and
-    the negations show a row an equality would have matched. A change of the file order or a fix
-    of #104 will change these assertions; only the range and the rounded value, which match both
-    files in either order, are guaranteed.
+    `NOT (price = 1.1 AND id > 0)` shows a row the equality matches. A change of the file order
+    or a fix of #104 will change these assertions; only the range and the rounded value, which
+    match both files in either order, are guaranteed.
     """
     _promoted_prices(session, principal, catalog)
 

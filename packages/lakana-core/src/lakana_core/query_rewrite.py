@@ -1247,9 +1247,11 @@ def _drop_schema_from_qualified_columns(
     table name, so the column `gold.orders.id` has to become `orders.id`, or the database looks
     for a schema called `gold`. Only a read whose bare name is used nowhere else in the
     statement is named that way (see `_bare_name_counts`), and only a column of the read's own
-    scope, or of a scope nested in it (a correlated subquery), is changed. Any other dotted
-    column (a struct field, a table beside it) is left as written, so a mistake still fails in
-    the database instead of binding to another table.
+    scope is changed. In a nested scope the database would bind `orders.id` to a struct column
+    called `orders` of that scope's own sources before it reached the outer read, and sqlglot
+    makes a CTE body or a derived table a child of the scope around it although the read is not
+    visible there. Any other dotted column is therefore left as written and fails in the
+    database, as it always did, instead of binding to something else.
 
     Parameters
     ----------
@@ -1259,18 +1261,22 @@ def _drop_schema_from_qualified_columns(
         The `_qualifier_key` of each read that took its bare name as alias, with the node.
     """
     owner = {id(node): scope for scope in scopes for node in (*scope.tables, *scope.derived_tables)}
+    roots = {id(scope.expression): scope for scope in scopes}
+    seen: set[int] = set()
     for scope in scopes:
+        # A scope lists the correlated columns of its subqueries too, so each column is
+        # attributed to the scope whose expression it sits in directly.
         for column in (*scope.columns, *scope.external_columns):
-            if column.args.get("db") is None:
+            if id(column) in seen or column.args.get("db") is None:
                 continue
+            seen.add(id(column))
+            node: exp.Expr | None = column
+            while node is not None and id(node) not in roots:
+                node = node.parent
+            own = None if node is None else roots[id(node)]
             key = _qualifier_key(column)
-            for named_key, node in named:
-                if named_key != key:
-                    continue
-                visible = scope
-                while visible is not None and visible is not owner.get(id(node)):
-                    visible = visible.parent
-                if visible is not None:
+            for named_key, read in named:
+                if named_key == key and own is owner.get(id(read)):
                     column.set("db", None)
                     column.set("catalog", None)
 
