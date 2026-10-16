@@ -112,12 +112,13 @@ or a column whose type was widened. A filter names top-level columns only:
   refused, as the table above shows. To hide a struct column from someone, use a
   [column mask](mask-a-column.md) on the column as a whole.
 - **A float column that was widened to double.** Rows written before the widening hold 32-bit
-  values and rows written after hold 64-bit ones, so `1.1` is not the same number in both. A
-  filter `price = 1.1` shows the rows of both files today, but the old value reads back as
-  `1.100000023841858`, and a comparison made on a value after it was read matches only the new
-  rows. Do not rely on an equality with a decimal literal for such a column. In a filter write a
-  range (`price > 1.09 AND price < 1.11`); in a query a range or a rounded value
-  (`round(price, 2) = 1.1`) matches both files the same way.
+  values and rows written after hold 64-bit ones, so `1.1` is not the same number in both. What
+  an equality with a decimal literal (`price = 1.1`) or its negation (`price <> 1.1`,
+  `NOT (price = 1.1)`) matches depends on the order of the table's data files and on how the
+  filter is written, so a filter meant to hide such rows can show some. Always write a range
+  (`price > 1.09 AND price < 1.11`) in a filter. A query can also use a rounded value
+  (`round(price, 2) = 1.1`). Both match the rows of old and new files alike, in either order.
+  Schema changes are tracked in [#104](https://github.com/chrschy/lakana/issues/104).
 
 ## When a table gains a column
 

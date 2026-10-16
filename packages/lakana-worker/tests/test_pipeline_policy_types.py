@@ -287,6 +287,15 @@ def test_a_column_mask_can_cover_a_whole_struct_column(
     assert star.column("address").to_pylist() == [None, None, None]
     assert qualified.column("address").to_pylist() == [None, None, None]
     assert field.column("c").to_pylist() == [None, None, None]
+    for spelling in ("customers.address.country", "gold.customers.address.country"):
+        try:
+            result = _result(
+                tmp_path,
+                _query(session, principal, f"SELECT {spelling} AS c FROM gold.customers"),
+            )
+        except AssertionError:
+            continue  # refused: nothing is shown, which is also fine
+        assert result.column("c").to_pylist() == [None, None, None]
     assert sorted(whole.column("id").to_pylist()) == [1, 2, 3]
 
 
@@ -406,46 +415,39 @@ def test_a_float_equality_on_a_column_promoted_to_double(
     """Characterisation: what `price = 1.1` matches once `price` went from float to double.
 
     The file written before the promotion holds 32-bit floats, the one written after holds
-    64-bit doubles. A filter on the column is matched against the file's own type, so the
-    literal 1.1 matches the row of the old file as well as the row of the new one. The old
-    row's value reads back as 1.100000023841858, though, and a comparison made on the value
-    after the read (here on a computed column) matches only the new row. The two spellings of
-    "about 1.1" that hold either way, a range and a rounded value, are what the documentation
-    advises.
+    64-bit doubles. The read takes the column's type from the first file it reads, so what an
+    equality matches depends on the order of the table's files, on the filter pushdown and on
+    how the filter is written (#104). This test describes the files listed newest first: there
+    `price = 1.1` matches the rows of both files, `price = 1.1 OR id = 99` only the new one, and
+    the negations show a row an equality would have matched. A change of the file order or a fix
+    of #104 will change these assertions; only the range and the rounded value, which match both
+    files in either order, are guaranteed.
     """
     _promoted_prices(session, principal, catalog)
-    plain = _ids(session, principal, tmp_path, "SELECT id FROM gold.prices WHERE price = 1.1")
-    after_read = _ids(
-        session,
-        principal,
-        tmp_path,
-        "SELECT id FROM (SELECT id, price + 0 AS p FROM gold.prices) WHERE p = 1.1",
-    )
-    ranged = _ids(
-        session,
-        principal,
-        tmp_path,
-        "SELECT id FROM gold.prices WHERE price > 1.09 AND price < 1.11",
-    )
-    rounded = _ids(
-        session, principal, tmp_path, "SELECT id FROM gold.prices WHERE round(price, 2) = 1.1"
-    )
+
+    def ids(where: str) -> list[int]:
+        return _ids(session, principal, tmp_path, f"SELECT id FROM gold.prices WHERE {where}")
+
+    ranged = ids("price > 1.09 AND price < 1.11")
+    rounded = ids("round(price, 2) = 1.1")
+    equal = ids("price = 1.1")
+    equal_or = ids("price = 1.1 OR id = 99")
+    not_equal = ids("price <> 1.1")
+    negated = ids("NOT (price = 1.1 AND id > 0)")
     RowFilterService(session, AllowAllAuthorization(), catalog).create(
         principal,
         principal="admin",
         environment="dev",
         namespace="gold",
         table="prices",
-        expression="price = 1.1",
+        expression="price > 1.09 AND price < 1.11",
     )
     filtered = _ids(session, principal, tmp_path, "SELECT id FROM gold.prices")
-    value = _result(
-        tmp_path, _query(session, principal, "SELECT price FROM gold.prices WHERE id = 1")
-    ).column("price")[0]
 
-    assert plain == [1, 3]
-    assert filtered == [1, 3]
-    assert after_read == [3]
     assert ranged == [1, 3]
     assert rounded == [1, 3]
-    assert value.as_py() == pytest.approx(1.100000023841858, abs=1e-15)
+    assert filtered == [1, 3]
+    assert equal == [1, 3]
+    assert equal_or == [3]
+    assert not_equal == [2, 4]
+    assert negated == [1, 2, 4]
