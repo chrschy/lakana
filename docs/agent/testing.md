@@ -200,7 +200,12 @@ every missing output of it means "run everything".
   time, when it reports them, never in bulk. `scripts/tests/test_workflows.py` pins the
   permissions, the triggers and its runner; another test there pins every action of every workflow
   by commit SHA.
-- **`security-deep.yml`** runs semgrep weekly.
+- **`security-deep.yml`** runs semgrep and Trivy weekly. The semgrep job uploads its SARIF to code
+  scanning (`security-events: write` on that job only).
+- **`codeql.yml`** runs CodeQL for Python on pull requests, on a push to `main` and weekly, on a
+  GitHub-hosted runner, with `security-events: write` on its one job.
+- **Token permissions.** No workflow has a write permission at its top level: each job names its
+  own (`cla.yml` and `security-deep.yml` included). `scripts/tests/test_workflows.py` fails on one.
 - **`release.yml`** is described in `docs/agent/release.md`; it also attaches the SBOM to each
   GitHub release.
 

@@ -14,6 +14,25 @@ This is the "team" deployment path; for a single user on their own laptop, see l
   releases.
 - The image `ghcr.io/chrschy/lakana` is public; pulling it needs no login.
 
+## Verify a download
+
+Every release after 0.13.0 carries a signed build provenance attestation, made by Lakana's
+release workflow, for each wheel, each sdist and the image. It proves that the file or image
+you hold was built by the `chrschy/lakana` repository from the tagged commit. Checking it is
+optional. You need the [GitHub CLI](https://cli.github.com/) (`gh`). Download a wheel and verify
+it, or verify the image you pulled:
+
+<!-- not tested: needs a published release and the GitHub CLI -->
+```bash
+pip download "lakana==<version>" --no-deps
+gh attestation verify lakana-<version>-py3-none-any.whl --repo chrschy/lakana
+gh attestation verify oci://ghcr.io/chrschy/lakana:<version> --repo chrschy/lakana
+```
+
+A passing check prints the repository and the workflow that built the file. A failing check
+means the file is not the one Lakana published: delete it and download again. A release up to 0.13.0
+has no attestation, and the command says that no attestation was found.
+
 ## Quickstart
 
 <!-- not tested: moved as is; sorted in the second pull request -->
@@ -1179,9 +1198,10 @@ so this discards the catalog and all stored data — there is no undo short of a
   (`duckdb.connect().execute('INSTALL httpfs')`), so the worker never downloads an extension
   the first time it runs a query.
 - **Dependencies are locked.** The image is built from wheels pinned by `uv.lock`
-  (`uv export --frozen ... -o dist/constraints.txt`, passed to `pip install -c
-  constraints.txt` in the build), so an image build always resolves the exact versions the
-  repo's lockfile pins, not whatever is newest on PyPI that day.
+  (`uv export --frozen ... -o dist/requirements.txt`, installed with `pip install
+  --require-hashes` in the build), so an image build installs exactly the versions and files the
+  repo's lockfile pins, not whatever is newest on PyPI that day; pip refuses a file whose hash
+  differs. The base image is pinned by digest.
 - **`HEALTHCHECK` probes `http://127.0.0.1:<LAKANA_PORT>/healthz`.** `LAKANA_HOST` (the address
   `lakana-server` itself binds to inside the container) must stay `0.0.0.0` or a loopback
   address — the image sets `LAKANA_HOST=0.0.0.0` by default — or the in-container healthcheck

@@ -31,3 +31,13 @@ updates:
         patterns: ["*"]
     commit-message:
       prefix: "deps"
+
+  - package-ecosystem: "docker"
+    directory: "/packages/lakana-worker/tests/sshd"   # the test SSH server's alpine image
+    schedule:
+      interval: "weekly"
+    groups:
+      test-images:
+        patterns: ["*"]
+    commit-message:
+      prefix: "deps"

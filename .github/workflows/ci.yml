@@ -333,6 +333,6 @@ jobs:
       - if: steps.changes.outputs.run == 'true'
         run: |
           uv build --all-packages -o dist
-          uv export --frozen --no-dev --all-packages --no-emit-workspace --no-hashes -o dist/constraints.txt
+          uv export --frozen --no-dev --all-packages --no-emit-workspace -o dist/requirements.txt
           docker build -t lakana:ci .
           uv run --locked bash scripts/compose_smoke_test.sh lakana:ci

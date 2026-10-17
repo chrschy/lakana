@@ -126,7 +126,28 @@ def test_dependabot_watches_the_docker_image_pins() -> None:
     """The base image and the pinned uv image in the Dockerfile get update pull requests."""
     config = yaml.safe_load((ROOT / ".github" / "dependabot.yml").read_text())
     docker = [u for u in config["updates"] if u["package-ecosystem"] == "docker"]
-    assert [u["directory"] for u in docker] == ["/"]
+    assert [u["directory"] for u in docker] == ["/", "/packages/lakana-worker/tests/sshd"]
+    # A directory that does not hold a Dockerfile would be watched for nothing.
+    for update in docker:
+        assert (ROOT / update["directory"].lstrip("/") / "Dockerfile").is_file()
+
+
+_BASE_IMAGE = re.compile(r"^FROM (?P<image>[\w./-]+:[\w.-]+)@sha256:[0-9a-f]{64}( AS \w+)?$")
+
+
+@pytest.mark.parametrize(
+    "dockerfile", ["Dockerfile", "packages/lakana-worker/tests/sshd/Dockerfile"]
+)
+def test_every_base_image_is_pinned_by_tag_and_digest(dockerfile: str) -> None:
+    """A tag moves; a digest does not. Dependabot's docker ecosystem bumps both together."""
+    froms = [
+        line
+        for line in (ROOT / dockerfile).read_text().splitlines()
+        if line.upper().startswith("FROM ")
+    ]
+    assert froms
+    unpinned = [line for line in froms if not _BASE_IMAGE.match(line)]
+    assert not unpinned, f"{dockerfile}: pin by `image:tag@sha256:...`: {unpinned}"
 
 
 def test_the_uv_image_is_a_from_line_so_dependabot_can_read_it() -> None:
@@ -1001,7 +1022,7 @@ def test_only_the_job_that_uploads_the_sbom_can_write_to_the_release() -> None:
     assert "--repo" in command
 
     for name, other in jobs.items():
-        if name != "sbom-release":
+        if name not in {"sbom-release", "provenance-release"}:
             assert _effective_permissions(workflow, other).get("contents") != "write", name
 
 
@@ -1024,3 +1045,114 @@ def test_the_scorecard_workflow_is_read_only_and_publishes_its_results() -> None
     assert upload["with"]["sarif_file"] == scorecard["with"]["results_file"]
     checkout = next(s for s in steps if s["uses"].startswith("actions/checkout@"))
     assert checkout["with"]["persist-credentials"] is False
+
+
+def test_no_workflow_grants_write_permissions_at_the_top_level() -> None:
+    """A workflow-level write scope reaches every job; each job asks for its own instead.
+
+    OpenSSF Scorecard's Token-Permissions check scores this. The top level is read-only, empty
+    or absent (the repository's default is read-only).
+    """
+    offenders = []
+    for path in sorted(WORKFLOWS.glob("*.yml")):
+        top = yaml.safe_load(path.read_text()).get("permissions", {})
+        if top == "write-all" or (isinstance(top, dict) and "write" in top.values()):
+            offenders.append(path.name)
+    assert not offenders, f"move the write permissions into the jobs that need them: {offenders}"
+
+
+def test_the_cla_and_deep_security_workflows_write_only_in_the_job_that_needs_it() -> None:
+    """The CLA action writes statuses and comments; the SARIF upload writes security events."""
+    cla = yaml.safe_load((WORKFLOWS / "cla.yml").read_text())
+    assert cla["permissions"] == {"contents": "read"}
+    assert cla["jobs"]["cla"]["permissions"] == {
+        "actions": "write",
+        "contents": "read",
+        "pull-requests": "write",
+        "statuses": "write",
+    }
+    deep = yaml.safe_load((WORKFLOWS / "security-deep.yml").read_text())
+    assert deep["permissions"] == {"contents": "read"}
+    assert deep["jobs"]["semgrep"]["permissions"] == {
+        "contents": "read",
+        "security-events": "write",
+    }
+    assert _effective_permissions(deep, deep["jobs"]["trivy"]).get("security-events") != "write"
+
+
+def test_the_semgrep_results_are_uploaded_to_code_scanning() -> None:
+    """The SARIF file goes to code scanning even when Semgrep finds something."""
+    steps = _jobs("security-deep.yml")["semgrep"]["steps"]
+    upload = next(s for s in steps if "upload-sarif" in str(s.get("uses")))
+    assert upload["with"]["sarif_file"] == "semgrep.sarif"
+    assert upload["with"]["category"] == "semgrep"
+    assert upload["if"] == "always()"
+
+
+def test_codeql_analyses_python_on_pull_requests_main_and_weekly() -> None:
+    """The CodeQL workflow is read-only except for the job that uploads to code scanning."""
+    workflow = yaml.safe_load((WORKFLOWS / "codeql.yml").read_text())
+    triggers = workflow[True]
+    assert set(triggers) == {"pull_request", "push", "schedule"}
+    assert triggers["push"]["branches"] == ["main"]
+    assert triggers["schedule"]
+    assert workflow["permissions"] == {"contents": "read"}
+    (job,) = workflow["jobs"].values()
+    assert job["permissions"] == {
+        "contents": "read",
+        "security-events": "write",
+    }
+    assert job["runs-on"] == "ubuntu-latest"  # a GitHub-hosted job, like Scorecard's
+    uses = {s["uses"].split("@")[0]: s for s in job["steps"] if "uses" in s}
+    assert uses["github/codeql-action/init"]["with"]["languages"] == "python"
+    assert "github/codeql-action/analyze" in uses
+    assert uses["github/codeql-action/analyze"]["with"]["category"] == "/language:python"
+
+
+def test_every_published_artefact_gets_a_build_provenance_attestation() -> None:
+    """Wheels, sdists and the image carry an attestation that `gh attestation verify` checks.
+
+    The attestations need ``id-token`` and ``attestations`` write scopes, held by the jobs that
+    make them and by none other; the workflow stays at ``{}``.
+    """
+    workflow = yaml.safe_load((WORKFLOWS / "release.yml").read_text())
+    jobs = workflow["jobs"]
+    assert workflow["permissions"] == {}
+
+    def attest(job: dict) -> list[dict]:
+        return [s for s in job["steps"] if "attest-build-provenance" in str(s.get("uses"))]
+
+    attesting = {name for name, job in jobs.items() if attest(job)}
+    assert attesting == {"attest-dist", "publish-image"}
+    for name in attesting:
+        perms = jobs[name]["permissions"]
+        assert perms["id-token"] == "write", name
+        assert perms["attestations"] == "write", name
+    assert jobs["attest-dist"]["permissions"] == {
+        "contents": "read",
+        "id-token": "write",
+        "attestations": "write",
+    }
+    (wheels,) = attest(jobs["attest-dist"])
+    assert wheels["with"]["subject-path"] == "dist/*"
+    assert jobs["attest-dist"]["needs"] == "build"
+    # Scorecard looks for a signature among the release's assets: the bundle goes there from a
+    # job that only downloads it, like the SBOM's.
+    release = jobs["provenance-release"]
+    assert release["permissions"] == {"contents": "write"}
+    assert set(release["needs"]) == {"release-please", "attest-dist"}
+    assert [s["uses"].split("@")[0] for s in release["steps"] if "uses" in s] == [
+        "actions/download-artifact"
+    ]
+    assert any(".intoto.jsonl" in c for s in release["steps"] for c in _commands(s))
+    (image,) = attest(jobs["publish-image"])
+    assert image["with"]["push-to-registry"] is True
+    assert image["with"]["subject-name"] == "ghcr.io/chrschy/lakana"
+    assert "steps.build.outputs.digest" in image["with"]["subject-digest"]
+    assert jobs["publish-image"]["permissions"]["packages"] == "write"
+    for name, job in jobs.items():
+        if name not in attesting:
+            perms = _effective_permissions(workflow, job)
+            assert perms.get("attestations") != "write", name
+            if name not in {"publish-core", "publish-runtime", "publish-sdk"}:
+                assert perms.get("id-token") != "write", name

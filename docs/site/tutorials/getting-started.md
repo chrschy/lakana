@@ -20,6 +20,9 @@ a local instance needs:
 pip install "lakana[server]"
 ```
 
+To check that a download is the one Lakana published, see
+[Verify a download](../how-to/deploy-with-compose.md#verify-a-download).
+
 To work on Lakana itself, or to try the development version, install from a checkout of the
 repository instead. You need [`uv`](https://docs.astral.sh/uv/), a Python package manager:
 
