@@ -14,7 +14,8 @@ variables (`UV_INDEX_<NAME>_PASSWORD`) follow the index *name*, which a project 
 another host.
 
 `resolve_index_access` is the third place that decrypts a secret, after `StorageResolver`
-and `lakana_worker.deploy.resolve_credential`.
+and `lakana_worker.deploy.resolve_credential`. A secret is sent only to the index it is bound
+to (`lakana_core.secrets.uses`).
 """
 
 from __future__ import annotations
@@ -31,10 +32,11 @@ from sqlalchemy.orm import Session
 
 from lakana_core.errors import LakanaError, ValidationError
 from lakana_core.identifiers import shown
-from lakana_core.models import Secret
+from lakana_core.models import Secret, SecretUseKind
 from lakana_core.projects.package_sources import RegisteredIndex, normalize_index_url
 from lakana_core.secrets.crypto import decrypt_secret_row
 from lakana_core.secrets.keys import KeyProvider
+from lakana_core.secrets.uses import SecretUse, SecretUseRefused, plain, require_use
 from lakana_worker.git import proxy_secrets
 
 INDEX_NAME_PREFIX = "lakana-registered-"
@@ -428,8 +430,9 @@ def missing_secret_message(index: RegisteredIndex, environment: str) -> str:
     return (
         f"the package index {index.name!r} needs the secret {index.credential_secret!r} in "
         f"environment {environment!r}, which does not exist. Create it with "
-        f"`lakana secret create {shlex.quote(index.credential_secret or '')} --env "
-        f'{shlex.quote(environment)} --values-stdin` (a JSON object with "username" and '
+        f"`lakana secret create {shlex.quote(plain(index.credential_secret or ''))} --env "
+        f"{shlex.quote(plain(environment))} --index {shlex.quote(plain(index.name))} "
+        '--values-stdin` (a JSON object with "username" and '
         '"password")'
     )
 
@@ -634,9 +637,10 @@ def resolve_index_access(
         If the stored URL of an index with a credential fails the
         registration rule (no secret is read then), no key provider is
         configured, a secret does not exist (or is revoked) in this
-        environment, cannot be decrypted, has no ``password`` that can be
-        passed on, or holds a user name or password over `MAX_CREDENTIAL_CHARS`, or the
-        credentials together would make a `UV_INDEX` over `MAX_UV_INDEX_BYTES`.
+        environment, is not bound to this index (`require_use`), the index has no id, cannot be
+        decrypted, has no ``password`` that can be passed on, or holds a user name or password
+        over `MAX_CREDENTIAL_CHARS`, or the credentials together would make a `UV_INDEX` over
+        `MAX_UV_INDEX_BYTES`.
     """
     accesses: list[IndexAccess] = []
     for index in indexes:
@@ -663,6 +667,20 @@ def resolve_index_access(
         ).scalar_one_or_none()
         if secret is None:
             raise IndexCredentialError(missing_secret_message(index, environment_name))
+        if index.id is None:
+            raise IndexCredentialError(
+                f"the package index {index.name!r} has no id, so no secret can be bound to it; "
+                "an index read from the registry always has one"
+            )
+        try:
+            require_use(
+                session,
+                secret,
+                SecretUse(SecretUseKind.PACKAGE_INDEX, index.id, index.name),
+                environment_name=environment_name,
+            )
+        except SecretUseRefused as exc:
+            raise IndexCredentialError(str(exc)) from exc
         try:
             values = decrypt_secret_row(
                 secret,

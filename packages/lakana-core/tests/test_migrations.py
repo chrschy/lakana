@@ -2612,3 +2612,373 @@ def test_0033_records_the_schema_a_policy_was_written_against(
             assert "schema_id" not in {c["name"] for c in inspect(engine).get_columns(table)}
     finally:
         engine.dispose()
+
+
+_REVISION_0034 = "f1c4a8e2b6d9"
+
+
+def test_0034_binds_each_secret_named_by_exactly_one_index_or_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revision `0034`: `secrets.use_kind` and `use_target_id`; only unambiguous names are bound.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    """
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, _REVISION_0033)
+    engine = create_engine(f"sqlite:///{db_path}")
+    index_id, repo_id = uuid.uuid4().hex, uuid.uuid4().hex
+    secrets = {name: uuid.uuid4().hex for name in ("pypi", "git", "shared", "s3")}
+    try:
+        with engine.begin() as connection:
+            connection.execute(sa.text("PRAGMA foreign_keys=OFF"))
+            connection.execute(
+                sa.text(
+                    "INSERT INTO package_indexes (id, name, url, credential_secret, created_at,"
+                    " updated_at) VALUES (:id, 'corp', 'https://corp/simple', 'pypi',"
+                    " '2026-10-17 00:00:00', '2026-10-17 00:00:00')"
+                ),
+                {"id": index_id},
+            )
+            for row_id, name, secret in (
+                (repo_id, "analytics", "git"),
+                (uuid.uuid4().hex, "one", "shared"),
+                (uuid.uuid4().hex, "two", "shared"),
+            ):
+                connection.execute(
+                    sa.text(
+                        "INSERT INTO repositories (id, name, kind, url, credential_secret,"
+                        " created_at, updated_at) VALUES (:id, :name, 'HTTPS', 'https://g/a.git',"
+                        " :secret, '2026-10-17 00:00:00', '2026-10-17 00:00:00')"
+                    ),
+                    {"id": row_id, "name": name, "secret": secret},
+                )
+            for name, secret_id in secrets.items():
+                connection.execute(
+                    sa.text(
+                        "INSERT INTO secrets (id, environment_id, name, ciphertext, nonce,"
+                        " wrapped_data_key, format_version, key_id, created_by, created_at)"
+                        " VALUES (:id, :env, :name, x'00', x'00', x'00', 2, 'env', :who,"
+                        " '2026-10-17 00:00:00')"
+                    ),
+                    {
+                        "id": secret_id,
+                        "env": uuid.uuid4().hex,
+                        "name": name,
+                        "who": uuid.uuid4().hex,
+                    },
+                )
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, _REVISION_0034)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        with engine.connect() as connection:
+            rows = {
+                name: (kind, target)
+                for name, kind, target in connection.execute(
+                    sa.text("SELECT name, use_kind, use_target_id FROM secrets")
+                )
+            }
+        assert rows["pypi"] == ("PACKAGE_INDEX", index_id)
+        assert rows["git"] == ("REPOSITORY", repo_id)
+        assert rows["shared"] == (None, None)  # two repositories name it: an administrator decides
+        assert rows["s3"] == (None, None)  # named by nothing: stays unbound
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, _REVISION_0033)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        columns = {c["name"] for c in inspect(engine).get_columns("secrets")}
+        assert not columns & {"use_kind", "use_target_id"}
+    finally:
+        engine.dispose()
+
+
+def test_0034_leaves_every_ambiguous_or_environment_used_secret_unbound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revision `0034` leaves ambiguous and environment-used secrets unbound.
+
+    Only a secret that exactly one index or repository names, and that its own environment
+    does not use, is bound; everything else stays unbound.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    """
+    db_path = tmp_path / "ambiguous.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, _REVISION_0033)
+    when = "2026-10-17 00:00:00"
+    env_one, env_two, env_three, who = (uuid.uuid4().hex for _ in range(4))
+    index_ids = {
+        name: uuid.uuid4().hex
+        for name in ("corp", "dup1", "dup2", "mixed", "own", "case", "hook", "mh", "oh")
+    }
+    repo_ids = {name: uuid.uuid4().hex for name in ("mixed", "own")}
+    # index name -> the secret name its credential_secret holds
+    index_secret = {
+        "corp": "pypi",  # exactly one index: bound, in both environments
+        "dup1": "two-indexes",
+        "dup2": "two-indexes",
+        "mixed": "index-and-repo",
+        "own": "storage-or-hook",  # bound in env_two only
+        "hook": "hook-secret",  # bound in env_two only
+        "mh": "manifest-hook",  # a deployed webhook that never delivered
+        "oh": "old-hook",  # a webhook of an older version only
+        "case": "Token",  # a case variant of the secret 'token' does not match
+    }
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        with engine.begin() as connection:
+            connection.execute(sa.text("PRAGMA foreign_keys=OFF"))
+            for env_id, name, ref in (
+                (env_one, "one", "storage-or-hook"),
+                (env_two, "two", None),
+                (env_three, "three", "repo-own"),
+            ):
+                connection.execute(
+                    sa.text(
+                        "INSERT INTO environments (id, name, storage_root, storage_options,"
+                        " is_protected, properties, storage_secret_ref, created_at, updated_at)"
+                        " VALUES (:id, :name, 'file:///x', '{}', 0, '{}', :ref, :t, :t)"
+                    ),
+                    {"id": env_id, "name": name, "ref": ref, "t": when},
+                )
+            for name, index_id in index_ids.items():
+                connection.execute(
+                    sa.text(
+                        "INSERT INTO package_indexes (id, name, url, credential_secret,"
+                        " created_at, updated_at) VALUES (:id, :name, :url, :secret, :t, :t)"
+                    ),
+                    {
+                        "id": index_id,
+                        "name": name,
+                        "url": f"https://{name}/simple",
+                        "secret": index_secret[name],
+                        "t": when,
+                    },
+                )
+            connection.execute(
+                sa.text(
+                    "INSERT INTO repositories (id, name, kind, url, credential_secret,"
+                    " created_at, updated_at) VALUES (:id, 'mixed', 'HTTPS', 'https://g/a.git',"
+                    " 'index-and-repo', :t, :t)"
+                ),
+                {"id": repo_ids["mixed"], "t": when},
+            )
+            connection.execute(
+                sa.text(
+                    "INSERT INTO repositories (id, name, kind, url, credential_secret,"
+                    " created_at, updated_at) VALUES (:id, 'own', 'HTTPS', 'https://g/own.git',"
+                    " 'repo-own', :t, :t)"
+                ),
+                {"id": repo_ids["own"], "t": when},
+            )
+            # a webhook that has delivered in env_one names a second secret there
+            connection.execute(
+                sa.text(
+                    "INSERT INTO notification_deliveries (id, environment_id, repository_id, job,"
+                    " event, format, secret_name, state, attempts, created_at)"
+                    " VALUES (:id, :env, :repo, 'nightly', 'test', 'json', 'hook-secret',"
+                    " 'PENDING', 0, :t)"
+                ),
+                {"id": uuid.uuid4().hex, "env": env_one, "repo": repo_ids["mixed"], "t": when},
+            )
+            versions = (
+                ("a" * 40, {"jobs": {"nightly": {"notify": {"webhook": "old-hook"}}}}),
+                (
+                    "b" * 40,
+                    {
+                        "jobs": {
+                            "nightly": {"notify": {"webhook": "manifest-hook", "format": "json"}}
+                        }
+                    },
+                ),
+            )
+            for sha, manifest in versions:
+                connection.execute(
+                    sa.text(
+                        "INSERT INTO job_versions (id, repository_id, environment_id, commit_sha,"
+                        " manifest_json, code_uri, code_sha256, created_at) VALUES (:id, :repo,"
+                        " :env, :sha, :manifest, 'file:///c', :sha256, :t)"
+                    ),
+                    {
+                        "id": uuid.uuid4().hex,
+                        "repo": repo_ids["mixed"],
+                        "env": env_one,
+                        "sha": sha,
+                        "manifest": json.dumps(manifest),
+                        "sha256": "0" * 64,
+                        "t": when,
+                    },
+                )
+            secrets = [
+                (env_one, "manifest-hook"),
+                (env_two, "manifest-hook"),
+                (env_one, "old-hook"),
+                (env_two, "old-hook"),
+                (env_two, "repo-own"),
+                (env_three, "repo-own"),
+                (env_one, "pypi"),
+                (env_two, "pypi"),
+                (env_one, "two-indexes"),
+                (env_one, "index-and-repo"),
+                (env_one, "storage-or-hook"),
+                (env_two, "storage-or-hook"),
+                (env_one, "hook-secret"),
+                (env_two, "hook-secret"),
+                (env_one, "token"),
+            ]
+            for env_id, name in secrets:
+                connection.execute(
+                    sa.text(
+                        "INSERT INTO secrets (id, environment_id, name, ciphertext, nonce,"
+                        " wrapped_data_key, format_version, key_id, created_by, created_at)"
+                        " VALUES (:id, :env, :name, x'00', x'00', x'00', 2, 'env', :who, :t)"
+                    ),
+                    {"id": uuid.uuid4().hex, "env": env_id, "name": name, "who": who, "t": when},
+                )
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, _REVISION_0034)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        with engine.connect() as connection:
+            found = {
+                (env_id, name): (kind, target)
+                for env_id, name, kind, target in connection.execute(
+                    sa.text("SELECT environment_id, name, use_kind, use_target_id FROM secrets")
+                )
+            }
+    finally:
+        engine.dispose()
+
+    unbound = (None, None)
+    assert found[env_one, "pypi"] == ("PACKAGE_INDEX", index_ids["corp"])
+    assert found[env_two, "pypi"] == ("PACKAGE_INDEX", index_ids["corp"])  # per environment
+    assert found[env_one, "two-indexes"] == unbound
+    assert found[env_one, "index-and-repo"] == unbound
+    assert found[env_one, "storage-or-hook"] == unbound  # env_one's storage uses it
+    assert found[env_two, "storage-or-hook"] == ("PACKAGE_INDEX", index_ids["own"])
+    assert found[env_one, "hook-secret"] == unbound  # env_one's webhook delivered with it
+    assert found[env_two, "hook-secret"] == ("PACKAGE_INDEX", index_ids["hook"])
+    assert found[env_one, "manifest-hook"] == unbound  # deployed in env_one, never delivered
+    assert found[env_two, "manifest-hook"] == ("PACKAGE_INDEX", index_ids["mh"])
+    assert found[env_one, "old-hook"] == unbound  # only an older version names it
+    assert found[env_two, "old-hook"] == ("PACKAGE_INDEX", index_ids["oh"])
+    assert found[env_two, "repo-own"] == ("REPOSITORY", repo_ids["own"])
+    assert found[env_three, "repo-own"] == unbound  # a repository names it, storage uses it
+    assert found[env_one, "token"] == unbound  # 'Token' is not 'token'
+
+
+@pytest.mark.parametrize(
+    "odd",
+    [
+        [],
+        "text",
+        {"jobs": []},
+        {"jobs": {"a": {"notify": None}}},
+        {"jobs": {"a": "a string, not a job"}},
+        {"jobs": {"a": {"notify": {"format": "json"}}}},
+        {"jobs": {"a": {"notify": {"webhook": 5}}}},
+    ],
+    ids=["list", "string", "jobs-list", "notify-null", "job-string", "no-webhook", "webhook-int"],
+)
+def test_0034_reads_an_unusual_manifest_without_failing_or_inventing_a_webhook(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, odd: object
+) -> None:
+    """Revision `0034` walks stored manifests defensively and a good one still counts.
+
+    The unusual manifest names no webhook, so the secret an index names stays bound; a normal
+    manifest stored beside it still makes its webhook secret unbound.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    odd
+        The unusual manifest.
+    """
+    db_path = tmp_path / "odd.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, _REVISION_0033)
+    when = "2026-10-17 00:00:00"
+    env_id, repo_id, who = (uuid.uuid4().hex for _ in range(3))
+    index_ids = {"plain": uuid.uuid4().hex, "hooked": uuid.uuid4().hex}
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        with engine.begin() as connection:
+            connection.execute(sa.text("PRAGMA foreign_keys=OFF"))
+            connection.execute(
+                sa.text(
+                    "INSERT INTO environments (id, name, storage_root, storage_options,"
+                    " is_protected, properties, created_at, updated_at)"
+                    " VALUES (:id, 'one', 'file:///x', '{}', 0, '{}', :t, :t)"
+                ),
+                {"id": env_id, "t": when},
+            )
+            for name, index_id in index_ids.items():
+                connection.execute(
+                    sa.text(
+                        "INSERT INTO package_indexes (id, name, url, credential_secret,"
+                        " created_at, updated_at) VALUES (:id, :name, :url, :name, :t, :t)"
+                    ),
+                    {"id": index_id, "name": name, "url": f"https://{name}/simple", "t": when},
+                )
+                connection.execute(
+                    sa.text(
+                        "INSERT INTO secrets (id, environment_id, name, ciphertext, nonce,"
+                        " wrapped_data_key, format_version, key_id, created_by, created_at)"
+                        " VALUES (:id, :env, :name, x'00', x'00', x'00', 2, 'env', :who, :t)"
+                    ),
+                    {"id": uuid.uuid4().hex, "env": env_id, "name": name, "who": who, "t": when},
+                )
+            good = {"jobs": {"nightly": {"notify": {"webhook": "hooked"}}}}
+            for sha, manifest in (("a" * 40, odd), ("b" * 40, good)):
+                connection.execute(
+                    sa.text(
+                        "INSERT INTO job_versions (id, repository_id, environment_id, commit_sha,"
+                        " manifest_json, code_uri, code_sha256, created_at) VALUES (:id, :repo,"
+                        " :env, :sha, :manifest, 'file:///c', :sha256, :t)"
+                    ),
+                    {
+                        "id": uuid.uuid4().hex,
+                        "repo": repo_id,
+                        "env": env_id,
+                        "sha": sha,
+                        "manifest": json.dumps(manifest),
+                        "sha256": "0" * 64,
+                        "t": when,
+                    },
+                )
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, _REVISION_0034)
+
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        with engine.connect() as connection:
+            found = dict(connection.execute(sa.text("SELECT name, use_kind FROM secrets")).all())
+    finally:
+        engine.dispose()
+    assert found == {"plain": "PACKAGE_INDEX", "hooked": None}

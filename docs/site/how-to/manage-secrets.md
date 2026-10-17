@@ -15,9 +15,82 @@ signs each message. The command that creates one is in
 The worker decrypts the secret only while it sends an attempt. Nothing shows the URL or the key
 afterwards: not a log, not the audit log, not the state of a delivery. To change either, set the
 secret again with `lakana secret rotate NAME --env ENV --values-stdin`. Anyone who may deploy to an
-environment can name any secret of it as a webhook, but that reveals no value: the worker only
-posts the message to it. What a message holds, how to test the webhook and how a receiver checks
+environment can name a secret of it as a webhook if the secret is unbound or bound to the environment, but that reveals no value: the worker only
+posts the message to it. A secret that is bound to an index or a repository is refused as a webhook. What a message holds, how to test the webhook and how a receiver checks
 the signature are in the same guide.
+
+## Bind a secret to its use
+
+A secret has one use: the credential of one package index, of one repository, or its
+environment's own work (storage and webhooks). Lakana refuses it for anything else, so
+someone who may register package indexes cannot send another secret to a host of their choice.
+Under the current runner, someone who also holds `DEPLOY` and `RUN` reads what the worker reads
+anyway, so binding protects against an index manager redirecting a secret, not against code that
+runs in the worker. Only someone who may manage the environment's secrets (the `ADMIN` role)
+binds a secret. `lakana secret bind` and `lakana secret create --index` print the name and the
+URL of the index or repository: that URL is where the secret goes, so read it before you bind.
+
+A secret serves one entry. Where several indexes or repositories shared one credential, create
+one secret per entry (the same value is fine) and point each entry at its own:
+`lakana secret create NEW --env ENV --repository REPO --values-stdin`, then
+`lakana repo update REPO --credential-secret NEW` (`--index INDEX` and `lakana index update
+INDEX` for an index). The refusal for a secret bound to another entry leads with these two
+commands; moving the secret instead breaks the entry it served.
+
+The one-step way is to create the secret with its use. Register the index first, then create the
+secret bound to it (`--repository NAME` and `--own-env` work the same way):
+
+<!-- source: docs/examples/bind-a-secret/run.sh#create -->
+```bash
+lakana secret create pypi-corp --env dev --index corp \
+  --value username=ci --value password=not-a-real-one
+```
+
+The other way is to create the secret first and name it where it is used. An administrator who
+registers or updates the index with `--credential-secret` binds each unbound secret of that name
+in the same step, as long as they may manage secrets in every environment that has one. The
+how-to [Use a private package index](private-package-index.md) shows that order.
+
+`lakana secret list` shows each secret's use:
+
+<!-- source: docs/examples/bind-a-secret/run.sh#list -->
+```bash
+lakana secret list --env dev
+```
+
+To bind a secret on its own, or to move it, an administrator runs `lakana secret bind` with
+exactly one of `--index NAME`, `--repository NAME` or `--own-env`:
+
+<!-- source: docs/examples/bind-a-secret/run.sh#bind -->
+```bash
+lakana secret bind hook --env dev --own-env
+```
+
+Someone who may only register indexes or repositories (`MANAGE_PACKAGE_INDEX`,
+`MANAGE_REPOSITORY`) can name a secret only if it is already bound to that same index or
+repository. Any other name is refused, and the refusal is recorded in the audit log as
+`AUTHORIZATION_DENIED`. The message gives the command and says to ask someone who manages
+secrets:
+
+<!-- output -->
+```text
+Error: Secret 'pypi-corp' of environment 'prod' is not bound to package index 'corp'. Ask someone who may manage secrets in 'prod' to bind it to this index: lakana secret bind pypi-corp --env prod --index corp
+```
+
+Creating a secret with `--index` or `--repository` is refused when its environment already uses
+that name for storage or webhooks; create it with `--own-env`, or give the index a secret under
+another name. `lakana secret bind` moves such a secret on purpose.
+
+The same check guards the other places a secret is read: a deploy of a repository refuses a
+secret that is not bound to that repository (`lakana secret bind NAME --env ENV --repository
+REPO`), and the environment's storage refuses one bound to an index or a repository
+(`--own-env` moves it on purpose, or give the storage its own secret). The message names the
+secret, what it is bound to now and the command.
+
+An unbound secret works for its environment's storage and webhooks. A secret that its
+environment uses for them is refused when anyone names it from an index or a repository, with
+the command that moves it on purpose. The URL of an index or repository with a bound secret
+changes only with the right to manage secrets in that secret's environment.
 
 ## See how each secret is stored
 
@@ -36,6 +109,7 @@ The listing shows, for each secret:
 | `name`, `environment` | Which secret it is. |
 | `format_version` | `2` is the current format. `1` is the original one, from before the format was recorded; Lakana refuses it unless `LAKANA_SECRETS__ACCEPT_FORMAT_1` is on (see below). |
 | `key_id` | Which key provider and which key wrapped the secret's data key: `env:` and 16 characters for a master key from `LAKANA_SECRETS__MASTER_KEY`, or just `env` for a secret stored in the original format. It does not reveal the key. |
+| `use`, `use_target` | What the secret is bound to: `package_index`, `repository` or `environment`, and the name of the index or repository. Both are empty when it is unbound. `use_target` is also empty for `environment`, and for an index or repository that was removed; `use` then still names the kind. |
 | `created_by`, `created_at` | Who created it and when. |
 
 ## Secrets stored in the old format

@@ -12,9 +12,14 @@ from fastapi import APIRouter, Depends
 
 from lakana_core.auth import PrincipalRef
 from lakana_core.errors import NotFoundError
-from lakana_core.models import Secret
+from lakana_core.models import Secret, SecretUseKind
 from lakana_core.secrets.service import SecretService
-from lakana_server.api.platform.schemas import SecretCreate, SecretOut, SecretRotate
+from lakana_server.api.platform.schemas import (
+    SecretBind,
+    SecretCreate,
+    SecretOut,
+    SecretRotate,
+)
 from lakana_server.api.routing import AuthenticateFirstRoute
 from lakana_server.deps import get_principal, get_secret_service
 
@@ -25,7 +30,7 @@ router = APIRouter(
 )
 
 
-def _to_out(secret: Secret, environment_name: str) -> SecretOut:
+def _to_out(secret: Secret, environment_name: str, service: SecretService) -> SecretOut:
     """Build a response body from a Secret row.
 
     Parameters
@@ -35,6 +40,8 @@ def _to_out(secret: Secret, environment_name: str) -> SecretOut:
     environment_name
         The environment this secret belongs to, since `Secret` itself
         only carries `environment_id`.
+    service
+        Reads the bound index's or repository's name and URL.
 
     Returns
     -------
@@ -50,6 +57,9 @@ def _to_out(secret: Secret, environment_name: str) -> SecretOut:
         created_at=secret.created_at,
         format_version=secret.format_version,
         key_id=secret.key_id,
+        use=secret.use_kind.value if secret.use_kind is not None else None,
+        use_target=service.use_target_name(secret),
+        use_target_url=service.use_target_url(secret),
     )
 
 
@@ -110,16 +120,25 @@ def create_secret(
         Mapped to 404 by `install_exception_handlers`.
     lakana_core.errors.AlreadyExistsError
         Mapped to 409.
+    lakana_core.errors.ValidationError
+        Mapped to 422: a use that names no target, or a name for the environment use.
     lakana_core.errors.LakanaError
         Unmapped, so defaults to 500 — raised if no secrets master key is
         configured. That is a deployment-misconfiguration condition, not
         invalid caller input, so it deliberately is not a `ValidationError`
         (422); see `lakana_core.secrets.keys.EnvKeyProvider`.
     """
-    created = service.create(
-        principal, environment=environment_name, name=body.name, values=body.values
+    use = (
+        service.use_from_names(
+            principal, environment_name, SecretUseKind(body.use.kind), body.use.target
+        )
+        if body.use is not None
+        else None
     )
-    return _to_out(created, environment_name)
+    created = service.create(
+        principal, environment=environment_name, name=body.name, values=body.values, use=use
+    )
+    return _to_out(created, environment_name, service)
 
 
 @router.get("", response_model=list[SecretOut])
@@ -150,7 +169,7 @@ def list_secrets(
         Mapped to 404 by `install_exception_handlers`.
     """
     return [
-        _to_out(secret, environment_name)
+        _to_out(secret, environment_name, service)
         for secret in service.list_for_environment(principal, environment_name)
     ]
 
@@ -195,7 +214,50 @@ def rotate_secret(
     """
     existing = _find_by_name(service.list_for_environment(principal, environment_name), secret_name)
     rotated = service.rotate(principal, existing.id, values=body.values)
-    return _to_out(rotated, environment_name)
+    return _to_out(rotated, environment_name, service)
+
+
+@router.put("/{secret_name}/use", response_model=SecretOut)
+def bind_secret(
+    environment_name: str,
+    secret_name: str,
+    body: SecretBind,
+    principal: PrincipalRef = Depends(get_principal),
+    service: SecretService = Depends(get_secret_service),
+) -> SecretOut:
+    """Bind a secret to a package index, a repository or its environment.
+
+    Parameters
+    ----------
+    environment_name
+        The environment the secret is scoped to.
+    secret_name
+        The secret's name.
+    body
+        The use.
+    principal
+        The authenticated caller.
+    service
+        The secret service for this request.
+
+    Returns
+    -------
+    SecretOut
+        The bound secret's metadata.
+
+    Raises
+    ------
+    lakana_core.errors.NotFoundError
+        Mapped to 404: the environment, the secret or the named target does not exist.
+    lakana_core.errors.ValidationError
+        Mapped to 422: a name for the environment use, or none for an index or repository.
+    lakana_core.errors.PermissionDenied
+        Mapped to 403: the caller may not manage secrets in this environment.
+    """
+    existing = _find_by_name(service.list_for_environment(principal, environment_name), secret_name)
+    use = service.use_from_names(principal, environment_name, SecretUseKind(body.kind), body.target)
+    bound = service.bind(principal, existing.id, use)
+    return _to_out(bound, environment_name, service)
 
 
 @router.delete("/{secret_name}", status_code=204)

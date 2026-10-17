@@ -13,13 +13,16 @@ from pathlib import Path
 import index_fixture
 import pytest
 from index_fixture import PASSWORD, USERNAME, Index, project_files, serving
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+import lakana_worker.index_credentials as index_credentials
 from lakana_core.auth import AllowAllAuthorization, PrincipalRef
-from lakana_core.models import Environment, Principal, PrincipalType
+from lakana_core.models import Environment, Principal, PrincipalType, Secret, SecretUseKind
 from lakana_core.projects.package_sources import RegisteredIndex
 from lakana_core.secrets.keys import EnvKeyProvider
 from lakana_core.secrets.service import SecretService
+from lakana_core.secrets.uses import SecretUse
 from lakana_worker.index_credentials import (
     INDEX_NAME_PREFIX,
     IndexAccess,
@@ -589,7 +592,12 @@ def test_serving_closes_the_first_socket_when_the_second_bind_fails(
 
 
 _KEY = EnvKeyProvider(base64.b64encode(b"0" * 32).decode())
-_TEAM = RegisteredIndex("team", "https://pkgs.example.org/simple", "team-index")
+_TEAM = RegisteredIndex(
+    "team",
+    "https://pkgs.example.org/simple",
+    "team-index",
+    id=uuid.UUID("00000000-0000-0000-0000-00000000a001"),
+)
 _OPEN = RegisteredIndex("open", "https://open.example.org/simple")
 
 
@@ -636,11 +644,13 @@ def _secret(session: Session, environment: str, values: dict[str, str]) -> uuid.
     owner = PrincipalRef(id=uuid.uuid4(), name=f"owner-{environment}", type=PrincipalType.USER)
     session.add(Principal(id=owner.id, type=owner.type, name=owner.name, is_active=True))
     session.commit()
-    return (
-        SecretService(session, AllowAllAuthorization(), _KEY)
-        .create(owner, environment=environment, name="team-index", values=values)
-        .id
+    secret = SecretService(session, AllowAllAuthorization(), _KEY).create(
+        owner, environment=environment, name="team-index", values=values
     )
+    # The index has no row in these tests, so the binding is written as the row holds it.
+    secret.use_kind, secret.use_target_id = SecretUseKind.PACKAGE_INDEX, _TEAM.id
+    session.commit()
+    return secret.id
 
 
 def test_resolve_reads_the_credential_from_the_environments_own_secret(session: Session) -> None:
@@ -668,7 +678,7 @@ def test_a_missing_or_revoked_secret_names_the_command_that_creates_it(session: 
     expected = (
         "the package index 'team' needs the secret 'team-index' in environment 'dev', which "
         "does not exist. Create it with `lakana secret create team-index --env dev "
-        '--values-stdin` (a JSON object with "username" and "password")'
+        '--index team --values-stdin` (a JSON object with "username" and "password")'
     )
     with pytest.raises(IndexCredentialError) as caught:
         resolve_index_access(session, _KEY, dev.id, dev.name, [_TEAM])
@@ -932,11 +942,26 @@ def test_credentials_too_long_together_are_refused_with_their_own_message(
 ) -> None:
     """One environment string holds every index's credential; it is limited as a whole."""
     dev = _environment(session, "dev")
-    _secret(session, "dev", {"username": "!" * 4096, "password": "!" * 4096})
-    indexes = [
-        RegisteredIndex(f"team{n}", f"https://pkgs{n}.example.org/simple", "team-index")
-        for n in range(6)
-    ]
+    owner = PrincipalRef(id=uuid.uuid4(), name="owner", type=PrincipalType.USER)
+    session.add(Principal(id=owner.id, type=owner.type, name=owner.name, is_active=True))
+    session.commit()
+    indexes = []
+    for n in range(6):
+        index = RegisteredIndex(
+            f"team{n}",
+            f"https://pkgs{n}.example.org/simple",
+            f"team-index-{n}",
+            id=uuid.UUID(int=n + 1),
+        )
+        secret = SecretService(session, AllowAllAuthorization(), _KEY).create(
+            owner,
+            environment="dev",
+            name=f"team-index-{n}",
+            values={"username": "!" * 4096, "password": "!" * 4096},
+        )
+        secret.use_kind, secret.use_target_id = SecretUseKind.PACKAGE_INDEX, index.id
+        indexes.append(index)
+    session.commit()
     resolve_index_access(session, _KEY, dev.id, dev.name, indexes[:3])
     with pytest.raises(IndexCredentialError) as caught:
         resolve_index_access(session, _KEY, dev.id, dev.name, indexes)
@@ -944,3 +969,80 @@ def test_credentials_too_long_together_are_refused_with_their_own_message(
         "the credentials of the package indexes this project uses, in environment 'dev', "
         "are too long together"
     )
+
+
+def test_a_secret_bound_to_another_index_is_refused_before_it_is_decrypted(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The index names the secret, but the secret serves another index: nothing is read."""
+    dev = _environment(session, "dev")
+    _secret(session, "dev", {"password": "pw"})
+    other = RegisteredIndex(
+        "other",
+        "https://other.example.org/simple",
+        "team-index",
+        id=uuid.UUID("00000000-0000-0000-0000-00000000a002"),
+    )
+    decrypted: list[object] = []
+    monkeypatch.setattr(
+        index_credentials, "decrypt_secret_row", lambda *a, **k: decrypted.append(a)
+    )
+
+    with pytest.raises(IndexCredentialError) as caught:
+        resolve_index_access(session, _KEY, dev.id, dev.name, [other])
+
+    assert decrypted == []
+    assert "bound to a package index that was removed, not to package index 'other'" in str(
+        caught.value
+    )
+    assert "pw" not in str(caught.value)
+    assert str(caught.value).endswith("lakana secret bind team-index --env dev --index other")
+
+
+@pytest.mark.parametrize(
+    ("use", "current"),
+    [(None, "is not bound to a use yet"), (SecretUse.environment(), "is bound to its environment")],
+)
+def test_a_secret_outside_every_index_is_refused_with_the_command_that_binds_it(
+    session: Session, use: SecretUse | None, current: str
+) -> None:
+    """An unbound secret, and one bound to its environment, reach no index."""
+    dev = _environment(session, "dev")
+    owner = PrincipalRef(id=uuid.uuid4(), name="owner", type=PrincipalType.USER)
+    session.add(Principal(id=owner.id, type=owner.type, name=owner.name, is_active=True))
+    session.commit()
+    SecretService(session, AllowAllAuthorization(), _KEY).create(
+        owner, environment="dev", name="team-index", values={"password": "pw"}, use=use
+    )
+
+    with pytest.raises(IndexCredentialError) as caught:
+        resolve_index_access(session, _KEY, dev.id, dev.name, [_TEAM])
+
+    assert current in str(caught.value)
+    assert str(caught.value).endswith("lakana secret bind team-index --env dev --index team")
+    assert "pw" not in str(caught.value)
+
+
+def test_an_index_built_without_an_id_is_never_served_a_secret(session: Session) -> None:
+    """No id, no binding can name it: refused for good rather than served."""
+    dev = _environment(session, "dev")
+    _secret(session, "dev", {"password": "pw"})
+    nameless = RegisteredIndex("team", _TEAM.url, "team-index")
+
+    with pytest.raises(IndexCredentialError, match="has no id") as caught:
+        resolve_index_access(session, _KEY, dev.id, dev.name, [nameless])
+    assert "pw" not in str(caught.value)
+
+
+def test_a_secret_bound_to_a_repository_reaches_no_index(session: Session) -> None:
+    """A repository's credential is not an index's, however the index names it."""
+    dev = _environment(session, "dev")
+    _secret(session, "dev", {"password": "pw"})
+    secret = session.execute(select(Secret)).scalar_one()
+    secret.use_kind, secret.use_target_id = SecretUseKind.REPOSITORY, uuid.uuid4()
+    session.commit()
+
+    with pytest.raises(IndexCredentialError, match="not to package index 'team'") as caught:
+        resolve_index_access(session, _KEY, dev.id, dev.name, [_TEAM])
+
+    assert "bound to a repository that was removed" in str(caught.value)

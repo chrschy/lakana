@@ -53,37 +53,26 @@ def test_index_add_sends_the_fields_and_says_what_to_do_next(tmp_path: Path) -> 
         "team-index",
     )
     assert result.exit_code == 0, result.output
-    assert json.loads(api.requests[-1].content) == {
+    (posted,) = [r for r in api.requests if r.method == "POST"]
+    assert json.loads(posted.content) == {
         "name": "team",
         "url": "https://pkgs.example.org/simple",
         "credential_secret": "team-index",
     }
     assert "Registered package index team" in result.stdout
-    assert _plain(result.stderr).endswith(
-        "Next: create the secret in each environment whose projects use this index: lakana "
-        'secret create team-index --env ENV --values-stdin (a JSON object with "username" and '
-        '"password").'
+    hint = result.stderr
+    assert "Next: in each environment where the secret team-index does not exist yet" in _plain(
+        hint
     )
+    assert "\n  lakana secret create team-index --env ENV --index team --values-stdin\n" in hint
+    assert "\n  lakana secret bind team-index --env ENV --index team\n" in hint + "\n"
 
 
 def test_index_add_quotes_a_secret_name_in_the_hint(tmp_path: Path) -> None:
-    api = FakeApi()
-    api.on("POST", _BASE, status=201, json={**_INDEX, "credential_secret": "a;b"})
-    result = invoke(
-        make_state(tmp_path, api),
-        "index",
-        "add",
-        "team",
-        "--url",
-        "https://pkgs.example.org/simple",
-        "--credential-secret",
-        "a;b",
-    )
-    assert result.exit_code == 0, result.output
-    assert "lakana secret create 'a;b' --env ENV" in _plain(result.stderr)
+    assert "lakana secret create 'a;b' --env ENV --index team" in _add_with_secret(tmp_path, "a;b")
 
 
-def _add_with_secret(tmp_path: Path, secret: str) -> str:
+def _add_with_secret(tmp_path: Path, secret: str, index: str = "team") -> str:
     """Run `index add` with a credential secret and return what it wrote to stderr.
 
     Parameters
@@ -92,14 +81,46 @@ def _add_with_secret(tmp_path: Path, secret: str) -> str:
         Pytest's per-test directory.
     secret
         The secret's name.
+    index
+        The index's name.
 
     Returns
     -------
     str
-        Standard error without styling.
+        What the command wrote to standard error, with its line breaks.
     """
     api = FakeApi()
-    api.on("POST", _BASE, status=201, json={**_INDEX, "credential_secret": secret})
+    api.on("POST", _BASE, status=201, json={**_INDEX, "name": index, "credential_secret": secret})
+    result = invoke(
+        make_state(tmp_path, api),
+        "index",
+        "add",
+        index,
+        "--url",
+        "https://pkgs.example.org/simple",
+        "--credential-secret",
+        secret,
+    )
+    assert result.exit_code == 0, result.output
+    return result.stderr
+
+
+def test_index_add_never_cuts_a_name_inside_a_command(tmp_path: Path) -> None:
+    """Long names stay whole, each command on a line of its own."""
+    secret = "a;" + "b" * 220
+    text = _add_with_secret(tmp_path, secret, index="i" * 200)
+    assert (
+        f"\n  lakana secret create '{secret}' --env ENV --index {'i' * 200} --values-stdin\n"
+        in text
+    )
+    assert f"\n  lakana secret bind '{secret}' --env ENV --index {'i' * 200}" in text
+    assert "…" not in text
+
+
+def test_index_add_makes_no_request_to_the_secret_routes(tmp_path: Path) -> None:
+    """The hint needs no lookup, so a manager's command leaves no secret request behind."""
+    api = FakeApi()
+    api.on("POST", _BASE, status=201, json=_INDEX)
     result = invoke(
         make_state(tmp_path, api),
         "index",
@@ -108,25 +129,10 @@ def _add_with_secret(tmp_path: Path, secret: str) -> str:
         "--url",
         "https://pkgs.example.org/simple",
         "--credential-secret",
-        secret,
+        "team-index",
     )
     assert result.exit_code == 0, result.output
-    return _plain(result.stderr)
-
-
-def test_index_add_shows_a_command_only_when_it_is_complete(tmp_path: Path) -> None:
-    """A name that needs quoting and is too long is not cut inside its quotes."""
-    text = _add_with_secret(tmp_path, "a;" + "b" * 220)
-    assert text.endswith(
-        "lakana secret create NAME --env ENV --values-stdin (NAME is the name you gave, too long "
-        'to show here) (a JSON object with "username" and "password").'
-    )
-    assert "'" not in text and "…" not in text
-
-
-def test_index_add_shows_a_quoted_name_of_the_largest_size_whole(tmp_path: Path) -> None:
-    secret = "a;" + "b" * 116  # 120 characters with its quotes: the longest that is shown
-    assert f"lakana secret create '{secret}' --env ENV" in _add_with_secret(tmp_path, secret)
+    assert [(r.method, r.url.path) for r in api.requests] == [("POST", _BASE)]
 
 
 def test_index_add_without_a_secret_gives_no_hint_and_json_stays_json(tmp_path: Path) -> None:

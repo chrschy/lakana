@@ -130,9 +130,11 @@ python3 -c 'import json,sys; s=json.loads(sys.argv[1]); assert set(s) == {"holde
 cd "$WORK"
 printf '%s\n' '{"username": "ci-reader", "password": "the-password-or-token"}' > credential.json
 # docs:start private-index-register
-lakana index add team --url https://pkgs.example.org/simple --credential-secret team-index
 lakana secret create team-index --env dev --values-stdin < credential.json
+lakana index add team --url https://pkgs.example.org/simple --credential-secret team-index
 # docs:end private-index-register
+out=$(lakana --output json secret list --env dev)
+python3 -c 'import json,sys; s={x["name"]:(x["use"],x["use_target"]) for x in json.loads(sys.argv[1])}; assert s["team-index"] == ("package_index", "team"), s' "$out"
 out=$(lakana --output json index show team)
 python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["url"] == "https://pkgs.example.org/simple" and d["credential_secret"] == "team-index", d' "$out"
 # The listing is read whole before it is searched: `grep -q` stops at the first match, and a

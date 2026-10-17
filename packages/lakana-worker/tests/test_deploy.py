@@ -47,6 +47,7 @@ from lakana_core.models import (
     Repository,
     RepositoryKind,
     Secret,
+    SecretUseKind,
 )
 from lakana_core.models.table import Table, TableType
 from lakana_core.projects.deploys import CONFLICT_MESSAGE, DeployService
@@ -58,6 +59,7 @@ from lakana_core.projects.run_policy import RunCaps
 from lakana_core.runs.store import DEPLOY_LOST_MESSAGE
 from lakana_core.secrets.keys import EnvKeyProvider
 from lakana_core.secrets.service import SecretService
+from lakana_core.secrets.uses import SecretUse
 from lakana_core.storage.fsspec_storage import FsspecStorage
 from lakana_core.storage.resolver import StorageResolver
 from lakana_worker import deploy as deploy_module
@@ -416,17 +418,21 @@ def _https_world(
     DeploySettings
         Settings trusting the server's certificate.
     """
-    if secret is not None:
-        SecretService(session, AllowAllAuthorization(), _KEY).create(
-            principal, environment="dev", name="git-token", values=secret
-        )
-    RepositoryService(session, AllowAllAuthorization()).create(
+    repository = RepositoryService(session, AllowAllAuthorization()).create(
         principal,
         name="remote",
         kind=RepositoryKind.HTTPS,
         url=server.url("analytics"),
         credential_secret="git-token",
     )
+    if secret is not None:
+        SecretService(session, AllowAllAuthorization(), _KEY).create(
+            principal,
+            environment="dev",
+            name="git-token",
+            values=secret,
+            use=SecretUse.repository(repository),
+        )
     return DeploySettings(ca_bundle=server.ca_file)
 
 
@@ -475,7 +481,11 @@ def test_https_wrong_token_fails_cleanly_and_redacted(
 @pytest.mark.parametrize(
     ("secret", "message"),
     [
-        (None, "secret 'git-token' does not exist in environment 'dev'"),
+        (
+            None,
+            "secret 'git-token' does not exist in environment 'dev'. Create it with `lakana "
+            "secret create git-token --env dev --repository remote --values-stdin`",
+        ),
         ({"password": "x"}, "secret 'git-token' has no 'token' value"),
     ],
 )
@@ -493,6 +503,41 @@ def test_credential_problems_fail_with_the_secret_name_only(
         settings = _https_world(session, principal, tmp_path, server, secret)
         run = _submit_and_run(session, principal, world, repository="remote", settings=settings)
     assert run.error_message == message
+
+
+@pytest.mark.parametrize(
+    ("use", "current"),
+    [
+        ((None, None), "is not bound to a use yet"),
+        ((SecretUseKind.ENVIRONMENT, None), "is bound to its environment"),
+        ((SecretUseKind.REPOSITORY, uuid.UUID(int=7)), "is bound to a repository that was removed"),
+        (
+            (SecretUseKind.PACKAGE_INDEX, uuid.UUID(int=8)),
+            "is bound to a package index that was removed",
+        ),
+    ],
+)
+def test_a_repository_secret_bound_to_another_use_stops_the_deploy(
+    session: Session,
+    principal: PrincipalRef,
+    world: World,
+    tmp_path: Path,
+    served: Path,
+    use: tuple[SecretUseKind | None, uuid.UUID | None],
+    current: str,
+) -> None:
+    """`resolve_credential` refuses, before decrypting, a secret that serves something else."""
+    with GitHttpServer(served, tmp_path) as server:
+        settings = _https_world(session, principal, tmp_path, server, {"token": server.token})
+        secret = session.execute(select(Secret).where(Secret.name == "git-token")).scalar_one()
+        secret.use_kind, secret.use_target_id = use
+        session.commit()
+        run = _submit_and_run(session, principal, world, repository="remote", settings=settings)
+
+    assert run.error_message is not None
+    assert current in run.error_message
+    assert run.error_message.endswith("lakana secret bind git-token --env dev --repository remote")
+    assert server.token not in run.error_message
 
 
 def test_missing_key_provider_fails_the_run(
@@ -1054,6 +1099,8 @@ def test_a_format_1_credential_is_refused_by_default_and_read_when_accepted(
         url="https://h/r.git",
         credential_secret="git-token",
     )
+    secret.use_kind, secret.use_target_id = SecretUseKind.REPOSITORY, repository.id
+    session.commit()
 
     with pytest.raises(LakanaError, match="stored in the old format"):
         resolve_credential(session, _KEY, environment, repository)
@@ -1102,6 +1149,9 @@ def test_ssh_credential_is_the_private_key(
         url="ssh://git@h/r.git",
         credential_secret="deploy-key",
     )
+    secret = session.execute(select(Secret)).scalar_one()
+    secret.use_kind, secret.use_target_id = SecretUseKind.REPOSITORY, repository.id
+    session.commit()
     credential = resolve_credential(session, _KEY, environment, repository)
     assert credential is not None
     assert credential.private_key == "KEY-MATERIAL" and credential.token is None
@@ -1819,7 +1869,7 @@ def test_a_registered_index_or_the_operators_index_lets_the_deploy_through(
     assert (run.status, run.error_message) == (DeployStatus.SUCCEEDED, None)
 
 
-def _register_team(session: Session, principal: PrincipalRef) -> None:
+def _register_team(session: Session, principal: PrincipalRef) -> PackageIndex:
     """Register the index `team` with the secret name `team-index`.
 
     Parameters
@@ -1828,8 +1878,13 @@ def _register_team(session: Session, principal: PrincipalRef) -> None:
         Database session.
     principal
         The registering principal.
+
+    Returns
+    -------
+    PackageIndex
+        The registered index, which a secret is bound to.
     """
-    PackageIndexService(session, AllowAllAuthorization()).create(
+    return PackageIndexService(session, AllowAllAuthorization()).create(
         principal,
         name="team",
         url="https://pkgs.example.org/simple",
@@ -1846,7 +1901,7 @@ def test_a_deploy_stops_when_the_index_secret_is_missing_from_the_environment(
     assert run.error_message == (
         "uv.lock: the package index 'team' needs the secret 'team-index' in environment 'dev', "
         "which does not exist. Create it with `lakana secret create team-index --env dev "
-        '--values-stdin` (a JSON object with "username" and "password")'
+        '--index team --values-stdin` (a JSON object with "username" and "password")'
     )
 
 
@@ -1930,12 +1985,37 @@ def test_a_deploy_names_the_remedy_when_a_host_that_takes_no_credential_has_one(
     )
 
 
+def test_a_deploy_stops_when_the_index_secret_is_not_bound_to_the_index(
+    session: Session, principal: PrincipalRef, world: World
+) -> None:
+    """An unbound secret, and one bound to another use, are refused at build with the fix."""
+    _register_team(session, principal)
+    SecretService(session, AllowAllAuthorization(), _KEY).create(
+        principal,
+        environment="dev",
+        name="team-index",
+        values={"username": "ci", "password": "the-password"},
+    )
+    run = _deploy_with_team_package(session, principal, world, _python_settings(world))
+    assert run.status is DeployStatus.FAILED
+    assert run.error_message is not None
+    assert run.error_message.startswith(
+        "uv.lock: Secret 'team-index' of environment 'dev' is not bound"
+    )
+    assert run.error_message.endswith("lakana secret bind team-index --env dev --index team")
+    assert "the-password" not in run.error_message
+
+
 def test_a_deploy_stops_when_the_index_secret_has_no_password(
     session: Session, principal: PrincipalRef, world: World
 ) -> None:
-    _register_team(session, principal)
+    row = _register_team(session, principal)
     SecretService(session, AllowAllAuthorization(), _KEY).create(
-        principal, environment="dev", name="team-index", values={"username": "ci"}
+        principal,
+        environment="dev",
+        name="team-index",
+        values={"username": "ci"},
+        use=SecretUse.package_index(row),
     )
     run = _deploy_with_team_package(session, principal, world, _python_settings(world))
     assert run.status is DeployStatus.FAILED
@@ -1949,12 +2029,13 @@ def test_a_deploy_stops_when_the_index_secret_has_no_password(
 def test_a_deploy_with_the_secret_records_the_index_in_the_manifest(
     session: Session, principal: PrincipalRef, world: World
 ) -> None:
-    _register_team(session, principal)
+    row = _register_team(session, principal)
     SecretService(session, AllowAllAuthorization(), _KEY).create(
         principal,
         environment="dev",
         name="team-index",
         values={"username": "ci", "password": "the-password"},
+        use=SecretUse.package_index(row),
     )
     run = _deploy_with_team_package(session, principal, world, _python_settings(world))
     assert (run.status, run.error_message) == (DeployStatus.SUCCEEDED, None)

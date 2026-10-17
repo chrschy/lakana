@@ -16,7 +16,7 @@ from lakana_core.models.query_run import QueryErrorCause, QueryRun, QueryRunStat
 from lakana_core.models.table import Table, TableType
 from lakana_core.models.artifact import ArtifactBlob, ArtifactUpload, ArtifactVersion
 from lakana_core.models.row_filter import RowFilter
-from lakana_core.models.secret import Secret
+from lakana_core.models.secret import Secret, SecretUseKind
 from lakana_core.models.audit_event import AuditEvent, AuditEventType
 from lakana_core.models.lineage_edge import LineageEdge
 from lakana_core.models.repository import Repository, RepositoryKind
@@ -89,6 +89,7 @@ __all__ = [
     "RunTrigger",
     "SchedulerLease",
     "Secret",
+    "SecretUseKind",
     "Table",
     "TableType",
     "TaskAttempt",

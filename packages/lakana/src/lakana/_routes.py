@@ -162,6 +162,9 @@ ROUTES: dict[str, Route] = {
     "secrets.revoke": Route(
         "DELETE", "/api/v1/environments/{environment_name}/secrets/{secret_name}"
     ),
+    "secrets.bind": Route(
+        "PUT", "/api/v1/environments/{environment_name}/secrets/{secret_name}/use"
+    ),
     "repositories.create": Route("POST", "/api/v1/repositories"),
     "repositories.list": Route("GET", "/api/v1/repositories"),
     "repositories.get": Route("GET", "/api/v1/repositories/{name}"),

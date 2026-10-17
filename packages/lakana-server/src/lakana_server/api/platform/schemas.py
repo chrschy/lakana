@@ -1151,6 +1151,23 @@ SecretValues = Annotated[dict[str, str], BeforeValidator(_check_secret_values)]
 """A secret's plaintext key-value bag; a bad shape is refused without echoing any of it."""
 
 
+class SecretBind(BaseModel):
+    """Request body for binding a secret to its use.
+
+    Parameters
+    ----------
+    kind
+        ``package_index``, ``repository`` or ``environment``.
+    target
+        The index's or repository's name; absent or null for the environment.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["package_index", "repository", "environment"]
+    target: str | None = None
+
+
 class SecretCreate(BaseModel):
     """Request body for creating a secret.
 
@@ -1161,10 +1178,13 @@ class SecretCreate(BaseModel):
     values
         The plaintext key-value bag to encrypt and store. Never echoed
         back in any response.
+    use
+        What the secret is for, so that it is bound as it is created; absent leaves it unbound.
     """
 
     name: str
     values: SecretValues
+    use: SecretBind | None = None
 
 
 class SecretRotate(BaseModel):
@@ -1200,6 +1220,13 @@ class SecretOut(BaseModel):
     key_id
         Which key provider and key wrapped the secret's data key. Safe to
         show: it does not reveal the key.
+    use
+        What the secret is bound to: ``package_index``, ``repository``, ``environment``, or
+        `None` for an unbound secret.
+    use_target
+        The index's or repository's name; `None` otherwise, also when that entry was removed.
+    use_target_url
+        Its URL, which is where the secret is sent; `None` when `use_target` is.
     """
 
     id: uuid.UUID
@@ -1209,6 +1236,9 @@ class SecretOut(BaseModel):
     created_at: datetime
     format_version: int
     key_id: str
+    use: str | None = None
+    use_target: str | None = None
+    use_target_url: str | None = None
 
 
 class AuditEventOut(BaseModel):

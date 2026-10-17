@@ -16,9 +16,8 @@ index_app = typer.Typer(
 )
 
 _LIST_COLUMNS = ["name", "url", "credential_secret"]
-_MAX_SHOWN_NAME = 120
-"""The longest quoted, escaped secret name a hint shows in a command; a longer one is not cut
-(a command that ends inside its quotes is broken) but left out."""
+_WHOLE = 100_000
+"""Far above any name, so that a name in a command is escaped but never cut."""
 
 
 @index_app.command("add")
@@ -56,16 +55,15 @@ def add(
     index = state.client().package_indexes.create(name, url, credential_secret=credential_secret)
     _output.done(state, f"Registered package index {_output.inline(name)}", index)
     if credential_secret is not None and state.output == "table":
-        written = _output.inline(shlex.quote(credential_secret), limit=_MAX_SHOWN_NAME + 1)
-        command = (
-            f"lakana secret create {written} --env ENV --values-stdin"
-            if len(written) <= _MAX_SHOWN_NAME
-            else "lakana secret create NAME --env ENV --values-stdin (NAME is the name you "
-            "gave, too long to show here)"
-        )
+        secret = _output.inline(shlex.quote(credential_secret), limit=_WHOLE)
+        index_name = _output.inline(shlex.quote(name), limit=_WHOLE)
         typer.echo(
-            "Next: create the secret in each environment whose projects use this index: "
-            f'{command} (a JSON object with "username" and "password").',
+            f"Next: in each environment where the secret {secret} does not exist yet, someone who "
+            "may manage secrets creates it, bound to this index (the values are a JSON object "
+            'with "username" and "password"):\n'
+            f"  lakana secret create {secret} --env ENV --index {index_name} --values-stdin\n"
+            "Where it exists but is not bound to this index, they bind it:\n"
+            f"  lakana secret bind {secret} --env ENV --index {index_name}",
             err=True,
         )
 

@@ -75,6 +75,11 @@ line the page shows.
 
 The scikit-learn page's `uv lock` block fell out of the count (54 to 53): it is synced from the
 example `train-and-predict`, which installs scikit-learn and locks with the public package index.
+
+The upgrade note "A secret is bound to one use" rose it from 52 to 53 with one block: it lists
+and binds the secrets of an upgraded instance, with placeholders for the names. The commands run
+for real in `docs/examples/bind-a-secret/run.sh` and, for the index case, in
+`docs/examples/getting-started/run.sh`.
 """
 SECTIONS = ("tutorials", "how-to", "reference", "explanation")
 

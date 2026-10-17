@@ -37,6 +37,7 @@ from lakana_core.models import (
     RunStatus,
     RunTrigger,
     Secret,
+    SecretUseKind,
     TaskRun,
     TaskStatus,
 )
@@ -208,7 +209,14 @@ class World:
         session.flush()
         return run_id
 
-    def secret(self, name: str, values: dict[str, str], *, revoked: bool = False) -> None:
+    def secret(
+        self,
+        name: str,
+        values: dict[str, str],
+        *,
+        revoked: bool = False,
+        use: tuple[SecretUseKind, uuid.UUID | None] | None = None,
+    ) -> None:
         """Store a secret in the environment.
 
         Parameters
@@ -219,6 +227,8 @@ class World:
             Its key-value bag.
         revoked
             Whether it is revoked.
+        use
+            The secret's use and target; `None` for unbound.
         """
         secret_id = uuid.uuid4()
         sealed = encrypt_secret_values(values, KEYS, SecretBinding(secret_id, self.env_id, name))
@@ -237,6 +247,8 @@ class World:
                     created_at=T0,
                     revoked_by=self.admin_id if revoked else None,
                     revoked_at=T0 if revoked else None,
+                    use_kind=use[0] if use else None,
+                    use_target_id=use[1] if use else None,
                 )
             )
             session.commit()
@@ -649,6 +661,39 @@ def test_a_secret_that_is_not_a_webhook_fails_with_a_fixed_reason_and_sends_noth
     dump = json.dumps([row.last_result, [e.detail for e in world.audit()]]) + caplog.text
     assert "SECRET" not in dump and URL not in dump and KEY not in dump
     assert len(world.audit()) == 1
+
+
+def test_a_webhook_secret_bound_to_an_index_fails_and_sends_nothing(
+    world: World, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A secret that serves a package index never becomes a webhook URL."""
+    caplog.set_level(logging.DEBUG)
+    world.secret("hook", {"url": URL}, use=(SecretUseKind.PACKAGE_INDEX, uuid.uuid4()))
+    row_id = world.delivery(secret="hook")
+    sent = Sent()
+
+    deliver_due(world.engine, T0, settings(sent), limit=10)
+
+    row = world.row(row_id)
+    assert row.state is NotificationState.FAILED
+    assert "is bound to a package index that was removed" in (row.last_result or "")
+    assert row.last_result is not None and row.last_result.endswith(
+        "lakana secret bind hook --env prod --own-env"
+    )
+    assert not sent.requests
+    assert URL not in row.last_result + caplog.text + json.dumps([e.detail for e in world.audit()])
+
+
+def test_a_secret_bound_to_its_environment_serves_a_webhook(world: World) -> None:
+    """Unbound (every other test here) and environment-bound secrets both send."""
+    world.secret("hook", {"url": URL}, use=(SecretUseKind.ENVIRONMENT, None))
+    row_id = world.delivery(secret="hook")
+    sent = Sent()
+
+    deliver_due(world.engine, T0, settings(sent), limit=10)
+
+    assert world.row(row_id).state is NotificationState.DELIVERED
+    assert len(sent.requests) == 1
 
 
 def test_an_http_url_is_refused_by_the_real_sender_unless_the_host_is_allowed(

@@ -1,9 +1,16 @@
 """Register, list, update and delete git repositories.
 
-Only `MANAGE_REPOSITORY` sets a URL or binds a credential; deployers name a
+Only `MANAGE_REPOSITORY` sets a URL and names a credential (binding a secret needs
+`MANAGE_SECRET`, as the paragraph below says); deployers name a
 repository and nothing else, so the worker fetches only from hosts an admin
 chose. That grant is the SSRF trust boundary (private addresses are allowed:
 self-hosted GitLab is usually internal).
+
+A manager of repositories never binds a secret (`bind_or_require_named_secrets`): the secret
+they name must already be bound to the repository. Binding is for someone who may manage
+secrets, with `lakana secret bind` or by naming an unbound secret. The URL of a repository with
+a bound secret changes only for a principal who has that right.
+A deploy sends a secret's `token` only to the repository it is bound to.
 """
 
 from __future__ import annotations
@@ -19,7 +26,12 @@ from sqlalchemy.orm.exc import StaleDataError
 
 from lakana_core.audit.service import AuditService
 from lakana_core.auth import Action, AuthorizationService, PrincipalRef, Securable
-from lakana_core.errors import AlreadyExistsError, ConflictError, NotFoundError, ValidationError
+from lakana_core.errors import (
+    AlreadyExistsError,
+    ConflictError,
+    NotFoundError,
+    ValidationError,
+)
 from lakana_core.identifiers import validate_path_component
 from lakana_core.models import (
     AuditEventType,
@@ -29,6 +41,14 @@ from lakana_core.models import (
     RepositoryKind,
 )
 from lakana_core.projects.git_input import resolve_local_path, validate_ref, validate_repo_url
+from lakana_core.secrets.uses import (
+    SecretBindingRefused,
+    SecretUse,
+    bind_or_require_named_secrets,
+    lock_row,
+    record_refusal,
+    require_secret_management_for_url_change,
+)
 
 UPDATABLE_FIELDS = frozenset(
     {"url", "credential_secret", "credential_username", "ssh_known_hosts", "default_ref"}
@@ -189,6 +209,9 @@ class RepositoryService:
         ------
         PermissionDenied
             Without `MANAGE_REPOSITORY`.
+        SecretBindingRefused
+            A `PermissionDenied`: `credential_secret` names a secret that is not bound to this
+            repository (unbound, bound elsewhere, or used by its environment).
         ValidationError
             If a field or the kind is invalid.
         AlreadyExistsError
@@ -218,6 +241,20 @@ class RepositoryService:
         _validate(repo, self._repo_roots)
         if self._session.execute(select(Repository.id).where(Repository.name == name)).first():
             raise AlreadyExistsError(f"A repository named {name!r} already exists.")
+        if credential_secret is not None:
+            try:
+                bind_or_require_named_secrets(
+                    self._session,
+                    self._authz,
+                    p,
+                    name=credential_secret,
+                    use=SecretUse.repository(repo),
+                    registered=False,
+                )
+            except SecretBindingRefused as refusal:
+                self._session.rollback()
+                record_refusal(self._authz, p, refusal)
+                raise
         AuditService(self._session).record(
             p.id,
             AuditEventType.REPOSITORY_CREATED,
@@ -244,6 +281,33 @@ class RepositoryService:
                 "other than a name collision."
             ) from exc
         return repo
+
+    def _lock(self, repo: Repository) -> Repository:
+        """Lock a repository's row and read it afresh, before anything about it is decided.
+
+        A bind, a naming and a URL change of one repository take this lock first, so they run
+        one after the other, and the one that waits sees what the other committed.
+
+        Parameters
+        ----------
+        repo
+            The repository found by name.
+
+        Returns
+        -------
+        Repository
+            The row as committed now.
+
+        Raises
+        ------
+        NotFoundError
+            If another request deleted it since it was found.
+        """
+        locked = lock_row(self._session, Repository, repo.id)
+        if locked is None:
+            self._session.rollback()
+            raise NotFoundError(f"No repository named {repo.name!r}.")
+        return locked
 
     def list_repositories(self, p: PrincipalRef) -> list[Repository]:
         """List every repository, by name.
@@ -313,6 +377,10 @@ class RepositoryService:
         ------
         PermissionDenied
             Without `MANAGE_REPOSITORY`.
+        SecretBindingRefused
+            A `PermissionDenied`: the URL changes while a secret is bound to the repository and
+            `p` may not manage secrets in its environment, or the new `credential_secret` names
+            a secret that is not bound to this repository.
         NotFoundError
             If no repository has that name, including when a concurrent request deletes it
             before this commit.
@@ -326,14 +394,33 @@ class RepositoryService:
         fixed = set(changes) - UPDATABLE_FIELDS
         if fixed:
             raise ValidationError(f"{', '.join(sorted(fixed))} cannot be changed.")
-        if changes.get("url", repo.url) is None:
+        if "url" in changes and changes["url"] is None:
             raise ValidationError("url cannot be cleared.")
+        repo = self._lock(repo)
+        previous_url, previous_secret = repo.url, repo.credential_secret
         try:
             for field, value in changes.items():
                 setattr(repo, field, value)
             if repo.default_ref is not None:
                 repo.default_ref = validate_ref(repo.default_ref)
             _validate(repo, self._repo_roots)
+            # Built after the changes, so that it carries the URL the request leaves.
+            use = SecretUse.repository(repo)
+            if repo.url != previous_url:
+                require_secret_management_for_url_change(self._session, self._authz, p, use)
+            if repo.credential_secret is not None and repo.credential_secret != previous_secret:
+                bind_or_require_named_secrets(
+                    self._session,
+                    self._authz,
+                    p,
+                    name=repo.credential_secret,
+                    use=use,
+                    registered=True,
+                )
+        except SecretBindingRefused as refusal:
+            self._session.rollback()
+            record_refusal(self._authz, p, refusal)
+            raise
         except ValidationError:
             self._session.rollback()
             raise

@@ -93,6 +93,9 @@ def test_secret_values_are_absent_from_the_secrets_routes_audit_log_row_and_log(
                 "created_at",
                 "format_version",
                 "key_id",
+                "use",
+                "use_target",
+                "use_target_url",
             }
 
             listed = client.get(base, headers=AUTH_HEADER)
@@ -165,6 +168,9 @@ def test_secret_values_are_absent_from_the_secrets_routes_audit_log_row_and_log(
                 "created_at",
                 "format_version",
                 "key_id",
+                "use",
+                "use_target",
+                "use_target_url",
             }
 
         engine = create_engine(settings.database)

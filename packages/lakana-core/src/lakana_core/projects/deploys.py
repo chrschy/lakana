@@ -46,6 +46,7 @@ from lakana_core.models import (
     Repository,
     Run,
     Secret,
+    SecretUseKind,
     Table,
     TableType,
 )
@@ -66,6 +67,7 @@ from lakana_core.projects.manifest import (
 )
 from lakana_core.projects.parse import ParsedAsset
 from lakana_core.runs.kept import kept_tables
+from lakana_core.secrets.uses import SecretUse, bind_command, describe_use
 
 CONFLICT_MESSAGE = "Another deploy or rollback moved this environment's deployment first; retry."
 
@@ -2409,9 +2411,9 @@ class DeployService:
         if not wanted:
             return []
         state = {
-            secret_name: revoked_at is not None
-            for secret_name, revoked_at in self._session.execute(
-                select(Secret.name, Secret.revoked_at).where(
+            secret_name: (revoked_at is not None, use_kind, use_target_id)
+            for secret_name, revoked_at, use_kind, use_target_id in self._session.execute(
+                select(Secret.name, Secret.revoked_at, Secret.use_kind, Secret.use_target_id).where(
                     Secret.environment_id == environment_id,
                     Secret.name.in_({notify.webhook for notify in wanted.values()}),
                 )
@@ -2434,12 +2436,23 @@ class DeployService:
                     f"{head}does not exist in `{environment_name}`; it {effect} until you "
                     f"create it: {create(notify.webhook)}"
                 )
-            elif state[notify.webhook]:
+            elif state[notify.webhook][0]:
                 warnings.append(
                     f"{head}is revoked in `{environment_name}` (a revoked name cannot be "
                     f"created or rotated again); it {effect} until you create a secret under "
                     f"another name and put that name in its `notify.webhook`, then deploy: "
                     f"{create('NEW-NAME')}"
+                )
+            elif state[notify.webhook][1] not in (None, SecretUseKind.ENVIRONMENT):
+                _, use_kind, target_id = state[notify.webhook]
+                current = describe_use(self._session, use_kind, target_id)
+                warnings.append(
+                    f"{head}is bound to {current}, not to its environment, so Lakana does not "
+                    f"send it to a webhook; it {effect} until you give the job a secret of its "
+                    f"own (put its name in `notify.webhook`, then deploy: {create('NEW-NAME')}) "
+                    f"or, if this secret really belongs to the environment, an administrator "
+                    f"binds it, and {current} then loses it: "
+                    f"{bind_command(environment_name, notify.webhook, SecretUse.environment())}"
                 )
         return warnings
 
