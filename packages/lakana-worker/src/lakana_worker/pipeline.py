@@ -160,6 +160,7 @@ from lakana_core.storage.resolver import (
 )
 from lakana_worker.activity import ACTIVITY
 from lakana_worker.executor import (
+    INTERNAL_ADVICE,
     DuckDBInternalError,
     OutOfMemoryQuery,
     QueryCancelled,
@@ -347,7 +348,8 @@ def _without_the_value(failure: LakanaError, restricted: frozenset[str]) -> Laka
     policy hides, and the engine's text for a failure can quote a value. A query that reads a
     table under such a policy therefore keeps that text only for the kinds known to carry no
     stored value (binder, catalog and parser errors, see `_KEEPS_ITS_TEXT`); every other
-    failure of the engine gets one fixed message, of the same kind (an invalid query). What is
+    failure of the engine gets one fixed message: an invalid query as before, and an internal error
+    with its own fixed text and kind. What is
     not the engine's text (a cancel, a timeout, a transient or memory error, the worker's own
     wording) is returned as it is.
 
@@ -366,6 +368,12 @@ def _without_the_value(failure: LakanaError, restricted: frozenset[str]) -> Laka
         The fixed message as a `ValidationError` when `failure` is such a failure of a
         query that reads a table under a policy, otherwise `failure` itself.
     """
+    if restricted and isinstance(failure, DuckDBInternalError):
+        # The engine's internal errors can format a value too; the type stays, so the cause and
+        # a retry are as before, and the worker's log keeps the details.
+        return DuckDBInternalError(
+            f"Query failed: the query engine failed on its own. {INTERNAL_ADVICE}"
+        )
     if not restricted or type(failure) is not ValidationError:
         return failure
     text = str(failure)

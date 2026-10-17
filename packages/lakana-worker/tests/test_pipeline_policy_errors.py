@@ -35,7 +35,8 @@ from lakana_core.policy.column_masks import ColumnMaskService
 from lakana_core.policy.read_errors import policy_read_failure
 from lakana_core.policy.row_filters import RowFilterService
 from lakana_core.storage.resolver import StorageResolver
-from lakana_worker.pipeline import run_one
+from lakana_worker.executor import INTERNAL_ADVICE, DuckDBInternalError
+from lakana_worker.pipeline import _without_the_value, failure_cause, run_one
 
 _SECRET = "HIDDEN-X"
 _BIG = 2_000_000_000
@@ -399,3 +400,18 @@ def test_a_catalog_error_under_a_policy_keeps_its_message(
 
     assert run.error_message is not None
     assert run.error_message.startswith("Query failed: Catalog Error")
+
+
+def test_an_internal_failure_under_a_policy_gets_a_fixed_text_and_stays_internal() -> None:
+    """The engine's internal text can format a value; the kind stays, so retries are unchanged."""
+    raw = DuckDBInternalError(
+        f"Query failed: Information loss on cast of {_SECRET}. {INTERNAL_ADVICE}"
+    )
+
+    replaced = _without_the_value(raw, frozenset({"gold.people"}))
+    untouched = _without_the_value(raw, frozenset())
+
+    assert isinstance(replaced, DuckDBInternalError)
+    assert str(replaced) == f"Query failed: the query engine failed on its own. {INTERNAL_ADVICE}"
+    assert failure_cause(replaced) == failure_cause(raw)
+    assert untouched is raw

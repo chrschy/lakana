@@ -148,7 +148,7 @@ Write the expression so that it compares like with like:
 
 A mask cannot convert a value (`CAST`, `try_cast` and `TRY` are refused). If a comparison needs
 the value in another type, store the column in that type, or add a column of that type and
-mask that one. To change an expression, revoke it and create the new one.
+compare with that one in the mask. To change an expression, revoke it and create the new one.
 
 The same message appears when a person's own query fails on a value of a table under a filter or
 mask. In their own query, `try_cast`, `try_strptime` and `TRY(...)` return
