@@ -198,10 +198,10 @@ def test_the_statement_reads_every_value_as_a_variable() -> None:
     ]
 
 
-def test_a_variable_read_streams_more_rows_than_its_memory_limit_could_hold(
+def test_a_variable_read_streams_in_more_than_one_batch(
     tmp_path: Path,
 ) -> None:
-    """About 57 MB of rows through a 32 MB limit: the result streams, batch by batch."""
+    """A million rows read through a files variable arrive as a stream of several batches."""
     path = tmp_path / "rows.parquet"
     duckdb.sql(
         "COPY (SELECT i, repeat('x', 50) || i::VARCHAR AS s FROM range(1000000) AS t(i)) "
