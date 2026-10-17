@@ -299,7 +299,7 @@ def _read_master_key(path: Path) -> str:
         If the path is a symlink (exit 2); if, on POSIX, it isn't owned by
         the current user or is accessible to group/other (exit 2); if its
         contents don't decode as exactly 32 bytes of base64, or aren't
-        valid UTF-8 (exit 3, with a hint to delete the data directory and
+        valid UTF-8 (exit 3, with a hint to run `lakana server reset --local` and
         rotate the key — the file itself is corrupt or wrong-mode); or if
         opening or reading it otherwise raises `OSError` for any other
         reason, e.g. the path is a directory, or a transient I/O error

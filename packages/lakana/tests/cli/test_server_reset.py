@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import pwd
 import shutil
 import sqlite3
 from pathlib import Path
@@ -424,7 +425,7 @@ def test_the_home_directory_is_found_by_identity_and_by_the_password_database(
     other = tmp_path / "elsewhere"
     other.mkdir()
     monkeypatch.setenv("HOME", str(other))
-    monkeypatch.setattr(reset_module.pwd, "getpwuid", lambda uid: SimpleNamespace(pw_dir=str(home)))
+    monkeypatch.setattr(pwd, "getpwuid", lambda uid: SimpleNamespace(pw_dir=str(home)))
     (home / MARKER_NAME).write_text("lakana local instance\n")
     result = _reset(tmp_path, home, "--yes")
     assert result.exit_code == 2 and "home directory" in result.output
@@ -432,9 +433,7 @@ def test_the_home_directory_is_found_by_identity_and_by_the_password_database(
     bind = tmp_path / "bind"
     bind.mkdir()
     (bind / MARKER_NAME).write_text("lakana local instance\n")
-    monkeypatch.setattr(
-        reset_module.pwd, "getpwuid", lambda uid: SimpleNamespace(pw_dir=str(other))
-    )
+    monkeypatch.setattr(pwd, "getpwuid", lambda uid: SimpleNamespace(pw_dir=str(other)))
     real = os.path.samefile
     monkeypatch.setattr(
         reset_module.os.path,
@@ -483,3 +482,123 @@ def test_the_question_says_what_stays(tmp_path: Path) -> None:
     result = _reset(tmp_path, root.root, interactive=True, input="n\n")
     text = " ".join(result.output.split())
     assert "outside" in text and "lake/" in text
+
+
+def _mountinfo(tmp_path: Path, *mounts: str) -> Path:
+    """Write a fake `/proc/self/mountinfo` and point the reset at it.
+
+    Parameters
+    ----------
+    tmp_path
+        Pytest's per-test directory.
+    *mounts
+        Mount points, already octal-escaped as the kernel writes them.
+
+    Returns
+    -------
+    Path
+        The file.
+    """
+    lines = ["22 1 8:1 / / rw,relatime shared:1 - ext4 /dev/sda1 rw"]
+    lines += [
+        f"{40 + i} 22 8:1 /src {m} rw,relatime shared:1 - ext4 /dev/sda1 rw"
+        for i, m in enumerate(mounts)
+    ]
+    path = tmp_path / "mountinfo"
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+def test_a_bind_mount_of_the_same_filesystem_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same `st_dev`, but mountinfo lists it: a bind mount in the lake stops the reset."""
+    root = _instance(tmp_path)
+    (root.lake / "dev" / "mnt").mkdir()
+    real = root.root.resolve()
+    for mount in (real / "lake", real / "lake" / "dev" / "mnt", real / "master.key"):
+        monkeypatch.setattr(reset_module, "_MOUNTINFO", _mountinfo(tmp_path, str(mount)))
+        result = _reset(tmp_path, root.root, "--yes")
+        assert result.exit_code == 2, mount
+        text = " ".join(result.output.split())
+        assert str(mount) in text and "mount" in text and "unmount" in text
+        assert _untouched(root)
+
+
+def test_an_escaped_mount_path_is_unescaped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    r"""The kernel writes a space as `\040`; a mount at such a path is still found."""
+    base = tmp_path / "my data"
+    root = prepare_data_dir(base / "instance")
+    (root.lake / "dev").mkdir()
+    (root.lake / "dev" / "x y").mkdir()
+    escaped = str(root.root.resolve() / "lake" / "dev" / "x y").replace(" ", "\\040")
+    monkeypatch.setattr(reset_module, "_MOUNTINFO", _mountinfo(tmp_path, escaped))
+    result = _reset(tmp_path, root.root, "--yes")
+    assert result.exit_code == 2
+    assert "x y" in result.output
+
+
+def test_unreadable_mountinfo_refuses_on_linux(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the mount table can't be read, the reset fails closed and says why."""
+    root = _instance(tmp_path)
+    monkeypatch.setattr(reset_module.sys, "platform", "linux")
+    monkeypatch.setattr(reset_module, "_MOUNTINFO", tmp_path / "missing")
+    result = _reset(tmp_path, root.root, "--yes")
+    assert result.exit_code == 2
+    assert "mountinfo" in result.output and _untouched(root)
+
+
+def test_mounts_elsewhere_do_not_stop_a_reset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mounts that are not inside the instance's data (`/`, a parent) are fine."""
+    root = _instance(tmp_path)
+    monkeypatch.setattr(
+        reset_module,
+        "_MOUNTINFO",
+        _mountinfo(tmp_path, str(tmp_path), str(root.root.resolve())),
+    )
+    result = _reset(tmp_path, root.root, "--yes")
+    assert result.exit_code == 0, result.output
+    assert not root.db_path.exists()
+
+
+def test_a_permission_error_while_scanning_names_the_path_and_chmod(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A directory that can't be read is a clean error, not a traceback."""
+    root = _instance(tmp_path)
+    real = os.scandir
+
+    def denied(path: str):  # ruff: ignore[missing-return-type-private-function]
+        if Path(str(path)).name == "bronze":
+            raise PermissionError(13, "Permission denied", str(path))
+        return real(path)
+
+    monkeypatch.setattr(reset_module.os, "scandir", denied)
+    result = _reset(tmp_path, root.root, "--yes")
+    assert result.exit_code == 3
+    text = " ".join(result.output.split())
+    assert "bronze" in text and "chmod" in text
+    assert _untouched(root)
+
+
+def test_a_permission_error_while_deleting_gives_a_chmod_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A delete that is not allowed says to fix the permissions and run the reset again."""
+    root = _instance(tmp_path)
+
+    def denied(path: object, *args: object, **kwargs: object) -> None:
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(reset_module.shutil, "rmtree", denied)
+    result = _reset(tmp_path, root.root, "--yes")
+    assert result.exit_code == 3
+    text = " ".join(result.output.split())
+    assert "chmod" in text and "again" in text
+    assert root.db_path.exists()

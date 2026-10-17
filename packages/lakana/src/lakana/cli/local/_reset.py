@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import contextlib
 import os
-import pwd
+import re
 import shutil
 import sqlite3
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
@@ -198,8 +199,13 @@ def _is_or_holds_home(root: Path, home: Path) -> bool:
         `True` if `root` is any of them.
     """
     homes = [home]
-    with contextlib.suppress(KeyError, OSError):
-        homes.append(Path(pwd.getpwuid(os.getuid()).pw_dir))
+    try:
+        import pwd  # not on Windows
+    except ImportError:  # pragma: no cover -- Windows only
+        pass
+    else:
+        with contextlib.suppress(KeyError, OSError):
+            homes.append(Path(pwd.getpwuid(os.getuid()).pw_dir))
     for candidate in homes:
         try:
             chain = [candidate.resolve(), *candidate.resolve().parents]
@@ -230,8 +236,51 @@ def _device_of(path: Path) -> int:
     return os.lstat(path).st_dev
 
 
-def _find_other_device(root: Path, targets: list[Path]) -> Path | None:
-    """Find a target, or anything below `lake/`, that lives on another device than `root`.
+_MOUNTINFO = Path("/proc/self/mountinfo")
+"""The kernel's mount table, where there is one."""
+
+
+def _mount_points() -> list[Path] | None:
+    """List this process's mount points.
+
+    Returns
+    -------
+    list of Path or None
+        The mount points from `/proc/self/mountinfo` (field 5, octal escapes undone);
+        `None` where the platform has no such file and only the device check applies.
+
+    Raises
+    ------
+    CliError
+        On Linux, if the table can't be read: the reset can't tell what is mounted, so it
+        refuses (exit 2).
+    """
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        text = _MOUNTINFO.read_text()
+    except OSError as exc:
+        raise CliError(
+            f"Can't read {_MOUNTINFO} ({exc}), so the reset can't tell whether a mount lies "
+            "inside the instance's data. Nothing was deleted",
+            hint="make /proc readable for this process, or delete the instance's files by hand",
+        ) from exc
+    points: list[Path] = []
+    for line in text.splitlines():
+        fields = line.split(" ")
+        if len(fields) > 4:
+            points.append(
+                Path(re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), fields[4]))
+            )
+    return points
+
+
+def _find_mount(root: Path, targets: list[Path]) -> Path | None:
+    """Find a mount point that is a target or lies inside one, on any device.
+
+    Two checks: the kernel's mount table (catches a bind mount, which shares the device of
+    its surroundings), and the device of every path below the targets (where there is no mount
+    table). Symlinks are never followed.
 
     Parameters
     ----------
@@ -243,17 +292,35 @@ def _find_other_device(root: Path, targets: list[Path]) -> Path | None:
     Returns
     -------
     Path or None
-        The first mount point found, or `None`. Symlinks are never followed.
+        The first mount point found, or `None`.
+
+    Raises
+    ------
+    CliError
+        If a directory can't be scanned (exit 3) or, on Linux, the mount table can't be read.
     """
+    points = _mount_points()
+    if points is not None:
+        for point in points:
+            for target in targets:
+                if point == target or target in point.parents:
+                    return point
     device = _device_of(root)
     pending = list(targets)
     while pending:
         path = pending.pop()
-        if _device_of(path) != device:
-            return path
-        if path.is_dir() and not path.is_symlink():
-            with os.scandir(path) as entries:
-                pending.extend(Path(entry.path) for entry in entries)
+        try:
+            if _device_of(path) != device:
+                return path
+            if path.is_dir() and not path.is_symlink():
+                with os.scandir(path) as entries:
+                    pending.extend(Path(entry.path) for entry in entries)
+        except PermissionError as exc:
+            raise CliError(
+                f"Can't read {path}: {exc}. Nothing was deleted",
+                3,
+                hint=f"give yourself access (chmod u+rwx {path}), then run the reset again",
+            ) from exc
     return None
 
 
@@ -287,10 +354,10 @@ def plan_reset(root: Path) -> ResetPlan:
                 hint=f"remove the link yourself if you want it gone; nothing in {root} was deleted",
             )
         targets.append(path)
-    mount = _find_other_device(root, targets)
+    mount = _find_mount(root, targets)
     if mount is not None:
         raise CliError(
-            f"{mount} is on another device than {root} (a mount point); "
+            f"{mount} is a mount point inside the instance's data in {root}; "
             "refusing to delete across it. Nothing was deleted",
             hint=f"unmount {mount} or remove it yourself, then run the reset again",
         )
@@ -327,10 +394,15 @@ def delete_targets(plan: ResetPlan) -> None:
             else:
                 path.unlink(missing_ok=True)
         except OSError as exc:
+            chmod = (
+                f" Give yourself access first: chmod -R u+rwx {path}."
+                if isinstance(exc, PermissionError)
+                else ""
+            )
             left = ", ".join(str(p) for p in plan.targets[position:] if os.path.lexists(p))
             raise CliError(
                 f"Can't delete {path}: {exc}. Still there: {left}",
                 3,
-                hint="fix the cause and run the reset again; it deletes what is left. The "
+                hint=f"fix the cause and run the reset again; it deletes what is left.{chmod} The "
                 "database goes last, so the instance is not reset until that run succeeds",
             ) from exc
