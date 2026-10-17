@@ -188,6 +188,20 @@ every missing output of it means "run everything".
   "Did the bundle change?" step. `test` has a 30-minute timeout.
 - **Coverage** is measured on 3.14 only (see the coverage ratchet below).
 
+### Scorecard, Semgrep and the release workflow
+
+- **`scorecard.yml`** runs OpenSSF Scorecard on a push to `main`, weekly (Mondays) and when the
+  branch protection changes. Workflow permissions are `read-all`; its job adds only
+  `security-events: write` (the SARIF upload to code scanning) and `id-token: write` (publishing
+  the score that the README badge shows). Its results are at
+  <https://scorecard.dev/viewer/?uri=github.com/chrschy/lakana>. Findings are fixed one at a
+  time, when it reports them, never in bulk. `scripts/tests/test_workflows.py` pins the
+  permissions, the triggers and its runner; another test there pins every action of every workflow
+  by commit SHA.
+- **`security-deep.yml`** runs semgrep weekly.
+- **`release.yml`** is described in `docs/agent/release.md`; it also attaches the SBOM to each
+  GitHub release.
+
 ## The documentation site
 
 The user documentation is a site under `docs/site/`, built by Zensical from `mkdocs.yml`. Every
@@ -379,6 +393,9 @@ maintainer who wants to run CI on a runner of their own.
   nobody has looked at yet, and a self-hosted runner runs a job with its owner's rights.
 - `scripts/tests/test_workflows.py` pins all four rules; a new job must use the same
   `runs-on` expression.
+
+`scorecard.yml` is the exception to the switch: OpenSSF Scorecard publishes its results (for the
+README badge) only from a GitHub-hosted job, so its one job is on `ubuntu-latest`.
 
 A self-hosted runner runs whatever a pull request contains, as the user who started it,
 including Docker. The fork guard keeps outside code off it, but a branch in this repository still runs on it, so
