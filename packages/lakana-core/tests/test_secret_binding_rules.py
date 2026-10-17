@@ -6,7 +6,7 @@ import base64
 import uuid
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
 
 from lakana_core.audit.authorization import AuditingAuthorization
@@ -34,7 +34,7 @@ from lakana_core.projects.package_indexes import PackageIndexService
 from lakana_core.projects.repositories import RepositoryService
 from lakana_core.secrets.keys import EnvKeyProvider
 from lakana_core.secrets.service import SecretService
-from lakana_core.secrets.uses import SecretUse, resolve_use
+from lakana_core.secrets.uses import SecretUse, resolve_use, used_by_its_environment
 
 _KEYS = EnvKeyProvider(base64.b64encode(b"0" * 32).decode())
 
@@ -1069,3 +1069,118 @@ def test_naming_a_secret_on_a_repository_records_its_url(
         "https://git.example.org/r.git",
         "https://git.example.org/moved.git",
     ]
+
+
+def test_a_webhook_of_another_name_does_not_make_a_secret_the_environments(
+    session: Session, world: dict[str, PrincipalRef]
+) -> None:
+    """Only the job that names the secret counts; other jobs, and jobs without a webhook, do not."""
+    prod = session.execute(select(Environment).where(Environment.name == "prod")).scalar_one()
+    repository = RepositoryService(session, AllowAllAuthorization()).create(
+        world["admin"], name="r", kind=RepositoryKind.HTTPS, url="https://git.example.org/r.git"
+    )
+    session.add(
+        JobVersion(
+            id=uuid.uuid4(),
+            repository_id=repository.id,
+            environment_id=prod.id,
+            commit_sha="a" * 40,
+            manifest_json={
+                "jobs": {
+                    "plain": {},
+                    "other": {"notify": {"webhook": "alerts"}},
+                    "mine": {"notify": {"webhook": "hook"}},
+                }
+            },
+            code_uri="file:///code",
+            code_sha256="0" * 64,
+        )
+    )
+    session.commit()
+
+    assert used_by_its_environment(session, prod, "hook")
+    assert used_by_its_environment(session, prod, "alerts")
+    assert not used_by_its_environment(session, prod, "pypi")
+
+
+def test_the_audit_records_the_url_the_entry_has_under_the_lock(
+    session: Session, world: dict[str, PrincipalRef]
+) -> None:
+    """A manager moves the URL after the target was resolved; the bind records the new one."""
+    secret = _secret(session, "prod", "pypi")
+    index = _indexes(session).create(
+        world["admin"], name="corp", url="https://old.example.org/simple"
+    )
+    use = resolve_use(session, SecretUseKind.PACKAGE_INDEX, "corp")
+    assert use.target_url == "https://old.example.org/simple"
+    session.execute(
+        update(PackageIndex)
+        .where(PackageIndex.id == index.id)
+        .values(url="https://new.example.org/simple")
+    )
+
+    SecretService(session, AllowAllAuthorization(), _KEYS).bind(world["admin"], secret.id, use)
+
+    assert _bound_urls(session) == ["https://new.example.org/simple"]
+
+
+def test_a_secret_created_with_a_use_records_the_url_under_the_lock(
+    session: Session, world: dict[str, PrincipalRef]
+) -> None:
+    """The same on create."""
+    index = _indexes(session).create(
+        world["admin"], name="corp", url="https://old.example.org/simple"
+    )
+    use = resolve_use(session, SecretUseKind.PACKAGE_INDEX, "corp")
+    session.execute(
+        update(PackageIndex)
+        .where(PackageIndex.id == index.id)
+        .values(url="https://new.example.org/simple")
+    )
+
+    _secret(session, "prod", "pypi", use)
+
+    assert _bound_urls(session) == ["https://new.example.org/simple"]
+
+
+def test_an_index_deleted_before_it_is_locked_is_reported_by_name(
+    session: Session, world: dict[str, PrincipalRef]
+) -> None:
+    """The service refuses to go on with a row another request removed."""
+    index = _indexes(session).create(
+        world["admin"], name="corp", url="https://corp.example.org/simple"
+    )
+    session.execute(delete(PackageIndex).where(PackageIndex.id == index.id))
+    session.commit()
+
+    with pytest.raises(NotFoundError, match="No package index named 'corp'"):
+        _indexes(session)._lock(index)
+
+
+def test_a_repository_deleted_before_it_is_locked_is_reported_by_name(
+    session: Session, world: dict[str, PrincipalRef]
+) -> None:
+    """The same for a repository."""
+    repository = _repositories(session).create(
+        world["admin"], name="r", kind=RepositoryKind.HTTPS, url="https://git.example.org/r.git"
+    )
+    session.execute(delete(Repository).where(Repository.id == repository.id))
+    session.commit()
+
+    with pytest.raises(NotFoundError, match="No repository named 'r'"):
+        _repositories(session)._lock(repository)
+
+
+@pytest.mark.parametrize(
+    ("kind", "listing"),
+    [
+        (SecretUseKind.PACKAGE_INDEX, "lakana index list"),
+        (SecretUseKind.REPOSITORY, "lakana repo list"),
+    ],
+)
+def test_an_index_or_repository_use_must_name_its_target(
+    session: Session, kind: SecretUseKind, listing: str
+) -> None:
+    """Naming nothing is refused with the command that lists the candidates."""
+    with pytest.raises(ValidationError, match=listing):
+        resolve_use(session, kind, None)

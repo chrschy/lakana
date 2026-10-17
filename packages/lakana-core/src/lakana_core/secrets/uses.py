@@ -10,6 +10,7 @@ it to a host of their choice.
 
 from __future__ import annotations
 
+import dataclasses
 import shlex
 import uuid
 from dataclasses import dataclass, field
@@ -540,7 +541,7 @@ def lock_row(session: Session, model: type[_Row], row_id: uuid.UUID) -> _Row | N
     ).scalar_one_or_none()
 
 
-def lock_entry(session: Session, use: SecretUse) -> None:
+def lock_entry(session: Session, use: SecretUse) -> SecretUse:
     """Lock the index or repository row a binding points at, until the transaction ends.
 
     Everything that binds a secret to an entry, names a secret for it or moves its URL takes
@@ -554,19 +555,26 @@ def lock_entry(session: Session, use: SecretUse) -> None:
     use
         The index or repository; the environment has no row and nothing is locked.
 
+    Returns
+    -------
+    SecretUse
+        `use` with the URL the row has under the lock, which is the URL the secret goes to;
+        `use` itself for the environment.
+
     Raises
     ------
     NotFoundError
         If the row has been removed.
     """
     if use.target_id is None:
-        return
+        return use
     if use.kind is SecretUseKind.PACKAGE_INDEX:
         found = lock_row(session, PackageIndex, use.target_id)
     else:
         found = lock_row(session, Repository, use.target_id)
     if found is None:
         raise NotFoundError(f"The {_NOUNS[use.kind]} was removed by someone else; look again.")
+    return dataclasses.replace(use, target_url=found.url)
 
 
 def bind_or_require_named_secrets(

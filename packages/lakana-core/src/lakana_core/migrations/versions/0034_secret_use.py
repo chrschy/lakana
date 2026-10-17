@@ -92,7 +92,7 @@ def upgrade() -> None:
         sa.text(
             "UPDATE secrets SET use_kind = 'PACKAGE_INDEX', use_target_id = "
             "(SELECT p.id FROM package_indexes p WHERE p.credential_secret = secrets.name) "
-            f"WHERE {_NAMED_BY_INDEXES} = 1 AND {_NAMED_BY_REPOSITORIES} = 0"
+            f"WHERE {_NAMED_BY_INDEXES} = 1 AND {_NAMED_BY_REPOSITORIES} = 0"  # nosec B608 -- module constants only
             f" AND NOT {_USED_BY_ITS_ENVIRONMENT}"
         )
     )
@@ -100,7 +100,7 @@ def upgrade() -> None:
         sa.text(
             "UPDATE secrets SET use_kind = 'REPOSITORY', use_target_id = "
             "(SELECT r.id FROM repositories r WHERE r.credential_secret = secrets.name) "
-            f"WHERE {_NAMED_BY_REPOSITORIES} = 1 AND {_NAMED_BY_INDEXES} = 0"
+            f"WHERE {_NAMED_BY_REPOSITORIES} = 1 AND {_NAMED_BY_INDEXES} = 0"  # nosec B608 -- module constants only
             f" AND NOT {_USED_BY_ITS_ENVIRONMENT}"
         )
     )

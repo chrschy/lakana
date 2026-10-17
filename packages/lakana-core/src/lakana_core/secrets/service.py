@@ -157,7 +157,7 @@ class SecretService:
         self._authz.authorize(p, Action.MANAGE_SECRET, Securable.environment_scope(environment))
         env = self._get_environment(environment)
         if use is not None:
-            lock_entry(self._session, use)
+            use = lock_entry(self._session, use)
             if use.kind is not SecretUseKind.ENVIRONMENT and used_by_its_environment(
                 self._session, env, name
             ):
@@ -237,7 +237,7 @@ class SecretService:
         scope = Securable.environment_scope(env.name)
         self._authz.authorize(p, Action.MANAGE_SECRET, scope)
         # The entry first and the secret second, the order every naming and URL change takes too.
-        lock_entry(self._session, use)
+        use = lock_entry(self._session, use)
         self._session.refresh(secret, with_for_update=True)
         if secret.revoked_at is not None:
             raise ValidationError(f"Secret {secret_id} has been revoked and cannot be bound.")

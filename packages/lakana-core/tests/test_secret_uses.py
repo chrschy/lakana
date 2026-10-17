@@ -24,6 +24,8 @@ from lakana_core.secrets.uses import (
     bind_command,
     describe_use,
     require_use,
+    resolve_use,
+    target_row,
 )
 
 
@@ -337,3 +339,16 @@ def test_a_repository_secret_bound_elsewhere_leads_with_a_secret_of_its_own(
         "--credential-secret NEW`. Moving this secret instead breaks repository 'first': "
         "lakana secret bind git-token --env prod --repository second"
     )
+
+
+def test_the_environment_use_has_no_target_row_and_is_named_in_words(
+    session: Session,
+) -> None:
+    """Unbound and environment uses name no row; `resolve_use` builds the environment use."""
+    assert target_row(session, SecretUseKind.ENVIRONMENT, uuid.uuid4()) is None
+    assert target_row(session, SecretUseKind.PACKAGE_INDEX, None) is None
+    assert describe_use(session, None, None) == "no use yet"
+    assert describe_use(session, SecretUseKind.ENVIRONMENT, None) == (
+        "its environment (storage and webhooks)"
+    )
+    assert resolve_use(session, SecretUseKind.ENVIRONMENT, None) == SecretUse.environment()
