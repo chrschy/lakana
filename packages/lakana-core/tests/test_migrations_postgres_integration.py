@@ -1607,13 +1607,17 @@ def test_0034_ambiguous_and_environment_used_secrets_on_postgres() -> None:
     revision_0033 = "e8b1f4c7d0a3"
     revision_0034 = "f1c4a8e2b6d9"
     env_one, env_two, who, repo_id = (uuid.uuid4() for _ in range(4))
-    index_ids = {n: uuid.uuid4() for n in ("corp", "dup1", "dup2", "mixed", "own", "case")}
+    index_ids = {
+        n: uuid.uuid4() for n in ("corp", "dup1", "dup2", "mixed", "own", "case", "mh", "oh")
+    }
     index_secret = {
         "corp": "pypi",
         "dup1": "two-indexes",
         "dup2": "two-indexes",
         "mixed": "index-and-repo",
         "own": "storage-or-hook",
+        "mh": "manifest-hook",
+        "oh": "old-hook",
         "case": "Token",
     }
     with PostgresContainer("postgres:16", driver="pg8000") as pg:
@@ -1622,6 +1626,15 @@ def test_0034_ambiguous_and_environment_used_secrets_on_postgres() -> None:
         engine = sqlalchemy.create_engine(url)
         with engine.begin() as conn:
             conn.execute(sqlalchemy.text("SET LOCAL session_replication_role = replica"))
+            # the migration rewrites a secret row twice in one transaction, and PostgreSQL then
+            # checks its foreign keys again, so the creator must exist
+            conn.execute(
+                sqlalchemy.text(
+                    "INSERT INTO principals (id, type, name, is_active, created_at, updated_at) "
+                    "VALUES (:id, 'USER', 'admin', true, now(), now())"
+                ),
+                {"id": who},
+            )
             for env_id, name, ref in ((env_one, "one", "storage-or-hook"), (env_two, "two", None)):
                 conn.execute(
                     sqlalchemy.text(
@@ -1669,7 +1682,37 @@ def test_0034_ambiguous_and_environment_used_secrets_on_postgres() -> None:
                 ),
                 {"id": uuid.uuid4(), "env": env_one, "repo": repo_id},
             )
+            for sha, manifest in (
+                ("a" * 40, {"jobs": {"nightly": {"notify": {"webhook": "old-hook"}}}}),
+                (
+                    "b" * 40,
+                    {
+                        "jobs": {
+                            "nightly": {"notify": {"webhook": "manifest-hook", "format": "json"}}
+                        }
+                    },
+                ),
+            ):
+                conn.execute(
+                    sqlalchemy.text(
+                        "INSERT INTO job_versions (id, repository_id, environment_id, commit_sha, "
+                        "manifest_json, code_uri, code_sha256, created_at) VALUES (:id, :repo, "
+                        ":env, :sha, CAST(:manifest AS json), 'file:///c', :sha256, now())"
+                    ),
+                    {
+                        "id": uuid.uuid4(),
+                        "repo": repo_id,
+                        "env": env_one,
+                        "sha": sha,
+                        "manifest": json.dumps(manifest),
+                        "sha256": "0" * 64,
+                    },
+                )
             for env_id, name in (
+                (env_one, "manifest-hook"),
+                (env_two, "manifest-hook"),
+                (env_one, "old-hook"),
+                (env_two, "old-hook"),
                 (env_one, "pypi"),
                 (env_two, "pypi"),
                 (env_one, "two-indexes"),
@@ -1711,4 +1754,8 @@ def test_0034_ambiguous_and_environment_used_secrets_on_postgres() -> None:
     assert found[env_two, "storage-or-hook"] == ("PACKAGE_INDEX", index_ids["own"])
     assert found[env_one, "hook-secret"] == unbound
     assert found[env_two, "hook-secret"] == ("PACKAGE_INDEX", index_ids["hook"])
+    assert found[env_one, "manifest-hook"] == unbound
+    assert found[env_two, "manifest-hook"] == ("PACKAGE_INDEX", index_ids["mh"])
+    assert found[env_one, "old-hook"] == unbound
+    assert found[env_two, "old-hook"] == ("PACKAGE_INDEX", index_ids["oh"])
     assert found[env_one, "token"] == unbound

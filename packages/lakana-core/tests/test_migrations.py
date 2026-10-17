@@ -2724,11 +2724,12 @@ def test_0034_leaves_every_ambiguous_or_environment_used_secret_unbound(
     config = Config(str(ALEMBIC_INI))
     command.upgrade(config, _REVISION_0033)
     when = "2026-10-17 00:00:00"
-    env_one, env_two, who = (uuid.uuid4().hex for _ in range(3))
+    env_one, env_two, env_three, who = (uuid.uuid4().hex for _ in range(4))
     index_ids = {
-        name: uuid.uuid4().hex for name in ("corp", "dup1", "dup2", "mixed", "own", "case", "hook")
+        name: uuid.uuid4().hex
+        for name in ("corp", "dup1", "dup2", "mixed", "own", "case", "hook", "mh", "oh")
     }
-    repo_ids = {name: uuid.uuid4().hex for name in ("mixed",)}
+    repo_ids = {name: uuid.uuid4().hex for name in ("mixed", "own")}
     # index name -> the secret name its credential_secret holds
     index_secret = {
         "corp": "pypi",  # exactly one index: bound, in both environments
@@ -2737,13 +2738,19 @@ def test_0034_leaves_every_ambiguous_or_environment_used_secret_unbound(
         "mixed": "index-and-repo",
         "own": "storage-or-hook",  # bound in env_two only
         "hook": "hook-secret",  # bound in env_two only
+        "mh": "manifest-hook",  # a deployed webhook that never delivered
+        "oh": "old-hook",  # a webhook of an older version only
         "case": "Token",  # a case variant of the secret 'token' does not match
     }
     engine = create_engine(f"sqlite:///{db_path}")
     try:
         with engine.begin() as connection:
             connection.execute(sa.text("PRAGMA foreign_keys=OFF"))
-            for env_id, name, ref in ((env_one, "one", "storage-or-hook"), (env_two, "two", None)):
+            for env_id, name, ref in (
+                (env_one, "one", "storage-or-hook"),
+                (env_two, "two", None),
+                (env_three, "three", "repo-own"),
+            ):
                 connection.execute(
                     sa.text(
                         "INSERT INTO environments (id, name, storage_root, storage_options,"
@@ -2774,6 +2781,14 @@ def test_0034_leaves_every_ambiguous_or_environment_used_secret_unbound(
                 ),
                 {"id": repo_ids["mixed"], "t": when},
             )
+            connection.execute(
+                sa.text(
+                    "INSERT INTO repositories (id, name, kind, url, credential_secret,"
+                    " created_at, updated_at) VALUES (:id, 'own', 'HTTPS', 'https://g/own.git',"
+                    " 'repo-own', :t, :t)"
+                ),
+                {"id": repo_ids["own"], "t": when},
+            )
             # a webhook that has delivered in env_one names a second secret there
             connection.execute(
                 sa.text(
@@ -2784,7 +2799,41 @@ def test_0034_leaves_every_ambiguous_or_environment_used_secret_unbound(
                 ),
                 {"id": uuid.uuid4().hex, "env": env_one, "repo": repo_ids["mixed"], "t": when},
             )
+            versions = (
+                ("a" * 40, {"jobs": {"nightly": {"notify": {"webhook": "old-hook"}}}}),
+                (
+                    "b" * 40,
+                    {
+                        "jobs": {
+                            "nightly": {"notify": {"webhook": "manifest-hook", "format": "json"}}
+                        }
+                    },
+                ),
+            )
+            for sha, manifest in versions:
+                connection.execute(
+                    sa.text(
+                        "INSERT INTO job_versions (id, repository_id, environment_id, commit_sha,"
+                        " manifest_json, code_uri, code_sha256, created_at) VALUES (:id, :repo,"
+                        " :env, :sha, :manifest, 'file:///c', :sha256, :t)"
+                    ),
+                    {
+                        "id": uuid.uuid4().hex,
+                        "repo": repo_ids["mixed"],
+                        "env": env_one,
+                        "sha": sha,
+                        "manifest": json.dumps(manifest),
+                        "sha256": "0" * 64,
+                        "t": when,
+                    },
+                )
             secrets = [
+                (env_one, "manifest-hook"),
+                (env_two, "manifest-hook"),
+                (env_one, "old-hook"),
+                (env_two, "old-hook"),
+                (env_two, "repo-own"),
+                (env_three, "repo-own"),
                 (env_one, "pypi"),
                 (env_two, "pypi"),
                 (env_one, "two-indexes"),
@@ -2829,4 +2878,10 @@ def test_0034_leaves_every_ambiguous_or_environment_used_secret_unbound(
     assert found[env_two, "storage-or-hook"] == ("PACKAGE_INDEX", index_ids["own"])
     assert found[env_one, "hook-secret"] == unbound  # env_one's webhook delivered with it
     assert found[env_two, "hook-secret"] == ("PACKAGE_INDEX", index_ids["hook"])
+    assert found[env_one, "manifest-hook"] == unbound  # deployed in env_one, never delivered
+    assert found[env_two, "manifest-hook"] == ("PACKAGE_INDEX", index_ids["mh"])
+    assert found[env_one, "old-hook"] == unbound  # only an older version names it
+    assert found[env_two, "old-hook"] == ("PACKAGE_INDEX", index_ids["oh"])
+    assert found[env_two, "repo-own"] == ("REPOSITORY", repo_ids["own"])
+    assert found[env_three, "repo-own"] == unbound  # a repository names it, storage uses it
     assert found[env_one, "token"] == unbound  # 'Token' is not 'token'

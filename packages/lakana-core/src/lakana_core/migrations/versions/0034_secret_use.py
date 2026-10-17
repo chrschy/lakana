@@ -27,10 +27,10 @@ _NAMED_BY_INDEXES = (
 _NAMED_BY_REPOSITORIES = (
     "(SELECT count(*) FROM repositories r WHERE r.credential_secret = secrets.name)"
 )
-# A secret its own environment already uses, for storage or for a webhook that has delivered,
-# keeps serving that environment: binding it to an index or repository would stop the
-# environment and would turn a name planted before the upgrade into an approved binding.
-# Webhooks a manifest declares but that never delivered are recorded nowhere in the database.
+# A secret its own environment already uses, for storage or for a webhook, keeps serving that
+# environment: binding it to an index or repository would stop the environment and would turn a
+# name planted before the upgrade into an approved binding. Storage and webhooks that have
+# delivered are found in SQL; webhooks of deployed project versions are read in Python below.
 _USED_BY_ITS_ENVIRONMENT = (
     "(EXISTS (SELECT 1 FROM environments e"
     " WHERE e.id = secrets.environment_id AND e.storage_secret_ref = secrets.name)"
@@ -38,15 +38,51 @@ _USED_BY_ITS_ENVIRONMENT = (
     " WHERE d.environment_id = secrets.environment_id AND d.secret_name = secrets.name))"
 )
 
+_JOB_VERSIONS = sa.table(
+    "job_versions", sa.column("environment_id", sa.Uuid()), sa.column("manifest_json", sa.JSON())
+)
+_SECRETS = sa.table(
+    "secrets",
+    sa.column("environment_id", sa.Uuid()),
+    sa.column("name", sa.String()),
+    sa.column("use_kind", _KIND),
+    sa.column("use_target_id", sa.Uuid()),
+)
+
+
+def _deployed_webhooks() -> set[tuple[object, str]]:
+    """Find every secret a deployed project version names as a webhook.
+
+    Every version counts, not only the current one, because a rollback brings an old one back.
+    The walk is copied here, not imported, so that a later change to the manifest code cannot
+    change what this revision does.
+
+    Returns
+    -------
+    set[tuple[object, str]]
+        Pairs of environment id and secret name.
+    """
+    found: set[tuple[object, str]] = set()
+    rows = op.get_bind().execute(sa.select(_JOB_VERSIONS)).all()
+    for environment_id, manifest in rows:
+        jobs = manifest.get("jobs") if isinstance(manifest, dict) else None
+        for job in jobs.values() if isinstance(jobs, dict) else ():
+            notify = job.get("notify") if isinstance(job, dict) else None
+            webhook = notify.get("webhook") if isinstance(notify, dict) else None
+            if isinstance(webhook, str):
+                found.add((environment_id, webhook))
+    return found
+
 
 def upgrade() -> None:
     """Upgrade schema.
 
     Adds `secrets.use_kind` and `secrets.use_target_id`. A secret whose name exactly one
     package index or repository names, and nothing else, is bound to it: that is the use it
-    already has. A secret its own environment uses for storage or for a webhook that has
-    delivered stays unbound, and so does every other secret that is not unambiguous. The worker
-    refuses an unbound secret to an index or a repository until an administrator binds it
+    already has. A secret its own environment uses for storage or for a webhook (delivered, or
+    in any deployed project version) stays unbound, and so does every other secret that is not
+    unambiguous. The worker refuses an unbound secret to an index or a repository until an
+    administrator binds it
     (`lakana secret bind`).
     """
     with op.batch_alter_table("secrets") as batch_op:
@@ -68,6 +104,13 @@ def upgrade() -> None:
             f" AND NOT {_USED_BY_ITS_ENVIRONMENT}"
         )
     )
+    # Nothing was bound before this revision, so clearing here only undoes the two updates above.
+    for environment_id, name in _deployed_webhooks():
+        op.execute(
+            sa.update(_SECRETS)
+            .where(_SECRETS.c.environment_id == environment_id, _SECRETS.c.name == name)
+            .values(use_kind=None, use_target_id=None)
+        )
 
 
 def downgrade() -> None:

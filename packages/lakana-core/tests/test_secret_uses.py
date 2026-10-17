@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 import uuid
 from datetime import UTC, datetime
 
@@ -285,3 +286,13 @@ def test_the_command_escapes_a_control_character_in_a_name() -> None:
 
     assert "\n" not in command
     assert "\x1b" not in command
+
+
+def test_a_long_non_ascii_name_survives_in_the_command() -> None:
+    """A printable name is kept as written, so the command can be pasted and still match."""
+    name = "ä" * 220
+    use = SecretUse(SecretUseKind.REPOSITORY, uuid.uuid4(), name)
+
+    parts = shlex.split(bind_command("dev", name, use))
+
+    assert parts == ["lakana", "secret", "bind", name, "--env", "dev", "--repository", name]

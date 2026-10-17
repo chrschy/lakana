@@ -25,6 +25,23 @@ _OPTIONS = {SecretUseKind.PACKAGE_INDEX: "--index", SecretUseKind.REPOSITORY: "-
 _ENVIRONMENT_USE = "its environment (storage, webhooks and tasks)"
 
 
+def _text(name: str) -> str:
+    """Make a name safe to print without changing a name a shell can carry.
+
+    Parameters
+    ----------
+    name
+        A secret, environment, index or repository name.
+
+    Returns
+    -------
+    str
+        The name as it is when every character is printable (so a pasted command still matches,
+        also for a long or non-ASCII name); otherwise its escaped form from `shown`.
+    """
+    return name if name.isprintable() else shown(name)
+
+
 class SecretUseRefused(ValidationError):
     """A secret was asked for a use it is not bound to; the text says what to do."""
 
@@ -114,7 +131,7 @@ class SecretUse:
         """
         if self.kind is SecretUseKind.ENVIRONMENT:
             return "--own-env"
-        return f"{_OPTIONS[self.kind]} {shlex.quote(shown(self.target_name or ''))}"
+        return f"{_OPTIONS[self.kind]} {shlex.quote(_text(self.target_name or ''))}"
 
     def wanted(self) -> str:
         """Name this use for a message.
@@ -200,7 +217,7 @@ def bind_command(environment: str, name: str, use: SecretUse) -> str:
         ``lakana secret bind <name> --env <environment> <option>``, quoted for a shell.
     """
     return (
-        f"lakana secret bind {shlex.quote(shown(name))} --env {shlex.quote(shown(environment))} "
+        f"lakana secret bind {shlex.quote(_text(name))} --env {shlex.quote(_text(environment))} "
         f"{use.option()}"
     )
 
