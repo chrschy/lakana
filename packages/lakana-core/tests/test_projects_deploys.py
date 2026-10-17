@@ -40,6 +40,7 @@ from lakana_core.models import (
     Repository,
     RepositoryKind,
     Secret,
+    SecretUseKind,
     Table,
     TableType,
 )
@@ -3465,7 +3466,14 @@ def _create_command(name: str) -> str:
     )
 
 
-def _secret(session: Session, principal: PrincipalRef, name: str, *, revoked: bool = False) -> None:
+def _secret(
+    session: Session,
+    principal: PrincipalRef,
+    name: str,
+    *,
+    revoked: bool = False,
+    use: tuple[SecretUseKind, uuid.UUID | None] | None = None,
+) -> None:
     """Store a secret row of the `dev` environment with placeholder ciphertext.
 
     The deploy only looks the name up, so the bytes are never decrypted.
@@ -3480,6 +3488,8 @@ def _secret(session: Session, principal: PrincipalRef, name: str, *, revoked: bo
         The secret's name.
     revoked
         Mark the secret revoked.
+    use
+        The secret's use and target; `None` for unbound.
     """
     environment = session.execute(select(Environment).where(Environment.name == "dev")).scalar_one()
     now = datetime.now(UTC)
@@ -3496,9 +3506,35 @@ def _secret(session: Session, principal: PrincipalRef, name: str, *, revoked: bo
             created_by=principal.id,
             created_at=now,
             revoked_at=now if revoked else None,
+            use_kind=use[0] if use else None,
+            use_target_id=use[1] if use else None,
         )
     )
     session.commit()
+
+
+def test_a_job_that_notifies_through_a_secret_bound_to_an_index_warns_at_deploy(
+    session: Session, env: None, principal: PrincipalRef
+) -> None:
+    """A secret that serves an index or a repository never serves a webhook; the deploy says so."""
+    repo = _repo(session)
+    _secret(session, principal, "idx", use=(SecretUseKind.PACKAGE_INDEX, uuid.uuid4()))
+    _secret(session, principal, "own", use=(SecretUseKind.ENVIRONMENT, None))
+    jobs = {
+        "a": _job(cron=None, notify="idx"),
+        "b": _job(cron=None, notify="own"),
+    }
+    run = _deployed_jobs(session, principal, repo, "a" * 40, jobs)
+    warnings = (
+        DeployService(session, AllowAllAuthorization()).get(principal, "dev", run.id).warnings
+    )
+    (warning,) = warnings
+    assert warning.startswith(
+        "job `a` notifies through secret `idx`, which is bound to a package index that was "
+        "removed, not to its environment, so Lakana does not send it to a webhook; it does not "
+        "notify until you give the job a secret of its own"
+    )
+    assert warning.endswith("lakana secret bind idx --env dev --own-env")
 
 
 def test_a_job_that_notifies_through_a_missing_secret_warns_at_deploy(

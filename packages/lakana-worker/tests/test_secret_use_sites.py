@@ -41,6 +41,56 @@ def _calls(node: ast.AST, name: str) -> list[ast.Call]:
     return sorted(found, key=lambda call: (call.lineno, call.col_offset))
 
 
+_DECRYPTERS = {"decrypt_secret_row", "decrypt_secret_values", "unwrap"}
+_BROAD = {"Exception", "BaseException"}
+_ALLOWED_HOMES = {_CRYPTO, "lakana-core/src/lakana_core/secrets/keys.py"}
+
+
+def _names_a_decrypter(source: str) -> bool:
+    """Say whether code refers to a function that opens a secret, however it is imported.
+
+    Parameters
+    ----------
+    source
+        Python source.
+
+    Returns
+    -------
+    bool
+        Whether a name, an attribute or an import (also under an alias) is one of the
+        decrypting functions; words in comments and docstrings do not count.
+    """
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Name) and node.id in _DECRYPTERS:
+            return True
+        if isinstance(node, ast.Attribute) and node.attr in _DECRYPTERS:
+            return True
+        if isinstance(node, ast.alias) and node.name.split(".")[-1] in _DECRYPTERS:
+            return True
+    return False
+
+
+def _is_broad(kind: ast.expr | None) -> bool:
+    """Say whether an `except` clause catches every exception.
+
+    Parameters
+    ----------
+    kind
+        The handler's type expression; `None` for a bare `except`.
+
+    Returns
+    -------
+    bool
+        Whether it is bare, names `Exception` or `BaseException` (also as `builtins.Exception`),
+        or is a tuple that contains one of them.
+    """
+    if kind is None:
+        return True
+    if isinstance(kind, ast.Tuple):
+        return any(_is_broad(element) for element in kind.elts)
+    return getattr(kind, "id", getattr(kind, "attr", None)) in _BROAD
+
+
 def _under_broad_handler(tree: ast.AST, call: ast.Call) -> bool:
     """Say whether a call sits in a `try` body whose handler catches every exception.
 
@@ -54,29 +104,68 @@ def _under_broad_handler(tree: ast.AST, call: ast.Call) -> bool:
     Returns
     -------
     bool
-        Whether a bare `except` or `except Exception` could swallow or relabel what the call
-        raises (the refusal and the environment-mismatch `ValueError` must reach the caller).
+        Whether a broad `except` could swallow or relabel what the call raises (the refusal
+        and the environment-mismatch `ValueError` must reach the caller).
     """
     for node in ast.walk(tree):
         if not isinstance(node, ast.Try) or not any(call in ast.walk(stmt) for stmt in node.body):
             continue
-        for handler in node.handlers:
-            kind = handler.type
-            if kind is None or getattr(kind, "id", None) in {"Exception", "BaseException"}:
-                return True
+        if any(_is_broad(handler.type) for handler in node.handlers):
+            return True
     return False
 
 
 def test_only_the_four_known_sites_decrypt_a_secret() -> None:
-    """A fifth caller of the decrypt functions would read a secret for any use."""
+    """A fifth caller of any decrypting function would read a secret for any use."""
     callers = sorted(
         str(path.relative_to(_PACKAGES))
         for path in _PACKAGES.glob("*/src/**/*.py")
-        if "decrypt_secret_row(" in path.read_text(encoding="utf-8")
-        and str(path.relative_to(_PACKAGES)) != _CRYPTO
+        if str(path.relative_to(_PACKAGES)) not in _ALLOWED_HOMES
+        and _names_a_decrypter(path.read_text(encoding="utf-8"))
     )
 
     assert callers == sorted(_SITES)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "decrypt_secret_values(a, b)",
+        "from lakana_core.secrets.crypto import decrypt_secret_row as d\nd(a)",
+        "import lakana_core.secrets.crypto as c\nc.decrypt_secret_row(a)",
+        "provider.unwrap(data, aad)",
+    ],
+)
+def test_the_scan_finds_each_way_to_open_a_secret(source: str) -> None:
+    """The inventory test would otherwise miss a fifth site written this way."""
+    assert _names_a_decrypter(source)
+
+
+def test_the_scan_ignores_words_in_docstrings_and_comments() -> None:
+    """Prose that mentions `unwrap` is not a caller."""
+    assert not _names_a_decrypter('"""It must unwrap the key."""\n# decrypt_secret_row\nx = 1')
+
+
+@pytest.mark.parametrize(
+    "handler",
+    ["", "Exception", "BaseException", "(ValueError, Exception)", "builtins.Exception"],
+)
+def test_the_guard_finds_each_broad_handler(handler: str) -> None:
+    """A refusal raised inside such a `try` would be swallowed or relabelled."""
+    tree = ast.parse(
+        f"try:\n    require_use()\nexcept {handler}:\n    pass\n".replace("except :", "except:")
+    )
+    (call,) = _calls(tree, "require_use")
+
+    assert _under_broad_handler(tree, call)
+
+
+def test_the_guard_accepts_a_narrow_handler() -> None:
+    """Catching only the refusal is how `resolve_index_access` relabels it."""
+    tree = ast.parse("try:\n    require_use()\nexcept (SecretUseRefused, KeyError):\n    pass\n")
+    (call,) = _calls(tree, "require_use")
+
+    assert not _under_broad_handler(tree, call)
 
 
 @pytest.mark.parametrize(("path", "function"), sorted(_SITES.items()))

@@ -105,6 +105,7 @@ from lakana_core.models import (
     RepositoryKind,
     RollbackOutcome,
     Run,
+    Secret,
     SecretUseKind,
     Table,
     TableType,
@@ -4342,6 +4343,27 @@ def test_a_testpypi_row_with_a_secret_is_told_to_clear_the_secret(py: PyWorld) -
         "takes none, so no credential is sent to it. An administrator removes it with "
         "`lakana index update testpypi --clear credential_secret`"
     )
+
+
+def test_an_unbound_index_secret_fails_the_build_for_good_with_the_bind_command(
+    py: PyWorld,
+) -> None:
+    """The secret exists and holds a password, but no one bound it to the index."""
+    _register_team_index(py, password="the-password")
+    with py.world.session() as session:
+        secret = session.execute(select(Secret).where(Secret.name == "team-index")).scalar_one()
+        secret.use_kind, secret.use_target_id = None, None
+        session.commit()
+    py.deploy(_lock() + _TEAM_PACKAGE)
+    task, message = _fails(py, _with_key(py.engine(_forged, acquire_venv=_building)))
+    assert (task.status, task.attempt) == (TaskStatus.FAILED, 1)
+    assert message == (
+        "environment build failed: Secret 'team-index' of environment 'dev' is not bound to a "
+        "use yet, so Lakana does not send it to package index 'team'. An administrator binds "
+        "it: lakana secret bind team-index --env dev --index team"
+    )
+    assert "the-password" not in message
+    assert py.tokens() == [] and py.runner.tasks == []
 
 
 def test_a_removed_secret_fails_the_next_build_for_good(py: PyWorld) -> None:

@@ -17,8 +17,8 @@ slow or dead webhook never holds up the task loop or the scheduler. Delivery is 
 - Nothing here writes to a run or its tasks; a failed notification is a row and an audit event.
 
 The URL and the signing key appear in no row, log line, exception text or audit detail: every
-failure is reduced to a fixed reason before it is stored, and the exception of an unexpected
-failure is never logged with its text.
+failure is reduced to a fixed reason before it is stored (or to the use refusal, which holds
+names only), and the exception of an unexpected failure is never logged with its text.
 """
 
 from __future__ import annotations

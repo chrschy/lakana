@@ -510,6 +510,11 @@ def test_credential_problems_fail_with_the_secret_name_only(
     [
         ((None, None), "is not bound to a use yet"),
         ((SecretUseKind.ENVIRONMENT, None), "is bound to its environment"),
+        ((SecretUseKind.REPOSITORY, uuid.UUID(int=7)), "is bound to a repository that was removed"),
+        (
+            (SecretUseKind.PACKAGE_INDEX, uuid.UUID(int=8)),
+            "is bound to a package index that was removed",
+        ),
     ],
 )
 def test_a_repository_secret_bound_to_another_use_stops_the_deploy(
@@ -518,7 +523,7 @@ def test_a_repository_secret_bound_to_another_use_stops_the_deploy(
     world: World,
     tmp_path: Path,
     served: Path,
-    use: tuple[SecretUseKind | None, None],
+    use: tuple[SecretUseKind | None, uuid.UUID | None],
     current: str,
 ) -> None:
     """`resolve_credential` refuses, before decrypting, a secret that serves something else."""

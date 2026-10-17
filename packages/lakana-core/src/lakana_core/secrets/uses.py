@@ -317,6 +317,14 @@ def require_use(session: Session, secret: Secret, use: SecretUse, *, environment
             f"An administrator binds it: {command}"
         )
     current = describe_use(session, secret.use_kind, secret.use_target_id)
+    if use.kind is SecretUseKind.ENVIRONMENT:
+        # Binding it to the environment would take it from the index or repository that
+        # needs it, so the first suggestion is a secret of its own.
+        raise SecretUseRefused(
+            f"{who} is bound to {current}, not to {use.wanted()}, so Lakana does not use it "
+            f"there. Name a secret of its own instead; or, if this secret really belongs to the "
+            f"environment, an administrator binds it, and {current} then loses it: {command}"
+        )
     raise SecretUseRefused(
         f"{who} is bound to {current}, not to {use.wanted()}, so Lakana does not use it there. "
         f"An administrator who means it changes its use: {command}"

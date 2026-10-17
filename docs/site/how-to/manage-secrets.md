@@ -70,6 +70,12 @@ Creating a secret with `--index` or `--repository` is refused when its environme
 that name for storage or webhooks; create it with `--own-env`, or give the index a secret under
 another name. `lakana secret bind` moves such a secret on purpose.
 
+The same check guards the other places a secret is read: a deploy of a repository refuses a
+secret that is not bound to that repository (`lakana secret bind NAME --env ENV --repository
+REPO`), and the environment's storage refuses one bound to an index or a repository
+(`--own-env` moves it on purpose, or give the storage its own secret). The message names the
+secret, what it is bound to now and the command.
+
 An unbound secret works for its environment's storage and webhooks. A secret that its
 environment uses for them is refused when anyone names it from an index or a repository, with
 the command that moves it on purpose. The URL of an index or repository with a bound secret

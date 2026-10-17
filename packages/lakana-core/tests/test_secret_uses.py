@@ -296,3 +296,23 @@ def test_a_long_non_ascii_name_survives_in_the_command() -> None:
     parts = shlex.split(bind_command("dev", name, use))
 
     assert parts == ["lakana", "secret", "bind", name, "--env", "dev", "--repository", name]
+
+
+def test_an_index_secret_refused_as_a_webhook_first_suggests_a_secret_of_its_own(
+    session: Session, principal: PrincipalRef
+) -> None:
+    """Binding it to the environment would break the index, so the text says so."""
+    env = _environment(session)
+    corp = _index(session, "corp")
+    secret = _secret(session, env, principal, "corp-token", SecretUseKind.PACKAGE_INDEX, corp.id)
+
+    with pytest.raises(SecretUseRefused) as caught:
+        require_use(session, secret, SecretUse.environment(), environment_name="prod")
+
+    assert str(caught.value) == (
+        "Secret 'corp-token' of environment 'prod' is bound to package index 'corp', not to its "
+        "environment (storage, webhooks and tasks), so Lakana does not use it there. Name a "
+        "secret of its own instead; or, if this secret really belongs to the environment, an "
+        "administrator binds it, and package index 'corp' then loses it: "
+        "lakana secret bind corp-token --env prod --own-env"
+    )
