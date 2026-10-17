@@ -36,6 +36,7 @@ from lakana_core.identifiers import TableRef
 from lakana_core.models import (
     AuditEvent,
     AuditEventType,
+    ColumnMask,
     Environment,
     JobVersion,
     Principal,
@@ -53,6 +54,7 @@ from lakana_core.models import (
     WriteMode,
 )
 from lakana_core.policy.column_masks import ColumnMaskService
+from lakana_core.policy.read_errors import policy_read_failure
 from lakana_core.policy.row_filters import RowFilterService
 from lakana_core.projects.checks import CheckSpec
 from lakana_core.runs.checks import error_text
@@ -777,6 +779,52 @@ def test_a_value_the_query_engine_quotes_stays_out_of_the_checks_error(
         "Conversion Error: the check's query failed. Run the check's SQL yourself to see the "
         "full message."
     )
+
+
+def test_a_check_under_a_failing_mask_has_the_fixed_text_in_its_error(
+    session: Session,
+    admin: PrincipalRef,
+    runner: PrincipalRef,
+    authz: GrantAuthorization,
+    task: TaskRun,
+) -> None:
+    """The count's run and the check's `error` hold the fixed message, never the stored value."""
+    _table(
+        session,
+        admin,
+        "gold.people",
+        pa.table({"name": pa.array(["HIDDEN-X"], pa.string())}),
+    )
+    _grant_read(session, admin, "runner", "people")
+    catalog = CatalogService(session, StorageResolver(session), AllowAllAuthorization())
+    ColumnMaskService(session, AllowAllAuthorization(), catalog).create(
+        admin,
+        principal="runner",
+        environment="dev",
+        namespace="gold",
+        table="people",
+        column="name",
+        expression="NULL",
+    )
+    # The service refuses a cast; an edit in the database can store one.
+    session.execute(update(ColumnMask).values(expression="CAST(name AS INTEGER) || 'x'"))
+    session.commit()
+
+    # The mask is in the WHERE clause: under a count the select list is never evaluated.
+    counted = _count(
+        session,
+        task,
+        runner,
+        authz,
+        _spec("SELECT name FROM gold.people WHERE name IS NOT NULL", table="gold.people"),
+    )
+
+    assert counted.error_cause == "invalid_query"
+    assert counted.error_message == policy_read_failure("gold.people")
+    worded = error_text(counted.error_cause, counted.error_message, runner.name)
+    assert worded == policy_read_failure("gold.people")
+    assert "HIDDEN-X" not in worded
+    assert "HIDDEN-X" not in (_stored(session, counted).error_message or "")
 
 
 def test_a_check_of_a_view_has_no_checked_snapshot(

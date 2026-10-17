@@ -121,6 +121,7 @@ from lakana_core.models import (
     WriteMode,
 )
 from lakana_core.policy.expressions import columns_of
+from lakana_core.policy.read_errors import policy_read_failure
 from lakana_core.policy.renames import policy_column_renamed_message, renamed_policy_column
 from lakana_core.policy.resolver import PolicyResolver
 from lakana_core.query_rewrite import (
@@ -159,6 +160,7 @@ from lakana_core.storage.resolver import (
 )
 from lakana_worker.activity import ACTIVITY
 from lakana_worker.executor import (
+    INTERNAL_ADVICE,
     DuckDBInternalError,
     OutOfMemoryQuery,
     QueryCancelled,
@@ -328,6 +330,57 @@ def _redact(message: str, locations: Sequence[str]) -> str:
     for location in sorted(locations, key=len, reverse=True):
         message = message.replace(location, _REDACTED)
     return message
+
+
+_KEEPS_ITS_TEXT = re.compile(
+    r"^Query failed: (?:(?:Binder|Catalog|Parser) Error"
+    r"|a file of a table this query reads stores column )"
+)
+"""The start of the engine's text for a failure that carries no stored value, as a query child
+words it: a name or a statement the reader wrote that the engine cannot resolve or parse, and the
+child's own fixed text for a file that stores a column in another type."""
+
+
+def _without_the_value(failure: LakanaError, restricted: frozenset[str]) -> LakanaError:
+    """Replace the engine's text for a failure, on a read under a row filter or column mask.
+
+    A row filter or column mask expression runs on every stored value, also on the ones the
+    policy hides, and the engine's text for a failure can quote a value. A query that reads a
+    table under such a policy therefore keeps that text only for the kinds known to carry no
+    stored value (binder, catalog and parser errors, see `_KEEPS_ITS_TEXT`); every other
+    failure of the engine gets one fixed message: an invalid query as before, and an internal error
+    with its own fixed text and kind. What is
+    not the engine's text (a cancel, a timeout, a transient or memory error, the worker's own
+    wording) is returned as it is.
+
+    Parameters
+    ----------
+    failure
+        The failure about to be recorded.
+    restricted
+        The dotted base tables of the query on which a row filter or a column mask applied;
+        empty for a query that reads none, which keeps the engine's text (the data is the
+        reader's own).
+
+    Returns
+    -------
+    LakanaError
+        The fixed message as a `ValidationError` when `failure` is such a failure of a
+        query that reads a table under a policy, otherwise `failure` itself.
+    """
+    if restricted and isinstance(failure, DuckDBInternalError):
+        # The engine's internal errors can format a value too; the type stays, so the cause and
+        # a retry are as before, and the worker's log keeps the details.
+        return DuckDBInternalError(
+            f"Query failed: the query engine failed on its own. {INTERNAL_ADVICE}"
+        )
+    if not restricted or type(failure) is not ValidationError:
+        return failure
+    text = str(failure)
+    if not text.startswith("Query failed: ") or _KEEPS_ITS_TEXT.match(text) is not None:
+        return failure
+    only = next(iter(restricted)) if len(restricted) == 1 else None
+    return ValidationError(policy_read_failure(only))
 
 
 class _RowsNotListed(ValidationError):
@@ -2413,6 +2466,8 @@ def _run_one(
                 )
                 or exc
             )
+        if prepared is not None:
+            failure = _without_the_value(failure, prepared.restricted)
         run.error_message = _redact(str(failure), locations)
         run.error_cause = failure_cause(failure).value
     except SQL_SYNTAX_ERRORS as exc:
