@@ -17,10 +17,11 @@ from pyiceberg.table.metadata import TableMetadata
 from lakana_core.identifiers import shown
 
 POLICY_COLUMN_RENAMED = (
-    "`{table}` has a row filter or column mask on column `{column}`, and a column was renamed "
-    "since the policy was created, so the policy may now cover a different column. Nothing is "
-    "shown. An administrator must review the table's row filters and column masks, revoke each "
-    "one that names a renamed column, and create it again for the column it is meant for."
+    "`{table}` has a row filter or column mask that uses column `{column}`, and a column "
+    "was renamed since the policy was created, so the policy may now cover a different "
+    "column. Nothing is shown. An administrator must review the table's row filters and "
+    "column masks, revoke each one that uses a renamed column, and create it again for the "
+    "column it is meant for."
 )
 """Why a read of a table is refused when a rename touched a column of one of its policies."""
 
@@ -79,6 +80,10 @@ def _touched_by(metadata: TableMetadata, policy: PolicyColumns) -> set[str]:
     """
     spelled = {name.lower(): name for name in policy.columns}
     ordered = sorted(metadata.schemas, key=lambda schema: schema.schema_id)
+    if policy.schema_id is not None and all(s.schema_id != policy.schema_id for s in ordered):
+        # Without the schema the policy was written against there is nothing to compare, and
+        # a rename before the next schema would go unseen: every name of the policy is suspect.
+        return set(policy.columns)
     start = ordered[0].schema_id if policy.schema_id is None else policy.schema_id
     steps = [schema for schema in ordered if schema.schema_id >= start]
     current = metadata.schema()
@@ -107,7 +112,10 @@ def renamed_policy_column(metadata: TableMetadata, policies: Iterable[PolicyColu
     Between a policy's schema and the current one, a field id that changed its name makes both
     names suspect, and so does a name that now belongs to another field id (a column dropped,
     a different one added under its name). The comparison ignores letter case, as the database
-    does. Each policy is judged from its own schema.
+    does. Each policy is judged from its own schema; one whose recorded schema the metadata
+    no longer has is affected in every column. A qualified column of a filter stored by a
+    release that accepted one (`t.region`) is listed by its qualifier; such a read fails in the
+    database before it can show a row, so it is closed without this rule.
 
     Parameters
     ----------

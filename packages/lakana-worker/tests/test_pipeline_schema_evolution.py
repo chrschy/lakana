@@ -655,10 +655,10 @@ def _refused(table: str, column: str) -> str:
         The message.
     """
     return (
-        f"`{table}` has a row filter or column mask on column `{column}`, and a column was "
+        f"`{table}` has a row filter or column mask that uses column `{column}`, and a column was "
         "renamed since the policy was created, so the policy may now cover a different column. "
         "Nothing is shown. An administrator must review the table's row filters and column "
-        "masks, revoke each one that names a renamed column, and create it again for the "
+        "masks, revoke each one that uses a renamed column, and create it again for the "
         "column it is meant for."
     )
 
@@ -874,6 +874,25 @@ def test_a_policy_created_after_the_rename_reads(
 
     assert {row["ssn"] for row in read.to_pylist()} == {"hidden"}
     assert {row["ssn_old"] for row in read.to_pylist()} == {"111", "222"}
+
+
+def test_the_documented_order_after_a_rename_ends_with_the_mask_on_the_right_column(
+    session: Session, principal: PrincipalRef, catalog: CatalogService, tmp_path: Path
+) -> None:
+    """Rename, refused, revoke, create for the new name, read: nothing shows in clear on the way."""
+    ref, _ = _people(catalog, principal, "staff")
+    stale = _mask(session, catalog, principal, "staff", "ssn")
+    _rename(catalog, principal, ref, ("ssn", "social"))
+
+    _assert_nothing_shown(
+        _query(session, principal, "SELECT * FROM gold.staff"), "gold.staff", "ssn"
+    )
+    ColumnMaskService(session, AllowAllAuthorization(), catalog).revoke(principal, stale)
+    _mask(session, catalog, principal, "staff", "social")
+
+    read = _result(tmp_path, _query(session, principal, "SELECT * FROM gold.staff"))
+    assert {row["social"] for row in read.to_pylist()} == {"hidden"}
+    assert {row["email"] for row in read.to_pylist()} == {"x@example.org", "y@example.org"}
 
 
 def test_creating_the_policy_again_after_the_refusal_reads(

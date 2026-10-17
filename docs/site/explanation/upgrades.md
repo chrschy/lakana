@@ -140,12 +140,12 @@ Row filters and column masks are bound to a column name, while a table is read b
 rename could leave a policy on another column. From this release a read is refused, and nothing is
 shown, when a column was renamed (or dropped and added again under its name) since the policy was
 created, and the old or the new name is one the policy uses:
-`` `TABLE` has a row filter or column mask on column `COLUMN`, and a column was renamed since the policy was created ...``
+`` `TABLE` has a row filter or column mask that uses column `COLUMN`, and a column was renamed since the policy was created ...``
 Each policy now records the table schema it was created against. A policy of an earlier release
 records none and is judged from the oldest schema of the table, so after the upgrade a table whose
 policy column was renamed at any time is refused until an administrator revokes the policy and
-creates it again for the column it is meant for. Create the policy for the new name before you
-rename a column, then revoke the old one
+creates it again for the column it is meant for. The order after a rename is: rename, revoke
+the policies that use the old or the new name, create them again; reads are refused in between
 ([Mask a column](../how-to/mask-a-column.md#after-a-rename),
 [Show some people only some rows](../how-to/filter-rows.md#after-a-rename)). Migration `0033` adds
 a column `schema_id` to the tables of row filters and column masks.

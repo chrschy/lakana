@@ -2232,8 +2232,8 @@ work.
   is read by field id, and a rename through the Iceberg REST catalog can move a name onto
   another column (`ssn` to `ssn_old`, `email` to `ssn`): a mask on `ssn` would cover the email
   column and `ssn_old` would show the real values. Each row filter and column mask records the
-  id of the table's current schema when it is created (`schema_id`, null for a raw table and for
-  a policy of a release before the column existed). For a read of an Iceberg table, `_resolve_sources`
+  id of the table's current schema when it is created (`schema_id`; null for a raw table, a view and an artifact, for a filter that reads no column,
+  and for a policy of a release before the column existed). For a read of an Iceberg table, `_resolve_sources`
   collects, from the reader's applied policies, every column a mask covers or its expression
   reads and every column a filter reads, and calls `policy.renames.renamed_policy_column` with the
   table's metadata: from each policy's own schema (the table's oldest one when it has none) to the
@@ -2241,7 +2241,8 @@ work.
   that now belongs to another field id, refuses the read before the query runs
   (`PolicyColumnRenamedError`, cause `invalid_query`, text `POLICY_COLUMN_RENAMED`, which names the
   first such column and no data). It applies to a read at a checked snapshot too, before the
-  comparison above. A refused read shows nothing and never runs without the policy. Creating the
+  comparison above. A refused read shows nothing and never runs without the policy. A recorded id the metadata does not have
+  makes every column of the policy suspect. Creating the
   policy again records the new schema id and the read works. Binding policies to field ids is not
   done yet. Pins: `test_pipeline_schema_evolution.py` (the `rename` tests), `test_policy_renames.py`.
 - **Grants, row filters, and column masks bind to ids, never names.** A rename or a

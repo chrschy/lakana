@@ -133,6 +133,13 @@ def test_each_policy_is_judged_from_its_own_schema_and_the_first_name_in_order_i
     assert renamed_policy_column(metadata, policies) == "a"
 
 
+def test_a_recorded_schema_the_metadata_lacks_touches_every_column_of_the_policy() -> None:
+    """Without the schema the policy was written against nothing can be compared: fail closed."""
+    metadata = _metadata(1, _schema(0, (2, "ssn")), _schema(1, (2, "ssn_old")))
+    assert renamed_policy_column(metadata, [_policy("ssn", "id", schema_id=999)]) == "id"
+    assert renamed_policy_column(metadata, [_policy("ssn", schema_id=999)]) == "ssn"
+
+
 def test_no_policy_touches_nothing() -> None:
     """With no policy there is no name to touch."""
     metadata = _metadata(1, _schema(0, (2, "ssn")), _schema(1, (2, "ssn_old")))
@@ -142,9 +149,9 @@ def test_no_policy_touches_nothing() -> None:
 def test_the_message_names_the_table_and_the_column_and_no_data() -> None:
     """The text says what happened and what to do next."""
     assert policy_column_renamed_message("ssn", "gold.staff") == (
-        "`gold.staff` has a row filter or column mask on column `ssn`, and a column was renamed "
-        "since the policy was created, so the policy may now cover a different column. Nothing "
-        "is shown. An administrator must review the table's row filters and column masks, "
-        "revoke each one that names a renamed column, and create it again for the column it is "
+        "`gold.staff` has a row filter or column mask that uses column `ssn`, and a column was "
+        "renamed since the policy was created, so the policy may now cover a different column. "
+        "Nothing is shown. An administrator must review the table's row filters and column masks, "
+        "revoke each one that uses a renamed column, and create it again for the column it is "
         "meant for."
     )

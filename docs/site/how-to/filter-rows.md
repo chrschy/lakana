@@ -139,9 +139,11 @@ the field `town` of its column `address` was renamed, ...`` until its owner writ
 again (an overwrite). Nothing is shown in the meantime.
 
 A raw-zone (external) table has no field ids: its files are read by column name. When some of its
-files lack a column it declares, a read under a filter or a mask of that table fails with
+files lack a column it declares, a read under a row filter of that table fails with
 ``The data files of `TABLE` do not all have the column `COLUMN` ...``, and nothing is shown
-unfiltered. Write the files again so that every file has the column.
+unfiltered. A column mask whose expression reads the column fails too, with a message that
+depends on the order of the files; a constant mask works. Write the files again so that every
+file has the column.
 
 A column of a type Lakana cannot read yet (nanosecond timestamps, `unknown`, and the geospatial
 types of Iceberg format version 3) makes every read of the table fail with ``'gold.events' has the
@@ -167,7 +169,7 @@ table by the filtered person is refused, and nothing is shown:
 
 <!-- output -->
 ```text
-`gold.customers` has a row filter or column mask on column `region`, and a column was renamed since the policy was created, so the policy may now cover a different column. Nothing is shown. An administrator must review the table's row filters and column masks, revoke each one that names a renamed column, and create it again for the column it is meant for.
+`gold.customers` has a row filter or column mask that uses column `region`, and a column was renamed since the policy was created, so the policy may now cover a different column. Nothing is shown. An administrator must review the table's row filters and column masks, revoke each one that uses a renamed column, and create it again for the column it is meant for.
 ```
 
 To make the table readable again, an administrator lists the row filters and column masks of the
@@ -177,8 +179,14 @@ records the new version of the schema, so it is not refused. A filter that an ea
 created has no recorded version: it is judged from the oldest schema of the table, so a rename from
 any time before also refuses the read until the filter is created again.
 
-The safe order for a rename is to create the filter for the new name first, then rename the column,
-then revoke the old filter. The read is refused between the rename and the revoke.
+A rename therefore goes in this order:
 
-A filter stored by an earlier release keeps working as it did, even if it would be refused when
-it is created today.
+1. Rename the column. From then on, reads of the table by the filtered person are refused. That is
+   the point: no rows are passed or hidden by a filter that is out of date.
+2. Revoke each filter that uses the old or the new name.
+3. Create the filter again for the column it is meant for. Lakana only accepts a filter on a
+   column the table has now, so it cannot be created before the rename.
+4. Reads work again, with the filter on the right column.
+
+A filter stored by an earlier release is judged by the same rule, even if its text would not be
+accepted by `create` today.

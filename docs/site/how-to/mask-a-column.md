@@ -169,7 +169,7 @@ masked person is refused, and nothing is shown:
 
 <!-- output -->
 ```text
-`gold.customers` has a row filter or column mask on column `ssn`, and a column was renamed since the policy was created, so the policy may now cover a different column. Nothing is shown. An administrator must review the table's row filters and column masks, revoke each one that names a renamed column, and create it again for the column it is meant for.
+`gold.customers` has a row filter or column mask that uses column `ssn`, and a column was renamed since the policy was created, so the policy may now cover a different column. Nothing is shown. An administrator must review the table's row filters and column masks, revoke each one that uses a renamed column, and create it again for the column it is meant for.
 ```
 
 To make the table readable again, an administrator lists the masks and row filters of the table
@@ -179,8 +179,14 @@ records the new version of the schema, so it is not refused. A mask that an earl
 created has no recorded version: it is judged from the oldest schema of the table, so a rename
 from any time before also refuses the read until the mask is created again.
 
-The safe order for a rename is to create the mask for the new name first, then rename the column,
-then revoke the old mask. The read is refused between the rename and the revoke.
+A rename therefore goes in this order:
+
+1. Rename the column. From then on, reads of the table by the masked person are refused. That is
+   the point: nothing shows in clear while the mask is out of date.
+2. Revoke each mask that uses the old or the new name.
+3. Create the mask again for the column it is meant for. Lakana only accepts a mask on a column
+   the table has now, so it cannot be created before the rename.
+4. Reads work again, with the mask on the right column.
 
 ## What a mask does not protect
 
