@@ -14,6 +14,7 @@ from pathlib import Path
 import duckdb
 import pyarrow as pa
 import pyarrow.ipc
+import pyarrow.parquet as pq
 import pytest
 from pyiceberg.schema import Schema
 from pyiceberg.table import StaticTable
@@ -41,9 +42,10 @@ from lakana_core.catalog.query_service import QueryService
 from lakana_core.catalog.service import CatalogService, LoadedTable
 from lakana_core.config import StorageConfig
 from lakana_core.identifiers import NamespacePath, TableRef
-from lakana_core.models import Principal, PrincipalType, QueryRun, QueryRunStatus
+from lakana_core.models import ColumnMask, Principal, PrincipalType, QueryRun, QueryRunStatus
 from lakana_core.policy.column_masks import ColumnMaskService
 from lakana_core.policy.row_filters import RowFilterService
+from lakana_core.storage.fsspec_storage import FsspecStorage
 from lakana_core.storage.resolver import StorageResolver
 from lakana_worker.pipeline import run_one
 
@@ -465,11 +467,14 @@ def test_a_read_follows_the_schema_change_by_field_id(
         reads used to take a column's type and presence from the first file.
     """
     column, values = _CHANGES[change](catalog, principal)
+    listings: list[tuple[list[str], list[str]]] = []
     if order == "reversed":
         real = pipeline_module.list_data_files
 
         def reverse(*args: object, **kwargs: object) -> list[str]:
-            return list(reversed(real(*args, **kwargs)))  # ty: ignore[invalid-argument-type]
+            listed = real(*args, **kwargs)  # ty: ignore[invalid-argument-type]
+            listings.append((listed, list(reversed(listed))))
+            return list(reversed(listed))
 
         monkeypatch.setattr(pipeline_module, "list_data_files", reverse)
     if policy == "row_filter":
@@ -493,6 +498,10 @@ def test_a_read_follows_the_schema_change_by_field_id(
         )
 
     read = _result(tmp_path, _query(session, principal, f"SELECT * FROM gold.{change}"))
+
+    # The reversed order must really differ from the listed one, or the parameter tests nothing.
+    assert all(listed != reversed_ for listed, reversed_ in listings)
+    assert bool(listings) == (order == "reversed")
 
     rows = sorted(read.to_pylist(), key=lambda row: row["id"])
     ids = [1, 3] if policy == "row_filter" else [1, 2, 3, 4]
@@ -628,3 +637,384 @@ def test_every_duckdb_type_the_map_names_round_trips_through_duckdb(
     row = duckdb.connect().execute(f"SELECT typeof(NULL::{duckdb_type})").fetchone()
     assert row is not None
     assert row[0].replace(" ", "") == duckdb_type.replace(" ", "")
+
+
+def _refused(table: str, column: str) -> str:
+    """Give the text of the refusal of a read after a rename touched a policy's column.
+
+    Parameters
+    ----------
+    table
+        The table's dotted name.
+    column
+        The policy's column.
+
+    Returns
+    -------
+    str
+        The message.
+    """
+    return (
+        f"`{table}` has a row filter or column mask on column `{column}`, and a column was "
+        "renamed since the policy was created, so the policy may now cover a different column. "
+        "Nothing is shown. An administrator must review the table's row filters and column "
+        "masks, revoke each one that names a renamed column, and create it again for the "
+        "column it is meant for."
+    )
+
+
+def _people(catalog: CatalogService, principal: PrincipalRef, name: str) -> tuple[TableRef, str]:
+    """Create `gold.<name>` with `id`, `dept`, `ssn` and `email`, holding two rows.
+
+    Parameters
+    ----------
+    catalog
+        The catalog.
+    principal
+        The acting principal.
+    name
+        The table's name.
+
+    Returns
+    -------
+    tuple of TableRef and str
+        The table, and the metadata location after the append.
+    """
+    ref = _ref(name)
+    created = catalog.create_table(
+        principal,
+        ref,
+        schema=Schema(
+            _optional(1, "id", LongType()),
+            _optional(2, "dept", StringType()),
+            _optional(3, "ssn", StringType()),
+            _optional(4, "email", StringType()),
+        ),
+    )
+    rows = pa.table(
+        {
+            "id": pa.array([1, 2], pa.int64()),
+            "dept": ["a", "b"],
+            "ssn": ["111", "222"],
+            "email": ["x@example.org", "y@example.org"],
+        }
+    )
+    return ref, _append(catalog, principal, ref, created, rows).metadata_location
+
+
+def _rename(
+    catalog: CatalogService, principal: PrincipalRef, ref: TableRef, *pairs: tuple[str, str]
+) -> None:
+    """Rename columns one after the other, each as a commit of its own.
+
+    Parameters
+    ----------
+    catalog
+        The catalog.
+    principal
+        The acting principal.
+    ref
+        The table.
+    *pairs
+        Each column's old and new name.
+    """
+    for old, new in pairs:
+        table = catalog.load_table(principal, ref)
+        _evolve(catalog, principal, ref, table, lambda u, o=old, n=new: u.rename_column(o, n))
+
+
+def _mask(
+    session: Session, catalog: CatalogService, principal: PrincipalRef, table: str, column: str
+) -> uuid.UUID:
+    """Mask a column of `gold.<table>` for the admin, with the text `hidden`.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    catalog
+        The catalog.
+    principal
+        The acting principal.
+    table
+        The table.
+    column
+        The column to mask.
+
+    Returns
+    -------
+    uuid.UUID
+        The mask's id.
+    """
+    return (
+        ColumnMaskService(session, AllowAllAuthorization(), catalog)
+        .create(
+            principal,
+            principal="admin",
+            environment="dev",
+            namespace="gold",
+            table=table,
+            column=column,
+            expression="'hidden'",
+        )
+        .id
+    )
+
+
+def _assert_nothing_shown(run: QueryRun, table: str, column: str) -> None:
+    """Assert a run failed with the refusal and wrote no result.
+
+    Parameters
+    ----------
+    run
+        The finished run.
+    table
+        The table's dotted name in the message.
+    column
+        The policy's column in the message.
+    """
+    assert run.status == QueryRunStatus.FAILED
+    assert run.error_message == _refused(table, column)
+    assert run.result_location is None
+
+
+def test_a_mask_whose_column_was_renamed_onto_another_refuses_the_read(
+    session: Session, principal: PrincipalRef, catalog: CatalogService, tmp_path: Path
+) -> None:
+    """`ssn` -> `ssn_old` and `email` -> `ssn`: the mask would cover the email column."""
+    ref, _ = _people(catalog, principal, "staff")
+    _mask(session, catalog, principal, "staff", "ssn")
+    _rename(catalog, principal, ref, ("ssn", "ssn_old"), ("email", "ssn"))
+
+    run = _query(session, principal, "SELECT * FROM gold.staff")
+
+    _assert_nothing_shown(run, "gold.staff", "ssn")
+
+
+def test_a_rename_that_touches_no_policy_column_reads_as_before(
+    session: Session, principal: PrincipalRef, catalog: CatalogService, tmp_path: Path
+) -> None:
+    """A mask on `ssn`; `email` -> `email2` leaves it covering the same column."""
+    ref, _ = _people(catalog, principal, "staff")
+    _mask(session, catalog, principal, "staff", "ssn")
+    _rename(catalog, principal, ref, ("email", "email2"))
+
+    read = _result(tmp_path, _query(session, principal, "SELECT * FROM gold.staff"))
+
+    rows = sorted(read.to_pylist(), key=lambda row: row["id"])
+    assert [row["ssn"] for row in rows] == ["hidden", "hidden"]
+    assert [row["email2"] for row in rows] == ["x@example.org", "y@example.org"]
+
+
+def test_a_row_filter_whose_column_was_renamed_refuses_the_read(
+    session: Session, principal: PrincipalRef, catalog: CatalogService, tmp_path: Path
+) -> None:
+    """The filter reads `dept`; renamed to `department`, it is no longer sure what it tests."""
+    ref, _ = _people(catalog, principal, "staff")
+    RowFilterService(session, AllowAllAuthorization(), catalog).create(
+        principal,
+        principal="admin",
+        environment="dev",
+        namespace="gold",
+        table="staff",
+        expression="dept = 'a'",
+    )
+    _rename(catalog, principal, ref, ("dept", "department"))
+
+    run = _query(session, principal, "SELECT * FROM gold.staff")
+
+    _assert_nothing_shown(run, "gold.staff", "dept")
+
+
+def test_a_column_dropped_and_added_again_under_a_policy_name_refuses_the_read(
+    session: Session, principal: PrincipalRef, catalog: CatalogService, tmp_path: Path
+) -> None:
+    """The name `ssn` now belongs to another field id."""
+    ref, _ = _people(catalog, principal, "staff")
+    _mask(session, catalog, principal, "staff", "ssn")
+    table = catalog.load_table(principal, ref)
+    table = _evolve(catalog, principal, ref, table, lambda u: u.delete_column("ssn"))
+    _evolve(catalog, principal, ref, table, lambda u: u.add_column("ssn", StringType()))
+
+    run = _query(session, principal, "SELECT * FROM gold.staff")
+
+    _assert_nothing_shown(run, "gold.staff", "ssn")
+
+
+def test_a_column_read_by_a_mask_expression_that_was_renamed_refuses_the_read(
+    session: Session, principal: PrincipalRef, catalog: CatalogService, tmp_path: Path
+) -> None:
+    """A mask on `ssn` built from `dept` is as stale as one on `dept`."""
+    ref, _ = _people(catalog, principal, "staff")
+    ColumnMaskService(session, AllowAllAuthorization(), catalog).create(
+        principal,
+        principal="admin",
+        environment="dev",
+        namespace="gold",
+        table="staff",
+        column="ssn",
+        expression="md5(dept)",
+    )
+    _rename(catalog, principal, ref, ("dept", "department"))
+
+    run = _query(session, principal, "SELECT * FROM gold.staff")
+
+    _assert_nothing_shown(run, "gold.staff", "dept")
+
+
+def test_a_policy_created_after_the_rename_reads(
+    session: Session, principal: PrincipalRef, catalog: CatalogService, tmp_path: Path
+) -> None:
+    """The policy records the schema it was written against, so the earlier rename is not its."""
+    ref, _ = _people(catalog, principal, "staff")
+    _rename(catalog, principal, ref, ("ssn", "ssn_old"), ("email", "ssn"))
+    _mask(session, catalog, principal, "staff", "ssn")
+
+    read = _result(tmp_path, _query(session, principal, "SELECT * FROM gold.staff"))
+
+    assert {row["ssn"] for row in read.to_pylist()} == {"hidden"}
+    assert {row["ssn_old"] for row in read.to_pylist()} == {"111", "222"}
+
+
+def test_creating_the_policy_again_after_the_refusal_reads(
+    session: Session, principal: PrincipalRef, catalog: CatalogService, tmp_path: Path
+) -> None:
+    """The administrator revokes the stale mask and creates it for the column it is meant for."""
+    ref, _ = _people(catalog, principal, "staff")
+    stale = _mask(session, catalog, principal, "staff", "ssn")
+    _rename(catalog, principal, ref, ("ssn", "ssn_old"))
+    _assert_nothing_shown(
+        _query(session, principal, "SELECT * FROM gold.staff"), "gold.staff", "ssn"
+    )
+
+    ColumnMaskService(session, AllowAllAuthorization(), catalog).revoke(principal, stale)
+    _mask(session, catalog, principal, "staff", "ssn_old")
+
+    read = _result(tmp_path, _query(session, principal, "SELECT * FROM gold.staff"))
+    assert {row["ssn_old"] for row in read.to_pylist()} == {"hidden"}
+
+
+def test_a_policy_without_a_recorded_schema_is_judged_from_the_oldest_schema(
+    session: Session, principal: PrincipalRef, catalog: CatalogService, tmp_path: Path
+) -> None:
+    """A policy of an earlier release has no schema id; a rename in the history touches it."""
+    ref, _ = _people(catalog, principal, "staff")
+    _rename(catalog, principal, ref, ("email", "mail"))
+    mask = _mask(session, catalog, principal, "staff", "mail")
+    read = _result(tmp_path, _query(session, principal, "SELECT * FROM gold.staff"))
+    assert {row["mail"] for row in read.to_pylist()} == {"hidden"}
+
+    row = session.get(ColumnMask, mask)
+    assert row is not None
+    row.schema_id = None
+    session.commit()
+
+    _assert_nothing_shown(
+        _query(session, principal, "SELECT * FROM gold.staff"), "gold.staff", "mail"
+    )
+
+
+def test_a_policy_of_another_reader_does_not_refuse_this_reader(
+    session: Session, principal: PrincipalRef, catalog: CatalogService, tmp_path: Path
+) -> None:
+    """Only a policy that applies to the reader can make the read stale."""
+    session.add(Principal(id=uuid.uuid4(), type=PrincipalType.USER, name="bob"))
+    session.commit()
+    ref, _ = _people(catalog, principal, "staff")
+    ColumnMaskService(session, AllowAllAuthorization(), catalog).create(
+        principal,
+        principal="bob",
+        environment="dev",
+        namespace="gold",
+        table="staff",
+        column="ssn",
+        expression="'hidden'",
+    )
+    _rename(catalog, principal, ref, ("ssn", "ssn_old"), ("email", "ssn"))
+
+    read = _result(tmp_path, _query(session, principal, "SELECT * FROM gold.staff"))
+
+    assert {row["ssn"] for row in read.to_pylist()} == {"x@example.org", "y@example.org"}
+
+
+def test_a_read_of_an_external_table_is_not_affected_by_the_rule(
+    session: Session, principal: PrincipalRef, catalog: CatalogService, tmp_path: Path
+) -> None:
+    """Raw files have no field ids; a mask binds by name and the files are read by name."""
+    catalog.create_namespace(principal, "dev", NamespacePath.from_parts(["raw"]))
+    (tmp_path / "raw" / "events").mkdir(parents=True)
+    pq.write_table(
+        pa.table({"id": [1], "tier": ["gold"]}), tmp_path / "raw" / "events" / "a.parquet"
+    )
+    catalog.create_external_table(
+        principal,
+        TableRef(environment="dev", namespace=NamespacePath.from_parts(["raw"]), name="events"),
+        location_pattern="raw/events/*.parquet",
+        format="parquet",
+    )
+    ColumnMaskService(session, AllowAllAuthorization(), catalog).create(
+        principal,
+        principal="admin",
+        environment="dev",
+        namespace="raw",
+        table="events",
+        column="tier",
+        expression="'hidden'",
+    )
+
+    read = _result(tmp_path, _query(session, principal, "SELECT * FROM raw.events"))
+
+    assert read.to_pylist() == [{"id": 1, "tier": "hidden"}]
+
+
+@pytest.mark.parametrize("order", ["listed", "reversed"])
+def test_an_external_table_whose_files_lack_a_declared_column_fails_under_a_row_filter(
+    monkeypatch: pytest.MonkeyPatch,
+    session: Session,
+    principal: PrincipalRef,
+    catalog: CatalogService,
+    tmp_path: Path,
+    order: str,
+) -> None:
+    """The first file has `tier` (the schema is inferred from it), the second lacks it.
+
+    The read fails with the raw-zone text in either order of the files, and shows nothing.
+    """
+    catalog.create_namespace(principal, "dev", NamespacePath.from_parts(["raw"]))
+    directory = tmp_path / "raw" / "events"
+    directory.mkdir(parents=True)
+    pq.write_table(pa.table({"id": [1], "tier": ["gold"]}), directory / "a-with-tier.parquet")
+    pq.write_table(pa.table({"id": [2]}), directory / "b-without-tier.parquet")
+    catalog.create_external_table(
+        principal,
+        TableRef(environment="dev", namespace=NamespacePath.from_parts(["raw"]), name="events"),
+        location_pattern="raw/events/*.parquet",
+        format="parquet",
+    )
+    RowFilterService(session, AllowAllAuthorization(), catalog).create(
+        principal,
+        principal="admin",
+        environment="dev",
+        namespace="raw",
+        table="events",
+        expression="tier = 'gold'",
+    )
+    seen: list[list[str]] = []
+    real = FsspecStorage.list
+
+    def listing(self: FsspecStorage, prefix: str) -> list[str]:
+        files = list(real(self, prefix))
+        seen.append(files)
+        return list(reversed(files)) if order == "reversed" else files
+
+    monkeypatch.setattr(FsspecStorage, "list", listing)
+
+    run = _query(session, principal, "SELECT * FROM raw.events")
+
+    assert run.status == QueryRunStatus.FAILED
+    assert run.error_message is not None
+    assert run.error_message.startswith("The data files of `raw.events` do not all have the column")
+    assert "`tier`" in run.error_message
+    assert run.result_location is None
+    first = [name for name in seen[0] if name.endswith(".parquet")]
+    assert len(first) == 2

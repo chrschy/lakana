@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, ForeignKey, String, Text, Uuid
+from sqlalchemy import CheckConstraint, ForeignKey, Integer, String, Text, Uuid
 from sqlalchemy.orm import Mapped, mapped_column
 
 from lakana_core.models.base import Base, UTCDateTime
@@ -46,6 +46,11 @@ class RowFilter(Base):
         The authoritative binding; the name columns are display-only.
     expression : str
         The SQL expression for filtering rows.
+    schema_id : int or None
+        The id of the table's current schema when this row filter was created, or `None` for a
+        row filter created before it was recorded or on a table without field ids. A rename since
+        then may have made the filter cover another column
+        (`lakana_core.policy.renames.renamed_policy_column`).
     created_by : uuid.UUID
         ID of the principal who created this filter.
     created_at : datetime
@@ -81,6 +86,7 @@ class RowFilter(Base):
         ForeignKey("tables.id", ondelete="SET NULL"), nullable=True, index=True
     )
     expression: Mapped[str] = mapped_column(Text)
+    schema_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("principals.id"))
     created_at: Mapped[datetime] = mapped_column(UTCDateTime)
     revoked_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("principals.id"), nullable=True)

@@ -73,6 +73,7 @@ from lakana_core.models import (
     WriteMode,
 )
 from lakana_core.policy.column_masks import ColumnMaskService
+from lakana_core.policy.renames import policy_column_renamed_message
 from lakana_core.policy.row_filters import RowFilterService
 from lakana_core.projects.checks import CheckSpec
 from lakana_core.query_rewrite import TableSource, rewrite_query
@@ -742,7 +743,9 @@ def _stored_filter(session: Session, admin: PrincipalRef, name: str, expression:
 
     Creating a filter now refuses a qualified column and a column the table lacks, so the
     row is written directly: filters stored before that check still exist and must keep
-    failing closed.
+    failing closed. It records the table's current schema, as a created filter does, so that
+    what these tests look at is the read of the checked snapshot and not the refusal after a
+    rename.
 
     Parameters
     ----------
@@ -769,6 +772,7 @@ def _stored_filter(session: Session, admin: PrincipalRef, name: str, expression:
             environment_id=environment_id,
             table_id=table_id,
             expression=expression,
+            schema_id=_catalog(session).load_table(admin, _ORDERS).metadata.current_schema_id,
             created_by=admin.id,
             created_at=datetime.now(UTC),
         )
@@ -1260,6 +1264,27 @@ def test_a_filter_on_a_column_dropped_and_added_again_refuses_the_read(
         QueryRunStatus.SUCCEEDED,
         [{"id": -8, "email": "o-8@example.org", "region": "eu"}],
     )
+
+
+def test_a_filter_written_before_the_column_was_dropped_and_added_again_refuses_the_read(
+    session: Session, admin: PrincipalRef, tmp_path: Path
+) -> None:
+    """A filter that names no schema is judged from the oldest one, also for a checked read.
+
+    The refusal after a rename comes before the one about the checked snapshot: the policy may
+    cover another column in every read of the table.
+    """
+    result = _dropped_and_added_again(session, admin)
+    ana = _reader(session, admin, "ana", "orders")
+    _filter(session, admin, "ana", "region = 'eu'")
+    for stored in session.execute(select(RowFilter)).scalars():
+        stored.schema_id = None
+    session.commit()
+
+    message, cause = _failure(session, tmp_path, ana, result)
+
+    assert message == policy_column_renamed_message("region", "gold.orders")
+    assert cause == QueryErrorCause.INVALID_QUERY.value
 
 
 def test_a_mask_whose_expression_reads_a_column_that_is_another_now_refuses_the_read(

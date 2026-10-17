@@ -499,6 +499,9 @@ class TableDescription:
     state_message
         Why it is not published (the text a read of it is refused with), or why it is kept;
         `None` when it is published.
+    schema_id
+        The id of the current schema of a managed table; `None` for a view, an external table
+        and an artifact, which have no field ids.
     """
 
     ref: TableRef
@@ -512,6 +515,7 @@ class TableDescription:
     snapshot_id: int | None = None
     state: Literal["published", "not_published", "kept"] = "published"
     state_message: str | None = None
+    schema_id: int | None = None
 
 
 _NO_UNPUBLISHING = (
@@ -2567,6 +2571,7 @@ class CatalogService:
             snapshot_id=loaded.metadata.current_snapshot_id,
             state=state,
             state_message=message,
+            schema_id=loaded.metadata.current_schema_id,
         )
 
     def can_read_table(self, p: PrincipalRef, ref: TableRef) -> bool:

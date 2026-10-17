@@ -303,8 +303,8 @@ _UNREADABLE_MANIFEST = (
     "applied. Write the manifests and the manifest list before the commit."
 )
 _TOO_MANY_FILES = (
-    "The commit adds {count} data files to `{table}`; Lakana checks at most {limit:,} per "
-    "commit. Split the load into smaller commits."
+    "The commit adds more than {limit:,} data files to `{table}`; Lakana checks at most "
+    "{limit:,} per commit. Split the load into smaller commits."
 )
 _TIMED_OUT = (
     "Checking the data files the commit adds to `{table}` for Iceberg field ids took longer "
@@ -514,9 +514,7 @@ def _added_data_files(
                         added.append(entry.data_file)
                 if len(added) > MAX_CHECKED_FILES:
                     raise ValidationError(
-                        _TOO_MANY_FILES.format(
-                            count=len(added), table=table, limit=MAX_CHECKED_FILES
-                        )
+                        _TOO_MANY_FILES.format(table=table, limit=MAX_CHECKED_FILES)
                     )
         except ValidationError:
             raise

@@ -158,10 +158,29 @@ renamed and nothing takes its name, every query of the masked person that reads 
 `Column mask references unknown column 'ssn'; known columns: ['id', 'name']`. Revoke the mask and
 create it again for the new column name.
 
-A rename can also change what a mask covers: a column renamed *onto* the masked name is masked in
-the old column's place, and the renamed column is no longer masked, so its values show in clear
-under its new name. After any rename of a masked column, or onto one, an administrator must review
-the table's masks.
+### After a rename
+
+A rename can also change what a mask covers: a column renamed *onto* the masked name would be
+masked in the old column's place, and the renamed column would show its values in clear under its
+new name. Lakana does not let that happen. Each mask records which version of the table's schema
+it was created against. When a column was renamed since, or dropped and added again under a name
+the mask uses (the masked column, or a column its expression reads), a read of the table by the
+masked person is refused, and nothing is shown:
+
+<!-- output -->
+```text
+`gold.customers` has a row filter or column mask on column `ssn`, and a column was renamed since the policy was created, so the policy may now cover a different column. Nothing is shown. An administrator must review the table's row filters and column masks, revoke each one that names a renamed column, and create it again for the column it is meant for.
+```
+
+To make the table readable again, an administrator lists the masks and row filters of the table
+(the `list` subcommand of `lakana column-mask` and of `lakana row-filter`), revokes each one that names a renamed
+column, and creates it again for the column it is meant for. A mask created after the rename
+records the new version of the schema, so it is not refused. A mask that an earlier release
+created has no recorded version: it is judged from the oldest schema of the table, so a rename
+from any time before also refuses the read until the mask is created again.
+
+The safe order for a rename is to create the mask for the new name first, then rename the column,
+then revoke the old mask. The read is refused between the rename and the revoke.
 
 ## What a mask does not protect
 

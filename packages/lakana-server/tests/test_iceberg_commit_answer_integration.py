@@ -361,3 +361,7 @@ def test_a_commit_that_names_a_data_file_missing_from_s3_is_refused_with_422(
 
     assert missing in str(caught.value)
     assert "right now" not in str(caught.value)
+    # pyiceberg raises the HTTP error as the cause of its own exception.
+    response = getattr(caught.value.__cause__, "response", None)
+    assert response is not None
+    assert response.status_code == 422

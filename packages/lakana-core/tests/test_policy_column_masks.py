@@ -672,6 +672,15 @@ def test_create_accepts_a_column_the_table_has(session: Session) -> None:
     assert [(p, ref.name) for p, ref in catalog.calls] == [(admin, "customers")]
 
 
+@pytest.mark.parametrize(("current", "recorded"), [(7, 7), (None, None)])
+def test_create_records_the_schema_the_mask_was_written_against(
+    session: Session, current: int | None, recorded: int | None
+) -> None:
+    """The current schema id of the table is stored with the mask; none when the table has none."""
+    service, admin = _ready(session, FakeColumnCatalog(schema_id=current))
+    assert service.create(admin, **_mask_args("ssn")).schema_id == recorded
+
+
 def test_create_refuses_a_column_the_table_lacks(session: Session) -> None:
     """A typo names the column, the table and the columns that exist, and stores nothing."""
     catalog = FakeColumnCatalog(names=["id", "ssn"])

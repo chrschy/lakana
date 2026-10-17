@@ -132,10 +132,23 @@ map column is read by name: after one was renamed, or dropped and added again, r
 table are refused with ``'TABLE' cannot be read: the field ...`` until its rows are written
 again. A table with a column of a type Lakana cannot read yet (nanosecond timestamps, `unknown`, the
 geospatial types of format version 3) is refused as a whole: ``'TABLE' has the column 'x' of type
-..., which Lakana cannot read yet.`` Store the column as another type. A filter or mask is bound to
-a column name: after a rename of a filtered or masked column, or onto one, review the table's
-policies. A filter on a float column widened to double still needs a range
+..., which Lakana cannot read yet.`` Store the column as another type. A filter on a float column
+widened to double still needs a range
 ([Show some people only some rows](../how-to/filter-rows.md#columns-of-a-table-made-outside-lakana)).
+
+Row filters and column masks are bound to a column name, while a table is read by field id, so a
+rename could leave a policy on another column. From this release a read is refused, and nothing is
+shown, when a column was renamed (or dropped and added again under its name) since the policy was
+created, and the old or the new name is one the policy uses:
+`` `TABLE` has a row filter or column mask on column `COLUMN`, and a column was renamed since the policy was created ...``
+Each policy now records the table schema it was created against. A policy of an earlier release
+records none and is judged from the oldest schema of the table, so after the upgrade a table whose
+policy column was renamed at any time is refused until an administrator revokes the policy and
+creates it again for the column it is meant for. Create the policy for the new name before you
+rename a column, then revoke the old one
+([Mask a column](../how-to/mask-a-column.md#after-a-rename),
+[Show some people only some rows](../how-to/filter-rows.md#after-a-rename)). Migration `0033` adds
+a column `schema_id` to the tables of row filters and column masks.
 
 From this release on, a commit through the Iceberg REST catalog that adds a data file without
 field ids, for example one registered with pyiceberg's `add_files`, is refused and nothing is
@@ -145,7 +158,8 @@ Lakana's own writes always do. A commit may add at most 2,000 data files, and th
 seconds; split a larger load into several commits. Files that other Iceberg clients committed
 before this release are not checked. If such a file lacks field ids, every column of it reads
 as NULL, with no error. Ask the owner of the table to write its rows again, with Lakana
-(`replace`) or with a client that writes field ids. Field ids that match no column of the table read as NULL as well.
+(`replace`) or with a client that writes field ids. Field ids that match no column of the table
+read as NULL as well.
 
 
 ## Notes for 0.12.0

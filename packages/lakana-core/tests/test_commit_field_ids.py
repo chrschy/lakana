@@ -548,8 +548,8 @@ def test_a_commit_of_too_many_files_is_refused_before_any_footer_is_read(
         _commit_files(catalog, principal, ref, created, uris, 900_000_080)
 
     assert str(caught.value) == (
-        "The commit adds 4 data files to `gold.sales`; Lakana checks at most 3 per commit. "
-        "Split the load into smaller commits."
+        "The commit adds more than 3 data files to `gold.sales`; Lakana checks at most 3 per "
+        "commit. Split the load into smaller commits."
     )
 
 

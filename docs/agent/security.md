@@ -2103,9 +2103,15 @@ for a file under the table's location (a file elsewhere is never opened, and a r
 table for it). The trailer is read first and a footer above 16 MiB is refused. The check is
 bounded: at most 2,000 added files per commit, and 60 seconds for all reads together
 (`MAX_CHECKED_FILES`, `CHECK_DEADLINE_SECONDS`, `MAX_FOOTER_BYTES`); a commit over either bound
-is refused whole (the deadline also covers the manifest reads, and a commit past the cap stops being read at that manifest). Reads already running when the deadline passes are abandoned and end at the storage client's own timeout. A snapshot's parent is looked up only among the table's snapshots before the commit and the earlier snapshots of the same commit; a parent that is the snapshot itself, comes later or is unknown counts as none, so the snapshot is checked in full. A file whose footer does not parse is refused as unreadable (422), never as storage failure. A non-Parquet entry is reported first; otherwise the first offending file in
-manifest order is named with the table. A reader's error text never reaches the caller (the log
-has the exception's class and the table). A storage failure answers `StorageUnavailableError`
+is refused whole (the deadline also covers the manifest reads, and a commit past the cap stops being
+read at that manifest). Reads already running when the deadline passes are abandoned and end at the
+storage client's own timeout. A snapshot's parent is looked up only among the table's snapshots
+before the commit and the earlier snapshots of the same commit; a parent that is the snapshot
+itself, comes later or is unknown counts as none, so the snapshot is checked in full. A file whose
+footer does not parse is refused as unreadable (422), never as storage failure. A non-Parquet entry
+is reported first; otherwise the first offending file in manifest order is named with the
+table. A reader's error text never reaches the caller (the log has the exception's class and
+the table). A storage failure answers `StorageUnavailableError`
 (503, retry), not a client fault. `append` and `write_batches` pass `own_data_files=True`:
 pyiceberg wrote those files with field ids. Limits by design: a client can mark an entry
 `EXISTING` in a new manifest and skip the check (the file then reads as NULL, which a policy
@@ -2222,6 +2228,22 @@ work.
   guessing which of two independently-authored expressions should win. Policies apply to
   every role including `admin` — there is no bypass *of the rewriter itself* — and layer on
   top of `READ_TABLE` authorization, never replacing it.
+- **A policy binds to column names, so a rename of a column fails the read closed.** The table
+  is read by field id, and a rename through the Iceberg REST catalog can move a name onto
+  another column (`ssn` to `ssn_old`, `email` to `ssn`): a mask on `ssn` would cover the email
+  column and `ssn_old` would show the real values. Each row filter and column mask records the
+  id of the table's current schema when it is created (`schema_id`, null for a raw table and for
+  a policy of a release before the column existed). For a read of an Iceberg table, `_resolve_sources`
+  collects, from the reader's applied policies, every column a mask covers or its expression
+  reads and every column a filter reads, and calls `policy.renames.renamed_policy_column` with the
+  table's metadata: from each policy's own schema (the table's oldest one when it has none) to the
+  current one, a field id that changed its name with the old or the new name among them, or a name
+  that now belongs to another field id, refuses the read before the query runs
+  (`PolicyColumnRenamedError`, cause `invalid_query`, text `POLICY_COLUMN_RENAMED`, which names the
+  first such column and no data). It applies to a read at a checked snapshot too, before the
+  comparison above. A refused read shows nothing and never runs without the policy. Creating the
+  policy again records the new schema id and the read works. Binding policies to field ids is not
+  done yet. Pins: `test_pipeline_schema_evolution.py` (the `rename` tests), `test_policy_renames.py`.
 - **Grants, row filters, and column masks bind to ids, never names.** A rename or a
   drop-and-recreate under the same name cannot evade either. An `EXTERNAL` table goes
   through this same rewriter and its own row filters/column masks apply to it, confined to

@@ -21,15 +21,15 @@ from lakana_core.models import AuditEventType, ColumnMask, Group, Principal
 from lakana_core.policy.columns import (
     ColumnSource,
     list_columns,
-    read_column_names,
+    read_table_description,
     validate_for_table,
 )
 
 
 def _check_column_exists(
     catalog: ColumnSource, p: PrincipalRef, ref: TableRef, environment: str, column: str
-) -> None:
-    """Refuse a mask on a column the table does not have.
+) -> int | None:
+    """Refuse a mask on a column the table does not have; give the schema it is written against.
 
     The comparison is exact, as it is when the mask is applied to a query, so
     a mask accepted here is a mask the query path can honour.
@@ -47,6 +47,12 @@ def _check_column_exists(
     column
         The column the mask is for.
 
+    Returns
+    -------
+    int or None
+        The id of the table's current schema as read for this check, so that the mask records
+        the schema whose columns were checked; `None` for a table without field ids.
+
     Raises
     ------
     ValidationError
@@ -57,9 +63,10 @@ def _check_column_exists(
         If the table's columns could not be read.
     """
     dotted = f"{ref.namespace}.{ref.name}"
-    names = read_column_names(catalog, p, ref, policy="mask")
+    description = read_table_description(catalog, p, ref, policy="mask")
+    names = [spec.name for spec in description.columns]
     if column in names:
-        return
+        return description.schema_id
     message = f"Table {dotted!r} in environment {environment!r} has no column {column!r}. "
     message += list_columns(names)
     if names:
@@ -244,7 +251,7 @@ class ColumnMaskService:
         ref = TableRef(
             environment=environment, namespace=NamespacePath.parse(namespace), name=table
         )
-        _check_column_exists(self._catalog, p, ref, environment, column)
+        schema_id = _check_column_exists(self._catalog, p, ref, environment, column)
         row = ColumnMask(
             id=uuid.uuid4(),
             principal_id=principal_id,
@@ -256,6 +263,7 @@ class ColumnMaskService:
             table_id=table_id,
             column=column,
             expression=expression,
+            schema_id=schema_id,
             created_by=p.id,
             created_at=datetime.now(UTC),
         )

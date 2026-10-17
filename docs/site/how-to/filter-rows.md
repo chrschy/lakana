@@ -156,7 +156,29 @@ A filter is bound to a column **name**, not to the column itself. When the colum
 renamed and nothing takes its name, a query of the filtered person that reads the table fails
 instead of showing rows. Revoke the filter and create it again for the new column name.
 
-A rename can also change what a filter covers: a column renamed *onto* the filtered name is
-filtered in the old column's place, and the renamed column is no longer filtered. After any
-rename of a filtered column, or onto one, an administrator must review the table's filters. A filter stored by an
-earlier release keeps working as it did, even if it would be refused today.
+### After a rename
+
+A rename can also change what a filter covers: a column renamed *onto* the filtered name would
+be tested in the old column's place. The filter would test the other column's values and could pass
+rows it was meant to hide, and the renamed column would no longer be filtered. Lakana does not let
+that happen. Each filter records which version of the table's schema it was created against. When a
+column was renamed since, or dropped and added again under a name the filter reads, a read of the
+table by the filtered person is refused, and nothing is shown:
+
+<!-- output -->
+```text
+`gold.customers` has a row filter or column mask on column `region`, and a column was renamed since the policy was created, so the policy may now cover a different column. Nothing is shown. An administrator must review the table's row filters and column masks, revoke each one that names a renamed column, and create it again for the column it is meant for.
+```
+
+To make the table readable again, an administrator lists the row filters and column masks of the
+table (the `list` subcommand of `lakana row-filter` and of `lakana column-mask`), revokes each
+one that names a renamed column, and creates it again for the column it is meant for. A filter created after the rename
+records the new version of the schema, so it is not refused. A filter that an earlier release
+created has no recorded version: it is judged from the oldest schema of the table, so a rename from
+any time before also refuses the read until the filter is created again.
+
+The safe order for a rename is to create the filter for the new name first, then rename the column,
+then revoke the old filter. The read is refused between the rename and the revoke.
+
+A filter stored by an earlier release keeps working as it did, even if it would be refused when
+it is created today.
