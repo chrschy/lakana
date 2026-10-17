@@ -359,7 +359,7 @@ def plan_reset(root: Path) -> ResetPlan:
         raise CliError(
             f"{mount} is a mount point inside the instance's data in {root}; "
             "refusing to delete across it. Nothing was deleted",
-            hint=f"unmount {mount} or remove it yourself, then run the reset again",
+            hint=f"unmount it (`umount {mount}`), then run the reset again",
         )
     return ResetPlan(root, tuple(targets), _count_tables(root / "lakana.db"))
 
