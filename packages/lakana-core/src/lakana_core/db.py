@@ -26,7 +26,7 @@ from typing import Any, cast
 import sqlalchemy
 from sqlalchemy import event, func, select
 from sqlalchemy.engine import CursorResult, Engine
-from sqlalchemy.engine.interfaces import DBAPIConnection
+from sqlalchemy.engine.interfaces import DBAPIConnection, ExceptionContext
 from sqlalchemy.orm import Session
 
 from lakana_core.config import DatabaseConfig
@@ -172,6 +172,36 @@ def _keepalive_listener(lease_seconds: int) -> Callable[[DBAPIConnection, object
     return _set_keepalives
 
 
+def _ping_that_survives_a_reset(engine: Engine) -> None:
+    """Make the pre-ping and statement errors treat a raw `OSError` as a dead connection.
+
+    pg8000 reads the first bytes of every answer outside its error handling, so a
+    connection the server ended surfaces as a bare `ConnectionResetError` instead of a
+    driver error. SQLAlchemy only classifies driver errors, so the pre-ping let it through
+    to the request, and a failing statement left the dead connection in the pool.
+
+    Parameters
+    ----------
+    engine
+        The engine to harden; its dialect's ping and error handling are changed.
+    """
+    dialect = engine.dialect
+    ping = dialect.do_ping
+
+    def _ping(dbapi_connection: DBAPIConnection) -> bool:
+        try:
+            return ping(dbapi_connection)
+        except OSError:
+            return False  # a false ping makes the pool discard the connection and open a new one
+
+    dialect.do_ping = _ping  # ty: ignore[invalid-assignment]
+
+    @event.listens_for(engine, "handle_error")
+    def _classify(context: ExceptionContext) -> None:
+        if isinstance(context.original_exception, OSError):
+            context.is_disconnect = True
+
+
 def create_engine(config: DatabaseConfig, *, lease_seconds: int = DEFAULT_LEASE_SECONDS) -> Engine:
     """Create an engine with Lakana's connection-level guarantees attached.
 
@@ -185,7 +215,9 @@ def create_engine(config: DatabaseConfig, *, lease_seconds: int = DEFAULT_LEASE_
     worker supervising a long Python task comes back to connections that have
     been idle for as long as the task ran; without the check, the first
     statement after the task (revoking the task's token, recording the
-    outcome) would fail on a dead connection.
+    outcome) would fail on a dead connection. A connection the server ended
+    answers with a raw `OSError` from the driver; that counts as dead too, so
+    the pool replaces it instead of failing the request that drew it.
 
     Parameters
     ----------
@@ -204,6 +236,7 @@ def create_engine(config: DatabaseConfig, *, lease_seconds: int = DEFAULT_LEASE_
     echo_logger = logging.getLogger("sqlalchemy.engine.Engine")
     before = list(echo_logger.handlers)
     engine = sqlalchemy.create_engine(config.url, echo=config.echo, pool_pre_ping=True)
+    _ping_that_survives_a_reset(engine)
     event.listen(engine, "connect", _configure_sqlite)
     if engine.dialect.name == "postgresql":
         event.listen(engine, "connect", _keepalive_listener(lease_seconds))

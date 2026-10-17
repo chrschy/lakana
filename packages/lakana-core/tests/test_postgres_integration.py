@@ -277,3 +277,26 @@ def test_a_cancel_behind_a_locked_run_row_is_a_conflict_within_the_timeout(
     assert isinstance(error, ConflictError)
     assert f"lakana query status {run_id} --env dev" in str(error)
     assert after == "1", "the session refused a statement after the conflict"
+
+
+def test_a_pooled_connection_the_server_ended_is_replaced_without_an_error() -> None:
+    """An ended backend leaves a dead pooled connection; the next checkout must not fail.
+
+    A terminated backend closes the socket cleanly, so pg8000 reports a driver error here;
+    the raw `ConnectionResetError` of a cut connection is covered by the unit tests.
+    """
+    with PostgresContainer("postgres:16-alpine", driver="pg8000") as pg:
+        engine = create_engine(DatabaseConfig(url=pg.get_connection_url()))
+        try:
+            victim = engine.connect()
+            pid = victim.execute(text("SELECT pg_backend_pid()")).scalar_one()
+            victim.rollback()
+            with engine.connect() as admin:  # a second backend, while the first is checked out
+                admin.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": pid})
+                admin.commit()
+            victim.close()  # back into the pool, dead
+            with engine.connect() as connection:
+                assert connection.execute(text("SELECT 1")).scalar_one() == 1
+                assert connection.execute(text("SELECT pg_backend_pid()")).scalar_one() != pid
+        finally:
+            engine.dispose()

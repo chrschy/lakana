@@ -129,9 +129,11 @@ class PostgresAdvisoryLock:
         -----
         After the server cut a connection (it noticed the client was gone, or PostgreSQL
         restarted), the next write succeeds and the server answers with a reset. pg8000 then
-        raises a raw `OSError` (`ConnectionResetError`) that SQLAlchemy does not wrap and
-        `pool_pre_ping` does not catch. That is expected from this driver, so the three database
-        calls here treat an `OSError` like a `DBAPIError`: one log line, no traceback.
+        raises a raw `OSError` (`ConnectionResetError`) that SQLAlchemy does not wrap. The
+        engine from `create_engine` now makes the pool replace such a connection at checkout
+        and invalidate it on error, but a statement that meets the reset still raises the raw
+        error, so the three database calls here keep treating an `OSError` like a `DBAPIError`:
+        one log line, no traceback.
         """
         held_connection = self._connection
         if held_connection is not None:
