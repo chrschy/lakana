@@ -2,7 +2,7 @@
 # The M4 exit criterion: clean machine → install → start local →
 # create a table → append → query → deploy and run a Python asset that stores an artifact and
 # one that reads it, in under 300 s. Runs inside a fresh
-# python:3.13-slim container. Args are passed to `pip install`. If
+# python:3.14-slim container. Args are passed to `pip install`. If
 # LAKANA_EXPECTED_VERSION is set, the installed `lakana`'s own version is
 # checked against it after install -- proving
 # the package actually installed is the one the caller pinned, not some

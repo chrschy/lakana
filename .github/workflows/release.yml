@@ -197,7 +197,7 @@ jobs:
           until docker run --rm -e GITHUB_STEP_SUMMARY=/summary/out.md \
               -e LAKANA_EXPECTED_VERSION="${{ steps.version.outputs.version }}" \
               -v "$PWD/scripts:/scripts:ro" -v "$RUNNER_TEMP:/summary" \
-              python:3.13-slim bash /scripts/five_minute_test.sh \
+              python:3.14-slim bash /scripts/five_minute_test.sh \
               "lakana[server]==${{ steps.version.outputs.version }}"; do
             if [ "$attempt" -ge "$max_attempts" ]; then
               echo "Five-minute test failed after $attempt attempts" >&2

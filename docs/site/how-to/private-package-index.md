@@ -74,9 +74,9 @@ whole rule, with the table of fields, is in the reference:
 ## 2. Name the index in the project
 
 In `pyproject.toml`, declare the index with the registered URL (`lakana index list` shows it),
-mark it `explicit`, and say which packages come from it. Next to the `lakana` index of
-[Projects and deploys](projects.md) ("Python assets", step 4), which takes `lakana` from the
-folder `wheelhouse`, the whole file reads:
+mark it `explicit`, and say which packages come from it. With the
+dependency on `lakana` of [Projects and deploys](projects.md) ("Python assets", step 4), which
+comes from the public index, the whole file reads:
 
 ```toml
 [project]
@@ -86,22 +86,15 @@ requires-python = ">=3.11"
 dependencies = ["lakana[assets]==<version>", "team-utils==1.4.0"]
 
 [[tool.uv.index]]
-name = "lakana"
-url = "wheelhouse"
-format = "flat"
-explicit = true
-
-[[tool.uv.index]]
 name = "team"
 url = "https://pkgs.example.org/simple"
 explicit = true
 
 [tool.uv.sources]
-lakana = { index = "lakana" }
 team-utils = { index = "team" }
 ```
 
-`<version>` is the version of the `lakana` wheel in `wheelhouse`, as in that step. The `team`
+`<version>` is the version of your instance, as in that step. The `team`
 index and the `team-utils` lines are the new ones. Every other package comes from the public
 package index, as it does for any project.
 

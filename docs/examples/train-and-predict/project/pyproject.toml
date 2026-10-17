@@ -4,14 +4,5 @@ version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = ["lakana[assets]==<version>", "scikit-learn>=1.5,<2"]
 
-[[tool.uv.index]]
-name = "lakana"
-url = "wheelhouse"
-format = "flat"
-explicit = true
-
-[tool.uv.sources]
-lakana = { index = "lakana" }
-
 [dependency-groups]
 dev = ["pytest>=8"]

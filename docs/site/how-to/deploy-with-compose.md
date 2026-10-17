@@ -1102,7 +1102,8 @@ artifact versions list` and the worker's log lines of the sweep.
 The credential `init` saves into the `team` profile (`lakana_pat_<key id>_<secret>`,
 `LAKANA_BOOTSTRAP_PAT_KEY_ID`/`LAKANA_BOOTSTRAP_PAT_SECRET` in `.env`) is a normal PAT for the
 bootstrap admin principal (named `admin` by default) — it stays valid until you revoke it.
-Create a named admin to replace it, then revoke the bootstrap one:
+Create a named admin to replace it, then revoke the bootstrap one. To add an ordinary user instead,
+see [Give a second person access](give-a-second-person-access.md):
 
 <!-- not tested: moved as is; sorted in the second pull request -->
 ```bash
