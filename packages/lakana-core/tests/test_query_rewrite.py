@@ -1427,6 +1427,19 @@ def test_a_projected_read_by_field_id_keeps_its_policy() -> None:
     ) in rewritten.sql
 
 
+def test_a_read_by_field_id_of_files_that_are_not_parquet_is_refused() -> None:
+    """Field ids belong to Parquet; any other format cannot be read by them."""
+    source = TableSource(
+        urls=["a.orc"],
+        file_format="orc",
+        columns={"id": "long", "name": "string"},
+        field_ids=_FIELDS,
+    )
+
+    with pytest.raises(ValidationError, match="A read by field id needs Parquet files"):
+        rewrite_query("SELECT * FROM gold.t", {"gold.t": source})
+
+
 def test_a_field_id_map_that_misses_a_declared_column_is_refused() -> None:
     """A column outside the map would not be read at all; that is a defect, refused."""
     source = TableSource(

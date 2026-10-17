@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from collections import Counter
 from pathlib import Path
@@ -625,6 +626,54 @@ def test_a_storage_failure_is_not_blamed_on_the_client(
 
     assert "Try the commit again" in str(caught.value)
     assert "secret" not in str(caught.value)
+
+
+def test_a_storage_failure_while_reading_a_manifest_is_not_blamed_on_the_client(
+    catalog: CatalogService,
+    principal: PrincipalRef,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ref, created = _created(catalog, principal, tmp_path)
+    uri = _parquet(created, "a.parquet", field_ids=True)
+
+    def fail(*_args: object, **_kwargs: object) -> list[object]:
+        raise OSError("AWS Error SLOW_DOWN for https://bucket.example/secret?X-Amz-Signature=abc")
+
+    monkeypatch.setattr(ManifestFile, "fetch_manifest_entry", fail)
+
+    with pytest.raises(StorageUnavailableError) as caught:
+        _commit_files(catalog, principal, ref, created, [uri], 900_000_111)
+
+    assert "Try the commit again" in str(caught.value)
+    assert "secret" not in str(caught.value)
+
+
+def test_a_footer_read_that_outlasts_the_deadline_refuses_the_commit(
+    catalog: CatalogService,
+    principal: PrincipalRef,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A read that never answers is abandoned when the deadline passes."""
+    ref, created = _created(catalog, principal, tmp_path)
+    uri = _parquet(created, "a.parquet", field_ids=True)
+    stuck = threading.Event()
+
+    def hang(*_args: object) -> str:
+        stuck.wait(timeout=30)
+        return "ok"
+
+    monkeypatch.setattr(field_ids_module, "_footer", hang)
+    monkeypatch.setattr(field_ids_module, "CHECK_DEADLINE_SECONDS", 1.0)
+
+    try:
+        with pytest.raises(ValidationError) as caught:
+            _commit_files(catalog, principal, ref, created, [uri], 900_000_112)
+    finally:
+        stuck.set()
+
+    assert "took longer than 1 seconds" in str(caught.value)
 
 
 def test_only_the_snapshots_of_the_commit_are_checked(
