@@ -474,7 +474,7 @@ class PackageIndexService:
         clash = self._clash(name, new_url, except_id=row.id)
         if clash is not None:
             raise AlreadyExistsError(clash)
-        use = SecretUse.package_index(row)
+        use = SecretUse.package_index(row, new_url)
         try:
             if new_url != row.url:
                 require_secret_management_for_url_change(self._session, self._authz, p, use)

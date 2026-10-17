@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import shlex
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TypeVar
 
 from sqlalchemy import select
@@ -92,11 +92,16 @@ class SecretUse:
         The package index's or repository's id; `None` for the environment.
     target_name
         Its name, for messages and the command; `None` for the environment.
+    target_url
+        The URL the secret goes to, as the request leaves the entry (the new URL of an update,
+        the URL of an entry being created); recorded when the secret is bound. It plays no part
+        in equality.
     """
 
     kind: SecretUseKind
     target_id: uuid.UUID | None = None
     target_name: str | None = None
+    target_url: str | None = field(default=None, compare=False)
 
     def __post_init__(self) -> None:
         """Refuse an index or repository use that names no target.
@@ -113,36 +118,40 @@ class SecretUse:
             raise ValueError(f"A {self.kind.value} use needs the target's id and name.")
 
     @classmethod
-    def package_index(cls, row: PackageIndex) -> SecretUse:
+    def package_index(cls, row: PackageIndex, url: str | None = None) -> SecretUse:
         """Name the use "credential of this package index".
 
         Parameters
         ----------
         row
             The index.
+        url
+            The URL the index will have when the request ends; the row's own when omitted.
 
         Returns
         -------
         SecretUse
             The use.
         """
-        return cls(SecretUseKind.PACKAGE_INDEX, row.id, row.name)
+        return cls(SecretUseKind.PACKAGE_INDEX, row.id, row.name, url or row.url)
 
     @classmethod
-    def repository(cls, row: Repository) -> SecretUse:
+    def repository(cls, row: Repository, url: str | None = None) -> SecretUse:
         """Name the use "credential of this repository".
 
         Parameters
         ----------
         row
             The repository.
+        url
+            The URL it will have when the request ends; the row's own when omitted.
 
         Returns
         -------
         SecretUse
             The use.
         """
-        return cls(SecretUseKind.REPOSITORY, row.id, row.name)
+        return cls(SecretUseKind.REPOSITORY, row.id, row.name, url or row.url)
 
     @classmethod
     def environment(cls) -> SecretUse:
@@ -375,7 +384,6 @@ def record_binding(
     use
         The use to bind it to.
     """
-    target = target_row(session, use.kind, use.target_id)
     AuditService(session).record(
         p.id,
         AuditEventType.SECRET_BOUND,
@@ -384,7 +392,7 @@ def record_binding(
             "name": secret.name,
             "use": use.kind.value,
             "target": use.target_name,
-            "url": target.url if target is not None else None,
+            "url": use.target_url,
             "previous": secret.use_kind.value if secret.use_kind is not None else None,
         },
     )
@@ -432,7 +440,7 @@ def resolve_use(session: Session, kind: SecretUseKind, target: str | None) -> Se
         raise NotFoundError(
             f"No {noun} named '{plain(target)}'; `{listing}` shows the registered ones."
         )
-    return SecretUse(kind, row.id, row.name)
+    return SecretUse(kind, row.id, row.name, row.url)
 
 
 def record_refusal(

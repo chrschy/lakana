@@ -600,3 +600,29 @@ def test_secret_create_refuses_two_uses(tmp_path: Path) -> None:
     assert result.exit_code == 2
     assert "Pass only one of --index, --repository or --own-env" in result.output
     assert api.requests == []
+
+
+def test_secret_bind_prints_a_long_url_whole(tmp_path: Path) -> None:
+    """The URL a secret goes to is never cut, however long."""
+    url = "https://corp.example.org/" + "a" * 300 + "/simple"
+    secret = {
+        "id": "s1",
+        "name": "pypi",
+        "environment": "dev",
+        "created_by": "a1",
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "format_version": 2,
+        "key_id": "env",
+        "use": "package_index",
+        "use_target": "corp",
+        "use_target_url": url,
+    }
+    api = FakeApi()
+    api.on("PUT", "/api/v1/environments/dev/secrets/pypi/use", json=secret)
+
+    result = invoke(
+        make_state(tmp_path, api), "secret", "bind", "pypi", "--env", "dev", "--index", "corp"
+    )
+
+    assert result.exit_code == 0, result.stderr
+    assert url in result.stdout

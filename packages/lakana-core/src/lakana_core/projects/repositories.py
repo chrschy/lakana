@@ -397,7 +397,6 @@ class RepositoryService:
         if "url" in changes and changes["url"] is None:
             raise ValidationError("url cannot be cleared.")
         repo = self._lock(repo)
-        use = SecretUse.repository(repo)
         previous_url, previous_secret = repo.url, repo.credential_secret
         try:
             for field, value in changes.items():
@@ -405,6 +404,8 @@ class RepositoryService:
             if repo.default_ref is not None:
                 repo.default_ref = validate_ref(repo.default_ref)
             _validate(repo, self._repo_roots)
+            # Built after the changes, so that it carries the URL the request leaves.
+            use = SecretUse.repository(repo)
             if repo.url != previous_url:
                 require_secret_management_for_url_change(self._session, self._authz, p, use)
             if repo.credential_secret is not None and repo.credential_secret != previous_secret:

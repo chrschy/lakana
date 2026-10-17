@@ -980,3 +980,92 @@ def test_a_webhook_secret_can_still_be_moved_on_purpose(
     )
 
     assert _uses(session, "hook") == {"prod": (SecretUseKind.PACKAGE_INDEX, entry.id)}
+
+
+def _bound_urls(session: Session) -> list[str | None]:
+    """List the URL each `SECRET_BOUND` event recorded, oldest first.
+
+    Parameters
+    ----------
+    session
+        Database session.
+
+    Returns
+    -------
+    list
+        One URL (or `None`) per event.
+    """
+    session.expire_all()
+    events = (
+        session.execute(
+            select(AuditEvent)
+            .where(AuditEvent.event_type == AuditEventType.SECRET_BOUND)
+            .order_by(AuditEvent.occurred_at)
+        )
+        .scalars()
+        .all()
+    )
+    return [event.detail["url"] for event in events]
+
+
+def test_naming_a_secret_on_add_records_the_url_of_the_new_index(
+    session: Session, world: dict[str, PrincipalRef]
+) -> None:
+    """The row is not stored yet when the bind runs; the audit still names its URL."""
+    _secret(session, "prod", "pypi")
+
+    _indexes(session).create(
+        world["admin"],
+        name="corp",
+        url="https://Corp.Example.org/simple/",
+        credential_secret="pypi",
+    )
+
+    assert _bound_urls(session) == ["https://corp.example.org/simple"]
+
+
+def test_naming_a_secret_while_moving_the_url_records_the_new_url(
+    session: Session, world: dict[str, PrincipalRef]
+) -> None:
+    """The secret goes to the URL the update leaves, not to the one the entry had."""
+    _secret(session, "prod", "pypi")
+    indexes = _indexes(session)
+    indexes.create(world["admin"], name="corp", url="https://old.example.org/simple")
+
+    indexes.update(
+        world["admin"],
+        "corp",
+        {"url": "https://new.example.org/simple", "credential_secret": "pypi"},
+    )
+
+    assert _bound_urls(session) == ["https://new.example.org/simple"]
+
+
+def test_naming_a_secret_on_a_repository_records_its_url(
+    session: Session, world: dict[str, PrincipalRef]
+) -> None:
+    """On add, and on an update that also moves the URL."""
+    _secret(session, "prod", "git")
+    _secret(session, "prod", "git2")
+    repositories = _repositories(session)
+    repositories.create(
+        world["admin"],
+        name="r",
+        kind=RepositoryKind.HTTPS,
+        url="https://git.example.org/r.git",
+        credential_secret="git",
+    )
+    repositories.create(
+        world["admin"], name="s", kind=RepositoryKind.HTTPS, url="https://git.example.org/s.git"
+    )
+
+    repositories.update(
+        world["admin"],
+        "s",
+        {"url": "https://git.example.org/moved.git", "credential_secret": "git2"},
+    )
+
+    assert _bound_urls(session) == [
+        "https://git.example.org/r.git",
+        "https://git.example.org/moved.git",
+    ]

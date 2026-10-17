@@ -25,6 +25,8 @@ _STDIN = Annotated[
 ]
 
 
+_WHOLE = 100_000
+"""No cut: a URL that is printed is the whole URL the secret goes to."""
 _INDEX = Annotated[str | None, typer.Option("--index", help="Bind it to this package index.")]
 _REPOSITORY = Annotated[
     str | None, typer.Option("--repository", help="Bind it to this repository.")
@@ -129,7 +131,7 @@ def _use_text(kind: str, target: str | None, url: str | None) -> str:
     noun = {"package_index": "package index", "repository": "repository"}.get(kind)
     if noun is None:
         return "its environment"
-    where = f" ({_output.inline(url)})" if url else ""
+    where = f" ({_output.inline(url, limit=_WHOLE)})" if url else ""
     return f"{noun} {_output.inline(target or '')}{where}"
 
 
