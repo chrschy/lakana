@@ -189,7 +189,7 @@ index:
 
 <!-- output -->
 ```text
-Using CPython 3.14.0 interpreter at: /home/you/lakana/.venv/bin/python3
+Using CPython 3.14.4 interpreter at: /home/you/lakana/.venv/bin/python3
 Resolved 34 packages in 327ms
 ```
 

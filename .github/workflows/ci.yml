@@ -291,7 +291,7 @@ jobs:
         with: {fetch-depth: 0}
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
       - run: uv build --all-packages -o dist
-      - name: Five-minute exit test (clean python:3.13-slim container)
+      - name: Five-minute exit test (clean python:3.14-slim container)
         # Pinned to this job's own build: an
         # unpinned "lakana[server]" lets pip prefer a final release on PyPI
         # over these dev pre-releases, so once any `lakana` is ever published
@@ -306,7 +306,7 @@ jobs:
           version=$(basename dist/lakana-[0-9]*.whl | cut -d- -f2)
           docker run --rm -e GITHUB_STEP_SUMMARY=/summary/out.md -e LAKANA_EXPECTED_VERSION="$version" \
             -v "$PWD/dist:/dist:ro" -v "$PWD/scripts:/scripts:ro" -v "$RUNNER_TEMP:/summary" \
-            python:3.13-slim bash /scripts/five_minute_test.sh --find-links /dist "lakana[server]==$version"
+            python:3.14-slim bash /scripts/five_minute_test.sh --find-links /dist "lakana[server]==$version"
           cat "$RUNNER_TEMP/out.md" >> "$GITHUB_STEP_SUMMARY"
 
   # Starts the real console scripts in containers: it runs for any change under packages/*/src/

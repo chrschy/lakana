@@ -57,12 +57,14 @@ in a unit test without root; `scripts/compose_smoke_test.sh` pins it end to end.
 
 CI's `test (3.11)` run uses `-n auto --maxprocesses 4 --dist loadfile` (pytest-xdist). **The
 3.14 run, which measures coverage, uses `--maxprocesses 2`**: it needs more memory per process
-(below). `addopts` carries no `-n`, so a plain `uv run pytest` stays serial. Locally on Python
-3.13 or 3.11, inside the capped scope (on 3.14: `-n 2`):
+(below). `addopts` carries no `-n`, so a plain `uv run pytest` stays serial. The default Python of
+a checkout is 3.14 (`.python-version`; the image runs 3.14 too), so a plain `uv run` is the
+3.14 run. Locally, inside the capped scope, use `-n 2` (on 3.11, `uv run --python 3.11`, `-n 4`
+fits):
 
 ```bash
 systemd-run --user --scope -q -p MemoryMax=6G -p MemorySwapMax=0 timeout 900 \
-  uv run pytest -n 4 --dist loadfile --cov --cov-report=json -q -p no:cacheprovider
+  uv run pytest -n 2 --dist loadfile --cov --cov-report=json -q -p no:cacheprovider
 ```
 
 - **Why `loadfile`:** every test of one file runs in one process, in file order. Test-level
@@ -79,7 +81,7 @@ systemd-run --user --scope -q -p MemoryMax=6G -p MemorySwapMax=0 timeout 900 \
 - **A worker's environment is not the serial one.** On Python 3.14 a `pytest -n` worker has
   `LINES=24` in `os.environ` and a serial run does not; rich then sizes a console differently.
   A test that depends on a console's size gives rich both width and height.
-- **Memory, Python 3.13 and 3.11:** only the controller runs the watchdog (see "Memory
+- **Memory, Python 3.11 (and 3.13, which is no longer the default):** only the controller runs the watchdog (see "Memory
   limit"); it counts the workers. At `-n 4` the peak is about 4.8 GB, so keep `MemoryMax=6G`
   and no more than four workers.
 - **Memory, Python 3.14: at most two workers, and `core = "ctrace"` stays.** On 3.14
@@ -90,7 +92,7 @@ systemd-run --user --scope -q -p MemoryMax=6G -p MemorySwapMax=0 timeout 900 \
   `[tool.coverage.run] core = "ctrace"` in `pyproject.toml` selects the C tracer that 3.11 to
   3.13 use anyway. With it, measured 2026-10-11 under a 6 GB cap, coverage 100 % each time:
   serial 797 s / 1.9 GB; `-n 2` 397 s / 4.2 GB; `-n 3` 274 s / 5.0 GB; `-n 4` killed at 96 %.
-  The 3.14 processes are still heavier than those of 3.13, so CI and the local gate use two.
+  The 3.14 processes are still heavier than those of 3.11 and 3.13, so CI and the local gate use two.
   If a parallel 3.14 run is killed again, check first that the setting is still there.
 - **The cap can end a run before the watchdog does.** The watchdog counts resident anonymous
   and shared pages; a cgroup cap also counts page cache and the files in `/tmp` (a RAM disk,

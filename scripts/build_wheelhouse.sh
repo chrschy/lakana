@@ -24,7 +24,7 @@ rm -f "$out/.gitignore"
 # wheels are executed by the tests, so they must be the ones the lock names.
 uv export --frozen --no-dev --package lakana --extra assets --no-emit-workspace \
   -o "$out/requirements.txt" >/dev/null
-# LAKANA_WHEELHOUSE_PYTHON (e.g. 3.13) picks the interpreter the wheels are for, when it is
+# LAKANA_WHEELHOUSE_PYTHON (e.g. 3.14) picks the interpreter the wheels are for, when it is
 # not the one `uv run` uses: the Compose smoke test needs the image's. If that interpreter is
 # not installed, uv downloads it (a network step). The image's Python can be newer than the
 # one in .python-version, which setup-uv installs in CI.
