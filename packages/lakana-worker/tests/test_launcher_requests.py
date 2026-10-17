@@ -409,6 +409,11 @@ HOSTILE: list[Any] = [
     pytest.param(
         _with(BUILD, operator_index="file:///etc/passwd"), "operator_index:", id="operator-file"
     ),
+    pytest.param(
+        _with(BUILD, operator_index="https://pkgs.example.org:99999/simple"),
+        "operator_index:",
+        id="operator-bad-port",
+    ),
     pytest.param(_with(BUILD, no_build="yes"), "no_build:", id="no-build-text"),
     pytest.param(_with(BUILD, max_bytes=0), "max_bytes:", id="max-bytes-zero"),
 ]
@@ -594,6 +599,31 @@ def test_volume_names_change_with_the_image_and_the_index_set() -> None:
     assert environment_volume(SETTINGS, "3.13", KEY) != environment_volume(newer, "3.13", KEY)
     assert environment_volume(SETTINGS, "3.13", KEY).startswith("lakana-env-")
     assert cache_volume(SETTINGS, build) != cache_volume(SETTINGS, other)
+
+
+def test_the_cache_volume_names_the_operator_index_without_its_credential() -> None:
+    """A password change does not start a new cache, and the password is not in the name."""
+    hosts = [*BUILD["hosts"], "mirror.example.org", "other.example.org"]
+    first = parse_request(
+        _raw(_with(BUILD, operator_index="https://u:one@mirror.example.org/simple", hosts=hosts)),
+        token=TOKEN,
+        settings=SETTINGS,
+    )
+    second = parse_request(
+        _raw(_with(BUILD, operator_index="https://u:two@mirror.example.org/simple", hosts=hosts)),
+        token=TOKEN,
+        settings=SETTINGS,
+    )
+    other = parse_request(
+        _raw(_with(BUILD, operator_index="https://u:one@other.example.org/simple", hosts=hosts)),
+        token=TOKEN,
+        settings=SETTINGS,
+    )
+    assert isinstance(first, BuildRequest) and isinstance(second, BuildRequest)
+    assert isinstance(other, BuildRequest)
+
+    assert cache_volume(SETTINGS, first) == cache_volume(SETTINGS, second)
+    assert cache_volume(SETTINGS, first) != cache_volume(SETTINGS, other)
 
 
 def test_the_operator_index_comes_first_and_keeps_its_own_credential() -> None:

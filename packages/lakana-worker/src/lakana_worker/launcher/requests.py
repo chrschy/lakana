@@ -941,6 +941,31 @@ def _volume(
     }
 
 
+def _ingestion_mount(settings: LauncherSettings, name: str) -> dict[str, Any]:
+    """Describe the read-only mount of one allowed ingestion root.
+
+    Parameters
+    ----------
+    settings
+        For the root's host path.
+    name
+        The root's name.
+
+    Returns
+    -------
+    dict
+        One entry of ``HostConfig.Mounts``. Non-recursive: a mount below the directory on the
+        host does not appear in the container.
+    """
+    return {
+        "Type": "bind",
+        "Source": settings.ingestion_roots[name],
+        "Target": f"/ingest/{name}",
+        "ReadOnly": True,
+        "BindOptions": {"Propagation": "rprivate", "NonRecursive": True},
+    }
+
+
 def _host_config(
     limits: Limits,
     network: str,
@@ -1026,16 +1051,7 @@ def run_container_spec(
             read_only=True,
         ),
         _volume(settings.work_volume, "/work", read_only=False, subpath=f"{request.attempt}/task"),
-        *(
-            {
-                "Type": "bind",
-                "Source": settings.ingestion_roots[name],
-                "Target": f"/ingest/{name}",
-                "ReadOnly": True,
-                "BindOptions": {"Propagation": "rprivate", "NonRecursive": True},
-            }
-            for name in request.roots
-        ),
+        *(_ingestion_mount(settings, name) for name in request.roots),
     ]
     return {
         "Image": settings.images[request.python],
@@ -1204,5 +1220,77 @@ def probe_container_spec(settings: LauncherSettings, image: str) -> dict[str, An
         "User": settings.task_user,
         "NetworkDisabled": True,
         "Labels": labels(settings, "probe", "no-new-privileges", "launcher"),
+        "HostConfig": host,
+    }
+
+
+INGEST_PROBE_SCRIPT = """\
+import os, stat, sys
+_LIMIT = 100000
+root, mountinfo = sys.argv[1], sys.argv[2]
+with open(mountinfo, encoding="utf-8", errors="replace") as handle:
+    for line in handle:
+        front, _, back = line.partition(" - ")
+        fields, rest = front.split(), back.split()
+        if len(fields) > 4 and rest and rest[0] in ("proc", "sysfs", "devtmpfs"):
+            if fields[4] == root or fields[4].startswith(root + "/"):
+                sys.exit(3)
+try:
+    if stat.S_ISSOCK(os.lstat(root).st_mode):
+        sys.exit(4)
+except OSError:
+    pass
+seen = 0
+for here, directories, files in os.walk(root, followlinks=False):
+    for entry in directories + files:
+        seen += 1
+        if seen > _LIMIT:
+            sys.exit(0)
+        try:
+            if stat.S_ISSOCK(os.lstat(os.path.join(here, entry)).st_mode):
+                sys.exit(4)
+        except OSError:
+            pass
+"""
+"""The script an ingestion-root probe runs: exit 3 for a proc, sysfs or devtmpfs mount at or below
+the root, 4 for a socket in a walk of at most 100000 entries, 0 otherwise."""
+
+
+def ingestion_probe_spec(
+    settings: LauncherSettings, image: str, name: str, *, no_new_privileges: bool
+) -> dict[str, Any]:
+    """Describe the container that looks at one ingestion root the way a task would see it.
+
+    Parameters
+    ----------
+    settings
+        For the user, the labels and the root's host path.
+    image
+        An allowed image.
+    name
+        The root's name.
+    no_new_privileges
+        Whether Docker allows the option here.
+
+    Returns
+    -------
+    dict
+        The body of ``POST /containers/create``: the root mounted read-only, no network, running
+        `INGEST_PROBE_SCRIPT`.
+    """
+    host = _host_config(
+        Limits(memory_mb=MIN_MEMORY_MB, cpus=0.5, pids=16, timeout_seconds=300),
+        "none",
+        [_ingestion_mount(settings, name)],
+        "rw,noexec,nosuid,nodev,size=1m",
+        no_new_privileges=no_new_privileges,
+    )
+    return {
+        "Image": image,
+        "Entrypoint": ["/usr/local/bin/python", "-I", "-c", INGEST_PROBE_SCRIPT],
+        "Cmd": [f"/ingest/{name}", "/proc/self/mountinfo"],
+        "User": settings.task_user,
+        "NetworkDisabled": True,
+        "Labels": labels(settings, "probe", f"ingest-{name}", "launcher"),
         "HostConfig": host,
     }
