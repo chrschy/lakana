@@ -23,7 +23,8 @@ def upgrade() -> None:
 
     Adds `row_filters.schema_id` and `column_masks.schema_id`, the id of the table's current
     schema when the policy was created. Every existing policy starts with none: a read judges
-    it from the table's oldest schema, so a rename that happened before this upgrade is found.
+    it against every schema the table has had, so a rename that happened before this upgrade
+    is found.
     """
     with op.batch_alter_table("row_filters") as batch_op:
         batch_op.add_column(sa.Column("schema_id", sa.Integer(), nullable=True))

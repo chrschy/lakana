@@ -38,7 +38,7 @@ class PolicyColumns:
         or every column a row filter reads, as the policy spells them.
     schema_id
         The id of the table's schema when the policy was created; `None` for a policy that
-        records none, which is judged from the table's oldest schema.
+        records none, which is judged against every schema the table has had.
     """
 
     columns: frozenset[str]
