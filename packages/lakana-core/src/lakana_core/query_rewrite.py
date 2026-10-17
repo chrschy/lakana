@@ -41,6 +41,7 @@ import re
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 import sqlglot
 import sqlglot.expressions as exp
@@ -322,6 +323,40 @@ _READERS = {"parquet": "read_parquet", "csv": "read_csv", "json": "read_json_aut
 """Maps a raw-zone table's stored file format to the DuckDB reader function."""
 
 
+class ReadField(NamedTuple):
+    """One column of an Iceberg read, as the field-id map hands it to DuckDB.
+
+    Parameters
+    ----------
+    field_id
+        The column's Iceberg field id.
+    name
+        The column's name in the schema the read uses.
+    duckdb_type
+        Its DuckDB type, as DuckDB's type parser reads it (`BIGINT`, `STRUCT("a" INTEGER)`).
+    """
+
+    field_id: int
+    name: str
+    duckdb_type: str
+
+
+def _schema_variable(index: int) -> str:
+    """Name the variable one read's field-id map is set under.
+
+    Parameters
+    ----------
+    index
+        The read's number, as for `_files_variable`.
+
+    Returns
+    -------
+    str
+        ``"v_<index>_schema"``.
+    """
+    return f"v_{index}_schema"
+
+
 def _files_variable(index: int) -> str:
     """Name the variable one read's file list is set under.
 
@@ -394,6 +429,12 @@ class TableSource:
         never with ``SELECT *``. Set for a read at an older snapshot of a table, whose files
         can hold a column that `columns` leaves out on purpose; `columns` must then not be
         empty.
+    field_ids
+        The columns of an Iceberg read, by field id, in the order the read returns them.
+        When given, the files are read through DuckDB's field-id map (`read_parquet(...,
+        schema = ...)`), so a renamed, re-added or widened column reads its own data and a
+        column a file lacks reads as NULL. Empty for a raw-zone table, whose files are read by
+        name. Must hold every key of `columns`; set as a variable, never rendered into SQL.
     """
 
     urls: Sequence[str]
@@ -402,6 +443,7 @@ class TableSource:
     row_filters: Sequence[str] = field(default_factory=tuple)
     column_masks: Mapping[str, str] = field(default_factory=dict)
     declared_columns_only: bool = False
+    field_ids: Sequence[ReadField] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -417,11 +459,12 @@ class RewrittenQuery:
     parameters
         Variable name to the value the query process sets it to before it runs the
         statement (`SET VARIABLE "<name>" = ?`, the value bound): one URL list, as a DuckDB
-        LIST, per CTE that reads files, numbered in the order the CTEs were generated.
+        LIST, per CTE that reads files, and, for an Iceberg read, its field-id map
+        (`v_<n>_schema`), numbered in the order the CTEs were generated.
     """
 
     sql: str
-    parameters: dict[str, list[str]]
+    parameters: dict[str, list[str] | tuple[ReadField, ...]]
 
 
 MAX_VIEW_DEPTH = 10
@@ -987,9 +1030,22 @@ def _reader_select_sql(source: TableSource, index: int, dialect: str) -> str:
         diagnostic. Column names are matched exactly, case included:
         Lakana's identifiers are always rendered quoted, so normalizing case
         here would be inconsistent with quoted-identifier semantics
-        everywhere else in this codebase.
+        everywhere else in this codebase. Or if `source.field_ids` is given for files that
+        are not Parquet, or lacks a key of `source.columns`: such a column would not be
+        read at all.
     """
-    reader = f"{_READERS[source.file_format]}(getvariable('{_files_variable(index)}'))"
+    arguments = f"getvariable('{_files_variable(index)}')"
+    if source.field_ids:
+        known = {read.name for read in source.field_ids}
+        missing = [name for name in source.columns if name not in known]
+        if missing:
+            raise ValidationError(
+                f"The read by field id has no field id for its column {missing[0]!r}."
+            )
+        if source.file_format != "parquet":
+            raise ValidationError("A read by field id needs Parquet files.")
+        arguments += f", schema = getvariable('{_schema_variable(index)}')"
+    reader = f"{_READERS[source.file_format]}({arguments})"
     if not source.row_filters and not source.column_masks and not source.declared_columns_only:
         # B608: the interpolated values are a literal reader name from the
         # closed `_READERS` dict and a generated variable name; the URLs are
@@ -1460,7 +1516,7 @@ def rewrite_query(
     bound = _cte_reference_ids(parsed)
     ctes: dict[str, exp.Expr] = {}
     owners: dict[str, str] = {}
-    parameters: dict[str, list[str]] = {}
+    parameters: dict[str, list[str] | tuple[ReadField, ...]] = {}
     reads = 0
     named: list[tuple[tuple[str, str, str], exp.Expr]] = []
     name_counts = _bare_name_counts(parsed)
@@ -1492,6 +1548,8 @@ def rewrite_query(
                         "not be read. Ask an administrator to correct or remove it."
                     ) from exc
                 parameters[_files_variable(index)] = list(source.urls)
+                if source.field_ids:
+                    parameters[_schema_variable(index)] = tuple(source.field_ids)
             else:
                 ctes[alias] = _empty_relation(dotted, source.columns)
         replacement = exp.to_table(alias)

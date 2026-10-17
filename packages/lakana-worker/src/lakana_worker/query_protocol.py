@@ -78,8 +78,34 @@ _NAME_CHARS = 60
 _ERROR_MARK = "lakana_query_error"
 _TEXT_FIELDS = ("sql", "memory_limit", "temp_directory", "max_temp_directory_size")
 
-ParameterValue = list[str] | int | Decimal | dt.date | dt.datetime
-"""What the platform sets as a variable: file URLs, or an incremental write's watermark."""
+FieldIdMap = tuple[tuple[int, str, str], ...]
+"""An Iceberg read's field-id map: field id, column name and DuckDB type of each column."""
+
+ParameterValue = list[str] | FieldIdMap | int | Decimal | dt.date | dt.datetime
+"""What the platform sets as a variable: a list of file URLs, a field-id map, or an incremental
+write's watermark."""
+
+
+def _is_field_entry(entry: object) -> bool:
+    """Tell whether one entry has the shape of a field-id map's entry.
+
+    Parameters
+    ----------
+    entry
+        A tuple (when encoding) or a list (when decoding).
+
+    Returns
+    -------
+    bool
+        Whether it is a field id (an `int`, never a `bool`), a name and a type.
+    """
+    return (
+        isinstance(entry, (tuple, list))
+        and len(entry) == 3
+        and type(entry[0]) is int
+        and isinstance(entry[1], str)
+        and isinstance(entry[2], str)
+    )
 
 
 @dataclass(frozen=True)
@@ -189,7 +215,8 @@ def _encode_value(name: str, value: object) -> dict[str, object]:
     Returns
     -------
     dict
-        A one-key object: the tag, and the value as text (or a list of texts).
+        A one-key object: the tag, and the value as text, a list of texts or a list of
+        field-id entries.
 
     Raises
     ------
@@ -199,6 +226,8 @@ def _encode_value(name: str, value: object) -> dict[str, object]:
     """
     if isinstance(value, list) and all(isinstance(item, str) for item in value):
         return {"strings": list(value)}
+    if isinstance(value, tuple) and all(_is_field_entry(entry) for entry in value):
+        return {"field_ids": [list(entry) for entry in value]}
     if isinstance(value, bool):
         raise TypeError(
             f"Query parameter {_name(name)} has a type the query process cannot take: bool."
@@ -229,7 +258,7 @@ def _decode_value(name: str, tagged: object) -> ParameterValue:
 
     Returns
     -------
-    list or int or Decimal or date or datetime
+    list or tuple or int or Decimal or date or datetime
         The value, in the type its tag names.
 
     Raises
@@ -242,6 +271,8 @@ def _decode_value(name: str, tagged: object) -> ParameterValue:
     ((tag, raw),) = tagged.items()
     if tag == "strings" and isinstance(raw, list) and all(isinstance(item, str) for item in raw):
         return list(raw)
+    if tag == "field_ids" and isinstance(raw, list) and all(_is_field_entry(e) for e in raw):
+        return tuple((entry[0], entry[1], entry[2]) for entry in raw)
     if not isinstance(raw, str):
         raise ValueError(f"query request: parameter {_name(name)} has an unreadable value")
     try:

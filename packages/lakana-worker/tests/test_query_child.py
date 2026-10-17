@@ -1535,3 +1535,18 @@ def test_other_errors_are_not_taken_for_a_lost_cause() -> None:
         threading.Event(),
     )
     assert error.message == "Query failed: Conversion Error: boom"
+
+
+def test_a_field_id_map_is_set_as_a_duckdb_map() -> None:
+    """The map has the shape `read_parquet(schema = ...)` takes on DuckDB 1.5."""
+    sql = (
+        "SELECT map_keys(getvariable('v_0_schema')) AS k, "
+        "getvariable('v_0_schema')[2].type AS t, "
+        "getvariable('v_0_schema')[2].default_value IS NULL AS d"
+    )
+    request = _request(sql, parameters={"v_0_schema": ((1, "id", "BIGINT"), (2, "n", "VARCHAR"))})
+
+    code, stream, _stderr = _main(request)
+
+    assert code == EXIT_OK
+    assert _table(stream).to_pylist() == [{"k": [1, 2], "t": "VARCHAR", "d": True}]

@@ -558,6 +558,20 @@ def set_variables(
         statement = f'SET VARIABLE "{name}" = '
         if isinstance(value, list):
             connection.execute(statement + "?::VARCHAR[]", [value])
+        elif isinstance(value, tuple):
+            # DuckDB 1.5's `read_parquet(schema = ...)` needs all three children; a NULL
+            # default makes a column a file lacks read as NULL, as Iceberg says.
+            connection.execute(
+                statement + "MAP(?::INTEGER[], "
+                "?::STRUCT(name VARCHAR, type VARCHAR, default_value VARCHAR)[])",
+                [
+                    [field_id for field_id, _name, _type in value],
+                    [
+                        {"name": name, "type": type_, "default_value": None}
+                        for _field_id, name, type_ in value
+                    ],
+                ],
+            )
         else:
             connection.execute(statement + "?", [value])
 

@@ -9,6 +9,7 @@ import sqlglot.expressions as exp
 from lakana_core import query_rewrite
 from lakana_core.errors import ValidationError
 from lakana_core.query_rewrite import (
+    ReadField,
     TableSource,
     ViewDefinition,
     _cte_alias,
@@ -1384,3 +1385,56 @@ def test_a_table_without_files_takes_no_variable_number() -> None:
 
     assert rewritten.parameters == {"v_0_files": ["a.parquet"], "v_1_files": ["c.csv"]}
     assert "READ_CSV(GETVARIABLE('v_1_files'))" in rewritten.sql
+
+
+_FIELDS = (ReadField(1, "id", "BIGINT"), ReadField(2, "name", "VARCHAR"))
+
+
+def test_an_iceberg_read_reads_its_files_by_field_id() -> None:
+    """The map is a second variable of the same read, never SQL text."""
+    source = TableSource(
+        urls=["a.parquet"],
+        file_format="parquet",
+        columns={"id": "long", "name": "string"},
+        field_ids=_FIELDS,
+    )
+
+    rewritten = rewrite_query("SELECT * FROM gold.t", {"gold.t": source})
+
+    assert (
+        "READ_PARQUET(GETVARIABLE('v_0_files'), schema = GETVARIABLE('v_0_schema'))"
+        in rewritten.sql
+    )
+    assert rewritten.parameters == {"v_0_files": ["a.parquet"], "v_0_schema": _FIELDS}
+
+
+def test_a_projected_read_by_field_id_keeps_its_policy() -> None:
+    """Filters and masks still apply in the CTE over the map's columns."""
+    source = TableSource(
+        urls=["a.parquet"],
+        file_format="parquet",
+        columns={"id": "long", "name": "string"},
+        row_filters=("id > 1",),
+        column_masks={"name": "NULL"},
+        field_ids=_FIELDS,
+    )
+
+    rewritten = rewrite_query("SELECT * FROM gold.t", {"gold.t": source})
+
+    assert (
+        'SELECT "id", NULL AS "name" FROM READ_PARQUET(GETVARIABLE(\'v_0_files\'), '
+        "schema = GETVARIABLE('v_0_schema')) WHERE (id > 1)"
+    ) in rewritten.sql
+
+
+def test_a_field_id_map_that_misses_a_declared_column_is_refused() -> None:
+    """A column outside the map would not be read at all; that is a defect, refused."""
+    source = TableSource(
+        urls=["a.parquet"],
+        file_format="parquet",
+        columns={"id": "long", "name": "string"},
+        field_ids=_FIELDS[:1],
+    )
+
+    with pytest.raises(ValidationError, match="has no field id for its column 'name'"):
+        rewrite_query("SELECT * FROM gold.t", {"gold.t": source})
