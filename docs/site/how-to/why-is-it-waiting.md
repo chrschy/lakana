@@ -162,7 +162,9 @@ section applies.
 
 - **Interactive work:** ad-hoc queries, writes and views that a person or a tool submits.
 - **Pipeline work:** deploys, the tasks of pipelines and the queries they run, and table
-  maintenance, also the maintenance a person starts by hand.
+  maintenance, also the maintenance a person starts by hand. A maintenance run takes at most
+  30 minutes (`LAKANA_RUN__MAINTENANCE_TIMEOUT`), so a task's input query that waits behind one
+  waits that long at the most.
 
 A query or deploy of one kind waits as long as no worker that takes its kind is free, even when
 workers of the other kind are idle. When no running worker takes the kind at all, a query, a

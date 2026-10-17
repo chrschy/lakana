@@ -55,6 +55,7 @@ import io
 import logging
 import re
 import threading
+import time
 import uuid
 from collections.abc import Callable, Generator, Mapping, Sequence
 from contextlib import contextmanager
@@ -84,12 +85,13 @@ from lakana_core.catalog.maintenance import (
     DEFAULT_KEEP_DAYS,
     DEFAULT_KEEP_LAST,
     DEFAULT_ORPHAN_AGE_HOURS,
+    MaintenanceStopped,
 )
 from lakana_core.catalog.schema_compat import arrow_to_iceberg_schema, view_columns
 from lakana_core.catalog.service import CatalogService
 from lakana_core.catalog.watermark import check_incremental_key, wrap_incremental
 from lakana_core.catalog.writes import SnapshotPin, target_changed_message
-from lakana_core.config import QueryLimitsConfig
+from lakana_core.config import DEFAULT_MAINTENANCE_TIMEOUT, QueryLimitsConfig
 from lakana_core.db import rowcount
 from lakana_core.errors import (
     CheckedSnapshotGoneError,
@@ -1816,6 +1818,25 @@ def _diagnose_views(
     return None
 
 
+_clock: Callable[[], float] = time.monotonic
+"""The clock the maintenance deadline reads; tests replace it."""
+
+_MAINTENANCE_TIMEOUT: float = DEFAULT_MAINTENANCE_TIMEOUT
+"""Seconds a maintenance run may take; set once by `install_maintenance_timeout`."""
+
+
+def install_maintenance_timeout(seconds: float) -> None:
+    """Set how long one maintenance run may take.
+
+    Parameters
+    ----------
+    seconds
+        `LAKANA_RUN__MAINTENANCE_TIMEOUT`.
+    """
+    global _MAINTENANCE_TIMEOUT
+    _MAINTENANCE_TIMEOUT = seconds
+
+
 def _run_maintenance(
     session: Session,
     run: QueryRun,
@@ -1845,20 +1866,34 @@ def _run_maintenance(
     ------
     LakanaError
         If the run has no target — `submit_maintenance` always sets one.
+    QueryTimeout
+        If the run passed `LAKANA_RUN__MAINTENANCE_TIMEOUT`. It stopped at a safe point, its
+        report so far is stored on the run, and running maintenance again continues.
     """
     if run.target_name is None:  # pragma: no cover
         # `submit_maintenance` sets it in the same insert; kept for type narrowing.
         raise LakanaError("A maintenance run has no target.")
     request = dict((run.maintenance or {}).get("request", {}))
     catalog = CatalogService(session, StorageResolver(session, key_provider), authz)
-    report = catalog.maintain(
-        principal,
-        TableRef.from_dotted(environment_name, run.target_name),
-        keep_days=int(request.get("keep_days", DEFAULT_KEEP_DAYS)),
-        keep_last=int(request.get("keep_last", DEFAULT_KEEP_LAST)),
-        dry_run=bool(request.get("dry_run")),
-        older_than_hours=int(request.get("older_than_hours", DEFAULT_ORPHAN_AGE_HOURS)),
-    )
+    deadline = _clock() + _MAINTENANCE_TIMEOUT
+    try:
+        report = catalog.maintain(
+            principal,
+            TableRef.from_dotted(environment_name, run.target_name),
+            keep_days=int(request.get("keep_days", DEFAULT_KEEP_DAYS)),
+            keep_last=int(request.get("keep_last", DEFAULT_KEEP_LAST)),
+            dry_run=bool(request.get("dry_run")),
+            older_than_hours=int(request.get("older_than_hours", DEFAULT_ORPHAN_AGE_HOURS)),
+            should_stop=lambda: _clock() >= deadline,
+        )
+    except MaintenanceStopped as stopped:
+        run.maintenance = {"request": request, "report": stopped.report.to_json()}
+        raise QueryTimeout(
+            f"Maintenance ran past its time limit ({_MAINTENANCE_TIMEOUT:g} s) and stopped at "
+            "a safe point; the table is consistent. Run maintenance on this table again to "
+            "continue where it stopped, or ask the operator to raise "
+            "LAKANA_RUN__MAINTENANCE_TIMEOUT."
+        ) from stopped
     run.maintenance = {"request": request, "report": report.to_json()}
 
 

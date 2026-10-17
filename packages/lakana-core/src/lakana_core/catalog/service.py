@@ -74,6 +74,7 @@ from lakana_core.catalog.maintenance import (
     FAILED_SNAPSHOT_KEEP_DAYS,
     FAILED_SNAPSHOT_TAG_PREFIX,
     MaintenanceReport,
+    MaintenanceStopped,
     check_orphan_age,
     has_foreign_reference,
     old_failed_tags,
@@ -4691,6 +4692,7 @@ class CatalogService:
         dry_run: bool = False,
         older_than_hours: int = DEFAULT_ORPHAN_AGE_HOURS,
         now: datetime | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> MaintenanceReport:
         """Expire a table's old snapshots and delete its orphaned files.
 
@@ -4721,6 +4723,9 @@ class CatalogService:
         now
             The current time; `None` for the real one. Tests pass a later
             time to age files past the cutoff.
+        should_stop
+            Asked before the expiry, before the orphans are looked for and before each file is
+            deleted; `None` never stops. When it answers `True` the run ends at that point.
 
         Returns
         -------
@@ -4736,6 +4741,10 @@ class CatalogService:
         ValidationError
             If the table is external, was created by an older Lakana (its location does not
             end in its id), or the keep values or `older_than_hours` are out of range.
+        MaintenanceStopped
+            If `should_stop` answered `True`. What was done stays done (the expiry is one
+            commit, files go one by one), the audit event records it as stopped, and a later
+            run continues with what is left; the exception carries the report so far.
 
         Notes
         -----
@@ -4774,6 +4783,11 @@ class CatalogService:
                 "not end in its id; re-create it before maintaining it."
             )
         metadata, metadata_location = loaded.metadata, loaded.metadata_location
+        if should_stop is not None and should_stop():
+            self._record_maintenance(
+                p, securable, MaintenanceReport(dry_run=dry_run), keep_days, keep_last, stopped=True
+            )
+            raise MaintenanceStopped(MaintenanceReport(dry_run=dry_run))
         old_tags = old_failed_tags(metadata, now_ms=int(now.timestamp() * 1000))
         expired = select_expired_snapshots(
             metadata,
@@ -4810,7 +4824,12 @@ class CatalogService:
             metadata = apply_updates(metadata, expiry)
         note = None
         deleted: list[StoredObject] = []
-        if self._write_in_flight(table_id):
+        # The expiry is behind us; skipping the orphans leaves a consistent table that the next
+        # run cleans up, so this is the cheapest point to honour a stop.
+        stopped = should_stop is not None and should_stop()
+        if stopped:
+            note = "Stopped before orphan removal."
+        elif self._write_in_flight(table_id):
             note = "A write into this table is running; orphan removal was skipped."
         else:
             resolved = self._storage.for_environment(ref.environment)
@@ -4838,7 +4857,10 @@ class CatalogService:
             if orphans and self._metadata_location_of(table_id) != metadata_location:
                 note = "the table changed before orphan removal; orphan removal skipped."
                 orphans = []
-            deleted = orphans if dry_run else self._delete_quietly(resolved, orphans)
+            if dry_run:
+                deleted = orphans
+            else:
+                deleted, stopped = self._delete_quietly(resolved, orphans, should_stop)
         report = MaintenanceReport(
             dry_run=dry_run,
             snapshots_expired=tuple(expired),
@@ -4848,14 +4870,52 @@ class CatalogService:
             tags_removed=tuple(old_tags),
         )
         if not dry_run:
-            AuditService(self._session).record(
-                p.id,
-                AuditEventType.TABLE_MAINTAINED,
-                securable=securable,
-                detail={**report.to_json(), "keep_days": keep_days, "keep_last": keep_last},
-            )
-            self._session.commit()
+            self._record_maintenance(p, securable, report, keep_days, keep_last, stopped=stopped)
+        if stopped:
+            raise MaintenanceStopped(report)
         return report
+
+    def _record_maintenance(
+        self,
+        p: PrincipalRef,
+        securable: Securable,
+        report: MaintenanceReport,
+        keep_days: int,
+        keep_last: int,
+        *,
+        stopped: bool,
+    ) -> None:
+        """Record `TABLE_MAINTAINED` for a run and commit.
+
+        A dry run records nothing, so a stopped dry run is not passed here.
+
+        Parameters
+        ----------
+        p
+            The acting principal.
+        securable
+            The table.
+        report
+            What the run did.
+        keep_days
+            The retention in days the run used.
+        keep_last
+            The number of snapshots the run kept at least.
+        stopped
+            The run ended early because it was asked to.
+        """
+        AuditService(self._session).record(
+            p.id,
+            AuditEventType.TABLE_MAINTAINED,
+            securable=securable,
+            detail={
+                **report.to_json(),
+                "keep_days": keep_days,
+                "keep_last": keep_last,
+                **({"stopped": True} if stopped else {}),
+            },
+        )
+        self._session.commit()
 
     def _snapshots_running_tasks_need(
         self, table_id: uuid.UUID, metadata: TableMetadata
@@ -4982,8 +5042,10 @@ class CatalogService:
 
     @staticmethod
     def _delete_quietly(
-        resolved: ResolvedStorage, orphans: Sequence[StoredObject]
-    ) -> list[StoredObject]:
+        resolved: ResolvedStorage,
+        orphans: Sequence[StoredObject],
+        should_stop: Callable[[], bool] | None = None,
+    ) -> tuple[list[StoredObject], bool]:
         """Delete orphans one by one, keeping going past a failure.
 
         Parameters
@@ -4992,22 +5054,28 @@ class CatalogService:
             The environment's storage.
         orphans
             What to delete.
+        should_stop
+            Asked before each file; `None` never stops.
 
         Returns
         -------
-        list of StoredObject
+        deleted : list of StoredObject
             The ones actually deleted; a failure is logged by exception
             class alone and not counted.
+        stopped : bool
+            `True` if `should_stop` ended the deletion with files left.
         """
         deleted: list[StoredObject] = []
         for stored in orphans:
+            if should_stop is not None and should_stop():
+                return deleted, True
             try:
                 resolved.storage.delete(stored.path)
             except Exception as exc:
                 logger.warning("Failed to delete an orphaned file: %s", type(exc).__name__)
                 continue
             deleted.append(stored)
-        return deleted
+        return deleted, False
 
     def _write_new_table(
         self,
