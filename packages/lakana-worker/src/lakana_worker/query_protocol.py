@@ -45,6 +45,14 @@ KINDS = frozenset({INVALID, TRANSIENT, OUT_OF_MEMORY, INTERNAL, INTERRUPTED})
 """How a child classifies a failure. `interrupted` means it stopped because it was asked to or
 because the worker stopped reading; the worker then names the reason itself."""
 
+UNCONVERTED_VALUE = (
+    "a value could not be converted (the value is not shown, because it may come from "
+    "data you cannot see). Check the casts in the query; otherwise a file of this table "
+    "stores a column in a type the read cannot convert it to."
+)
+"""What a child says of a conversion error on a read through a field-id map, in place of the
+engine's text (which quotes the cell). The worker matches on it to recognise such an error."""
+
 MAX_ERROR_BYTES = 5_000
 """Longest error message a child sends and the worker accepts, in bytes of its UTF-8 text. A longer
 message is cut on a character boundary and ends in an ellipsis. JSON escaping makes one byte of a

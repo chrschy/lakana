@@ -85,6 +85,7 @@ from lakana_worker.query_protocol import (
     OUT_OF_MEMORY,
     READ,
     TRANSIENT,
+    UNCONVERTED_VALUE,
     ErrorDocument,
     ParameterValue,
     Request,
@@ -410,11 +411,7 @@ def failure(
             "one type."
         )
     elif mapped and text.startswith("Conversion Error"):
-        text = (
-            "a value could not be converted (the value is not shown, because it may come from "
-            "data you cannot see). Check the casts in the query; otherwise a file of this table "
-            "stores a column in a type the read cannot convert it to."
-        )
+        text = UNCONVERTED_VALUE
     message = f"Query failed: {text}"
     if _is_transient(exc):
         return ErrorDocument(TRANSIENT, message)

@@ -39,6 +39,7 @@ from lakana_core.models import (
     TaskRun,
     TaskStatus,
 )
+from lakana_core.policy.read_errors import is_policy_read_failure
 from lakana_core.projects.checks import CheckSpec
 
 if TYPE_CHECKING:
@@ -629,6 +630,9 @@ def error_text(cause: str | None, stored: str | None, principal: str) -> str:
     """
     if cause in {"permission_denied", "not_found"}:
         return ERROR_UNREADABLE.format(principal=shown(principal))
+    if is_policy_read_failure(stored):
+        # Fixed wording that names a table and no value: safe to show as it is.
+        return stored or ""
     matched = _ENGINE_ERROR_TYPE.match(stored or "")
     if matched is not None and matched.group(1) in _ENGINE_ERROR_TYPES:
         return f"{matched.group(1)} Error: {_QUERY_FAILED}. {_SEE_YOURSELF}"

@@ -121,6 +121,7 @@ from lakana_core.models import (
     WriteMode,
 )
 from lakana_core.policy.expressions import columns_of
+from lakana_core.policy.read_errors import policy_read_failure
 from lakana_core.policy.renames import policy_column_renamed_message, renamed_policy_column
 from lakana_core.policy.resolver import PolicyResolver
 from lakana_core.query_rewrite import (
@@ -173,6 +174,7 @@ from lakana_worker.executor import (
     stream_query,
 )
 from lakana_worker.memory import MACHINE_MEMORY_ADVICE
+from lakana_worker.query_protocol import UNCONVERTED_VALUE
 
 if TYPE_CHECKING:
     from pyiceberg.table.metadata import TableMetadata
@@ -328,6 +330,46 @@ def _redact(message: str, locations: Sequence[str]) -> str:
     for location in sorted(locations, key=len, reverse=True):
         message = message.replace(location, _REDACTED)
     return message
+
+
+_VALUE_ERROR = re.compile(r"^Query failed: (?:Conversion|Invalid Input|Out of Range) Error")
+"""The start of the engine's text for a value it could not convert or compute, as a query child
+words a failure."""
+
+
+def _without_the_value(failure: LakanaError, restricted: frozenset[str]) -> LakanaError:
+    """Replace the engine's text for a value it could not convert or compute, on a policy read.
+
+    A row filter or column mask expression runs on every stored value, also on the ones the
+    policy hides, and the engine's text for a failure quotes the value. A query that reads a
+    table under such a policy therefore never shows that text; the reader gets one fixed
+    message, of the same kind (an invalid query). Every other failure, among them the reader's
+    own binder errors, a catalog error, a cancel and a transient error, is returned as it is.
+
+    Parameters
+    ----------
+    failure
+        The failure about to be recorded.
+    restricted
+        The dotted base tables of the query on which a row filter or a column mask applied;
+        empty for a query that reads none, which keeps the engine's text (the data is the
+        reader's own).
+
+    Returns
+    -------
+    LakanaError
+        The fixed message as a `ValidationError` when `failure` is such a failure of a
+        query that reads a table under a policy, otherwise `failure` itself.
+    """
+    if not restricted or type(failure) is not ValidationError:
+        return failure
+    text = str(failure)
+    if _VALUE_ERROR.match(text) is None and not text.startswith(
+        f"Query failed: {UNCONVERTED_VALUE}"
+    ):
+        return failure
+    only = next(iter(restricted)) if len(restricted) == 1 else None
+    return ValidationError(policy_read_failure(only))
 
 
 class _RowsNotListed(ValidationError):
@@ -2413,6 +2455,8 @@ def _run_one(
                 )
                 or exc
             )
+        if prepared is not None:
+            failure = _without_the_value(failure, prepared.restricted)
         run.error_message = _redact(str(failure), locations)
         run.error_cause = failure_cause(failure).value
     except SQL_SYNTAX_ERRORS as exc:

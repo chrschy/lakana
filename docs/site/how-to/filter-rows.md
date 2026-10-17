@@ -80,6 +80,22 @@ revoke the old one. When several filters apply to one person, a row must pass al
 commands are `client.row_filters.create(...)`, `.list(...)` and `.revoke(...)` in the Python SDK
 and `/api/v1/row-filters` in the REST API.
 
+## An expression must not fail on any stored value
+
+A filter runs on every stored value, also on the ones it hides. Lakana checks the expression when you
+create it, but not against the values in the table. If it fails on one, for example a conversion of text
+that is not a number, everyone it applies to gets this message instead of the database's, which would
+quote the value:
+
+<!-- output -->
+```text
+The query failed on a value it could not convert or compute, under a row filter or column mask on `gold.customers`; the value is not shown. Check the casts and functions in the query. If the query has none that could fail, a row filter or column mask on the table fails on some stored values: ask an administrator to check it (for example with try_cast or TRY).
+```
+
+The same message appears when a person's own query fails on a value under a row filter or column mask. Where a conversion
+may meet a value it cannot convert, write it so that it returns `NULL` instead of failing: `try_cast`,
+`try_strptime` or `TRY(...)`. A query on a table with no filter or mask keeps the database's own message.
+
 ## When Lakana refuses
 
 Lakana checks a filter when you create it, so a mistake is an error now and not a failure of
