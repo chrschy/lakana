@@ -18,6 +18,7 @@ from pyiceberg.manifest import (
     ManifestContent,
     ManifestEntry,
     ManifestEntryStatus,
+    ManifestFile,
     write_manifest,
     write_manifest_list,
 )
@@ -642,3 +643,149 @@ def test_only_the_snapshots_of_the_commit_are_checked(
 
     assert committed.metadata.current_snapshot_id == 900_000_122
     assert reads == Counter({first_uri: 1, second_uri: 1})
+
+
+def _forged_parent(snapshot: Snapshot, parent_id: int) -> Snapshot:
+    """Copy a snapshot with another parent id, as a client may commit one.
+
+    Parameters
+    ----------
+    snapshot
+        The snapshot to copy.
+    parent_id
+        The parent id to claim.
+
+    Returns
+    -------
+    Snapshot
+        The copy; its manifest list is the original's.
+    """
+    return snapshot.model_copy(update={"parent_snapshot_id": parent_id})
+
+
+def test_a_snapshot_that_names_itself_as_its_parent_is_checked_in_full(
+    catalog: CatalogService, principal: PrincipalRef, tmp_path: Path
+) -> None:
+    ref, created = _created(catalog, principal, tmp_path)
+    uri = _parquet(created, "plain.parquet", field_ids=False)
+    own = _snapshot(created.metadata, None, [uri], 900_000_130)
+
+    with pytest.raises(ValidationError) as caught:
+        _commit_snapshots(catalog, principal, ref, [_forged_parent(own, 900_000_130)])
+
+    assert str(caught.value) == _no_field_ids(uri)
+
+
+def test_a_snapshot_whose_parent_comes_later_in_the_commit_is_checked_in_full(
+    catalog: CatalogService, principal: PrincipalRef, tmp_path: Path
+) -> None:
+    ref, created = _created(catalog, principal, tmp_path)
+    uri = _parquet(created, "plain.parquet", field_ids=False)
+    other = _parquet(created, "other.parquet", field_ids=True)
+    first = _snapshot(created.metadata, None, [uri], 900_000_140)
+    second = _snapshot(created.metadata, first, [other], 900_000_141)
+
+    with pytest.raises(ValidationError) as caught:
+        _commit_snapshots(catalog, principal, ref, [_forged_parent(first, 900_000_141), second])
+
+    assert str(caught.value) == _no_field_ids(uri)
+
+
+def test_a_snapshot_with_an_unknown_parent_is_checked_in_full(
+    catalog: CatalogService, principal: PrincipalRef, tmp_path: Path
+) -> None:
+    ref, created = _created(catalog, principal, tmp_path)
+    uri = _parquet(created, "plain.parquet", field_ids=False)
+    own = _snapshot(created.metadata, None, [uri], 900_000_150)
+
+    with pytest.raises(ValidationError) as caught:
+        _commit_snapshots(catalog, principal, ref, [_forged_parent(own, 424_242)])
+
+    assert str(caught.value) == _no_field_ids(uri)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"PAR1" + b"x" * 20 + (20).to_bytes(4, "little") + b"PAR1",
+        b"PAR1" + (0).to_bytes(4, "little") + b"PAR1",
+    ],
+    ids=["garbage-footer", "empty-footer"],
+)
+def test_a_garbled_footer_is_the_files_fault_not_a_storage_failure(
+    catalog: CatalogService, principal: PrincipalRef, tmp_path: Path, content: bytes
+) -> None:
+    ref, created = _created(catalog, principal, tmp_path)
+    uri = f"{created.metadata.location}/data/garbled.parquet"
+    path = Path(uri.removeprefix("file://"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content)
+
+    with pytest.raises(ValidationError) as caught:
+        _commit_files(catalog, principal, ref, created, [uri], 900_000_160)
+
+    assert "could not be read as a Parquet file" in str(caught.value)
+    assert uri in str(caught.value)
+
+
+def test_collecting_stops_once_the_cap_is_passed(
+    catalog: CatalogService,
+    principal: PrincipalRef,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The second snapshot's manifest is never opened once the first one passed the cap."""
+    ref, created = _created(catalog, principal, tmp_path)
+    monkeypatch.setattr(field_ids_module, "MAX_CHECKED_FILES", 2)
+    first = _snapshot(
+        created.metadata,
+        None,
+        [_parquet(created, f"a{i}.parquet", field_ids=True) for i in range(3)],
+        900_000_170,
+    )
+    second = _snapshot(
+        created.metadata,
+        first,
+        [_parquet(created, f"b{i}.parquet", field_ids=True) for i in range(3)],
+        900_000_171,
+    )
+    fetched: list[str] = []
+    real = ManifestFile.fetch_manifest_entry
+
+    def counting(
+        self: ManifestFile, io: object, discard_deleted: bool = True
+    ) -> list[ManifestEntry]:
+        fetched.append(self.manifest_path)
+        return real(self, io, discard_deleted)  # ty: ignore[invalid-argument-type]
+
+    monkeypatch.setattr(ManifestFile, "fetch_manifest_entry", counting)
+
+    with pytest.raises(ValidationError, match="Lakana checks at most 2 per commit"):
+        _commit_snapshots(catalog, principal, ref, [first, second])
+
+    assert len(fetched) == 1
+
+
+def test_the_deadline_also_covers_the_manifest_reads(
+    catalog: CatalogService,
+    principal: PrincipalRef,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ref, created = _created(catalog, principal, tmp_path)
+    uri = _parquet(created, "a.parquet", field_ids=True)
+    ticks = iter([0.0, 1000.0, 1000.0])
+    monkeypatch.setattr(field_ids_module, "_clock", lambda: next(ticks))
+
+    opened: list[str] = []
+
+    def record(_file_io: object, path: str) -> bool:
+        opened.append(path)
+        return True
+
+    monkeypatch.setattr(field_ids_module, "has_field_ids", record)
+
+    with pytest.raises(ValidationError, match="took longer than 60 seconds"):
+        _commit_files(catalog, principal, ref, created, [uri], 900_000_180)
+
+    assert opened == []

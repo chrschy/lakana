@@ -326,7 +326,7 @@ class _FooterTooLarge(Exception):
 
 
 class _NotParquet(Exception):
-    """A file does not end in the Parquet magic bytes."""
+    """A file is not a readable Parquet file: no magic bytes, or a footer that does not parse."""
 
 
 def has_field_ids(file_io: FileIO, path: str) -> bool:
@@ -348,7 +348,7 @@ def has_field_ids(file_io: FileIO, path: str) -> bool:
     Raises
     ------
     _NotParquet
-        If the file does not end in the Parquet magic bytes.
+        If the file does not end in the Parquet magic bytes, or its footer cannot be parsed.
     _FooterTooLarge
         If the trailer names a footer above `MAX_FOOTER_BYTES`.
     """
@@ -360,7 +360,10 @@ def has_field_ids(file_io: FileIO, path: str) -> bool:
         if int.from_bytes(trailer[:4], "little") > MAX_FOOTER_BYTES:
             raise _FooterTooLarge
         stream.seek(0)
-        schema = pq.read_schema(stream)
+        try:
+            schema = pq.read_schema(stream)
+        except Exception as exc:  # the file exists and ends in the magic: its footer is bad
+            raise _NotParquet from exc
     return all(field.metadata is not None and _FIELD_ID in field.metadata for field in schema)
 
 
@@ -407,6 +410,8 @@ def _footer(file_io: FileIO, path: str, table: str) -> str:
         return "ok" if has_field_ids(file_io, path) else "no_ids"
     except _FooterTooLarge:
         return "too_large"
+    except _NotParquet:
+        return "unreadable"
     except Exception as exc:  # any reader failure refuses the commit with a fixed text
         logger.warning(
             "A data file of a commit to %s could not be read (%s).", table, type(exc).__name__
@@ -414,10 +419,34 @@ def _footer(file_io: FileIO, path: str, table: str) -> str:
         return "unavailable" if _is_unavailable(exc) else "unreadable"
 
 
+def _timed_out(table: str) -> str:
+    """Word the refusal for a check that outlasted its deadline.
+
+    Parameters
+    ----------
+    table
+        The table's dotted name.
+
+    Returns
+    -------
+    str
+        The refusal's text.
+    """
+    return _TIMED_OUT.format(table=table, seconds=CHECK_DEADLINE_SECONDS)
+
+
 def _added_data_files(
-    snapshots: Sequence[Snapshot], metadata: TableMetadata, file_io: FileIO, table: str
+    snapshots: Sequence[Snapshot],
+    metadata: TableMetadata,
+    file_io: FileIO,
+    table: str,
+    deadline: float,
 ) -> list[DataFile]:
     """List the data files the snapshots of one commit add, from manifests their parents lack.
+
+    A parent is looked up among the snapshots the table had before the commit and the ones
+    that come earlier in this commit. A parent that is the snapshot itself, comes later or is
+    unknown counts as none, so all of that snapshot's manifests are read.
 
     Parameters
     ----------
@@ -430,6 +459,8 @@ def _added_data_files(
         Reads the table's storage.
     table
         The table's dotted name, for the message.
+    deadline
+        When the check's time is up, on the clock `_clock` reads.
 
     Returns
     -------
@@ -442,11 +473,12 @@ def _added_data_files(
     Raises
     ------
     ValidationError
-        If the manifest list or a manifest cannot be read.
+        If the manifest list or a manifest cannot be read, there are more than
+        `MAX_CHECKED_FILES` files (the rest are not read), or the deadline passes.
     StorageUnavailableError
         If storage failed while reading them.
     """
-    added_here = {s.snapshot_id: s for s in snapshots}
+    earlier: dict[int, Snapshot] = {}
     seen_manifests: set[str] = set()
     seen_files: set[str] = set()
     added: list[DataFile] = []
@@ -455,8 +487,9 @@ def _added_data_files(
         parent = (
             None
             if parent_id is None
-            else added_here.get(parent_id) or metadata.snapshot_by_id(parent_id)
+            else earlier.get(parent_id) or metadata.snapshot_by_id(parent_id)
         )
+        earlier[snapshot.snapshot_id] = snapshot
         try:
             known = (
                 set() if parent is None else {m.manifest_path for m in parent.manifests(file_io)}
@@ -468,6 +501,8 @@ def _added_data_files(
                     or not is_within_location(metadata.location, manifest.manifest_path)
                 ):
                     continue
+                if _clock() >= deadline:
+                    raise ValidationError(_timed_out(table))
                 seen_manifests.add(manifest.manifest_path)
                 for entry in manifest.fetch_manifest_entry(file_io, discard_deleted=True):
                     if (
@@ -477,6 +512,14 @@ def _added_data_files(
                     ):
                         seen_files.add(entry.data_file.file_path)
                         added.append(entry.data_file)
+                if len(added) > MAX_CHECKED_FILES:
+                    raise ValidationError(
+                        _TOO_MANY_FILES.format(
+                            count=len(added), table=table, limit=MAX_CHECKED_FILES
+                        )
+                    )
+        except ValidationError:
+            raise
         except Exception as exc:  # any reader failure refuses the commit with a fixed text
             logger.warning(
                 "A manifest of a commit to %s could not be read (%s).", table, type(exc).__name__
@@ -524,11 +567,7 @@ def check_added_files_have_field_ids(
         If storage failed while reading a footer or a manifest.
     """
     deadline = _clock() + CHECK_DEADLINE_SECONDS
-    files = _added_data_files(snapshots, metadata, file_io, table)
-    if len(files) > MAX_CHECKED_FILES:
-        raise ValidationError(
-            _TOO_MANY_FILES.format(count=len(files), table=table, limit=MAX_CHECKED_FILES)
-        )
+    files = _added_data_files(snapshots, metadata, file_io, table, deadline)
     for data_file in files:
         if data_file.file_format != FileFormat.PARQUET:
             raise ValidationError(
@@ -547,9 +586,7 @@ def check_added_files_have_field_ids(
             except FutureTimeout:
                 outcome = None
             if outcome is None:
-                raise ValidationError(
-                    _TIMED_OUT.format(table=table, seconds=CHECK_DEADLINE_SECONDS)
-                )
+                raise ValidationError(_timed_out(table))
             if outcome == "unavailable":
                 raise StorageUnavailableError(_STORAGE_UNAVAILABLE.format(table=table))
             if outcome == "unreadable":

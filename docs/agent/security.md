@@ -2103,7 +2103,7 @@ for a file under the table's location (a file elsewhere is never opened, and a r
 table for it). The trailer is read first and a footer above 16 MiB is refused. The check is
 bounded: at most 2,000 added files per commit, and 60 seconds for all reads together
 (`MAX_CHECKED_FILES`, `CHECK_DEADLINE_SECONDS`, `MAX_FOOTER_BYTES`); a commit over either bound
-is refused whole. A non-Parquet entry is reported first; otherwise the first offending file in
+is refused whole (the deadline also covers the manifest reads, and a commit past the cap stops being read at that manifest). Reads already running when the deadline passes are abandoned and end at the storage client's own timeout. A snapshot's parent is looked up only among the table's snapshots before the commit and the earlier snapshots of the same commit; a parent that is the snapshot itself, comes later or is unknown counts as none, so the snapshot is checked in full. A file whose footer does not parse is refused as unreadable (422), never as storage failure. A non-Parquet entry is reported first; otherwise the first offending file in
 manifest order is named with the table. A reader's error text never reaches the caller (the log
 has the exception's class and the table). A storage failure answers `StorageUnavailableError`
 (503, retry), not a client fault. `append` and `write_batches` pass `own_data_files=True`:

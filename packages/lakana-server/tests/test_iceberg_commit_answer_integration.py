@@ -8,6 +8,7 @@ its table and not read it, gets that answer too and moves the task's own tip.
 
 from __future__ import annotations
 
+import time
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -17,8 +18,21 @@ import pyarrow as pa
 import pytest
 import requests
 from pyiceberg.catalog.rest import RestCatalog
+from pyiceberg.manifest import (
+    DataFile,
+    DataFileContent,
+    FileFormat,
+    ManifestEntry,
+    ManifestEntryStatus,
+    write_manifest,
+    write_manifest_list,
+)
 from pyiceberg.table import Table as IcebergTable
 from pyiceberg.table.metadata import TableMetadataUtil
+from pyiceberg.table.refs import SnapshotRefType
+from pyiceberg.table.snapshots import Operation, Snapshot, Summary
+from pyiceberg.table.update import AddSnapshotUpdate, SetSnapshotRefUpdate
+from pyiceberg.typedef import Record
 from pyiceberg.types import LongType
 from sqlalchemy import Engine, update
 from sqlalchemy.orm import Session
@@ -265,3 +279,85 @@ def test_a_writers_pyiceberg_schema_change_on_a_reused_schema_id_is_refused(
 
     current = admin_catalog.load_table(("gold", "sales")).schema()
     assert [field.name for field in current.fields] == ["id"]
+
+
+def test_a_commit_that_names_a_data_file_missing_from_s3_is_refused_with_422(
+    stack: _Stack,
+) -> None:
+    """A missing object is the client's fault: 422 naming the file, not a retryable 503."""
+    environment = unique_name()
+    stack.services.environment(stack.admin, environment)
+    stack.admin.tables.create(environment, "gold.sales", schema=_IDS)
+    catalog = stack.catalog(environment, TOKEN)
+    table = catalog.load_table(("gold", "sales"))
+    metadata = table.metadata
+    missing = f"{metadata.location}/data/never-written.parquet"
+    snapshot_id = 900_000_201
+    with write_manifest(
+        format_version=metadata.format_version,
+        spec=metadata.spec(),
+        schema=metadata.schema(),
+        output_file=table.io.new_output(f"{metadata.location}/metadata/{snapshot_id}-m0.avro"),
+        snapshot_id=snapshot_id,
+        avro_compression="null",
+    ) as writer:
+        writer.add(
+            ManifestEntry.from_args(
+                status=ManifestEntryStatus.ADDED,
+                snapshot_id=snapshot_id,
+                sequence_number=1,
+                file_sequence_number=1,
+                data_file=DataFile.from_args(
+                    content=DataFileContent.DATA,
+                    file_path=missing,
+                    file_format=FileFormat.PARQUET,
+                    partition=Record(),
+                    record_count=1,
+                    file_size_in_bytes=1,
+                    column_sizes={},
+                    value_counts={},
+                    null_value_counts={},
+                    nan_value_counts={},
+                    lower_bounds={},
+                    upper_bounds={},
+                    key_metadata=None,
+                    split_offsets=None,
+                    equality_ids=None,
+                    sort_order_id=None,
+                ),
+            )
+        )
+    list_path = f"{metadata.location}/metadata/snap-{snapshot_id}.avro"
+    with write_manifest_list(
+        format_version=metadata.format_version,
+        output_file=table.io.new_output(list_path),
+        snapshot_id=snapshot_id,
+        parent_snapshot_id=None,
+        sequence_number=1,
+        avro_compression="null",
+    ) as list_writer:
+        list_writer.add_manifests([writer.to_manifest_file()])
+    snapshot = Snapshot(
+        snapshot_id=snapshot_id,
+        parent_snapshot_id=None,
+        sequence_number=1,
+        timestamp_ms=int(time.time() * 1000),
+        manifest_list=list_path,
+        summary=Summary(operation=Operation.APPEND),
+        schema_id=metadata.current_schema_id,
+    )
+    transaction = table.transaction()
+    transaction._apply(
+        (
+            AddSnapshotUpdate(snapshot=snapshot),
+            SetSnapshotRefUpdate(
+                ref_name="main", type=SnapshotRefType.BRANCH, snapshot_id=snapshot_id
+            ),
+        )
+    )
+
+    with pytest.raises(Exception, match="could not be read as a Parquet file") as caught:
+        transaction.commit_transaction()
+
+    assert missing in str(caught.value)
+    assert "right now" not in str(caught.value)
