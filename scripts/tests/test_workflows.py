@@ -950,3 +950,54 @@ def test_the_cla_workflow_starts_only_for_pull_requests_and_the_signing_phrases(
         "github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA'"
         in condition
     )
+
+
+_PINNED = re.compile(r"^[\w.-]+/[\w./-]+@[0-9a-f]{40}$")
+
+
+def test_the_sbom_is_attached_to_the_github_release() -> None:
+    """Whoever wants a release's bill of materials finds it on the release page.
+
+    The job uploads the file to the release of the tag it built, and it is the only
+    job of ``release.yml`` that may write to the repository's contents.
+    """
+    jobs = _jobs("release.yml")
+    job = jobs["sbom"]
+    assert job["permissions"] == {"contents": "write"}
+    upload = next(c for s in job["steps"] for c in _commands(s) if "gh release upload" in c)
+    assert '"${{ needs.release-please.outputs.tag }}"' in upload or '"$TAG"' in upload
+    assert "lakana-sbom.spdx.json" in upload
+    assert "--repo" in upload
+    generate = next(s for s in job["steps"] if "anchore/sbom-action" in str(s.get("uses")))
+    assert generate["with"]["output-file"] == "lakana-sbom.spdx.json"
+    for name, other in jobs.items():
+        if name != "sbom":
+            assert other.get("permissions", {}).get("contents") != "write", name
+
+
+def test_the_scorecard_workflow_is_read_only_and_publishes_its_results() -> None:
+    """It runs on main, weekly and on a branch-protection change, with the job's own scopes."""
+    workflow = yaml.safe_load((WORKFLOWS / "scorecard.yml").read_text())
+    assert set(workflow[True]) == {"push", "schedule", "branch_protection_rule"}
+    assert workflow[True]["push"]["branches"] == ["main"]
+    assert workflow["permissions"] == "read-all"
+    (job,) = workflow["jobs"].values()
+    assert job["permissions"] == {"security-events": "write", "id-token": "write"}
+    steps = job["steps"]
+    scorecard = next(s for s in steps if s["uses"].startswith("ossf/scorecard-action@"))
+    assert scorecard["with"]["publish_results"] is True
+    assert scorecard["with"]["results_format"] == "sarif"
+    upload = next(s for s in steps if s["uses"].startswith("github/codeql-action/upload-sarif@"))
+    assert upload["with"]["sarif_file"] == scorecard["with"]["results_file"]
+    checkout = next(s for s in steps if s["uses"].startswith("actions/checkout@"))
+    assert checkout["with"]["persist-credentials"] is False
+
+
+def test_every_action_in_every_workflow_is_pinned_by_commit_sha() -> None:
+    """A tag can move; a commit cannot. Local actions and ``docker://`` images are exempt."""
+    for path in sorted(WORKFLOWS.glob("*.yml")):
+        for name, job in yaml.safe_load(path.read_text())["jobs"].items():
+            for step in job.get("steps", []):
+                uses = step.get("uses")
+                if uses and not uses.startswith(("./", "docker://")):
+                    assert _PINNED.match(uses), f"{path.name}: job `{name}`: {uses}"
