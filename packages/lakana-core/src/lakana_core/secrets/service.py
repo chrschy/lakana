@@ -144,6 +144,8 @@ class SecretService:
         """
         self._authz.authorize(p, Action.MANAGE_SECRET, Securable.environment_scope(environment))
         env = self._get_environment(environment)
+        if use is not None:
+            lock_entry(self._session, use)
         secret_id = uuid.uuid4()
         encrypted = encrypt_secret_values(
             values, self._key_provider, SecretBinding(secret_id, env.id, name)

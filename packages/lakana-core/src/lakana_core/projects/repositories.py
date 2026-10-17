@@ -242,6 +242,8 @@ class RepositoryService:
             try:
                 require_named_secrets_bound(
                     self._session,
+                    self._authz,
+                    p,
                     name=credential_secret,
                     use=SecretUse.repository(repo),
                     registered=False,
@@ -388,14 +390,15 @@ class RepositoryService:
             If `changes` is empty, a field cannot be changed or the result is invalid.
         """
         self._authz.authorize(p, Action.MANAGE_REPOSITORY, Securable.instance_scope())
-        repo = self._lock(self._find(name))
+        repo = self._find(name)
         if not changes:
             raise ValidationError("Nothing to change; name at least one field.")
         fixed = set(changes) - UPDATABLE_FIELDS
         if fixed:
             raise ValidationError(f"{', '.join(sorted(fixed))} cannot be changed.")
-        if changes.get("url", repo.url) is None:
+        if "url" in changes and changes["url"] is None:
             raise ValidationError("url cannot be cleared.")
+        repo = self._lock(repo)
         use = SecretUse.repository(repo)
         previous_url, previous_secret = repo.url, repo.credential_secret
         try:
@@ -408,16 +411,17 @@ class RepositoryService:
                 require_secret_management_for_url_change(self._session, self._authz, p, use)
             if repo.credential_secret is not None and repo.credential_secret != previous_secret:
                 require_named_secrets_bound(
-                    self._session, name=repo.credential_secret, use=use, registered=True
+                    self._session,
+                    self._authz,
+                    p,
+                    name=repo.credential_secret,
+                    use=use,
+                    registered=True,
                 )
         except SecretBindingRefused as refusal:
             self._session.rollback()
             record_refusal(self._authz, p, refusal)
             raise
-        except StaleDataError:
-            # The secrets queries flush the change early, so a concurrent delete shows here.
-            self._session.rollback()
-            raise NotFoundError(f"No repository named {name!r}.") from None
         except ValidationError:
             self._session.rollback()
             raise

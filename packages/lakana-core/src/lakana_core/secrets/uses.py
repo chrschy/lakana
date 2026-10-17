@@ -498,21 +498,31 @@ def lock_entry(session: Session, use: SecretUse) -> None:
 
 
 def require_named_secrets_bound(
-    session: Session, *, name: str, use: SecretUse, registered: bool
+    session: Session,
+    authz: AuthorizationService,
+    p: PrincipalRef,
+    *,
+    name: str,
+    use: SecretUse,
+    registered: bool,
 ) -> None:
-    """Refuse to name a secret for an index or repository it is not bound to.
+    """Make every active secret called `name` serve this index or repository, or refuse.
 
-    Naming a secret binds nothing, whoever names it. Every active secret called `name`
-    must already be bound to this very index or repository; binding, or changing a use, is
-    `lakana secret bind` (or creating the secret with its use) and needs the right to manage
-    secrets. A secret the environment itself uses (storage, a webhook) is refused with the
-    explicit way to move it. The secret rows are locked while this runs and read afresh, so a
-    bind that commits at the same moment is seen.
+    A secret already bound to `use` passes. An unbound secret binds to `use` (audited, with
+    the actor) when `p` may manage secrets in its environment, and the environment does not use
+    it; for anyone else naming it is refused. A secret bound to another use, or one the
+    environment itself uses (storage, a webhook), is refused to everyone with the explicit way
+    to move it (`lakana secret bind`). The secret rows are locked while this runs and read
+    afresh, so a bind that commits at the same moment is seen. Nothing is committed here.
 
     Parameters
     ----------
     session
         Database session.
+    authz
+        Answers whether `p` may manage secrets in an environment.
+    p
+        The acting principal.
     name
         The secret name the index or repository names.
     use
@@ -524,7 +534,7 @@ def require_named_secrets_bound(
     Raises
     ------
     SecretBindingRefused
-        If a secret of that name is not bound to `use`; the message names the cause and the
+        If a secret of that name cannot serve `use`; the message names the cause and the
         next step, and the exception carries the environment scope and the reason.
     """
     rows = session.execute(
@@ -558,6 +568,9 @@ def require_named_secrets_bound(
                 scope,
                 "secret_used_by_environment",
             )
+        if current is None and authz.permits(p, Action.MANAGE_SECRET, scope):
+            record_binding(session, p, secret, scope, use)
+            continue
         if current is None:
             cause, reason = f"is not bound to {use.wanted()}", "secret_not_bound_to_entry"
         else:

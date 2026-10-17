@@ -793,3 +793,93 @@ def test_rights_in_dev_never_bind_or_redirect_anything_in_prod(
     assert _denials(session) == [(devsec.id, "url_moves_bound_secret")]
     service.update(devsec, "o", {"url": "https://moved.example.org/simple"})
     assert _url(session, PackageIndex, other.id) == "https://moved.example.org/simple"
+
+
+@pytest.mark.parametrize("on", ["create", "update"])
+def test_someone_who_manages_secrets_binds_an_unbound_secret_by_naming_it(
+    session: Session, world: dict[str, PrincipalRef], on: str
+) -> None:
+    """An administrator registers the index with its credential and is done; it is audited."""
+    _secret(session, "prod", "pypi")
+    indexes = PackageIndexService(session, _auditing(session))
+    if on == "create":
+        row = indexes.create(
+            world["admin"],
+            name="corp",
+            url="https://corp.example.org/simple",
+            credential_secret="pypi",
+        )
+    else:
+        row = indexes.create(world["admin"], name="corp", url="https://corp.example.org/simple")
+        indexes.update(world["admin"], "corp", {"credential_secret": "pypi"})
+
+    assert _uses(session, "pypi") == {"prod": (SecretUseKind.PACKAGE_INDEX, row.id)}
+    events = (
+        session.execute(
+            select(AuditEvent).where(AuditEvent.event_type == AuditEventType.SECRET_BOUND)
+        )
+        .scalars()
+        .all()
+    )
+    assert [(e.principal_id, e.detail["target"], e.detail["previous"]) for e in events] == [
+        (world["admin"].id, "corp", None)
+    ]
+    assert _denials(session) == []
+
+
+def test_an_administrator_binds_a_repository_secret_by_naming_it(
+    session: Session, world: dict[str, PrincipalRef]
+) -> None:
+    """The same for repositories."""
+    _secret(session, "prod", "git")
+    repo = _repositories(session).create(
+        world["admin"],
+        name="r",
+        kind=RepositoryKind.HTTPS,
+        url="https://git.example.org/r.git",
+        credential_secret="git",
+    )
+    assert _uses(session, "git") == {"prod": (SecretUseKind.REPOSITORY, repo.id)}
+
+
+def test_a_manager_naming_the_same_unbound_secret_is_still_refused(
+    session: Session, world: dict[str, PrincipalRef]
+) -> None:
+    """Only the right to manage secrets binds."""
+    _secret(session, "prod", "pypi")
+    with pytest.raises(PermissionDenied, match="is not bound to package index 'corp'"):
+        PackageIndexService(session, _auditing(session)).create(
+            world["manager"],
+            name="corp",
+            url="https://corp.example.org/simple",
+            credential_secret="pypi",
+        )
+    assert _uses(session, "pypi") == {"prod": (None, None)}
+
+
+def test_an_administrator_does_not_bind_in_an_environment_where_they_lack_the_right(
+    session: Session, world: dict[str, PrincipalRef]
+) -> None:
+    """Rights are per environment: dev rights bind the dev secret and refuse for prod."""
+    devsec = _scoped(session, world, role=False)
+    _secret(session, "dev", "pypi")
+    _secret(session, "prod", "pypi")
+
+    with pytest.raises(PermissionDenied, match="environment 'prod' is not bound"):
+        PackageIndexService(session, _auditing(session)).create(
+            devsec, name="corp", url="https://corp.example.org/simple", credential_secret="pypi"
+        )
+
+    assert _uses(session, "pypi") == {"dev": (None, None), "prod": (None, None)}
+
+
+def test_creating_a_secret_for_an_entry_that_was_removed_is_refused(
+    session: Session, world: dict[str, PrincipalRef]
+) -> None:
+    """`create(use=...)` checks the target still exists, as `bind` does."""
+    row = _indexes(session).create(world["admin"], name="corp", url="https://c.example.org/simple")
+    use = SecretUse.package_index(row)
+    _indexes(session).delete(world["admin"], "corp")
+
+    with pytest.raises(NotFoundError):
+        _secret(session, "prod", "pypi", use)

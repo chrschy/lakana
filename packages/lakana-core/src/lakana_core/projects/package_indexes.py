@@ -303,6 +303,8 @@ class PackageIndexService:
             try:
                 require_named_secrets_bound(
                     self._session,
+                    self._authz,
+                    p,
                     name=credential_secret,
                     use=SecretUse.package_index(row),
                     registered=False,
@@ -455,7 +457,7 @@ class PackageIndexService:
             If the commit fails for a reason other than a collision.
         """
         self._authz.authorize(p, Action.MANAGE_PACKAGE_INDEX, Securable.instance_scope())
-        row = self._lock(self._find(name))
+        row = self._find(name)
         if not changes:
             raise ValidationError("Nothing to change; name at least one field.")
         fixed = set(changes) - UPDATABLE_FIELDS
@@ -463,10 +465,12 @@ class PackageIndexService:
             raise ValidationError(
                 f"{', '.join(sorted(shown(key) for key in fixed))} cannot be changed."
             )
+        if "url" in changes and changes["url"] is None:
+            raise ValidationError("url cannot be cleared.")
+        row = self._lock(row)
         new_secret = changes.get("credential_secret", row.credential_secret)
         new_url = changes.get("url", row.url)
-        if new_url is None:
-            raise ValidationError("url cannot be cleared.")
+        assert new_url is not None  # nosec B101 -- the stored URL is never null; a null change was refused
         new_url = normalize_index_url(new_url, credential=new_secret is not None)
         _validate_secret_name(new_secret)
         clash = self._clash(name, new_url, except_id=row.id)
@@ -478,7 +482,7 @@ class PackageIndexService:
                 require_secret_management_for_url_change(self._session, self._authz, p, use)
             if new_secret is not None and new_secret != row.credential_secret:
                 require_named_secrets_bound(
-                    self._session, name=new_secret, use=use, registered=True
+                    self._session, self._authz, p, name=new_secret, use=use, registered=True
                 )
         except SecretBindingRefused as refusal:
             self._session.rollback()
