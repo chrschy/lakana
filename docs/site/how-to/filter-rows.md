@@ -143,9 +143,20 @@ files lack a column it declares, a read under a filter or a mask of that table f
 ``The data files of `TABLE` do not all have the column `COLUMN` ...``, and nothing is shown
 unfiltered. Write the files again so that every file has the column.
 
+A column of a type Lakana cannot read yet (nanosecond timestamps, `unknown`, and the geospatial
+types of Iceberg format version 3) makes every read of the table fail with ``'gold.events' has the
+column 'x' of type timestamp_ns, which Lakana cannot read yet. Ask the owner of the table to store
+the column as another type.`` The whole table is refused, also by a query that does not name the
+column, so that nothing is hidden without a word. The owner stores the column as a type Lakana
+reads (a microsecond timestamp, for example) and writes the table's rows again.
+
 ## Filters and dropped columns
 
-A filter does not follow a column that is dropped or renamed afterwards. From then on a query of
-the filtered person that reads the table fails instead of showing rows, so nothing is shown
-unfiltered. Revoke the filter and create it again for the new column name. A filter stored by an
+A filter is bound to a column **name**, not to the column itself. When the column is dropped or
+renamed and nothing takes its name, a query of the filtered person that reads the table fails
+instead of showing rows. Revoke the filter and create it again for the new column name.
+
+A rename can also change what a filter covers: a column renamed *onto* the filtered name is
+filtered in the old column's place, and the renamed column is no longer filtered. After any
+rename of a filtered column, or onto one, an administrator must review the table's filters. A filter stored by an
 earlier release keeps working as it did, even if it would be refused today.

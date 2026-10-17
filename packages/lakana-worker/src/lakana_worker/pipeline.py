@@ -796,11 +796,14 @@ def _resolve_sources(
             # policy is never left out. Said here, before the query runs: in the database a
             # missing column would be a "column not found" that suggests columns the reader
             # is not shown, and a column that is merely another one would not fail at all.
+            # A column that has the same field id but is not shown (its type changed) is not
+            # mapped by the read, so a policy on it is told the same way, not as a column of the
+            # reader's own SQL.
             not_the_same = sorted(
                 column
                 for expression in (*resolved_policy.row_filters, *column_masks.values())
                 for column in columns_of(expression)
-                if column.lower() not in same_columns
+                if column.lower() not in same_columns or column.lower() not in shown_names
             )
             if not_the_same:
                 raise _RowsNotListed(

@@ -153,10 +153,15 @@ brackets.
 A column added to the table later reads as NULL in the rows written before it, also under a
 mask, and a renamed column keeps its data. See [Show some people only some rows](filter-rows.md#when-a-tables-schema-changes).
 
-A mask does not follow a column that is dropped or renamed afterwards. From then on every query of
-the masked person that reads the table fails with `Column mask references unknown column 'ssn'; known
-columns: ['id', 'name']`, so nothing is shown unmasked. Revoke the mask and create it again for the new
-column name.
+A mask is bound to a column **name**, not to the column itself. When the column is dropped or
+renamed and nothing takes its name, every query of the masked person that reads the table fails with
+`Column mask references unknown column 'ssn'; known columns: ['id', 'name']`. Revoke the mask and
+create it again for the new column name.
+
+A rename can also change what a mask covers: a column renamed *onto* the masked name is masked in
+the old column's place, and the renamed column is no longer masked, so its values show in clear
+under its new name. After any rename of a masked column, or onto one, an administrator must review
+the table's masks.
 
 ## What a mask does not protect
 

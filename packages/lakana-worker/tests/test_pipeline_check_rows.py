@@ -77,7 +77,7 @@ from lakana_core.policy.row_filters import RowFilterService
 from lakana_core.projects.checks import CheckSpec
 from lakana_core.query_rewrite import TableSource, rewrite_query
 from lakana_core.runs.check_rows import submit_check_rows
-from lakana_core.runs.checks import column_not_shown_message, record_result
+from lakana_core.runs.checks import policy_needs_a_column_message, record_result
 from lakana_core.runs.tasks import Written
 from lakana_core.secrets.keys import KeyProvider
 from lakana_core.storage.resolver import StorageResolver
@@ -2548,24 +2548,41 @@ def test_an_ordinary_read_under_a_filter_on_a_column_an_older_file_lacks_shows_w
     assert (run.status, rows) == (QueryRunStatus.SUCCEEDED, [{"id": 6}])
 
 
-def test_a_filter_on_a_column_widened_since_fails_closed_with_the_columns_own_text(
-    session: Session, admin: PrincipalRef, tmp_path: Path
+@pytest.mark.parametrize("policy", ["filter", "mask"])
+def test_a_policy_on_a_column_widened_since_is_named_as_the_policys_need(
+    session: Session, admin: PrincipalRef, tmp_path: Path, policy: str
 ) -> None:
     """A widened column is not shown in the checked snapshot, and the read maps only shown ones.
 
-    The filter reads `qty`, which the read of the snapshot does not map, so the read fails
-    closed with the text that says the column is not shown, and no row of either file appears.
+    The policy reads `qty`, which the read of the snapshot does not map. The reader is told, before
+    the query runs, that their policy needs a column the snapshot does not show, and to ask
+    whoever manages policies; the text about a column in their own SQL would send them to a
+    query that never names it.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    admin
+        Sets the world up.
+    tmp_path
+        The storage root.
+    policy
+        A row filter on `qty`, or a column mask on `region` whose expression reads `qty`.
     """
     narrow = pa.table({"id": pa.array([2, -1], pa.int64()), "qty": pa.array([5, 6], pa.int32())})
     result = _warned_run(session, admin, narrow, "SELECT * FROM gold.orders WHERE id < 0")
     wide = pa.table({"id": pa.array([3], pa.int64()), "qty": pa.array([7], pa.int64())})
     _write(session, admin, wide, WriteMode.REPLACE, evolve_schema=True)
     ana = _reader(session, admin, "ana", "orders")
-    _filter(session, admin, "ana", "qty > 6")
+    if policy == "filter":
+        _filter(session, admin, "ana", "qty > 6")
+    else:
+        _mask_as(session, admin, "ana", "id", "qty")
 
     message, cause = _failure(session, tmp_path, ana, result)
 
-    assert message == column_not_shown_message("qty", "gold.orders", result.run_id, "dev")
+    assert message == policy_needs_a_column_message("qty", "gold.orders", result.run_id, "dev")
     assert cause == QueryErrorCause.INVALID_QUERY.value
 
 

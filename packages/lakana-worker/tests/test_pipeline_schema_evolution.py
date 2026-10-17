@@ -34,6 +34,7 @@ from pyiceberg.types import (
 )
 from sqlalchemy.orm import Session
 
+import lakana_worker.pipeline as pipeline_module
 from lakana_core.auth import AllowAllAuthorization, PrincipalRef
 from lakana_core.catalog.field_ids import duckdb_type_of
 from lakana_core.catalog.query_service import QueryService
@@ -428,20 +429,25 @@ def _result(tmp_path: Path, run: QueryRun) -> pa.Table:
         return reader.read_all()
 
 
+@pytest.mark.parametrize("order", ["listed", "reversed"])
 @pytest.mark.parametrize("policy", ["none", "row_filter", "column_mask"])
 @pytest.mark.parametrize("change", sorted(_CHANGES))
 def test_a_read_follows_the_schema_change_by_field_id(
+    monkeypatch: pytest.MonkeyPatch,
     session: Session,
     principal: PrincipalRef,
     catalog: CatalogService,
     tmp_path: Path,
     change: str,
     policy: str,
+    order: str,
 ) -> None:
     """Each change, read plainly, through a row filter and through a mask on the changed column.
 
     Parameters
     ----------
+    monkeypatch
+        Replaces the file listing.
     session
         Database session.
     principal
@@ -454,8 +460,18 @@ def test_a_read_follows_the_schema_change_by_field_id(
         The schema change between the two files.
     policy
         What applies to the reader.
+    order
+        Whether the data files are read in the order the manifests list them or the reverse; by-name
+        reads used to take a column's type and presence from the first file.
     """
     column, values = _CHANGES[change](catalog, principal)
+    if order == "reversed":
+        real = pipeline_module.list_data_files
+
+        def reverse(*args: object, **kwargs: object) -> list[str]:
+            return list(reversed(real(*args, **kwargs)))  # ty: ignore[invalid-argument-type]
+
+        monkeypatch.setattr(pipeline_module, "list_data_files", reverse)
     if policy == "row_filter":
         RowFilterService(session, AllowAllAuthorization(), catalog).create(
             principal,

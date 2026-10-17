@@ -130,7 +130,11 @@ failed after such a change (``The data files of `TABLE` do not all have the colu
 run; that message remains only for raw-zone (external) tables. A field inside a struct, list or
 map column is read by name: after one was renamed, or dropped and added again, reads of the
 table are refused with ``'TABLE' cannot be read: the field ...`` until its rows are written
-again. A filter on a float column widened to double still needs a range
+again. A table with a column of a type Lakana cannot read yet (nanosecond timestamps, `unknown`, the
+geospatial types of format version 3) is refused as a whole: ``'TABLE' has the column 'x' of type
+..., which Lakana cannot read yet.`` Store the column as another type. A filter or mask is bound to
+a column name: after a rename of a filtered or masked column, or onto one, review the table's
+policies. A filter on a float column widened to double still needs a range
 ([Show some people only some rows](../how-to/filter-rows.md#columns-of-a-table-made-outside-lakana)).
 
 From this release on, Lakana refuses a commit of a data file that has no field ids, which is
