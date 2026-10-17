@@ -70,6 +70,7 @@ jobs:
   attest-dist:
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
       id-token: write          # the Sigstore signing certificate
@@ -82,7 +83,9 @@ jobs:
       - id: attest
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
         with:
-          subject-path: dist/*
+          subject-path: |
+            dist/*.whl
+            dist/*.tar.gz
       - run: cp "$BUNDLE" lakana-provenance.intoto.jsonl
         env: {BUNDLE: "${{ steps.attest.outputs.bundle-path }}"}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7
@@ -174,8 +177,8 @@ jobs:
     permissions:
       contents: read
       packages: write
-      id-token: write          # the Sigstore signing certificate for the attestation
-      attestations: write      # stores the attestation
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with: {ref: "${{ needs.release-please.outputs.tag }}"}
@@ -202,13 +205,24 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ghcr.io/chrschy/lakana:${{ steps.version.outputs.version }}
-      # Provenance for the image, pushed to the registry next to it: `gh attestation verify
-      # oci://ghcr.io/chrschy/lakana:<version> --repo chrschy/lakana`.
+
+  # Signs the pushed image by digest. Its own job: `publish-image` runs several third-party
+  # actions, and any step of a job with `id-token: write` could ask for a signing certificate.
+  # `gh attestation verify` reads attestations from GitHub, so nothing is pushed to the registry.
+  attest-image:
+    needs: publish-image
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write          # the Sigstore signing certificate
+      attestations: write      # stores the attestation
+    steps:
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
         with:
           subject-name: ghcr.io/chrschy/lakana
-          subject-digest: ${{ steps.build.outputs.digest }}
-          push-to-registry: true
+          subject-digest: ${{ needs.publish-image.outputs.digest }}
+          push-to-registry: false
 
   five-minute-release:
     needs: [release-please, publish-sdk]

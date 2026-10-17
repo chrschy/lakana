@@ -261,7 +261,7 @@ Two jobs of `release.yml` ship the SBOM. `sbom` builds an SPDX software bill of 
 tagged tree with `anchore/sbom-action` (read-only token) and keeps it as the workflow artifact
 `lakana-sbom.spdx.json`. `sbom-release` then downloads that artifact and attaches it to the
 **GitHub release** of the tag, so it is found on the release page; it runs
-`gh release upload "$TAG" … --clobber`, so a re-run replaces the file. `sbom-release` is the only job
+`gh release upload "$TAG" … --clobber`, so a re-run replaces the file. `sbom-release` and `provenance-release` (below) are the only jobs
 with `contents: write`: it has no checkout and no third-party action but the artifact download, so
 no code that builds anything holds the write token. The workflow's own `permissions` is `{}`; every
 job names what it needs, and `release-please` needs nothing from `GITHUB_TOKEN` because it uses
@@ -280,16 +280,22 @@ this repository's `release.yml` from the tagged commit.
   `gh release upload`, the only other job with `contents: write`) attaches the bundle to the
   GitHub release as `lakana-provenance.intoto.jsonl`, where OpenSSF Scorecard's Signed-Releases
   check looks for a signature.
-- **`publish-image`** attests the pushed image by digest (`subject-digest` from the
-  `docker/build-push-action` output, `push-to-registry: true`), and has the same two scopes for it.
+- **`attest-image`** needs `publish-image`, which passes the pushed image's digest as a job
+  output. It attests the image by digest (`subject-digest`, `push-to-registry: false`: `gh
+  attestation verify` reads attestations from GitHub, so nothing is pushed to the registry). It
+  is a job of its own with one step: `publish-image` runs several third-party actions, and any
+  step of a job with `id-token: write` could ask for a signing certificate. `publish-image` has
+  neither `id-token` nor `attestations`.
 - No other job has `id-token` (the three PyPI publish jobs have it for Trusted Publishing) or
   `attestations` write; `scripts/tests/test_workflows.py` pins this by effective permissions.
 
 How a user verifies (also in the user documentation, "Verify a download" in the Compose how-to):
 
 ```bash
-gh attestation verify lakana-<version>-py3-none-any.whl --repo chrschy/lakana
-gh attestation verify oci://ghcr.io/chrschy/lakana:<version> --repo chrschy/lakana
+gh attestation verify lakana-<version>-py3-none-any.whl --repo chrschy/lakana \
+  --signer-workflow chrschy/lakana/.github/workflows/release.yml
+gh attestation verify oci://ghcr.io/chrschy/lakana:<version> --repo chrschy/lakana \
+  --signer-workflow chrschy/lakana/.github/workflows/release.yml
 ```
 
 Check it after each release: the first release that has attestations is the first one cut after

@@ -25,11 +25,14 @@ it, or verify the image you pulled:
 <!-- not tested: needs a published release and the GitHub CLI -->
 ```bash
 pip download "lakana==<version>" --no-deps
-gh attestation verify lakana-<version>-py3-none-any.whl --repo chrschy/lakana
-gh attestation verify oci://ghcr.io/chrschy/lakana:<version> --repo chrschy/lakana
+gh attestation verify lakana-<version>-py3-none-any.whl --repo chrschy/lakana \
+  --signer-workflow chrschy/lakana/.github/workflows/release.yml
+gh attestation verify oci://ghcr.io/chrschy/lakana:<version> --repo chrschy/lakana \
+  --signer-workflow chrschy/lakana/.github/workflows/release.yml
 ```
 
-A passing check prints the repository and the workflow that built the file. A failing check
+`--signer-workflow` ties the check to Lakana's release workflow, not to any workflow of the
+repository. A passing check prints the repository and the workflow that built the file. A failing check
 means the file is not the one Lakana published: delete it and download again. A release up to 0.13.0
 has no attestation, and the command says that no attestation was found.
 

@@ -259,7 +259,7 @@ def test_dependabot_groups_its_updates_and_keeps_the_pinned_tools_apart() -> Non
     """One pull request per ecosystem and week; ruff and ty upgrade in their own."""
     config = yaml.safe_load((ROOT / ".github" / "dependabot.yml").read_text())
     updates = {entry["package-ecosystem"]: entry for entry in config["updates"]}
-    assert set(updates) == {"uv", "github-actions", "docker"}
+    assert set(updates) == {"uv", "github-actions", "docker", "pip"}
     for ecosystem, entry in updates.items():
         groups = entry["groups"]
         assert len(groups) == 1, ecosystem
@@ -1078,20 +1078,31 @@ def test_the_cla_and_deep_security_workflows_write_only_in_the_job_that_needs_it
     }
     deep = yaml.safe_load((WORKFLOWS / "security-deep.yml").read_text())
     assert deep["permissions"] == {"contents": "read"}
-    assert deep["jobs"]["semgrep"]["permissions"] == {
-        "contents": "read",
-        "security-events": "write",
-    }
-    assert _effective_permissions(deep, deep["jobs"]["trivy"]).get("security-events") != "write"
+    for name, job in deep["jobs"].items():
+        writes = _effective_permissions(deep, job).get("security-events") == "write"
+        assert writes == (name == "semgrep-upload"), name
 
 
-def test_the_semgrep_results_are_uploaded_to_code_scanning() -> None:
-    """The SARIF file goes to code scanning even when Semgrep finds something."""
-    steps = _jobs("security-deep.yml")["semgrep"]["steps"]
-    upload = next(s for s in steps if "upload-sarif" in str(s.get("uses")))
-    assert upload["with"]["sarif_file"] == "semgrep.sarif"
-    assert upload["with"]["category"] == "semgrep"
-    assert upload["if"] == "always()"
+def test_the_semgrep_scan_holds_no_write_scope_and_the_upload_runs_nothing_else() -> None:
+    """The scanner is a pinned third-party image over the checkout; the upload is its own job."""
+    jobs = _jobs("security-deep.yml")
+    scan = jobs["semgrep"]
+    assert scan["permissions"] == {"contents": "read"}
+    assert re.search(r"@sha256:[0-9a-f]{64}$", scan["container"]["image"])
+    checkout = next(s for s in scan["steps"] if "actions/checkout" in str(s.get("uses")))
+    assert checkout["with"]["persist-credentials"] is False
+    assert all("upload-sarif" not in str(s.get("uses")) for s in scan["steps"])
+    artifact = next(s for s in scan["steps"] if "upload-artifact" in str(s.get("uses")))
+    assert artifact["with"]["name"] == "semgrep-sarif"
+
+    upload = jobs["semgrep-upload"]
+    assert upload["needs"] == "semgrep"
+    assert upload["permissions"] == {"security-events": "write"}
+    uses = [s["uses"].split("@")[0] for s in upload["steps"]]
+    assert uses == ["actions/download-artifact", "github/codeql-action/upload-sarif"]
+    sarif = upload["steps"][1]["with"]
+    assert sarif["sarif_file"] == "sarif/semgrep.sarif"
+    assert sarif["category"] == "semgrep"
 
 
 def test_codeql_analyses_python_on_pull_requests_main_and_weekly() -> None:
@@ -1128,18 +1139,30 @@ def test_every_published_artefact_gets_a_build_provenance_attestation() -> None:
         return [s for s in job["steps"] if "attest-build-provenance" in str(s.get("uses"))]
 
     attesting = {name for name, job in jobs.items() if attest(job)}
-    assert attesting == {"attest-dist", "publish-image"}
+    assert attesting == {"attest-dist", "attest-image"}
     for name in attesting:
         perms = jobs[name]["permissions"]
         assert perms["id-token"] == "write", name
         assert perms["attestations"] == "write", name
+        assert jobs[name]["timeout-minutes"] <= 10, name
     assert jobs["attest-dist"]["permissions"] == {
         "contents": "read",
         "id-token": "write",
         "attestations": "write",
     }
+    # The image is signed by a job that runs no other third-party action: `publish-image`
+    # runs several, and any step of a job with `id-token: write` could ask for a certificate.
+    assert jobs["attest-image"]["permissions"] == {
+        "contents": "read",
+        "id-token": "write",
+        "attestations": "write",
+    }
+    assert jobs["attest-image"]["needs"] == "publish-image"
+    assert len(jobs["attest-image"]["steps"]) == 1
+    assert jobs["publish-image"]["outputs"]["digest"] == "${{ steps.build.outputs.digest }}"
+    assert jobs["publish-image"]["permissions"] == {"contents": "read", "packages": "write"}
     (wheels,) = attest(jobs["attest-dist"])
-    assert wheels["with"]["subject-path"] == "dist/*"
+    assert wheels["with"]["subject-path"].split() == ["dist/*.whl", "dist/*.tar.gz"]
     assert jobs["attest-dist"]["needs"] == "build"
     # Scorecard looks for a signature among the release's assets: the bundle goes there from a
     # job that only downloads it, like the SBOM's.
@@ -1150,11 +1173,10 @@ def test_every_published_artefact_gets_a_build_provenance_attestation() -> None:
         "actions/download-artifact"
     ]
     assert any(".intoto.jsonl" in c for s in release["steps"] for c in _commands(s))
-    (image,) = attest(jobs["publish-image"])
-    assert image["with"]["push-to-registry"] is True
+    (image,) = attest(jobs["attest-image"])
+    assert image["with"]["push-to-registry"] is False
     assert image["with"]["subject-name"] == "ghcr.io/chrschy/lakana"
-    assert "steps.build.outputs.digest" in image["with"]["subject-digest"]
-    assert jobs["publish-image"]["permissions"]["packages"] == "write"
+    assert image["with"]["subject-digest"] == "${{ needs.publish-image.outputs.digest }}"
     for name, job in jobs.items():
         if name not in attesting:
             perms = _effective_permissions(workflow, job)
@@ -1177,6 +1199,7 @@ def test_the_macos_job_runs_the_unit_suite_and_the_getting_started_example() -> 
     assert job["timeout-minutes"] <= 45
     commands = [c for step in job["steps"] for c in _commands(step)]
     pytest_command = next(c for c in commands if "pytest" in c)
+    assert pytest_command.startswith("uv run pytest packages ")  # scripts/ is Linux tooling
     assert '-m "not integration"' in pytest_command
     assert "-n 2" in pytest_command
     assert "--cov" not in pytest_command
@@ -1214,3 +1237,17 @@ def test_the_macos_job_runs_for_a_pull_request_only_when_packages_change() -> No
     assert guarded
     for step in guarded:
         assert step["if"] == "steps.scope.outputs.run == 'true'", step
+
+
+def test_the_five_minute_script_installs_uv_by_hash_and_dependabot_keeps_it_current() -> None:
+    """The tool `uv` comes from a hashed requirements file; the product install stays unpinned on purpose."""
+    script = (ROOT / "scripts" / "five_minute_test.sh").read_text()
+    assert "--require-hashes -r" in script
+    assert "requirements-uv.txt" in script
+    requirements = (ROOT / "scripts" / "requirements-uv.txt").read_text()
+    assert re.search(r"^uv==\d+\.\d+\.\d+ \\$", requirements, re.MULTILINE)
+    assert len(re.findall(r"--hash=sha256:[0-9a-f]{64}", requirements)) >= 2
+    config = yaml.safe_load((ROOT / ".github" / "dependabot.yml").read_text())
+    assert [u["directory"] for u in config["updates"] if u["package-ecosystem"] == "pip"] == [
+        "/scripts"
+    ]
