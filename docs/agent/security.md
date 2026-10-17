@@ -2238,8 +2238,10 @@ work.
   filter that reads no column, and for a policy of a release before the column existed). For a
   read of an Iceberg table, `_resolve_sources` collects, from the reader's applied policies, every
   column a mask covers or its expression reads and every column a filter reads, and calls
-  `policy.renames.renamed_policy_column` with the table's metadata. Only the policy's schema (the
-  table's first one when it has none) and the CURRENT schema are compared, never the ones between,
+  `policy.renames.renamed_policy_column` with the table's metadata. Two schemas are compared at a time, never
+  the ones between: the policy's schema and the CURRENT one (a policy with no recorded id, made by
+  an earlier release, is judged against every schema the table has had, since it may have been
+  written at any point of the history, and a name touched since any of them counts),
   because schema ids are chosen by clients and a set-back makes the current schema an older one: a
   name whose owning field id differs, or a field id that changed its name with the old or the new
   name among the policy's, refuses the read before the query runs (`PolicyColumnRenamedError`,

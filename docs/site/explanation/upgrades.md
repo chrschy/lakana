@@ -144,7 +144,7 @@ through `evolve_schema`) since the policy was created, and the old or the new na
 policy uses:
 `` `TABLE` has a row filter or column mask that uses column `COLUMN`, and a column was renamed or replaced since the policy was created ...``
 Each policy now records the table schema it was created against. A policy of an earlier release
-records none and is judged from the oldest schema of the table, so after the upgrade a table whose
+records none and is judged against every schema the table has had, so after the upgrade a table whose
 policy column was renamed or replaced at any time is refused until an administrator creates the
 policy again for the column it is meant for and revokes the old one. Before you upgrade, list the
 row filters and column masks (the `list` subcommand of `lakana row-filter` and of

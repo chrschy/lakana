@@ -535,7 +535,7 @@ def _added_data_files(
                 raise StorageUnavailableError(
                     _STORAGE_UNAVAILABLE.format(table=shown(table))
                 ) from None
-            raise ValidationError(_UNREADABLE_MANIFEST.format(table=table)) from exc
+            raise ValidationError(_UNREADABLE_MANIFEST.format(table=shown(table))) from exc
     return added
 
 

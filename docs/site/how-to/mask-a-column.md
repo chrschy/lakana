@@ -191,9 +191,9 @@ A rename therefore goes in this order:
 Do not revoke the old mask first: until the new one exists, the renamed column would show its
 values in clear.
 
-A mask created after the rename records the new version of the schema, so it is not refused. A
-mask that an earlier release created has no recorded version: it is judged from the oldest schema
-of the table, so a rename from any time before also refuses the read until it is created again.
+A mask created after the rename records the new version of the schema, so it is not refused. A mask
+that an earlier release created has no recorded version: it is judged against every schema the table
+has had, so a rename from any time before also refuses the read until it is created again.
 
 ## What a mask does not protect
 

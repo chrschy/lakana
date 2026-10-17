@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 
+from pyiceberg.schema import Schema
 from pyiceberg.table.metadata import TableMetadata
 
 from lakana_core.identifiers import shown
@@ -62,39 +63,29 @@ def policy_column_renamed_message(column: str, table: str) -> str:
     return POLICY_COLUMN_RENAMED.format(column=shown(column), table=shown(table))
 
 
-def _touched_by(metadata: TableMetadata, policy: PolicyColumns) -> set[str]:
-    """Find the names of a policy that changed owner or were renamed since its schema.
+def _changed_since(written: Schema, current: Schema, spelled: dict[str, str]) -> set[str]:
+    """Find the names that changed owner or were renamed between two schemas.
 
     Parameters
     ----------
-    metadata
-        The table's metadata, with every schema it lists.
-    policy
-        The policy.
+    written
+        The schema a policy is taken to have been written against.
+    current
+        The schema a read uses.
+    spelled
+        The policy's names, each lower-cased name to the spelling the policy uses.
 
     Returns
     -------
     set of str
-        The policy's names, as it spells them, that a field id lost or gained between its
-        schema and the current one; empty when none did.
+        The policy's names, as it spells them, whose field id differs between the schemas or
+        that a field id lost or gained by a rename; empty when none did.
     """
-    spelled = {name.lower(): name for name in policy.columns}
-    if policy.schema_id is None:
-        written = metadata.schemas[0]
-    else:
-        found = [schema for schema in metadata.schemas if schema.schema_id == policy.schema_id]
-        if not found:
-            # Without the schema the policy was written against there is nothing to compare:
-            # every name of the policy is suspect.
-            return set(policy.columns)
-        written = found[0]
-    # Schema ids are chosen by clients and the history can be set back, so only the two schemas
-    # that matter are compared: the one the policy was written against and the one a read uses.
     before = {field.field_id: field.name.lower() for field in written.fields}
-    now = {field.field_id: field.name.lower() for field in metadata.schema().fields}
+    now = {field.field_id: field.name.lower() for field in current.fields}
     owner_before = {name: field_id for field_id, name in before.items()}
     owner_now = {name: field_id for field_id, name in now.items()}
-    touched: set[str] = {
+    touched = {
         spelled[name]
         for name in spelled
         if name in owner_before and name in owner_now and owner_before[name] != owner_now[name]
@@ -106,6 +97,45 @@ def _touched_by(metadata: TableMetadata, policy: PolicyColumns) -> set[str]:
     return touched
 
 
+def _touched_by(metadata: TableMetadata, policy: PolicyColumns) -> set[str]:
+    """Find the names of a policy that changed owner or were renamed since it was written.
+
+    Schema ids are chosen by clients and the history can be set back, so only two schemas are
+    compared at a time: one the policy may have been written against and the one a read uses.
+    A policy that recorded its schema is compared against that one. A policy that recorded none
+    (made by an earlier release) may have been written at any point of the table's history, so
+    it is compared against every schema the table has had, and a name touched since any of them
+    counts.
+
+    Parameters
+    ----------
+    metadata
+        The table's metadata, with every schema it lists.
+    policy
+        The policy.
+
+    Returns
+    -------
+    set of str
+        The policy's names, as it spells them, that a field id lost or gained between the
+        schema it was written against and the current one; empty when none did.
+    """
+    spelled = {name.lower(): name for name in policy.columns}
+    if policy.schema_id is None:
+        candidates = list(metadata.schemas)
+    else:
+        candidates = [schema for schema in metadata.schemas if schema.schema_id == policy.schema_id]
+        if not candidates:
+            # Without the schema the policy was written against there is nothing to compare:
+            # every name of the policy is suspect.
+            return set(policy.columns)
+    current = metadata.schema()
+    touched: set[str] = set()
+    for written in candidates:
+        touched |= _changed_since(written, current, spelled)
+    return touched
+
+
 def renamed_policy_column(metadata: TableMetadata, policies: Iterable[PolicyColumns]) -> str | None:
     """Find a policy column that a rename may have moved onto another column.
 
@@ -113,10 +143,11 @@ def renamed_policy_column(metadata: TableMetadata, policies: Iterable[PolicyColu
     field id that changed its name makes both names suspect, and so does a name that now belongs
     to another field id (a column dropped, a different one added under its name). The comparison
     ignores letter case, as the database does. Each policy is judged from its own schema; one
-    whose recorded schema the metadata no longer has is affected in every column. A qualified
-    column of a filter stored by a release that accepted one (`t.region`) is listed by its
-    qualifier; such a read fails in the database before it can show a row, so it is closed
-    without this rule.
+    that recorded none is judged against every schema the table has had, and one whose
+    recorded schema the metadata no longer has is affected in every column. A qualified column
+    of a filter stored by a release that accepted one (`t.region`) is listed by its qualifier;
+    such a read fails in the database before it can show a row, so it is closed without this
+    rule.
 
     Parameters
     ----------

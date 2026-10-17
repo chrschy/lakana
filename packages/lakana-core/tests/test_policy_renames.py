@@ -140,6 +140,28 @@ def test_a_recorded_schema_the_metadata_lacks_touches_every_column_of_the_policy
     assert renamed_policy_column(metadata, [_policy("ssn", schema_id=999)]) == "ssn"
 
 
+def test_a_policy_without_a_recorded_schema_is_judged_against_every_schema() -> None:
+    """The mask was made at schema 1, after `ssn` was added; a takeover came after, not before."""
+    metadata = _metadata(
+        2,
+        _schema(0),
+        _schema(1, (2, "ssn")),
+        _schema(2, (2, "ssn_old"), (3, "ssn")),
+    )
+    assert renamed_policy_column(metadata, [_policy("ssn", schema_id=None)]) == "ssn"
+
+
+def test_a_policy_without_a_recorded_schema_reads_when_no_policy_column_was_touched() -> None:
+    """Only an unrelated column changed in the table's history."""
+    metadata = _metadata(
+        2,
+        _schema(0, (3, "e")),
+        _schema(1, (2, "ssn"), (3, "e")),
+        _schema(2, (2, "ssn"), (3, "email")),
+    )
+    assert renamed_policy_column(metadata, [_policy("ssn", schema_id=None)]) is None
+
+
 def test_a_schema_set_back_to_the_policys_own_touches_nothing() -> None:
     """Schema 1 stays in the metadata after a set-back to 0; only the current schema counts."""
     metadata = _metadata(0, _schema(0, (2, "ssn")), _schema(1, (9, "ssn")))

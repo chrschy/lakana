@@ -976,6 +976,32 @@ def test_a_policy_without_a_recorded_schema_is_judged_from_the_oldest_schema(
     )
 
 
+def test_an_old_release_mask_on_a_column_added_later_is_refused_after_a_takeover(
+    session: Session, principal: PrincipalRef, catalog: CatalogService, tmp_path: Path
+) -> None:
+    """The mask names no schema and `ssn` was added after the table was made, then taken over."""
+    ref = _ref("staff")
+    created = catalog.create_table(principal, ref, schema=Schema(_optional(1, "id", LongType())))
+    table = _append(
+        catalog, principal, ref, created, pa.table({"id": pa.array([1, 2], pa.int64())})
+    )
+    table = _evolve(catalog, principal, ref, table, lambda u: u.add_column("ssn", StringType()))
+    mask = _mask(session, catalog, principal, "staff", "ssn")
+    row = session.get(ColumnMask, mask)
+    assert row is not None
+    row.schema_id = None
+    session.commit()
+    read = _result(tmp_path, _query(session, principal, "SELECT * FROM gold.staff"))
+    assert {r["ssn"] for r in read.to_pylist()} == {"hidden"}
+
+    table = _evolve(catalog, principal, ref, table, lambda u: u.rename_column("ssn", "ssn_old"))
+    _evolve(catalog, principal, ref, table, lambda u: u.add_column("ssn", StringType()))
+
+    _assert_nothing_shown(
+        _query(session, principal, "SELECT * FROM gold.staff"), "gold.staff", "ssn"
+    )
+
+
 def test_a_policy_of_another_reader_does_not_refuse_this_reader(
     session: Session, principal: PrincipalRef, catalog: CatalogService, tmp_path: Path
 ) -> None:

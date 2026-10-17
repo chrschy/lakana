@@ -193,9 +193,8 @@ A rename therefore goes in this order:
 Do not revoke the old filter first: until the new one exists, the person reads every row.
 
 A filter created after the rename records the new version of the schema, so it is not refused. A
-filter that an earlier release created has no recorded version: it is judged from the oldest
-schema of the table, so a rename from any time before also refuses the read until it is created
-again.
+filter that an earlier release created has no recorded version: it is judged against every schema
+the table has had, so a rename from any time before also refuses the read until it is created again.
 
 A filter stored by an earlier release is judged by the same rule, even if its text would not be
 accepted by `create` today.
