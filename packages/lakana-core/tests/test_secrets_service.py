@@ -425,7 +425,7 @@ def test_create_records_a_secret_created_audit_event(session: Session) -> None:
     events = session.query(AuditEvent).filter_by(event_type=AuditEventType.SECRET_CREATED).all()
     assert len(events) == 1
     assert events[0].securable_environment == "dev"
-    assert events[0].detail == {"name": "s3-creds"}
+    assert events[0].detail == {"name": "s3-creds", "use": None}
     assert "SUPERSECRET" not in str(events[0].detail)
 
 

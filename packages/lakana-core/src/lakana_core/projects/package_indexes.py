@@ -4,9 +4,10 @@ Only `MANAGE_PACKAGE_INDEX` registers an index or binds a credential to one.
 The `ADMIN` role carries the action, and it can be granted on its own. A
 project's lock may only name a registered index's URL (a wheel's own URL in
 the lock may still point at another host, which receives no credential).
-The holder of the action chooses where a credential may go: it binds the
-name of any secret of an environment to a URL of its choice, and a build of
-a project that names the index sends that secret's `password` to that host.
+Naming a secret binds it to the index on first use (`bind_named_secrets`): an unbound
+secret is bound, one bound to anything else is refused unless the principal may manage
+secrets in its environment, and the URL of an index with a bound secret changes only for
+such a principal. A build sends a secret's `password` only to the index it is bound to.
 """
 
 from __future__ import annotations
@@ -32,6 +33,11 @@ from lakana_core.errors import (
 from lakana_core.identifiers import is_secret_name, shown, validate_path_component
 from lakana_core.models import AuditEventType, Environment, PackageIndex
 from lakana_core.projects.package_sources import RegisteredIndex, normalize_index_url
+from lakana_core.secrets.uses import (
+    SecretUse,
+    bind_named_secrets,
+    require_secret_management_for_url_change,
+)
 
 UPDATABLE_FIELDS = frozenset({"url", "credential_secret"})
 """What `PATCH /package-indexes/{name}` may change. The name is fixed."""
@@ -256,6 +262,18 @@ class PackageIndexService:
             credential_secret=credential_secret,
             created_by=p.id,
         )
+        if credential_secret is not None:
+            try:
+                bind_named_secrets(
+                    self._session,
+                    self._authz,
+                    p,
+                    name=credential_secret,
+                    use=SecretUse.package_index(row),
+                )
+            except PermissionDenied:
+                self._session.rollback()
+                raise
         AuditService(self._session).record(
             p.id,
             AuditEventType.PACKAGE_INDEX_CREATED,
@@ -412,6 +430,15 @@ class PackageIndexService:
         clash = self._clash(name, new_url, except_id=row.id)
         if clash is not None:
             raise AlreadyExistsError(clash)
+        use = SecretUse.package_index(row)
+        try:
+            if new_url != row.url:
+                require_secret_management_for_url_change(self._session, self._authz, p, use)
+            if new_secret is not None:
+                bind_named_secrets(self._session, self._authz, p, name=new_secret, use=use)
+        except PermissionDenied:
+            self._session.rollback()
+            raise
         previous = {key: getattr(row, key) for key in changes}
         row.url = new_url
         row.credential_secret = new_secret

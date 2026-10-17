@@ -1,4 +1,4 @@
-"""Secret creation, listing, rotation, and revocation.
+"""Secret creation, listing, rotation, binding, and revocation.
 
 Every method here authorizes `Action.MANAGE_SECRET` before doing anything
 else it can (`create`/`list_for_environment`, which already know the
@@ -25,6 +25,7 @@ from lakana_core.errors import AlreadyExistsError, NotFoundError, ValidationErro
 from lakana_core.models import AuditEventType, Environment, Secret
 from lakana_core.secrets.crypto import SecretBinding, encrypt_secret_values
 from lakana_core.secrets.keys import KeyProvider
+from lakana_core.secrets.uses import SecretUse, first_use, record_binding
 
 
 class SecretService:
@@ -98,7 +99,13 @@ class SecretService:
         return secret
 
     def create(
-        self, p: PrincipalRef, *, environment: str, name: str, values: dict[str, str]
+        self,
+        p: PrincipalRef,
+        *,
+        environment: str,
+        name: str,
+        values: dict[str, str],
+        use: SecretUse | None = None,
     ) -> Secret:
         """Create a secret.
 
@@ -112,6 +119,9 @@ class SecretService:
             The secret's name, unique within `environment`.
         values
             The plaintext key-value bag to encrypt and store.
+        use
+            What the secret is for; `None` binds it on first use: to the one package index or
+            repository that names it, else it stays unbound (`first_use`).
 
         Returns
         -------
@@ -134,6 +144,8 @@ class SecretService:
         """
         self._authz.authorize(p, Action.MANAGE_SECRET, Securable.environment_scope(environment))
         env = self._get_environment(environment)
+        if use is None:
+            use = first_use(self._session, name)
         secret_id = uuid.uuid4()
         encrypted = encrypt_secret_values(
             values, self._key_provider, SecretBinding(secret_id, env.id, name)
@@ -147,6 +159,8 @@ class SecretService:
             wrapped_data_key=encrypted.wrapped_data_key,
             format_version=encrypted.format_version,
             key_id=encrypted.key_id,
+            use_kind=use.kind if use is not None else None,
+            use_target_id=use.target_id if use is not None else None,
             created_by=p.id,
             created_at=datetime.now(UTC),
         )
@@ -154,7 +168,7 @@ class SecretService:
             p.id,
             AuditEventType.SECRET_CREATED,
             securable=Securable.environment_scope(environment),
-            detail={"name": name},
+            detail={"name": name, "use": use.kind.value if use is not None else None},
         )
         self._session.add(secret)
         try:
@@ -167,6 +181,43 @@ class SecretService:
             raise AlreadyExistsError(
                 f"A secret named {name!r} already exists in environment {environment!r}."
             ) from exc
+        return secret
+
+    def bind(self, p: PrincipalRef, secret_id: uuid.UUID, use: SecretUse) -> Secret:
+        """Bind a secret to a use, whatever it was bound to before.
+
+        Parameters
+        ----------
+        p
+            The acting principal.
+        secret_id
+            The secret's id.
+        use
+            The use (`resolve_use` builds it from names).
+
+        Returns
+        -------
+        Secret
+            The updated row.
+
+        Raises
+        ------
+        NotFoundError
+            If no secret has that id.
+        ValidationError
+            If the secret has been revoked.
+        PermissionDenied
+            If the acting principal may not manage secrets in the secret's environment.
+        """
+        secret = self._get_secret(secret_id)
+        env = self._session.get(Environment, secret.environment_id)
+        assert env is not None  # nosec B101 -- environment_id is a non-nullable FK with ON DELETE CASCADE
+        scope = Securable.environment_scope(env.name)
+        self._authz.authorize(p, Action.MANAGE_SECRET, scope)
+        if secret.revoked_at is not None:
+            raise ValidationError(f"Secret {secret_id} has been revoked and cannot be bound.")
+        record_binding(self._session, p, secret, scope, use)
+        self._session.commit()
         return secret
 
     def list_for_environment(self, p: PrincipalRef, environment: str) -> list[Secret]:

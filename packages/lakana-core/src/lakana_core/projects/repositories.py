@@ -4,6 +4,12 @@ Only `MANAGE_REPOSITORY` sets a URL or binds a credential; deployers name a
 repository and nothing else, so the worker fetches only from hosts an admin
 chose. That grant is the SSRF trust boundary (private addresses are allowed:
 self-hosted GitLab is usually internal).
+
+Naming a secret binds it to the repository on first use (`bind_named_secrets`): an unbound
+secret is bound, one bound to anything else is refused unless the principal may manage
+secrets in its environment, and the URL of a repository with a bound secret changes only
+for such a principal. A deploy sends a secret's `token` only to the repository it is bound
+to.
 """
 
 from __future__ import annotations
@@ -19,7 +25,13 @@ from sqlalchemy.orm.exc import StaleDataError
 
 from lakana_core.audit.service import AuditService
 from lakana_core.auth import Action, AuthorizationService, PrincipalRef, Securable
-from lakana_core.errors import AlreadyExistsError, ConflictError, NotFoundError, ValidationError
+from lakana_core.errors import (
+    AlreadyExistsError,
+    ConflictError,
+    NotFoundError,
+    PermissionDenied,
+    ValidationError,
+)
 from lakana_core.identifiers import validate_path_component
 from lakana_core.models import (
     AuditEventType,
@@ -29,6 +41,11 @@ from lakana_core.models import (
     RepositoryKind,
 )
 from lakana_core.projects.git_input import resolve_local_path, validate_ref, validate_repo_url
+from lakana_core.secrets.uses import (
+    SecretUse,
+    bind_named_secrets,
+    require_secret_management_for_url_change,
+)
 
 UPDATABLE_FIELDS = frozenset(
     {"url", "credential_secret", "credential_username", "ssh_known_hosts", "default_ref"}
@@ -218,6 +235,18 @@ class RepositoryService:
         _validate(repo, self._repo_roots)
         if self._session.execute(select(Repository.id).where(Repository.name == name)).first():
             raise AlreadyExistsError(f"A repository named {name!r} already exists.")
+        if credential_secret is not None:
+            try:
+                bind_named_secrets(
+                    self._session,
+                    self._authz,
+                    p,
+                    name=credential_secret,
+                    use=SecretUse.repository(repo),
+                )
+            except PermissionDenied:
+                self._session.rollback()
+                raise
         AuditService(self._session).record(
             p.id,
             AuditEventType.REPOSITORY_CREATED,
@@ -328,6 +357,16 @@ class RepositoryService:
             raise ValidationError(f"{', '.join(sorted(fixed))} cannot be changed.")
         if changes.get("url", repo.url) is None:
             raise ValidationError("url cannot be cleared.")
+        use = SecretUse.repository(repo)
+        try:
+            if changes.get("url", repo.url) != repo.url:
+                require_secret_management_for_url_change(self._session, self._authz, p, use)
+            named = changes.get("credential_secret", repo.credential_secret)
+            if named is not None:
+                bind_named_secrets(self._session, self._authz, p, name=named, use=use)
+        except PermissionDenied:
+            self._session.rollback()
+            raise
         try:
             for field, value in changes.items():
                 setattr(repo, field, value)

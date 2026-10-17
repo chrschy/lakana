@@ -14,11 +14,21 @@ import shlex
 import uuid
 from dataclasses import dataclass
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from lakana_core.errors import ValidationError
+from lakana_core.audit.service import AuditService
+from lakana_core.auth import Action, AuthorizationService, PrincipalRef, Securable
+from lakana_core.errors import NotFoundError, PermissionDenied, ValidationError
 from lakana_core.identifiers import shown
-from lakana_core.models import Environment, PackageIndex, Repository, Secret, SecretUseKind
+from lakana_core.models import (
+    AuditEventType,
+    Environment,
+    PackageIndex,
+    Repository,
+    Secret,
+    SecretUseKind,
+)
 
 _NOUNS = {SecretUseKind.PACKAGE_INDEX: "package index", SecretUseKind.REPOSITORY: "repository"}
 _OPTIONS = {SecretUseKind.PACKAGE_INDEX: "--index", SecretUseKind.REPOSITORY: "--repository"}
@@ -222,6 +232,24 @@ def bind_command(environment: str, name: str, use: SecretUse) -> str:
     )
 
 
+def _bound_to(secret: Secret, use: SecretUse) -> bool:
+    """Say whether a secret is bound to exactly this use.
+
+    Parameters
+    ----------
+    secret
+        The secret.
+    use
+        The use.
+
+    Returns
+    -------
+    bool
+        Whether kind and target match.
+    """
+    return secret.use_kind is use.kind and secret.use_target_id == use.target_id
+
+
 def require_use(session: Session, secret: Secret, use: SecretUse, *, environment_name: str) -> None:
     """Refuse a secret for a use it is not bound to.
 
@@ -257,11 +285,7 @@ def require_use(session: Session, secret: Secret, use: SecretUse, *, environment
     if use.kind is SecretUseKind.ENVIRONMENT:
         if secret.use_kind in (None, SecretUseKind.ENVIRONMENT):
             return
-    elif (
-        use.target_id is not None
-        and secret.use_kind is use.kind
-        and secret.use_target_id == use.target_id
-    ):
+    elif use.target_id is not None and _bound_to(secret, use):
         return
     command = bind_command(environment_name, secret.name, use)
     who = f"Secret '{shown(secret.name)}' of environment '{shown(environment_name)}'"
@@ -275,3 +299,227 @@ def require_use(session: Session, secret: Secret, use: SecretUse, *, environment
         f"{who} is bound to {current}, not to {use.wanted()}, so Lakana does not use it there. "
         f"An administrator who means it changes its use: {command}"
     )
+
+
+def record_binding(
+    session: Session, p: PrincipalRef, secret: Secret, scope: Securable, use: SecretUse
+) -> None:
+    """Bind a secret to a use and add the audit event; the caller commits.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    p
+        The acting principal.
+    secret
+        The secret to bind; its previous use goes into the event.
+    scope
+        The secret's environment scope.
+    use
+        The use to bind it to.
+    """
+    AuditService(session).record(
+        p.id,
+        AuditEventType.SECRET_BOUND,
+        securable=scope,
+        detail={
+            "name": secret.name,
+            "use": use.kind.value,
+            "target": use.target_name,
+            "previous": secret.use_kind.value if secret.use_kind is not None else None,
+        },
+    )
+    secret.use_kind, secret.use_target_id = use.kind, use.target_id
+
+
+def first_use(session: Session, name: str) -> SecretUse | None:
+    """Find the use a new secret takes on first use: the one entry that names it.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    name
+        The secret's name.
+
+    Returns
+    -------
+    SecretUse or None
+        The package index or repository when exactly one of all of them names `name` as its
+        credential; `None` otherwise (none, or more than one: an administrator decides).
+    """
+    indexes = (
+        session.execute(select(PackageIndex).where(PackageIndex.credential_secret == name))
+        .scalars()
+        .all()
+    )
+    repositories = (
+        session.execute(select(Repository).where(Repository.credential_secret == name))
+        .scalars()
+        .all()
+    )
+    if len(indexes) + len(repositories) != 1:
+        return None
+    if indexes:
+        return SecretUse.package_index(indexes[0])
+    return SecretUse.repository(repositories[0])
+
+
+def resolve_use(session: Session, kind: SecretUseKind, target: str | None) -> SecretUse:
+    """Turn a use as a caller names it into a `SecretUse`.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    kind
+        The kind of use.
+    target
+        The index's or repository's name; `None` for the environment.
+
+    Returns
+    -------
+    SecretUse
+        The use, with the target's id.
+
+    Raises
+    ------
+    ValidationError
+        If the environment use is given a name, or an index or repository use none.
+    NotFoundError
+        If no index or repository has that name.
+    """
+    if kind is SecretUseKind.ENVIRONMENT:
+        if target is not None:
+            raise ValidationError(
+                "The environment use takes no name. Leave the name out to bind the secret to "
+                "its environment."
+            )
+        return SecretUse.environment()
+    noun = _NOUNS[kind]
+    listing = "lakana index list" if kind is SecretUseKind.PACKAGE_INDEX else "lakana repo list"
+    if not target:
+        raise ValidationError(f"Name the {noun} the secret is for; `{listing}` shows them.")
+    model = PackageIndex if kind is SecretUseKind.PACKAGE_INDEX else Repository
+    row = session.execute(select(model).where(model.name == target)).scalar_one_or_none()
+    if row is None:
+        raise NotFoundError(
+            f"No {noun} named '{_text(target)}'; `{listing}` shows the registered ones."
+        )
+    return SecretUse(kind, row.id, row.name)
+
+
+def bind_named_secrets(
+    session: Session,
+    authz: AuthorizationService,
+    p: PrincipalRef,
+    *,
+    name: str,
+    use: SecretUse,
+) -> list[str]:
+    """Bind every active secret called `name` to `use`: bind on first use.
+
+    An index or a repository names its credential by secret name, resolved in each
+    environment. Naming it binds every unbound secret of that name; one bound to anything
+    else (an unbound one an environment's storage names counts as bound to its environment)
+    changes its use only for a principal who may manage that environment's secrets. Nothing
+    is committed here; the caller commits or rolls back.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    authz
+        Answers whether `p` may manage secrets in an environment.
+    p
+        The acting principal.
+    name
+        The secret name the index or repository names.
+    use
+        The index or repository, with its id.
+
+    Returns
+    -------
+    list of str
+        The environments whose secret was bound or rebound now, sorted.
+
+    Raises
+    ------
+    PermissionDenied
+        If a secret of that name is bound to another use and `p` may not manage secrets in its
+        environment; the message names the use and the command.
+    """
+    rows = session.execute(
+        select(Secret, Environment)
+        .join(Environment, Environment.id == Secret.environment_id)
+        .where(Secret.name == name, Secret.revoked_at.is_(None))
+        .order_by(Environment.name)
+    ).all()
+    bound: list[str] = []
+    for secret, environment in rows:
+        if _bound_to(secret, use):
+            continue
+        current = secret.use_kind
+        if current is None and environment.storage_secret_ref == name:
+            current = SecretUseKind.ENVIRONMENT
+        scope = Securable.environment_scope(environment.name)
+        if current is not None and not authz.permits(p, Action.MANAGE_SECRET, scope):
+            described = describe_use(session, current, secret.use_target_id)
+            raise PermissionDenied(
+                f"Secret '{_text(name)}' of environment '{_text(environment.name)}' is bound to "
+                f"{described}. Naming it for {use.wanted()} would change its use, which needs "
+                f"the right to manage secrets in '{_text(environment.name)}' (the ADMIN role): "
+                f"{bind_command(environment.name, name, use)}"
+            )
+        record_binding(session, p, secret, scope, use)
+        bound.append(environment.name)
+    return bound
+
+
+def require_secret_management_for_url_change(
+    session: Session, authz: AuthorizationService, p: PrincipalRef, use: SecretUse
+) -> None:
+    """Refuse to move an index or repository to another URL without the right.
+
+    The URL is where a bound secret goes: changing it changes the secret's use as surely as
+    binding it elsewhere would. The check does not look at the credential the entry names
+    now, because clearing that name leaves the secret bound and would free the URL.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    authz
+        Answers whether `p` may manage secrets in an environment.
+    p
+        The acting principal.
+    use
+        The index or repository whose URL changes.
+
+    Raises
+    ------
+    PermissionDenied
+        If a secret bound to it lives in an environment where `p` may not manage secrets.
+    """
+    rows = session.execute(
+        select(Secret.name, Environment.name)
+        .join(Environment, Environment.id == Secret.environment_id)
+        .where(
+            Secret.use_kind == use.kind,
+            Secret.use_target_id == use.target_id,
+            Secret.revoked_at.is_(None),
+        )
+        .order_by(Environment.name)
+    ).all()
+    for secret_name, environment in rows:
+        if not authz.permits(p, Action.MANAGE_SECRET, Securable.environment_scope(environment)):
+            raise PermissionDenied(
+                f"Changing the URL of {use.wanted()} would send secret '{_text(secret_name)}' of "
+                f"environment '{_text(environment)}' to another host. That needs the right to "
+                f"manage secrets in '{_text(environment)}' (the ADMIN role). Ask someone who may "
+                f"manage secrets in '{_text(environment)}' to change it, or bind the secret "
+                f"elsewhere first: lakana secret bind {shlex.quote(_text(secret_name))} --env "
+                f"{shlex.quote(_text(environment))} (with --index NAME, --repository NAME or "
+                "--own-env)"
+            )
