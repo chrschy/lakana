@@ -65,7 +65,8 @@ def add(
         )
         typer.echo(
             "Next: create the secret in each environment whose projects use this index: "
-            f'{command} (a JSON object with "username" and "password").',
+            f'{command} (a JSON object with "username" and "password"). '
+            "Then bind it to this index: lakana secret bind SECRET --env ENV --index INDEX.",
             err=True,
         )
 

@@ -821,11 +821,16 @@ can run Python assets, and why not. Its cache directory is `$XDG_CACHE_HOME/laka
 
 <!-- not tested: moved as is; sorted in the second pull request -->
 ```bash
-lakana repo add analytics --kind https --url https://github.com/acme/analytics.git \
-    --credential-secret github-token --default-ref main
 lakana secret create github-token --env prod --value token=ghp_…   # per environment
 lakana secret create github-token --env dev  --value token=ghp_…
+lakana repo add analytics --kind https --url https://github.com/acme/analytics.git \
+    --credential-secret github-token --default-ref main
 ```
+
+Create the secrets first. An administrator who registers the repository binds each secret of that
+name to it, in every environment they manage. Someone who may only register repositories
+(`MANAGE_REPOSITORY`) can name a secret only if it is already bound to that repository; see
+[Manage secrets](manage-secrets.md#bind-a-secret-to-its-use).
 
 - `https`: the secret's `token` is sent as the password with username `oauth2`, or with
   `--credential-username` (GitLab deploy tokens have their own).

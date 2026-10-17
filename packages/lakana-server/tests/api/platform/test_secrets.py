@@ -287,3 +287,100 @@ def test_a_storage_update_without_options_is_still_accepted(
     for body in ({}, {"options": None}, {"options": {"endpoint": "http://s3.corp"}}):
         response = client.patch("/api/v1/environments/dev/storage", headers=AUTH_HEADER, json=body)
         assert response.status_code == 200, response.text
+
+
+def test_a_secret_is_bound_through_the_api_and_shows_its_use(
+    client: TestClient, storage_root: str
+) -> None:
+    """PUT .../use binds; every listing shows the use and the target's name."""
+    _create_dev_environment(client, storage_root)
+    created = client.post(
+        "/api/v1/environments/dev/secrets",
+        headers=AUTH_HEADER,
+        json={"name": "pypi", "values": {"password": "pw"}},
+    )
+    assert created.status_code == 201
+    assert (created.json()["use"], created.json()["use_target"]) == (None, None)
+    client.post(
+        "/api/v1/package-indexes",
+        headers=AUTH_HEADER,
+        json={"name": "corp", "url": "https://corp.example.org/simple"},
+    )
+
+    bound = client.put(
+        "/api/v1/environments/dev/secrets/pypi/use",
+        headers=AUTH_HEADER,
+        json={"kind": "package_index", "target": "corp"},
+    )
+
+    assert bound.status_code == 200, bound.text
+    assert (bound.json()["use"], bound.json()["use_target"]) == ("package_index", "corp")
+    listed = client.get("/api/v1/environments/dev/secrets", headers=AUTH_HEADER).json()
+    assert [(s["name"], s["use"], s["use_target"]) for s in listed] == [
+        ("pypi", "package_index", "corp")
+    ]
+
+
+def test_naming_an_unbound_secret_as_an_administrator_binds_it_and_the_listing_shows_it(
+    client: TestClient, storage_root: str
+) -> None:
+    """The one-step flow: create the secret, name it on an index, read its use back."""
+    _create_dev_environment(client, storage_root)
+    client.post(
+        "/api/v1/environments/dev/secrets",
+        headers=AUTH_HEADER,
+        json={"name": "pypi", "values": {"password": "pw"}},
+    )
+
+    added = client.post(
+        "/api/v1/package-indexes",
+        headers=AUTH_HEADER,
+        json={"name": "corp", "url": "https://corp.example.org/simple"},
+    )
+    assert added.status_code == 201, added.text
+    updated = client.patch(
+        "/api/v1/package-indexes/corp",
+        headers=AUTH_HEADER,
+        json={"credential_secret": "pypi"},
+    )
+    assert updated.status_code == 200, updated.text
+
+    listed = client.get("/api/v1/environments/dev/secrets", headers=AUTH_HEADER).json()
+    assert [(s["use"], s["use_target"]) for s in listed] == [("package_index", "corp")]
+
+
+@pytest.mark.parametrize(
+    ("body", "status"),
+    [
+        ({"kind": "package_index", "target": "nope"}, 404),
+        ({"kind": "environment", "target": "corp"}, 422),
+        ({"kind": "elsewhere", "target": None}, 422),
+        ({"kind": "repository"}, 422),
+    ],
+)
+def test_a_bind_to_something_that_is_not_there_is_refused(
+    client: TestClient, storage_root: str, body: dict[str, object], status: int
+) -> None:
+    """An unknown target is 404; a malformed use is 422.
+
+    Parameters
+    ----------
+    client
+        The administrator's client.
+    storage_root
+        The environment's storage root.
+    body
+        The request body.
+    status
+        The expected status.
+    """
+    _create_dev_environment(client, storage_root)
+    client.post(
+        "/api/v1/environments/dev/secrets",
+        headers=AUTH_HEADER,
+        json={"name": "s", "values": {"k": "v"}},
+    )
+
+    response = client.put("/api/v1/environments/dev/secrets/s/use", headers=AUTH_HEADER, json=body)
+
+    assert response.status_code == status

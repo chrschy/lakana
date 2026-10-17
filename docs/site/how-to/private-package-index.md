@@ -20,8 +20,8 @@ a password or token for it.
 
 <!-- source: docs/examples/getting-started/run.sh#private-index-register -->
 ```bash
-lakana index add team --url https://pkgs.example.org/simple --credential-secret team-index
 lakana secret create team-index --env dev --values-stdin < credential.json
+lakana index add team --url https://pkgs.example.org/simple --credential-secret team-index
 ```
 
 `credential.json` holds the user name and the password:
@@ -33,17 +33,25 @@ lakana secret create team-index --env dev --values-stdin < credential.json
 For an index that takes a token, put the token into `password` and use the user name the index
 asks for with tokens. Delete the file afterwards.
 
-- `team-index` is the name of a secret, the one the index names. Create that secret in **every environment** whose
-  projects use the index. Environments can hold different passwords under the same name. A
-  deploy into an environment that lacks the secret stops and says so.
+- `team-index` is the name of a secret, the one the index names. Create it before you register
+  the index, in **every environment** whose projects use the index. Environments can hold
+  different passwords under the same name. Registering the index binds each secret of that name
+  to it, in every environment where you may manage secrets (the `ADMIN` role). A secret created
+  after the index is not bound yet: bind it with
+  `lakana secret bind team-index --env ENV --index team`. A deploy into an environment that lacks
+  the secret stops and says so; a build with a secret that is not bound to the index is refused,
+  with that command in the message.
+- A secret has one use: this index, a repository, or its environment's own work (storage and
+  webhooks). Lakana sends it nowhere else. `lakana secret list --env ENV` shows each secret's use.
 - An index that asks for no password can be registered too: leave out `--credential-secret`.
 - Registering needs the permission `MANAGE_PACKAGE_INDEX` on the instance. The `ADMIN` role has
-  it, and an administrator can also grant it to someone as a single action. Whoever holds it
-  can register an index at any URL and bind the **name** of any secret of an environment to it.
-  Together with the permission to deploy and run in that environment, this sends that secret's
-  `password` value to the host of the registered URL. So grant it only to people you would give
-  those secrets. Under the current runner, everyone who may deploy and run Python code can read
-  what the worker reads anyway (see the start of this page).
+  it, and an administrator can also grant it to someone as a single action. Whoever holds only
+  that permission can register an index at any URL, but can name only a secret that an
+  administrator has already bound to that same index. Naming any other secret is refused, the
+  refusal is recorded in the audit log, and the message gives the `lakana secret bind` command
+  to ask someone who manages secrets to run. Changing the URL of an index that has a bound secret
+  needs the right to manage secrets in that secret's environment too, because the URL is where
+  the secret goes.
 - Anyone who can read an environment can list the indexes: `lakana index list` shows names and
   URLs, never a password.
 
@@ -183,7 +191,9 @@ lakana secret rotate team-index --env dev --values-stdin < credential.json
 ```
 
 An environment that was built keeps working without the secret. The next build uses the new
-value. To take the credential off an index, an administrator clears the secret's name:
+value. The secret stays bound to the index, and no other index or repository can name it unless
+someone who manages secrets moves it with `lakana secret bind`. To take the credential off an
+index, an administrator clears the secret's name:
 
 <!-- source: docs/examples/getting-started/run.sh#private-index-clear -->
 ```bash
@@ -248,6 +258,11 @@ unreachable public index does, and the task is tried again until its retries run
 
 ## What this does and does not protect
 
+- A secret is bound to the one index it serves. Someone who may register indexes
+  (`MANAGE_PACKAGE_INDEX`) cannot send another secret to a host of their choice: they can name
+  only a secret already bound to that index, and they cannot change the URL of an index whose
+  secret is bound unless they also manage secrets in its environment. A refusal is recorded in
+  the audit log as `AUTHORIZATION_DENIED`.
 - The credential is offered only to the host and port of the registered URL. A project that
   points the index's name at another host gets no credential there.
 - The index's files must be on the same host and port as the index. A file that the index

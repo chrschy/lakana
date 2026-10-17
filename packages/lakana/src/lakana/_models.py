@@ -768,6 +768,11 @@ class Secret:
         again (`lakana secret rotate`) to store it in the current one.
     key_id
         Which key provider and key wrapped the secret's data key.
+    use
+        What the secret is bound to (``package_index``, ``repository`` or ``environment``);
+        `None` for an unbound secret.
+    use_target
+        The bound index's or repository's name, when there is one.
     """
 
     id: str
@@ -777,6 +782,8 @@ class Secret:
     created_at: datetime
     format_version: int
     key_id: str
+    use: str | None = None
+    use_target: str | None = None
 
 
 @dataclass(frozen=True)

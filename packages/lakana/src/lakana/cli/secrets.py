@@ -100,6 +100,10 @@ def list_secrets(ctx: typer.Context, env: _ENV = None) -> None:
     `format_version` 1 marks a secret stored in the original format; set it
     again with `lakana secret rotate` to store it in the current one.
 
+    `use` says what a secret may be used for: a package index or a repository (`use_target`
+    names it), or its environment's storage and webhooks. A secret with no use serves its
+    environment only; `lakana secret bind` gives it one.
+
     Parameters
     ----------
     ctx
@@ -112,8 +116,17 @@ def list_secrets(ctx: typer.Context, env: _ENV = None) -> None:
     _output.emit(
         state,
         secrets,
-        columns=["name", "environment", "format_version", "key_id", "created_by", "created_at"],
-        droppable=["created_by", "environment", "key_id", "format_version"],
+        columns=[
+            "name",
+            "environment",
+            "use",
+            "use_target",
+            "format_version",
+            "key_id",
+            "created_by",
+            "created_at",
+        ],
+        droppable=["created_by", "environment", "key_id", "format_version", "use_target"],
     )
 
 
@@ -146,6 +159,68 @@ def rotate(
     secret = state.client().secrets.rotate(environment, name, values)
     _output.done(
         state, f"Rotated secret {_output.inline(name)} in {_output.inline(environment)}", secret
+    )
+
+
+@secret_app.command("bind")
+def bind(
+    ctx: typer.Context,
+    name: str,
+    env: _ENV = None,
+    index: Annotated[
+        str | None, typer.Option("--index", help="Bind it to this package index.")
+    ] = None,
+    repository: Annotated[
+        str | None, typer.Option("--repository", help="Bind it to this repository.")
+    ] = None,
+    own_env: Annotated[
+        bool,
+        typer.Option("--own-env", help="Bind it to its environment: storage, webhooks and tasks."),
+    ] = False,
+) -> None:
+    """Bind secret NAME to the one use it may serve; needs the right to manage secrets.
+
+    Parameters
+    ----------
+    ctx
+        The Typer context.
+    name
+        The secret name.
+    env
+        The environment.
+    index
+        A package index's name.
+    repository
+        A repository's name.
+    own_env
+        Bind it to its environment instead.
+
+    Raises
+    ------
+    CliError
+        Unless exactly one of the three options is given (exit 2).
+    """
+    chosen = [
+        (kind, target)
+        for kind, target, given in (
+            ("package_index", index, index is not None),
+            ("repository", repository, repository is not None),
+            ("environment", None, own_env),
+        )
+        if given
+    ]
+    if len(chosen) != 1:
+        raise CliError("Pass exactly one of --index, --repository or --own-env")
+    kind, target = chosen[0]
+    state = state_of(ctx)
+    environment = resolve_environment(state, env)
+    secret = state.client().secrets.bind(environment, name, kind, target)
+    noun = {"package_index": "package index", "repository": "repository"}.get(kind)
+    use = f"{noun} {_output.inline(target or '')}" if noun else "its environment"
+    _output.done(
+        state,
+        f"Bound secret {_output.inline(name)} in {_output.inline(environment)} to {use}",
+        secret,
     )
 
 

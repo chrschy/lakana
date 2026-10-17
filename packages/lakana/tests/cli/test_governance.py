@@ -461,3 +461,48 @@ def test_audit_list_rejects_a_bad_timestamp_and_cursor_with_all(tmp_path: Path) 
 
     assert invoke(state, "audit", "list", "--since", "yesterday").exit_code == 2
     assert invoke(state, "audit", "list", "--all", "--cursor", "c1").exit_code == 2
+
+
+def test_secret_bind_sends_exactly_one_use(tmp_path: Path) -> None:
+    """`lakana secret bind` takes exactly one of the three use options."""
+    secret = {
+        "id": "s1",
+        "name": "pypi",
+        "environment": "dev",
+        "created_by": "a1",
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "format_version": 2,
+        "key_id": "env",
+        "use": "package_index",
+        "use_target": "corp",
+    }
+    api = FakeApi()
+    api.on("PUT", "/api/v1/environments/dev/secrets/pypi/use", json=secret)
+    api.on("GET", "/api/v1/environments/dev/secrets", json=[secret])
+
+    result = invoke(
+        make_state(tmp_path, api), "secret", "bind", "pypi", "--env", "dev", "--index", "corp"
+    )
+
+    assert result.exit_code == 0, result.stderr
+    assert "Bound secret pypi in dev to package index corp" in result.stdout
+    (sent,) = [r for r in api.requests if r.method == "PUT"]
+    assert json.loads(sent.content) == {"kind": "package_index", "target": "corp"}
+    listing = invoke(make_state(tmp_path, api), "secret", "list", "--env", "dev")
+    assert "package_index" in listing.stdout
+    assert "corp" in listing.stdout
+    both = invoke(
+        make_state(tmp_path, api),
+        "secret",
+        "bind",
+        "pypi",
+        "--env",
+        "dev",
+        "--index",
+        "corp",
+        "--own-env",
+    )
+    assert both.exit_code == 2
+    assert "Pass exactly one of --index, --repository or --own-env" in both.output
+    neither = invoke(make_state(tmp_path, api), "secret", "bind", "pypi", "--env", "dev")
+    assert neither.exit_code == 2

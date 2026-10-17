@@ -24,7 +24,8 @@ def _secret_from_json(data: dict[str, Any]) -> Secret:
         The decoded `SecretOut` JSON body. Structurally cannot carry a
         value or ciphertext field. A server that predates the stored-format
         fields sends neither `format_version` nor `key_id`; they read as `1`
-        and `env`, which is how such a server stores every secret.
+        and `env`, which is how such a server stores every secret, and neither `use` nor
+        `use_target`, which read as `None`.
 
     Returns
     -------
@@ -39,6 +40,8 @@ def _secret_from_json(data: dict[str, Any]) -> Secret:
         created_at=datetime.fromisoformat(data["created_at"]),
         format_version=data.get("format_version", 1),
         key_id=data.get("key_id", "env"),
+        use=data.get("use"),
+        use_target=data.get("use_target"),
     )
 
 
@@ -168,3 +171,36 @@ class Secrets:
             ROUTES["secrets.revoke"],
             path_params={"environment_name": environment, "secret_name": name},
         )
+
+    def bind(self, environment: str, name: str, kind: str, target: str | None = None) -> Secret:
+        """Bind a secret to the one use it may serve.
+
+        Parameters
+        ----------
+        environment
+            The environment the secret is scoped to.
+        name
+            The secret's name.
+        kind
+            ``package_index``, ``repository`` or ``environment``.
+        target
+            The index's or repository's name; `None` for the environment.
+
+        Returns
+        -------
+        Secret
+            The bound secret's metadata.
+
+        Raises
+        ------
+        lakana.errors.NotFound
+            If the environment, the secret or the target does not exist.
+        lakana.errors.PermissionDenied
+            If the caller may not manage secrets in the environment.
+        """
+        response = self._transport.request(
+            ROUTES["secrets.bind"],
+            path_params={"environment_name": environment, "secret_name": name},
+            json={"kind": kind, "target": target},
+        )
+        return _secret_from_json(response.json())

@@ -134,10 +134,10 @@ text.
 
 | Command | What it does | Needs |
 |---|---|---|
-| `lakana index add NAME --url URL [--credential-secret SECRET]` | Registers an index and prints `Registered package index NAME`. With `--credential-secret` and text output it also prints, on standard error, the command that creates the secret. | `MANAGE_PACKAGE_INDEX` |
+| `lakana index add NAME --url URL [--credential-secret SECRET]` | Registers an index and prints `Registered package index NAME`. With `--credential-secret` it binds each unbound secret of that name to the index, in every environment where the caller holds `MANAGE_SECRET`; a secret that is bound elsewhere, or that its environment uses for storage or webhooks, is refused. With text output it also prints, on standard error, the commands that create and bind the secret. | `MANAGE_PACKAGE_INDEX`; `MANAGE_SECRET` in an environment to bind its unbound secret |
 | `lakana index list` | Lists the indexes: name, URL and secret name. A narrow window leaves the secret name out and says so. | `READ_ENVIRONMENT` on any environment |
 | `lakana index show NAME` | Shows one index with all its fields. | `READ_ENVIRONMENT` on any environment |
-| `lakana index update NAME [--url URL] [--credential-secret SECRET] [--clear credential_secret]` | Changes the options given; `--clear credential_secret` removes the secret. The name cannot be changed, and the URL cannot be cleared. Prints `Updated package index NAME`. A new URL stops the deployed projects whose lock names the old one, as `remove` does, until the old URL is registered again or the projects are locked with the new one and deployed again. | `MANAGE_PACKAGE_INDEX` |
+| `lakana index update NAME [--url URL] [--credential-secret SECRET] [--clear credential_secret]` | Changes the options given; `--clear credential_secret` removes the secret. The name cannot be changed, and the URL cannot be cleared. Prints `Updated package index NAME`. A new URL stops the deployed projects whose lock names the old one, as `remove` does, until the old URL is registered again or the projects are locked with the new one and deployed again. With a new URL, and with a name in `--credential-secret`, the secrets bound to the index are checked. | `MANAGE_PACKAGE_INDEX`; also `MANAGE_SECRET` in the environment of each secret bound to the index, for a new URL |
 | `lakana index remove NAME [--yes]` | Deletes the index after asking, and prints `Deleted package index NAME`. Projects whose lock names it stop running until it is registered again. Without a terminal, `--yes` is required. | `MANAGE_PACKAGE_INDEX` |
 
 ## SDK
@@ -195,17 +195,24 @@ principal may do.
 
 **What a holder of `MANAGE_PACKAGE_INDEX` can do.** An administrator can grant the permission on
 its own, with `lakana grant create` and the action `MANAGE_PACKAGE_INDEX` at the scope of the
-instance. Its holder can register an index at any URL and bind the name of any secret of an
-environment to it; nothing ties a secret to one index. A holder who may also deploy and run in
-that environment (`DEPLOY` and `RUN`) can so have the `password` value of that secret sent to the
-host of the registered URL, by a project whose lock names it. Grant the permission only to people
-you would give those secrets. Under the current runner this adds nothing to what such a person
-can read: everyone who may deploy and run Python code can read what the worker reads (see
+instance. Its holder can register an index at any URL, but a secret serves one use only: a package
+index, a repository, or its environment. A holder of `MANAGE_PACKAGE_INDEX` alone can name only a
+secret that is already bound to that same index. Naming an unbound secret, one bound elsewhere,
+or one its environment uses for storage or webhooks is refused with `403`; the refusal is
+recorded as `AUTHORIZATION_DENIED` and the message names the exact `lakana secret bind` command
+for someone who manages secrets to run. A holder of `MANAGE_SECRET` in the environment who names
+an unbound secret binds it in the same step. Changing the URL of an index that has a bound
+secret needs `MANAGE_SECRET` in that secret's environment, whatever credential the index names
+at that moment, because the URL is where the secret goes. So a holder of `MANAGE_PACKAGE_INDEX`
+cannot have the `password` of an environment's secret sent to a host of their choice. Grant the
+permission only to people you would trust with the index's own credential. Under the current
+runner this adds nothing to what a person who may deploy and run Python code can read anyway:
+they can read what the worker reads (see
 [Isolation: one instance is one trust domain](../how-to/projects.md#isolation-one-instance-is-one-trust-domain)).
-`MANAGE_REPOSITORY` has the same property: its holder binds the name of a secret to a
-repository's URL, and a deploy sends that secret's `token` value to the host of that URL. A
-holder without `DEPLOY` can still stop projects: a changed URL and a removed index both stop the
-deployed projects that use the index.
+`MANAGE_REPOSITORY` follows the same rules for a repository: its holder can name only a secret
+bound to that repository and cannot move its URL while a secret is bound without
+`MANAGE_SECRET`. A holder without `DEPLOY` can still stop projects: a changed URL and a removed
+index both stop the deployed projects that use the index.
 
 Three audit events record the changes. None holds a credential: only the name of the secret.
 

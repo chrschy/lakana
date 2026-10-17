@@ -371,13 +371,16 @@ _LISTINGS = {
                 "environment": "dev",
                 "format_version": 2,
                 "key_id": "env:0123456789abcdef",
+                "use": "package_index",
+                "use_target": "team-pakete",
                 "created_by": "admin@example.org",
                 "created_at": _TIME,
             }
         ],
         whole=(("created_at", _TIME),),
-        headers=("name", "created_at"),
+        headers=("name", "use", "created_at"),
         key="warehouse-readonly-credentials",
+        wraps_at=(80,),
     ),
     "grants": _Listing(
         ("grant", "list"),

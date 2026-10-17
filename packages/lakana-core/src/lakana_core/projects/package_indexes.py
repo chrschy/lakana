@@ -4,10 +4,11 @@ Only `MANAGE_PACKAGE_INDEX` registers an index or binds a credential to one.
 The `ADMIN` role carries the action, and it can be granted on its own. A
 project's lock may only name a registered index's URL (a wheel's own URL in
 the lock may still point at another host, which receives no credential).
-Naming a secret binds nothing (`require_named_secrets_bound`): it must already be bound to
-the index, and binding or rebinding is `lakana secret bind`, which needs the right to manage
-secrets. The URL of an index with a bound secret changes only for a principal who has that
-right. A build sends a secret's `password` only to the index it is bound to.
+A manager of indexes never binds a secret (`bind_or_require_named_secrets`): the secret they
+name must already be bound to the index. Binding is for someone who may manage secrets, with
+`lakana secret bind` or by naming an unbound secret. The URL of an index with a bound secret
+changes only for a principal who has that right.
+A build sends a secret's `password` only to the index it is bound to.
 """
 
 from __future__ import annotations
@@ -36,8 +37,8 @@ from lakana_core.projects.package_sources import RegisteredIndex, normalize_inde
 from lakana_core.secrets.uses import (
     SecretBindingRefused,
     SecretUse,
+    bind_or_require_named_secrets,
     record_refusal,
-    require_named_secrets_bound,
     require_secret_management_for_url_change,
 )
 
@@ -301,7 +302,7 @@ class PackageIndexService:
         )
         if credential_secret is not None:
             try:
-                require_named_secrets_bound(
+                bind_or_require_named_secrets(
                     self._session,
                     self._authz,
                     p,
@@ -481,7 +482,7 @@ class PackageIndexService:
             if new_url != row.url:
                 require_secret_management_for_url_change(self._session, self._authz, p, use)
             if new_secret is not None and new_secret != row.credential_secret:
-                require_named_secrets_bound(
+                bind_or_require_named_secrets(
                     self._session, self._authz, p, name=new_secret, use=use, registered=True
                 )
         except SecretBindingRefused as refusal:

@@ -25,7 +25,7 @@ from lakana_core.errors import AlreadyExistsError, NotFoundError, ValidationErro
 from lakana_core.models import AuditEventType, Environment, Secret
 from lakana_core.secrets.crypto import SecretBinding, encrypt_secret_values
 from lakana_core.secrets.keys import KeyProvider
-from lakana_core.secrets.uses import SecretUse, lock_entry, record_binding
+from lakana_core.secrets.uses import SecretUse, lock_entry, record_binding, target_row
 
 
 class SecretService:
@@ -120,8 +120,8 @@ class SecretService:
         values
             The plaintext key-value bag to encrypt and store.
         use
-            What the secret is for; `None` leaves it unbound until `bind`. Naming a secret
-            from an index or repository binds nothing.
+            What the secret is for; `None` leaves it unbound until `bind`. Naming it from an
+            index or repository binds it only for someone who may manage secrets.
 
         Returns
         -------
@@ -222,6 +222,25 @@ class SecretService:
         record_binding(self._session, p, secret, scope, use)
         self._session.commit()
         return secret
+
+    def use_target_name(self, secret: Secret) -> str | None:
+        """Name the index or repository a secret is bound to, for a listing.
+
+        Parameters
+        ----------
+        secret
+            The row.
+
+        Returns
+        -------
+        str or None
+            The name; `None` for an unbound secret, the environment use, or a target that was
+            removed.
+        """
+        if secret.use_kind is None:
+            return None
+        row = target_row(self._session, secret.use_kind, secret.use_target_id)
+        return row.name if row is not None else None
 
     def list_for_environment(self, p: PrincipalRef, environment: str) -> list[Secret]:
         """List an environment's active secrets.

@@ -5,10 +5,11 @@ repository and nothing else, so the worker fetches only from hosts an admin
 chose. That grant is the SSRF trust boundary (private addresses are allowed:
 self-hosted GitLab is usually internal).
 
-Naming a secret binds nothing (`require_named_secrets_bound`): it must already be bound to
-the repository, and binding or rebinding is `lakana secret bind`, which needs the right to
-manage secrets. The URL of a repository with a bound secret changes only for a principal who
-has that right. A deploy sends a secret's `token` only to the repository it is bound to.
+A manager of repositories never binds a secret (`bind_or_require_named_secrets`): the secret
+they name must already be bound to the repository. Binding is for someone who may manage
+secrets, with `lakana secret bind` or by naming an unbound secret. The URL of a repository with
+a bound secret changes only for a principal who has that right.
+A deploy sends a secret's `token` only to the repository it is bound to.
 """
 
 from __future__ import annotations
@@ -42,8 +43,8 @@ from lakana_core.projects.git_input import resolve_local_path, validate_ref, val
 from lakana_core.secrets.uses import (
     SecretBindingRefused,
     SecretUse,
+    bind_or_require_named_secrets,
     record_refusal,
-    require_named_secrets_bound,
     require_secret_management_for_url_change,
 )
 
@@ -240,7 +241,7 @@ class RepositoryService:
             raise AlreadyExistsError(f"A repository named {name!r} already exists.")
         if credential_secret is not None:
             try:
-                require_named_secrets_bound(
+                bind_or_require_named_secrets(
                     self._session,
                     self._authz,
                     p,
@@ -410,7 +411,7 @@ class RepositoryService:
             if repo.url != previous_url:
                 require_secret_management_for_url_change(self._session, self._authz, p, use)
             if repo.credential_secret is not None and repo.credential_secret != previous_secret:
-                require_named_secrets_bound(
+                bind_or_require_named_secrets(
                     self._session,
                     self._authz,
                     p,

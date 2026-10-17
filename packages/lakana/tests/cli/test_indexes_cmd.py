@@ -63,6 +63,7 @@ def test_index_add_sends_the_fields_and_says_what_to_do_next(tmp_path: Path) -> 
         "Next: create the secret in each environment whose projects use this index: lakana "
         'secret create team-index --env ENV --values-stdin (a JSON object with "username" and '
         '"password").'
+        " Then bind it to this index: lakana secret bind SECRET --env ENV --index INDEX."
     )
 
 
@@ -120,6 +121,7 @@ def test_index_add_shows_a_command_only_when_it_is_complete(tmp_path: Path) -> N
     assert text.endswith(
         "lakana secret create NAME --env ENV --values-stdin (NAME is the name you gave, too long "
         'to show here) (a JSON object with "username" and "password").'
+        " Then bind it to this index: lakana secret bind SECRET --env ENV --index INDEX."
     )
     assert "'" not in text and "…" not in text
 

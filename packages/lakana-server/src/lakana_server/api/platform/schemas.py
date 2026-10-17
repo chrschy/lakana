@@ -1200,6 +1200,11 @@ class SecretOut(BaseModel):
     key_id
         Which key provider and key wrapped the secret's data key. Safe to
         show: it does not reveal the key.
+    use
+        What the secret is bound to: ``package_index``, ``repository``, ``environment``, or
+        `None` for an unbound secret.
+    use_target
+        The index's or repository's name; `None` otherwise, also when that entry was removed.
     """
 
     id: uuid.UUID
@@ -1209,6 +1214,25 @@ class SecretOut(BaseModel):
     created_at: datetime
     format_version: int
     key_id: str
+    use: str | None = None
+    use_target: str | None = None
+
+
+class SecretBind(BaseModel):
+    """Request body for binding a secret to its use.
+
+    Parameters
+    ----------
+    kind
+        ``package_index``, ``repository`` or ``environment``.
+    target
+        The index's or repository's name; absent or null for the environment.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["package_index", "repository", "environment"]
+    target: str | None = None
 
 
 class AuditEventOut(BaseModel):

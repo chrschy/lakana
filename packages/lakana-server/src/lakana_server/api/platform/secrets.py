@@ -9,14 +9,21 @@ to.
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
 
 from lakana_core.auth import PrincipalRef
 from lakana_core.errors import NotFoundError
-from lakana_core.models import Secret
+from lakana_core.models import Secret, SecretUseKind
 from lakana_core.secrets.service import SecretService
-from lakana_server.api.platform.schemas import SecretCreate, SecretOut, SecretRotate
+from lakana_core.secrets.uses import resolve_use
+from lakana_server.api.platform.schemas import (
+    SecretBind,
+    SecretCreate,
+    SecretOut,
+    SecretRotate,
+)
 from lakana_server.api.routing import AuthenticateFirstRoute
-from lakana_server.deps import get_principal, get_secret_service
+from lakana_server.deps import get_principal, get_secret_service, get_session
 
 router = APIRouter(
     route_class=AuthenticateFirstRoute,
@@ -25,7 +32,7 @@ router = APIRouter(
 )
 
 
-def _to_out(secret: Secret, environment_name: str) -> SecretOut:
+def _to_out(secret: Secret, environment_name: str, target: str | None) -> SecretOut:
     """Build a response body from a Secret row.
 
     Parameters
@@ -35,6 +42,8 @@ def _to_out(secret: Secret, environment_name: str) -> SecretOut:
     environment_name
         The environment this secret belongs to, since `Secret` itself
         only carries `environment_id`.
+    target
+        The bound index's or repository's name, from `SecretService.use_target_name`.
 
     Returns
     -------
@@ -50,6 +59,8 @@ def _to_out(secret: Secret, environment_name: str) -> SecretOut:
         created_at=secret.created_at,
         format_version=secret.format_version,
         key_id=secret.key_id,
+        use=secret.use_kind.value if secret.use_kind is not None else None,
+        use_target=target,
     )
 
 
@@ -119,7 +130,7 @@ def create_secret(
     created = service.create(
         principal, environment=environment_name, name=body.name, values=body.values
     )
-    return _to_out(created, environment_name)
+    return _to_out(created, environment_name, service.use_target_name(created))
 
 
 @router.get("", response_model=list[SecretOut])
@@ -150,7 +161,7 @@ def list_secrets(
         Mapped to 404 by `install_exception_handlers`.
     """
     return [
-        _to_out(secret, environment_name)
+        _to_out(secret, environment_name, service.use_target_name(secret))
         for secret in service.list_for_environment(principal, environment_name)
     ]
 
@@ -195,7 +206,53 @@ def rotate_secret(
     """
     existing = _find_by_name(service.list_for_environment(principal, environment_name), secret_name)
     rotated = service.rotate(principal, existing.id, values=body.values)
-    return _to_out(rotated, environment_name)
+    return _to_out(rotated, environment_name, service.use_target_name(rotated))
+
+
+@router.put("/{secret_name}/use", response_model=SecretOut)
+def bind_secret(
+    environment_name: str,
+    secret_name: str,
+    body: SecretBind,
+    principal: PrincipalRef = Depends(get_principal),
+    service: SecretService = Depends(get_secret_service),
+    session: Session = Depends(get_session),
+) -> SecretOut:
+    """Bind a secret to a package index, a repository or its environment.
+
+    Parameters
+    ----------
+    environment_name
+        The environment the secret is scoped to.
+    secret_name
+        The secret's name.
+    body
+        The use.
+    principal
+        The authenticated caller.
+    service
+        The secret service for this request.
+    session
+        The request's database session, to resolve the target's name.
+
+    Returns
+    -------
+    SecretOut
+        The bound secret's metadata.
+
+    Raises
+    ------
+    lakana_core.errors.NotFoundError
+        Mapped to 404: the environment, the secret or the named target does not exist.
+    lakana_core.errors.ValidationError
+        Mapped to 422: a name for the environment use, or none for an index or repository.
+    lakana_core.errors.PermissionDenied
+        Mapped to 403: the caller may not manage secrets in this environment.
+    """
+    existing = _find_by_name(service.list_for_environment(principal, environment_name), secret_name)
+    use = resolve_use(session, SecretUseKind(body.kind), body.target)
+    bound = service.bind(principal, existing.id, use)
+    return _to_out(bound, environment_name, service.use_target_name(bound))
 
 
 @router.delete("/{secret_name}", status_code=204)

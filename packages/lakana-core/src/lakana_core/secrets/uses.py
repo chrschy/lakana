@@ -497,7 +497,7 @@ def lock_entry(session: Session, use: SecretUse) -> None:
         raise NotFoundError(f"The {_NOUNS[use.kind]} was removed by someone else; look again.")
 
 
-def require_named_secrets_bound(
+def bind_or_require_named_secrets(
     session: Session,
     authz: AuthorizationService,
     p: PrincipalRef,
