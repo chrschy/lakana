@@ -188,7 +188,7 @@ every missing output of it means "run everything".
   "Did the bundle change?" step. `test` has a 30-minute timeout.
 - **Coverage** is measured on 3.14 only (see the coverage ratchet below).
 
-### Workflows besides CI
+### Scorecard, Semgrep and the release workflow
 
 - **`scorecard.yml`** runs OpenSSF Scorecard on a push to `main`, weekly (Mondays) and when the
   branch protection changes. Workflow permissions are `read-all`; its job adds only
@@ -196,7 +196,8 @@ every missing output of it means "run everything".
   the score that the README badge shows). Its results are at
   <https://scorecard.dev/viewer/?uri=github.com/chrschy/lakana>. Findings are fixed one at a
   time, when it reports them, never in bulk. `scripts/tests/test_workflows.py` pins the
-  permissions, the triggers and that every action in every workflow is pinned by commit SHA.
+  permissions, the triggers and its runner; another test there pins every action of every workflow
+  by commit SHA.
 - **`security-deep.yml`** runs semgrep weekly.
 - **`release.yml`** is described in `docs/agent/release.md`; it also attaches the SBOM to each
   GitHub release.

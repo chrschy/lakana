@@ -257,13 +257,15 @@ specific measured time as a promise, since CI runner speed varies.
 
 ## The SBOM
 
-The `sbom` job of `release.yml` builds an SPDX software bill of materials of the tagged tree with
-`anchore/sbom-action` and attaches it to the **GitHub release** of that tag as
-`lakana-sbom.spdx.json`, so it is found on the release page; the same file is also kept as a
-workflow artifact. The job runs `gh release upload "$TAG" lakana-sbom.spdx.json --clobber`, so a
-re-run replaces the file. It is the one job with `contents: write` (a job-level permission: Actions
-has none per step), and it has no other credentials. `scripts/tests/test_workflows.py` pins the
-upload and that no other job of the workflow may write to the contents.
+Two jobs of `release.yml` ship the SBOM. `sbom` builds an SPDX software bill of materials of the
+tagged tree with `anchore/sbom-action` (read-only token) and keeps it as the workflow artifact
+`lakana-sbom.spdx.json`. `sbom-release` then downloads that artifact and attaches it to the
+**GitHub release** of the tag, so it is found on the release page; it runs
+`gh release upload "$TAG" … --clobber`, so a re-run replaces the file. `sbom-release` is the only job
+with `contents: write`: it has no checkout and no third-party action but the artifact download, so
+no code that builds anything holds the write token. The workflow's own `permissions` is `{}`; every
+job names what it needs, and `release-please` needs nothing from `GITHUB_TOKEN` because it uses
+`RELEASE_PLEASE_TOKEN`. `scripts/tests/test_workflows.py` pins this by effective permissions.
 
 ## Why untagged builds cannot publish
 

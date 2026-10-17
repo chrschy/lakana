@@ -7,15 +7,17 @@ on:
 concurrency:
   group: release-${{ github.ref }}
 
-permissions:
-  contents: write
-  pull-requests: write
+# No job inherits a permission: each one below names what it needs.
+permissions: {}
 
 jobs:
   # Opens and merges the release pull request; it builds nothing, so it may run on the
   # configured runner. Every job below builds or publishes and stays on GitHub's runners.
   release-please:
     runs-on: ${{ (github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER) || 'ubuntu-latest' }}
+    # Nothing from GITHUB_TOKEN: the action is given RELEASE_PLEASE_TOKEN below and uses only
+    # that to open the release PR, tag and create the release.
+    permissions: {}
     outputs:
       released: ${{ steps.release.outputs.release_created }}
       tag: ${{ steps.release.outputs.tag_name }}
@@ -233,10 +235,8 @@ jobs:
     needs: release-please
     if: needs.release-please.outputs.released == 'true'
     runs-on: ubuntu-latest
-    # `contents: write` lets the upload step below attach the file to the release; no other
-    # job of this workflow has it.
     permissions:
-      contents: write
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
@@ -251,8 +251,22 @@ jobs:
           artifact-name: lakana-sbom.spdx.json
           output-file: lakana-sbom.spdx.json
           upload-release-assets: false
+
+  # The only job that can write to the repository's contents. It runs no third-party code
+  # that builds anything: it downloads the SBOM and uploads it to the release.
+  sbom-release:
+    needs: [release-please, sbom]
+    if: needs.release-please.outputs.released == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
+        with:
+          name: lakana-sbom.spdx.json
+          path: sbom
       - name: Attach the SBOM to the GitHub release
-        run: gh release upload "$TAG" lakana-sbom.spdx.json --clobber --repo "$GITHUB_REPOSITORY"
+        run: gh release upload "$TAG" sbom/lakana-sbom.spdx.json --clobber --repo "$GITHUB_REPOSITORY"
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.release-please.outputs.tag }}

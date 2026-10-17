@@ -952,27 +952,57 @@ def test_the_cla_workflow_starts_only_for_pull_requests_and_the_signing_phrases(
     )
 
 
-_PINNED = re.compile(r"^[\w.-]+/[\w./-]+@[0-9a-f]{40}$")
+def _effective_permissions(workflow: dict, job: dict) -> dict:
+    """Give the permissions a job runs with: its own block, else the workflow's.
+
+    Parameters
+    ----------
+    workflow
+        The parsed workflow.
+    job
+        One of its jobs.
+
+    Returns
+    -------
+    dict
+        The job's ``permissions``, or the workflow's when the job has none.
+    """
+    return job.get("permissions", workflow.get("permissions", {}))
 
 
-def test_the_sbom_is_attached_to_the_github_release() -> None:
+def test_only_the_job_that_uploads_the_sbom_can_write_to_the_release() -> None:
     """Whoever wants a release's bill of materials finds it on the release page.
 
-    The job uploads the file to the release of the tag it built, and it is the only
-    job of ``release.yml`` that may write to the repository's contents.
+    A separate job uploads the file with ``contents: write`` and runs no checkout and no
+    third-party action but the artifact download; the job that builds the SBOM stays read-only.
+    No other job, by its effective permissions, may write to the contents.
     """
-    jobs = _jobs("release.yml")
-    job = jobs["sbom"]
-    assert job["permissions"] == {"contents": "write"}
-    upload = next(c for s in job["steps"] for c in _commands(s) if "gh release upload" in c)
-    assert '"${{ needs.release-please.outputs.tag }}"' in upload or '"$TAG"' in upload
-    assert "lakana-sbom.spdx.json" in upload
-    assert "--repo" in upload
-    generate = next(s for s in job["steps"] if "anchore/sbom-action" in str(s.get("uses")))
+    workflow = yaml.safe_load((WORKFLOWS / "release.yml").read_text())
+    jobs = workflow["jobs"]
+    assert workflow["permissions"] == {}
+    assert jobs["sbom"]["permissions"] == {"contents": "read"}
+    generate = next(s for s in jobs["sbom"]["steps"] if "anchore/sbom-action" in str(s.get("uses")))
     assert generate["with"]["output-file"] == "lakana-sbom.spdx.json"
+    assert generate["with"]["artifact-name"] == "lakana-sbom.spdx.json"
+    assert generate["with"]["upload-release-assets"] is False
+
+    job = jobs["sbom-release"]
+    assert job["permissions"] == {"contents": "write"}
+    assert set(job["needs"]) == {"release-please", "sbom"}
+    assert job["if"] == jobs["sbom"]["if"]
+    uses = [s["uses"].split("@")[0] for s in job["steps"] if "uses" in s]
+    assert uses == ["actions/download-artifact"]
+    upload = next(s for s in job["steps"] if "gh release upload" in s.get("run", ""))
+    assert upload["env"]["TAG"] == "${{ needs.release-please.outputs.tag }}"
+    (command,) = _commands(upload)
+    assert '"$TAG"' in command
+    assert "lakana-sbom.spdx.json" in command
+    assert "--clobber" in command
+    assert "--repo" in command
+
     for name, other in jobs.items():
-        if name != "sbom":
-            assert other.get("permissions", {}).get("contents") != "write", name
+        if name != "sbom-release":
+            assert _effective_permissions(workflow, other).get("contents") != "write", name
 
 
 def test_the_scorecard_workflow_is_read_only_and_publishes_its_results() -> None:
@@ -981,8 +1011,11 @@ def test_the_scorecard_workflow_is_read_only_and_publishes_its_results() -> None
     assert set(workflow[True]) == {"push", "schedule", "branch_protection_rule"}
     assert workflow[True]["push"]["branches"] == ["main"]
     assert workflow["permissions"] == "read-all"
+    assert "env" not in workflow
+    assert "defaults" not in workflow
     (job,) = workflow["jobs"].values()
     assert job["permissions"] == {"security-events": "write", "id-token": "write"}
+    assert job["runs-on"] == "ubuntu-latest"  # published results need a GitHub-hosted job
     steps = job["steps"]
     scorecard = next(s for s in steps if s["uses"].startswith("ossf/scorecard-action@"))
     assert scorecard["with"]["publish_results"] is True
@@ -991,13 +1024,3 @@ def test_the_scorecard_workflow_is_read_only_and_publishes_its_results() -> None
     assert upload["with"]["sarif_file"] == scorecard["with"]["results_file"]
     checkout = next(s for s in steps if s["uses"].startswith("actions/checkout@"))
     assert checkout["with"]["persist-credentials"] is False
-
-
-def test_every_action_in_every_workflow_is_pinned_by_commit_sha() -> None:
-    """A tag can move; a commit cannot. Local actions and ``docker://`` images are exempt."""
-    for path in sorted(WORKFLOWS.glob("*.yml")):
-        for name, job in yaml.safe_load(path.read_text())["jobs"].items():
-            for step in job.get("steps", []):
-                uses = step.get("uses")
-                if uses and not uses.startswith(("./", "docker://")):
-                    assert _PINNED.match(uses), f"{path.name}: job `{name}`: {uses}"

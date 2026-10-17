@@ -1594,8 +1594,9 @@ def test_a_worker_stopped_for_memory_while_it_counts_a_check_leaves_the_task_to_
     assert not thread.is_alive(), "the worker's thread did not end after its child was killed"
     assert exits == [memory_module.EXIT_CODE]
 
-    # Wait for the event under test, the task set back to pending, not for the thread's end:
-    # on a loaded runner the status was read while it still said running.
+    # Wait for the event under test, the task set back to pending. `stop_worker` stops waiting
+    # for its recording thread after `RECORD_TIMEOUT_SECONDS`, so on a loaded runner the reset
+    # can land after it has returned and the status was read while it still said running.
     deadline = time.monotonic() + 30
     while (stopped := _task(world, "silver.orders")).status is TaskStatus.RUNNING:
         assert time.monotonic() < deadline, "the task was not set back after the stop"
