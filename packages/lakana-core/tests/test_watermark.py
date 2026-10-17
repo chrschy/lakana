@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import datetime as dt
-import re
 import uuid
 from decimal import Decimal
 from pathlib import Path
@@ -150,28 +149,17 @@ def test_the_key_must_be_a_top_level_orderable_column() -> None:
             check_incremental_key(schema, key, table_name="gold.t")
 
 
-def test_wrap_incremental_quotes_the_key_and_binds_the_watermark_by_name() -> None:
-    """The key is a quoted identifier and the watermark a named parameter, never text.
-
-    Every URL list binds under a named parameter, and DuckDB
-    refuses to mix named and positional parameters — so the watermark binds
-    by name too, never as a positional `?`.
-    """
+def test_wrap_incremental_quotes_the_key_and_reads_the_watermark_as_a_variable() -> None:
+    """The key is a quoted identifier and the watermark a variable, never text or a placeholder."""
     wrapped = wrap_incremental('SELECT 1 AS "my ""key"""', 'my "key"')
 
-    assert re.fullmatch(r"__lakana_watermark_[0-9a-f]{32}", wrapped.parameter)
+    assert wrapped.parameter == "v_watermark"
     assert wrapped.sql == (
         'SELECT * FROM (SELECT 1 AS "my ""key""") AS __lakana_incremental '
-        f'WHERE "my ""key""" > ${wrapped.parameter}'
+        'WHERE "my ""key""" > getvariable(\'v_watermark\')'
     )
     assert "?" not in wrapped.sql
-
-
-def test_wrap_incremental_draws_a_fresh_parameter_name_every_time() -> None:
-    """The name is unguessable: a random token per wrap, never a fixed spelling."""
-    names = {wrap_incremental("SELECT 1 AS k", "k").parameter for _ in range(20)}
-
-    assert len(names) == 20
+    assert "$" not in wrapped.sql
 
 
 def test_an_empty_table_has_no_watermark(
@@ -235,7 +223,7 @@ def test_date_timestamp_and_decimal_keys_decode_to_python_values(
     column: pa.Array,
     expected: Watermark,
 ) -> None:
-    """Bounds decode to the values DuckDB compares against (a bound parameter)."""
+    """Bounds decode to the values DuckDB compares against (a variable)."""
     catalog = _catalog(session, principal, tmp_path)
     _write(catalog, principal, WriteMode.CREATE, pa.table({"id": column}))
 

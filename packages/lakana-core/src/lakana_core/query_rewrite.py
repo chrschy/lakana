@@ -9,23 +9,20 @@ from a storage object key, and a raw-zone landing area accepts arbitrary
 writes by design, so an object key is attacker-controlled text: a key
 containing a single quote would close the string literal an interpolated
 list built and run the rest of the key as SQL inside another principal's
-authorized query. Instead each CTE reads `read_parquet($<name>)` and the URL
-list is bound as a single LIST parameter at execution time, where DuckDB
-treats it as a filename to look for and never as syntax — see
-`RewrittenQuery`.
+authorized query. Instead each CTE reads `read_parquet(getvariable('v_<n>_files'))`
+and the query process sets that variable to the URL list, bound as a value
+(`SET VARIABLE "v_0_files" = ?`), before it runs the statement, which then
+takes no parameters at all — see `RewrittenQuery`.
 
-Those bound lists must in turn be unreachable from the user's own SQL: on S3
-they are presigned URLs of the raw files, and a caller holding one reads the
-file directly, past every row filter and column mask. A placeholder in the
-submitted query would bind to them and return them as an ordinary value, so
-two independent controls close that. Every `exp.Placeholder`/`exp.Parameter`
-in the user's tree is refused (`check_blacklist`, and again in every parse
-`rewrite_query`/`extract_table_refs` make — see `_reject_placeholders`), and
-the rewriter binds each list under a *named* parameter carrying a fresh
-random token per rewrite (`_parameter_name`), never positionally. A
-positional `?`/`$1` that ever slipped past the first control cannot be mixed
-with named parameters in DuckDB, and a named one would have to guess the
-token.
+Those variables must in turn be unreachable from the user's own SQL: on S3
+they hold presigned URLs of the raw files, and a caller holding one reads the
+file directly, past every row filter and column mask. `getvariable` and
+`duckdb_variables` are blacklisted, a `SET` or `RESET` of a variable is a
+statement that is not a read and is refused, and every `exp.Placeholder`/
+`exp.Parameter` in the user's tree is refused too (`check_blacklist`, and
+again in every parse `rewrite_query`/`extract_table_refs` make — see
+`_reject_placeholders`): nothing is bound to the statement, so a placeholder
+has no use, and DuckDB refuses a statement with one.
 
 A `TableSource`'s `row_filters` and `column_masks` are a second kind of data
 reaching the generated SQL, and unlike the URLs they are spliced into the SQL
@@ -41,7 +38,6 @@ from __future__ import annotations
 
 import hashlib
 import re
-import secrets
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -172,7 +168,7 @@ and it is *introspection*: functions that return the connection's own state
 rather than data. `current_query` is the one that matters most — it returns
 the full *rewritten* statement as an ordinary result value, row-filter
 predicates and column-mask expressions spliced into the CTEs included, plus
-the names of the bound URL parameters, and since a write run persists its
+the names of the URL variables, and since a write run persists its
 result, it could store that text in a table others read. The rest were
 probed against DuckDB 1.5.5 through the real rewriter and executor:
 `current_setting`/`duckdb_settings`/`duckdb_secrets`/`duckdb_extensions`/
@@ -322,14 +318,29 @@ _NOT_A_READ_MESSAGE = (
 _KEYWORD_CHARS = 40
 """The most characters of a refused statement's leading word the message repeats."""
 
-_PARAMETER_PREFIX = "__lakana_urls_"
-"""Leading text of every parameter name the rewriter binds a URL list under."""
-
-_PARAMETER_TOKEN_BYTES = 16
-"""Random bytes in each rewrite's parameter-name token (32 hex characters)."""
-
 _READERS = {"parquet": "read_parquet", "csv": "read_csv", "json": "read_json_auto"}
 """Maps a raw-zone table's stored file format to the DuckDB reader function."""
+
+
+def _files_variable(index: int) -> str:
+    """Name the variable one read's file list is set under.
+
+    The name is predictable on purpose: no user SQL can reach a variable (`getvariable` and
+    `duckdb_variables` are blacklisted, `SET` and `RESET` are refused), so a random part would
+    protect nothing.
+
+    Parameters
+    ----------
+    index
+        The read's position among the reads of this rewrite that have files.
+
+    Returns
+    -------
+    str
+        ``"v_<index>_files"``.
+    """
+    return f"v_{index}_files"
+
 
 _WITH_ARG = "with_"
 """sqlglot's argument key for a query's `WITH` clause.
@@ -348,7 +359,7 @@ class TableSource:
     ----------
     urls
         The already-resolved, already-authorized file URLs to read. Treated
-        as data throughout: bound as a named query parameter the user's own
+        as data throughout: set as a DuckDB variable the user's own
         SQL cannot address, never rendered into SQL text.
     file_format
         The stored format, one of `"parquet"`, `"csv"`, or `"json"`.
@@ -395,19 +406,18 @@ class TableSource:
 
 @dataclass(frozen=True)
 class RewrittenQuery:
-    """A rewritten query and the values to bind when executing it.
+    """A rewritten query and the variables to set before executing it.
 
     Parameters
     ----------
     sql
-        The rewritten SQL. Every resolved file list appears as a single
-        named `$<name>` placeholder, never as literal text, and no other
-        placeholder appears in it: the user's own SQL may contain none.
+        The rewritten SQL. Every resolved file list is read through
+        `getvariable('v_<n>_files')`, never as literal text, and no placeholder appears in
+        it: the user's own SQL may contain none and nothing is bound to the statement.
     parameters
-        Parameter name (without the `$`) to the URL list bound to it, as a
-        DuckDB LIST value — one entry per CTE that reads files, in the order
-        the CTEs were generated. Each name carries a random token drawn
-        fresh for this rewrite, so it cannot be predicted from the query.
+        Variable name to the value the query process sets it to before it runs the
+        statement (`SET VARIABLE "<name>" = ?`, the value bound): one URL list, as a DuckDB
+        LIST, per CTE that reads files, numbered in the order the CTEs were generated.
     """
 
     sql: str
@@ -679,25 +689,6 @@ def _reject_statements_inside(parsed: exp.Expr, dialect: str) -> None:
             )
 
 
-def _parameter_name(token: str, index: int) -> str:
-    """Name the parameter one CTE's URL list binds under.
-
-    Parameters
-    ----------
-    token
-        A random hex token drawn once per `rewrite_query` call.
-    index
-        This URL list's position among the rewrite's parameters.
-
-    Returns
-    -------
-    str
-        ``"__lakana_urls_<token>_<index>"``, a valid DuckDB parameter
-        identifier.
-    """
-    return f"{_PARAMETER_PREFIX}{token}_{index}"
-
-
 def _require_unambiguous_references(parsed: exp.Expr, dialect: str) -> None:
     """Refuse a query whose own references sqlglot cannot resolve unambiguously.
 
@@ -947,7 +938,7 @@ def _quoted_identifier(name: str, dialect: str) -> str:
     return exp.to_identifier(name, quoted=True).sql(dialect=dialect)
 
 
-def _reader_select_sql(source: TableSource, parameter: str, dialect: str) -> str:
+def _reader_select_sql(source: TableSource, index: int, dialect: str) -> str:
     """Build the SELECT reading a table's files, applying its row filters/column masks.
 
     Parameters
@@ -957,18 +948,17 @@ def _reader_select_sql(source: TableSource, parameter: str, dialect: str) -> str
         masks — already composed and context-substituted for the
         requesting principal by `lakana_core.policy.PolicyResolver.resolve`,
         never raw, unvalidated policy text.
-    parameter
-        The name `source.urls` is bound under, from `_parameter_name` —
-        generated here, never user text.
+    index
+        The read's number, from which its variable names are made (`_files_variable`).
     dialect
         The SQL dialect to render the generated SQL as.
 
     Returns
     -------
     str
-        `SELECT * FROM <reader>($<parameter>)` when no policy applies and the source does
-        not ask for its declared columns only. Otherwise an explicit column list built from
-        `source.columns`, with a masked column's projection replaced by its
+        `SELECT * FROM <reader>(getvariable('v_<n>_files'))` when no policy applies and the
+        source does not ask for its declared columns only. Otherwise an explicit column list
+        built from `source.columns`, with a masked column's projection replaced by its
         mask expression instead of the raw value, plus a `WHERE` clause
         ANDing every applicable row filter. A masked column's real value is
         therefore never selected in the first place, not merely hidden
@@ -999,11 +989,11 @@ def _reader_select_sql(source: TableSource, parameter: str, dialect: str) -> str
         here would be inconsistent with quoted-identifier semantics
         everywhere else in this codebase.
     """
-    reader = f"{_READERS[source.file_format]}(${parameter})"
+    reader = f"{_READERS[source.file_format]}(getvariable('{_files_variable(index)}'))"
     if not source.row_filters and not source.column_masks and not source.declared_columns_only:
         # B608: the interpolated values are a literal reader name from the
-        # closed `_READERS` dict and a generated parameter name; the URLs
-        # bind to that parameter, never to text.
+        # closed `_READERS` dict and a generated variable name; the URLs are
+        # the variable's value, never text.
         return f"SELECT * FROM {reader}"  # nosec B608
     if not source.columns:
         raise ValidationError(
@@ -1027,7 +1017,7 @@ def _reader_select_sql(source: TableSource, parameter: str, dialect: str) -> str
     # unvalidated user input — see
     # `lakana_core.policy.expressions.validate_restricted_expression` and
     # `lakana_core.policy.resolver`); `reader` is the same closed literal as
-    # above. The URLs still bind to the named parameter, never to text.
+    # above. The URLs are still the variable's value, never text.
     sql = f"SELECT {', '.join(projections)} FROM {reader}"  # nosec B608
     if source.row_filters:
         sql += " WHERE " + " AND ".join(f"({expression})" for expression in source.row_filters)
@@ -1436,9 +1426,9 @@ def rewrite_query(
     -------
     RewrittenQuery
         `sql` with every reference in `sources` replaced by a uniquely-named
-        CTE (`read_parquet($<name>)` or the matching reader), keeping the
+        CTE (`read_parquet(getvariable('v_<n>_files'))` or the matching reader), keeping the
         original reference's alias so the rest of the query still resolves,
-        plus the URL lists to bind to those named parameters. This is what lets a
+        plus the URL lists to set as those variables. This is what lets a
         multi-level Lakana name (`gold.sales.monthly`) run against DuckDB at
         all — the name never reaches DuckDB's own catalog, only the
         rewritten form does. A source with no `row_filters` or
@@ -1471,7 +1461,7 @@ def rewrite_query(
     ctes: dict[str, exp.Expr] = {}
     owners: dict[str, str] = {}
     parameters: dict[str, list[str]] = {}
-    token = secrets.token_hex(_PARAMETER_TOKEN_BYTES)
+    reads = 0
     named: list[tuple[tuple[str, str, str], exp.Expr]] = []
     name_counts = _bare_name_counts(parsed)
     scopes = list(traverse_scope(parsed))
@@ -1488,10 +1478,11 @@ def rewrite_query(
             )
         if alias not in ctes:
             if source.urls:
-                name = _parameter_name(token, len(parameters))
+                index = reads
+                reads += 1
                 try:
                     ctes[alias] = sqlglot.parse_one(
-                        _reader_select_sql(source, name, dialect), dialect=dialect
+                        _reader_select_sql(source, index, dialect), dialect=dialect
                     )
                 except SQL_SYNTAX_ERRORS as exc:
                     # The text holds stored row filters and column masks, which the reader
@@ -1500,7 +1491,7 @@ def rewrite_query(
                         "A stored row filter or column mask on a table this query reads could "
                         "not be read. Ask an administrator to correct or remove it."
                     ) from exc
-                parameters[name] = list(source.urls)
+                parameters[_files_variable(index)] = list(source.urls)
             else:
                 ctes[alias] = _empty_relation(dotted, source.columns)
         replacement = exp.to_table(alias)

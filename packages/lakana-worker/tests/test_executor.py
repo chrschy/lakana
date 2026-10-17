@@ -555,14 +555,14 @@ def test_parameters_bind_by_name_only(run: str) -> None:
             )
 
 
-def test_named_parameters_bind_in_every_entry_point() -> None:
-    """A mapping binds by name for a read, a write stream and a plan alike."""
-    sql = "SELECT $__lakana_test::INT AS x"
+def test_a_variable_is_set_in_every_entry_point() -> None:
+    """A mapping is set as variables for a read, a write stream and a plan alike."""
+    sql = "SELECT getvariable('v_test')::INT AS x"
 
-    assert execute_query(sql, {"__lakana_test": 7}).column("x").to_pylist() == [7]
-    with stream_query(sql, {"__lakana_test": 7}, restrict_local_filesystem=False) as (_, batches):
+    assert execute_query(sql, {"v_test": 7}).column("x").to_pylist() == [7]
+    with stream_query(sql, {"v_test": 7}, restrict_local_filesystem=False) as (_, batches):
         assert [row["x"] for batch in batches for row in batch.to_pylist()] == [7]
-    assert describe_query(sql, {"__lakana_test": 7}, restrict_local_filesystem=False).names == ["x"]
+    assert describe_query(sql, {"v_test": 7}, restrict_local_filesystem=False).names == ["x"]
 
 
 _SLOW_SQL = "SELECT sum(hash(a.range + b.range)) AS n FROM range(40000) a, range(40000) b"
@@ -885,11 +885,11 @@ def test_a_mid_stream_sql_error_in_a_buffered_query_is_permanent(sql: str) -> No
     assert type(info.value) is ValidationError
 
 
-def test_a_refused_spill_is_out_of_memory_with_bound_parameters() -> None:
-    """The re-plan binds the query's parameters: every production query carries some."""
+def test_a_refused_spill_is_out_of_memory_with_variables_set() -> None:
+    """The re-plan sees the variables: every production query reads some."""
     sql = (
         "SELECT * FROM (SELECT i, repeat('x', 100) || i::VARCHAR AS b "
-        "FROM range($n) AS r(i)) ORDER BY b DESC"
+        "FROM range(getvariable('n')) AS r(i)) ORDER BY b DESC"
     )
     with pytest.raises(OutOfMemoryQuery, match="LAKANA_QUERY_LIMITS__MEMORY_LIMIT"):
         execute_query(sql, {"n": 200000}, restrict_local_filesystem=True, limits=_SMALL_LIMIT)
@@ -1502,7 +1502,7 @@ def test_a_query_over_too_many_files_is_refused_before_a_process_starts(
     monkeypatch.setattr(executor_module.query_process, "run", not_started)
     urls = [f"https://store.example/data/{'x' * 200}-{i}.parquet" for i in range(10_000)]
     with pytest.raises(ValidationError) as caught:
-        execute_query("SELECT len($u) AS n", {"u": urls})
+        execute_query("SELECT len(getvariable('u')) AS n", {"u": urls})
     message = str(caught.value)
     assert type(caught.value) is ValidationError
     assert message.startswith("Query refused: it would read 10,000 data files")
@@ -1537,7 +1537,9 @@ def test_a_request_over_the_limit_without_a_file_list_does_not_talk_about_files(
 def test_a_request_of_a_thousand_files_is_sent() -> None:
     """An ordinary many-file read still goes through the check."""
     urls = [f"https://store.example/data/{'x' * 200}-{i}.parquet" for i in range(1000)]
-    assert execute_query("SELECT len($u) AS n", {"u": urls}).to_pydict() == {"n": [1000]}
+    assert execute_query("SELECT len(getvariable('u')) AS n", {"u": urls}).to_pydict() == {
+        "n": [1000]
+    }
 
 
 def test_the_start_up_checks_timeout_names_the_check_not_the_query_time_limit(
@@ -1585,7 +1587,7 @@ def test_a_child_that_cannot_start_fails_the_query_and_the_start_up_check(
 
 def test_a_value_the_child_cannot_take_is_refused_before_a_process_starts() -> None:
     with pytest.raises(ValidationError) as caught:
-        execute_query("SELECT $x AS x", {"x": 1.5})
+        execute_query("SELECT getvariable('x') AS x", {"x": 1.5})
     assert str(caught.value) == (
         "Query parameter 'x' has a type the query process cannot take: float."
     )

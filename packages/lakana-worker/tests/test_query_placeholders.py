@@ -1,7 +1,7 @@
-"""User SQL must never reach the rewriter's own bound parameters.
+"""User SQL must never reach the rewriter's own variables.
 
 `lakana_core.query_rewrite.rewrite_query` hands DuckDB each table's resolved
-file list as a bound parameter — on S3, presigned URLs of the raw files. A
+file list as a DuckDB variable — on S3, presigned URLs of the raw files. A
 placeholder in the user's own SQL would bind to that list and return it as
 an ordinary value, and anyone holding those URLs can read the raw files
 directly, past every row filter and column mask. These tests drive the real
@@ -121,27 +121,51 @@ def test_the_reported_leak_no_longer_returns_the_source_urls(customers: TableSou
     assert customers.urls[0] not in str(result.to_pylist())
 
 
-def test_the_rewritten_query_binds_urls_under_unguessable_names(
-    customers: TableSource,
-) -> None:
-    """The URL lists bind by per-rewrite random names, never by position.
+def test_the_rewritten_query_reads_its_urls_through_variables(customers: TableSource) -> None:
+    """The URL list is set as a variable; the statement carries no placeholder at all.
 
     Parameters
     ----------
     customers
         The masked, row-filtered source fixture.
     """
-    sql = "SELECT id, ssn FROM bronze.customers"
-    first = rewrite_query(sql, {"bronze.customers": customers})
-    second = rewrite_query(sql, {"bronze.customers": customers})
+    rewritten = rewrite_query(
+        "SELECT id, ssn FROM bronze.customers", {"bronze.customers": customers}
+    )
 
-    assert "?" not in first.sql
-    assert list(first.parameters.values()) == [list(customers.urls)]
-    assert set(first.parameters).isdisjoint(second.parameters)
-    for name in first.parameters:
-        assert f"${name}" in first.sql
-    result = execute_query(first.sql, first.parameters, restrict_local_filesystem=False)
+    assert "$" not in rewritten.sql
+    assert "?" not in rewritten.sql
+    assert "GETVARIABLE('v_0_files')" in rewritten.sql
+    assert rewritten.parameters == {"v_0_files": list(customers.urls)}
+    result = execute_query(rewritten.sql, rewritten.parameters, restrict_local_filesystem=False)
     assert result.to_pylist() == [{"id": 2, "ssn": "***"}, {"id": 3, "ssn": "***"}]
+
+
+def test_a_name_of_the_users_own_that_matches_a_variable_reads_the_users_data(
+    customers: TableSource,
+) -> None:
+    """A CTE, an alias and a literal called `v_0_files` are the user's, not the variable.
+
+    Parameters
+    ----------
+    customers
+        The masked, row-filtered source fixture.
+    """
+    sql = (
+        "WITH v_0_files AS (SELECT 10 AS id) "
+        "SELECT c.id, v.id AS v_0_files, 'v_0_files' AS label "
+        "FROM bronze.customers AS c, v_0_files AS v"
+    )
+    check_blacklist(sql)
+    rewritten = rewrite_query(sql, {"bronze.customers": customers})
+
+    result = execute_query(rewritten.sql, rewritten.parameters, restrict_local_filesystem=False)
+
+    assert sorted(result.to_pylist(), key=lambda row: row["id"]) == [
+        {"id": 2, "v_0_files": 10, "label": "v_0_files"},
+        {"id": 3, "v_0_files": 10, "label": "v_0_files"},
+    ]
+    assert customers.urls[0] not in str(result.to_pylist())
 
 
 @pytest.mark.parametrize("smuggled", ["$1", "?"])
@@ -151,8 +175,8 @@ def test_a_positional_placeholder_that_slipped_past_validation_still_cannot_bind
     """Defence in depth: a positional reference cannot address named URL lists.
 
     Stands in for a future parser differential that let a positional
-    placeholder survive into the rewritten SQL: DuckDB refuses to mix it
-    with the rewriter's named parameters rather than binding it.
+    placeholder survive into the rewritten SQL: DuckDB refuses a
+    statement that has a placeholder and no bound value, and the platform binds none.
 
     Parameters
     ----------

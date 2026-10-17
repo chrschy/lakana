@@ -1,10 +1,10 @@
 """What the worker and a query child say to each other.
 
 The worker starts one process per query (`lakana_worker.query_child`) and hands it one JSON
-document on standard input: the rewritten SQL, its bound values and what DuckDB is configured
-with. Nothing else crosses: no database URL, no storage credential, no token, no secret. The
-child answers with an Arrow IPC stream on standard output and, when the statement failed, one
-JSON line on standard error.
+document on standard input: the rewritten SQL, the values it reads as variables and what
+DuckDB is configured with. Nothing else crosses: no database URL, no storage credential, no
+token, no secret. The child answers with an Arrow IPC stream on standard output and, when
+the statement failed, one JSON line on standard error.
 
 This module imports the standard library only. The child imports it, and every import the child
 makes is paid by every query (importing `lakana_core.config` alone costs 130 ms).
@@ -79,7 +79,7 @@ _ERROR_MARK = "lakana_query_error"
 _TEXT_FIELDS = ("sql", "memory_limit", "temp_directory", "max_temp_directory_size")
 
 ParameterValue = list[str] | int | Decimal | dt.date | dt.datetime
-"""What the platform binds: a list of file URLs, or an incremental write's watermark."""
+"""What the platform sets as a variable: file URLs, or an incremental write's watermark."""
 
 
 @dataclass(frozen=True)
@@ -93,7 +93,7 @@ class Request:
     sql
         The rewritten SQL.
     parameters
-        The values bound by name.
+        The values the child sets as DuckDB variables, by name, before the statement runs.
     restrict_local_filesystem
         Whether DuckDB's local file system is disabled.
     memory_limit

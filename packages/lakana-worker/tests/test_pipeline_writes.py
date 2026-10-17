@@ -6,7 +6,6 @@ import base64
 import contextlib
 import datetime as dt
 import logging
-import re
 import sys
 import time
 import uuid
@@ -320,13 +319,13 @@ def test_an_incremental_append_takes_only_rows_past_the_watermark(
     assert [row["id"] for row in _rows(catalog, principal, "gold.events")] == [1, 2, 3, 4]
 
 
-def test_an_incremental_write_binds_the_watermark_by_name_beside_the_url_lists(
+def test_an_incremental_write_sets_the_watermark_beside_the_url_lists(
     session: Session,
     principal: PrincipalRef,
     catalog: CatalogService,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Every parameter is named: two URL lists and the watermark, no positional one.
+    """Every value is a variable: two URL lists and the watermark, and no placeholder.
 
     Runs against real DuckDB (the spy only records what it is handed), with
     two sources so more than one URL list sits beside the watermark.
@@ -363,13 +362,10 @@ def test_an_incremental_write_binds_the_watermark_by_name_beside_the_url_lists(
     assert [row["id"] for row in _rows(catalog, principal, "gold.events")] == [1, 2, 3, 4]
     [(sql, parameters)] = seen
     assert isinstance(parameters, dict)
-    urls = [n for n in parameters if re.fullmatch(r"__lakana_urls_[0-9a-f]{32}_\d+", n)]
-    [watermark] = [n for n in parameters if re.fullmatch(r"__lakana_watermark_[0-9a-f]{32}", n)]
-    assert len(urls) == 2
-    assert len(parameters) == 3
-    assert parameters[watermark] == 2
-    assert f"> ${watermark}" in sql
-    assert "?" not in sql
+    assert sorted(parameters) == ["v_0_files", "v_1_files", "v_watermark"]
+    assert parameters["v_watermark"] == 2
+    assert "> getvariable('v_watermark')" in sql
+    assert "$" not in sql
 
 
 def test_an_incremental_append_into_an_empty_table_takes_every_row(

@@ -1063,7 +1063,7 @@ class _Prepared:
     Parameters
     ----------
     rewritten
-        The rewritten SQL and its bound parameters.
+        The rewritten SQL and the variables it reads.
     views
         The dotted names of the views expanded into it, innermost first
         ; empty for a query that reads no view.
