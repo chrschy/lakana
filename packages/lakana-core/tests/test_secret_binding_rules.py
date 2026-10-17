@@ -21,6 +21,7 @@ from lakana_core.models import (
     AuditEventType,
     Environment,
     JobVersion,
+    NotificationDelivery,
     PackageIndex,
     Principal,
     PrincipalType,
@@ -84,8 +85,8 @@ def world(session: Session) -> dict[str, PrincipalRef]:
     return {"admin": admin, "manager": manager}
 
 
-def _secret(session: Session, environment: str, name: str) -> Secret:
-    """Create a secret as an administrator would, unbound unless something names it.
+def _secret(session: Session, environment: str, name: str, use: SecretUse | None = None) -> Secret:
+    """Create a secret as an administrator would: unbound unless a use is given.
 
     Parameters
     ----------
@@ -95,6 +96,8 @@ def _secret(session: Session, environment: str, name: str) -> Secret:
         Its environment.
     name
         Its name.
+    use
+        What it is for; `None` leaves it unbound.
 
     Returns
     -------
@@ -104,7 +107,7 @@ def _secret(session: Session, environment: str, name: str) -> Secret:
     admin = session.execute(select(Principal).where(Principal.name == "admin")).scalar_one()
     ref = PrincipalRef(id=admin.id, name=admin.name, type=admin.type)
     return SecretService(session, AllowAllAuthorization(), _KEYS).create(
-        ref, environment=environment, name=name, values={"password": "pw"}
+        ref, environment=environment, name=name, values={"password": "pw"}, use=use
     )
 
 
@@ -171,245 +174,6 @@ def _indexes(session: Session) -> PackageIndexService:
     return PackageIndexService(session, GrantAuthorization(session))
 
 
-def test_naming_an_unbound_secret_binds_it_in_every_environment(
-    session: Session, world: dict[str, PrincipalRef]
-) -> None:
-    """Bind on first use: the manager may name an unbound secret, and that binds it."""
-    _secret(session, "dev", "pypi")
-    _secret(session, "prod", "pypi")
-
-    row = _indexes(session).create(
-        world["manager"],
-        name="corp",
-        url="https://corp.example.org/simple",
-        credential_secret="pypi",
-    )
-
-    assert _uses(session, "pypi") == {
-        "dev": (SecretUseKind.PACKAGE_INDEX, row.id),
-        "prod": (SecretUseKind.PACKAGE_INDEX, row.id),
-    }
-    events = (
-        session.execute(
-            select(AuditEvent).where(AuditEvent.event_type == AuditEventType.SECRET_BOUND)
-        )
-        .scalars()
-        .all()
-    )
-    assert sorted(e.detail["target"] for e in events) == ["corp", "corp"]
-    assert {e.principal_id for e in events} == {world["manager"].id}
-    assert [e.detail["previous"] for e in events] == [None, None]
-
-
-def test_a_secret_bound_elsewhere_needs_manage_secret_to_be_named(
-    session: Session, world: dict[str, PrincipalRef]
-) -> None:
-    """The manager alone is refused and nothing is written; an administrator rebinds."""
-    _secret(session, "prod", "pypi")
-    first = _indexes(session).create(
-        world["manager"], name="a", url="https://a.example.org/simple", credential_secret="pypi"
-    )
-
-    with pytest.raises(PermissionDenied) as caught:
-        _indexes(session).create(
-            world["manager"], name="b", url="https://b.example.org/simple", credential_secret="pypi"
-        )
-
-    assert str(caught.value) == (
-        "Secret 'pypi' of environment 'prod' is bound to package index 'a'. Naming it for "
-        "package index 'b' would change its use, which needs the right to manage secrets in "
-        "'prod' (the ADMIN role). Register package index 'b' without a credential first, then "
-        "ask someone who may manage secrets in 'prod' to run: "
-        "lakana secret bind pypi --env prod --index b"
-    )
-    assert session.execute(select(PackageIndex.name)).scalars().all() == ["a"]
-    assert _uses(session, "pypi") == {"prod": (SecretUseKind.PACKAGE_INDEX, first.id)}
-    second = _indexes(session).create(
-        world["admin"], name="b", url="https://b.example.org/simple", credential_secret="pypi"
-    )
-    assert _uses(session, "pypi") == {"prod": (SecretUseKind.PACKAGE_INDEX, second.id)}
-
-
-def test_a_storage_secret_counts_as_bound_to_its_environment(
-    session: Session, world: dict[str, PrincipalRef]
-) -> None:
-    """An unbound secret that an environment's storage names is not free for an index."""
-    _secret(session, "prod", "s3")
-    env = session.execute(select(Environment).where(Environment.name == "prod")).scalar_one()
-    env.storage_secret_ref = "s3"
-    session.commit()
-
-    with pytest.raises(PermissionDenied) as caught:
-        _indexes(session).create(
-            world["manager"],
-            name="corp",
-            url="https://corp.example.org/simple",
-            credential_secret="s3",
-        )
-    assert str(caught.value) == (
-        "Secret 's3' of environment 'prod' serves its environment (storage or webhooks), so it "
-        "cannot be the credential of package index 'corp'. Create a new secret for it and name "
-        "that one."
-    )
-    assert "lakana secret bind" not in str(caught.value)
-    assert _uses(session, "s3") == {"prod": (None, None)}
-
-
-def test_a_re_registered_index_of_the_same_name_cannot_take_the_secret(
-    session: Session, world: dict[str, PrincipalRef]
-) -> None:
-    """Deleting `corp` and registering `corp` again elsewhere does not carry the binding."""
-    _secret(session, "prod", "pypi")
-    service = _indexes(session)
-    service.create(
-        world["manager"],
-        name="corp",
-        url="https://corp.example.org/simple",
-        credential_secret="pypi",
-    )
-    service.delete(world["manager"], "corp")
-
-    with pytest.raises(PermissionDenied, match="bound to a package index that was removed"):
-        service.create(
-            world["manager"],
-            name="corp",
-            url="https://evil.example.org/simple",
-            credential_secret="pypi",
-        )
-
-
-_URL_REFUSAL = (
-    "Changing the URL of {use} would send secret '{secret}' of environment 'prod' to another "
-    "host. That needs the right to manage secrets in 'prod' (the ADMIN role). Ask someone who "
-    "may manage secrets in 'prod' to change it, or bind the secret elsewhere first: "
-    "lakana secret bind {secret} --env prod (with --index NAME, --repository NAME or --own-env)"
-)
-
-
-def test_changing_the_url_of_a_credentialed_index_needs_manage_secret(
-    session: Session, world: dict[str, PrincipalRef]
-) -> None:
-    """The URL is part of the use: moving it moves the secret to another host."""
-    _secret(session, "prod", "pypi")
-    service = _indexes(session)
-    service.create(
-        world["manager"],
-        name="corp",
-        url="https://corp.example.org/simple",
-        credential_secret="pypi",
-    )
-
-    with pytest.raises(PermissionDenied) as caught:
-        service.update(world["manager"], "corp", {"url": "https://evil.example.org/simple"})
-
-    assert str(caught.value) == _URL_REFUSAL.format(use="package index 'corp'", secret="pypi")
-
-    def stored() -> str:
-        session.expire_all()
-        return session.execute(select(PackageIndex.url)).scalar_one()
-
-    assert stored() == "https://corp.example.org/simple"
-    service.update(world["manager"], "corp", {"credential_secret": None})
-    with pytest.raises(PermissionDenied):
-        service.update(world["manager"], "corp", {"url": "https://other.example.org/simple"})
-    assert stored() == "https://corp.example.org/simple"
-    service.update(world["admin"], "corp", {"url": "https://moved.example.org/simple"})
-    assert stored() == "https://moved.example.org/simple"
-
-
-def test_clearing_the_credential_does_not_free_the_url(
-    session: Session, world: dict[str, PrincipalRef]
-) -> None:
-    """Clear, move, name again: the secret stays bound to the index, so the move is refused."""
-    _secret(session, "prod", "pypi")
-    service = _indexes(session)
-    row = service.create(
-        world["manager"],
-        name="corp",
-        url="https://corp.example.org/simple",
-        credential_secret="pypi",
-    )
-
-    service.update(world["manager"], "corp", {"credential_secret": None})
-    with pytest.raises(PermissionDenied, match="Changing the URL of package index 'corp'"):
-        service.update(world["manager"], "corp", {"url": "https://evil.example.org/simple"})
-    with pytest.raises(PermissionDenied, match="Changing the URL of package index 'corp'"):
-        service.update(
-            world["manager"],
-            "corp",
-            {"url": "https://evil.example.org/simple", "credential_secret": "pypi"},
-        )
-
-    assert _url(session, PackageIndex, row.id) == "https://corp.example.org/simple"
-    assert _uses(session, "pypi") == {"prod": (SecretUseKind.PACKAGE_INDEX, row.id)}
-
-
-def test_repositories_follow_the_same_rules(
-    session: Session, world: dict[str, PrincipalRef]
-) -> None:
-    """Naming binds on first use, and a URL change of a credentialed repository is guarded."""
-    _secret(session, "prod", "git")
-    service = RepositoryService(session, GrantAuthorization(session))
-    repo = service.create(
-        world["manager"],
-        name="analytics",
-        kind=RepositoryKind.HTTPS,
-        url="https://git.example.org/analytics.git",
-        credential_secret="git",
-    )
-    assert _uses(session, "git") == {"prod": (SecretUseKind.REPOSITORY, repo.id)}
-
-    with pytest.raises(PermissionDenied) as caught:
-        service.update(world["manager"], "analytics", {"url": "https://evil.example.org/a.git"})
-    assert str(caught.value) == _URL_REFUSAL.format(use="repository 'analytics'", secret="git")
-    assert session.execute(select(Repository.url)).scalar_one() == repo.url
-    with pytest.raises(PermissionDenied, match="is bound to repository 'analytics'"):
-        service.create(
-            world["manager"],
-            name="other",
-            kind=RepositoryKind.HTTPS,
-            url="https://git.example.org/other.git",
-            credential_secret="git",
-        )
-
-
-def test_create_binds_on_first_use_or_to_the_use_given(
-    session: Session, world: dict[str, PrincipalRef]
-) -> None:
-    """A new secret takes the one entry that names it; two entries leave it unbound."""
-    index = _indexes(session).create(
-        world["admin"], name="corp", url="https://corp.example.org/simple", credential_secret="pypi"
-    )
-    _indexes(session).create(
-        world["admin"], name="twin", url="https://twin.example.org/simple", credential_secret="both"
-    )
-    _indexes(session).create(
-        world["admin"],
-        name="twin2",
-        url="https://twin2.example.org/simple",
-        credential_secret="both",
-    )
-    secrets = SecretService(session, AllowAllAuthorization(), _KEYS)
-
-    created = secrets.create(
-        world["admin"], environment="prod", name="pypi", values={"password": "p"}
-    )
-    shared = secrets.create(
-        world["admin"], environment="prod", name="both", values={"password": "p"}
-    )
-    storage = secrets.create(
-        world["admin"],
-        environment="prod",
-        name="s3",
-        values={"k": "v"},
-        use=SecretUse.environment(),
-    )
-
-    assert (created.use_kind, created.use_target_id) == (SecretUseKind.PACKAGE_INDEX, index.id)
-    assert (shared.use_kind, shared.use_target_id) == (None, None)
-    assert (storage.use_kind, storage.use_target_id) == (SecretUseKind.ENVIRONMENT, None)
-
-
 def test_bind_needs_manage_secret_checks_the_target_and_audits(
     session: Session, world: dict[str, PrincipalRef]
 ) -> None:
@@ -449,27 +213,12 @@ def test_bind_needs_manage_secret_checks_the_target_and_audits(
         granted.bind(world["admin"], secret.id, SecretUse.environment())
 
 
-def test_clearing_the_credential_does_not_free_the_url_of_a_repository(
-    session: Session, world: dict[str, PrincipalRef]
-) -> None:
-    """The same bypass is closed for repositories, and an administrator may still move it."""
-    _secret(session, "prod", "git")
-    service = RepositoryService(session, GrantAuthorization(session))
-    repo = service.create(
-        world["manager"],
-        name="analytics",
-        kind=RepositoryKind.HTTPS,
-        url="https://git.example.org/analytics.git",
-        credential_secret="git",
-    )
-
-    service.update(world["manager"], "analytics", {"credential_secret": None})
-    with pytest.raises(PermissionDenied, match="Changing the URL of repository 'analytics'"):
-        service.update(world["manager"], "analytics", {"url": "https://evil.example.org/a.git"})
-    assert _url(session, Repository, repo.id) == "https://git.example.org/analytics.git"
-
-    service.update(world["admin"], "analytics", {"url": "https://git.example.org/moved.git"})
-    assert _url(session, Repository, repo.id) == "https://git.example.org/moved.git"
+_URL_REFUSAL = (
+    "Changing the URL of {use} would send secret '{secret}' of environment 'prod' to another "
+    "host. That needs the right to manage secrets in 'prod' (the ADMIN role). Ask someone who "
+    "may manage secrets in 'prod' to change it, or bind the secret elsewhere first: "
+    "lakana secret bind {secret} --env prod (with --index NAME, --repository NAME or --own-env)"
+)
 
 
 def _auditing(session: Session) -> AuditingAuthorization:
@@ -536,233 +285,6 @@ def _bound_events(session: Session) -> int:
     )
 
 
-def _ambiguous(session: Session, world: dict[str, PrincipalRef]) -> None:
-    """Name `pypi` from index `a` and index `b`, then create the secret: it stays unbound.
-
-    Parameters
-    ----------
-    session
-        Database session.
-    world
-        The fixture's principals.
-    """
-    service = _indexes(session)
-    for name in ("a", "b"):
-        service.create(
-            world["admin"],
-            name=name,
-            url=f"https://{name}.example.org/simple",
-            credential_secret="pypi",
-        )
-    _secret(session, "prod", "pypi")
-    assert _uses(session, "pypi") == {"prod": (None, None)}
-
-
-def test_a_manager_cannot_claim_a_secret_that_several_entries_name(
-    session: Session, world: dict[str, PrincipalRef]
-) -> None:
-    """Ambiguous secrets are for an administrator, also when the URL is moved first."""
-    _ambiguous(session, world)
-    service = PackageIndexService(session, _auditing(session))
-
-    service.update(world["manager"], "b", {"credential_secret": "pypi"})
-    assert _uses(session, "pypi") == {"prod": (None, None)}
-    service.update(world["manager"], "b", {"credential_secret": None})
-    service.update(world["manager"], "b", {"url": "https://evil.example.org/simple"})
-    with pytest.raises(PermissionDenied) as caught:
-        service.update(world["manager"], "b", {"credential_secret": "pypi"})
-
-    assert str(caught.value) == (
-        "Secret 'pypi' of environment 'prod' is named by more than one package index or "
-        "repository and is not bound yet. Naming it for package index 'b' would bind it, which "
-        "needs the right to manage secrets in 'prod' (the ADMIN role). Ask someone who may "
-        "manage secrets in 'prod' to run: lakana secret bind pypi --env prod --index b"
-    )
-    assert _uses(session, "pypi") == {"prod": (None, None)}
-    assert _denials(session) == [(world["manager"].id, "secret_named_by_several")]
-    assert _bound_events(session) == 0
-    service.update(world["admin"], "b", {"credential_secret": "pypi"})
-    assert _uses(session, "pypi")["prod"][0] is SecretUseKind.PACKAGE_INDEX
-
-
-def test_a_repository_and_an_index_naming_one_secret_leave_it_to_an_administrator(
-    session: Session, world: dict[str, PrincipalRef]
-) -> None:
-    """The check holds across kinds, in both directions, and on create."""
-    _indexes(session).create(
-        world["admin"], name="a", url="https://a.example.org/simple", credential_secret="tok"
-    )
-    repositories = RepositoryService(session, _auditing(session))
-    repositories.create(
-        world["admin"],
-        name="r",
-        kind=RepositoryKind.HTTPS,
-        url="https://git.example.org/r.git",
-        credential_secret="tok",
-    )
-    _secret(session, "prod", "tok")
-    assert _uses(session, "tok") == {"prod": (None, None)}
-
-    repositories.update(world["manager"], "r", {"credential_secret": None})
-    with pytest.raises(PermissionDenied, match="named by more than one"):
-        repositories.update(world["manager"], "r", {"credential_secret": "tok"})
-    indexes = PackageIndexService(session, _auditing(session))
-    indexes.update(world["manager"], "a", {"credential_secret": None})
-    repositories.update(world["admin"], "r", {"credential_secret": "tok"})
-    with pytest.raises(PermissionDenied, match="is bound to repository 'r'"):
-        indexes.update(world["manager"], "a", {"credential_secret": "tok"})
-    with pytest.raises(PermissionDenied, match="Register package index 'c' without a credential"):
-        indexes.create(
-            world["manager"], name="c", url="https://c.example.org/simple", credential_secret="tok"
-        )
-    assert [reason for _, reason in _denials(session)] == [
-        "secret_named_by_several",
-        "secret_bound_elsewhere",
-        "secret_bound_elsewhere",
-    ]
-
-
-def test_a_secret_a_deployed_webhook_names_cannot_be_taken_by_a_manager(
-    session: Session, world: dict[str, PrincipalRef]
-) -> None:
-    """The environment uses it: only a secret manager may bind it, and nobody is told to rebind."""
-    _secret(session, "prod", "hook")
-    prod = session.execute(select(Environment).where(Environment.name == "prod")).scalar_one()
-    repository = RepositoryService(session, AllowAllAuthorization()).create(
-        world["admin"], name="r", kind=RepositoryKind.HTTPS, url="https://git.example.org/r.git"
-    )
-    session.add(
-        JobVersion(
-            id=uuid.uuid4(),
-            repository_id=repository.id,
-            environment_id=prod.id,
-            commit_sha="a" * 40,
-            manifest_json={"jobs": {"nightly": {"notify": {"webhook": "hook"}}}},
-            code_uri="file:///code",
-            code_sha256="0" * 64,
-        )
-    )
-    session.commit()
-    service = PackageIndexService(session, _auditing(session))
-
-    with pytest.raises(PermissionDenied) as caught:
-        service.create(
-            world["manager"],
-            name="corp",
-            url="https://corp.example.org/simple",
-            credential_secret="hook",
-        )
-
-    assert "serves its environment (storage or webhooks)" in str(caught.value)
-    assert "lakana secret bind" not in str(caught.value)
-    assert _uses(session, "hook") == {"prod": (None, None)}
-    assert _denials(session) == [(world["manager"].id, "secret_used_by_environment")]
-    assert session.execute(select(PackageIndex.name)).scalars().all() == []
-    service.create(
-        world["admin"],
-        name="corp",
-        url="https://corp.example.org/simple",
-        credential_secret="hook",
-    )
-    assert _uses(session, "hook")["prod"][0] is SecretUseKind.PACKAGE_INDEX
-
-
-def test_an_unchanged_credential_binds_nothing(
-    session: Session, world: dict[str, PrincipalRef]
-) -> None:
-    """An unrelated update does not re-run the bind, so it neither fails nor binds."""
-    repositories = RepositoryService(session, GrantAuthorization(session))
-    repositories.create(
-        world["admin"],
-        name="r",
-        kind=RepositoryKind.HTTPS,
-        url="https://git.example.org/r.git",
-        credential_secret="git",
-    )
-    _indexes(session).create(
-        world["admin"], name="a", url="https://a.example.org/simple", credential_secret="git"
-    )
-    _secret(session, "prod", "git")
-    session.expire_all()
-    before = _uses(session, "git")
-
-    repositories.update(world["manager"], "r", {"default_ref": "main"})
-    repositories.update(world["manager"], "r", {"credential_secret": "git"})
-
-    assert _uses(session, "git") == before
-    assert before == {"prod": (None, None)}
-
-
-def test_a_revoked_secret_neither_blocks_nor_is_bound(
-    session: Session, world: dict[str, PrincipalRef]
-) -> None:
-    """Only active secrets count."""
-    _secret(session, "dev", "pypi")
-    old = _secret(session, "prod", "pypi")
-    secrets = SecretService(session, AllowAllAuthorization(), _KEYS)
-    index = _indexes(session).create(
-        world["admin"], name="a", url="https://a.example.org/simple", credential_secret="pypi"
-    )
-    secrets.revoke(world["admin"], old.id)
-    _secret(session, "prod", "other")
-
-    _indexes(session).create(
-        world["manager"], name="b", url="https://b.example.org/simple", credential_secret="other"
-    )
-    with pytest.raises(PermissionDenied):
-        _indexes(session).create(
-            world["manager"], name="c", url="https://c.example.org/simple", credential_secret="pypi"
-        )
-    assert _uses(session, "pypi")["dev"] == (SecretUseKind.PACKAGE_INDEX, index.id)
-
-
-def test_a_secret_bound_to_its_environment_or_a_repository_is_refused_to_a_manager(
-    session: Session, world: dict[str, PrincipalRef]
-) -> None:
-    """Explicit uses count as bound, and the environment's can be taken by an administrator."""
-    secrets = SecretService(session, AllowAllAuthorization(), _KEYS)
-    secrets.create(
-        world["admin"],
-        environment="prod",
-        name="own",
-        values={"k": "v"},
-        use=SecretUse.environment(),
-    )
-    with pytest.raises(PermissionDenied, match="serves its environment"):
-        _indexes(session).create(
-            world["manager"], name="a", url="https://a.example.org/simple", credential_secret="own"
-        )
-    _indexes(session).create(
-        world["admin"], name="a", url="https://a.example.org/simple", credential_secret="own"
-    )
-    assert _uses(session, "own")["prod"][0] is SecretUseKind.PACKAGE_INDEX
-
-
-def test_a_re_registered_repository_of_the_same_name_cannot_take_the_secret(
-    session: Session, world: dict[str, PrincipalRef]
-) -> None:
-    """The binding follows the id, so a repository registered again does not inherit it."""
-    _secret(session, "prod", "git")
-    service = RepositoryService(session, GrantAuthorization(session))
-    service.create(
-        world["manager"],
-        name="r",
-        kind=RepositoryKind.HTTPS,
-        url="https://git.example.org/r.git",
-        credential_secret="git",
-    )
-    service.delete(world["manager"], "r")
-
-    with pytest.raises(PermissionDenied, match="bound to a repository that was removed"):
-        service.create(
-            world["manager"],
-            name="r",
-            kind=RepositoryKind.HTTPS,
-            url="https://evil.example.org/r.git",
-            credential_secret="git",
-        )
-
-
 def _scoped(session: Session, world: dict[str, PrincipalRef], *, role: bool) -> PrincipalRef:
     """Persist `devsec`: both manage actions everywhere, and secret management in dev only.
 
@@ -804,62 +326,470 @@ def _scoped(session: Session, world: dict[str, PrincipalRef], *, role: bool) -> 
 
 
 @pytest.mark.parametrize("role", [False, True])
-def test_rights_in_dev_never_bind_or_redirect_anything_in_prod(
-    session: Session, world: dict[str, PrincipalRef], role: bool
-) -> None:
-    """A dev secret manager is refused for prod, and the refusal leaves dev untouched too."""
-    devsec = _scoped(session, world, role=role)
-    for env in ("dev", "prod"):
-        _secret(session, env, "pypi")
-    _secret(session, "dev", "dev-only")
-    first = _indexes(session).create(
-        world["admin"], name="a", url="https://a.example.org/simple", credential_secret="pypi"
+def _repositories(session: Session) -> RepositoryService:
+    """Build the repository service on real grants that record denials.
+
+    Parameters
+    ----------
+    session
+        Database session.
+
+    Returns
+    -------
+    RepositoryService
+        The service.
+    """
+    return RepositoryService(session, _auditing(session))
+
+
+def _credentialed_index(
+    session: Session,
+    world: dict[str, PrincipalRef],
+    secret: str,
+    environments: tuple[str, ...] = ("prod",),
+    name: str = "corp",
+) -> PackageIndex:
+    """Register an index that names `secret`, then create the secret bound to it.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    world
+        The fixture's principals.
+    secret
+        The secret's name.
+    environments
+        The environments that get a secret of that name, bound to the index.
+    name
+        The index's name.
+
+    Returns
+    -------
+    PackageIndex
+        The index.
+    """
+    row = _indexes(session).create(
+        world["manager"],
+        name=name,
+        url=f"https://{name}.example.org/simple",
+        credential_secret=secret,
     )
-    other = _indexes(session).create(
-        world["admin"], name="o", url="https://o.example.org/simple", credential_secret="dev-only"
-    )
-    service = PackageIndexService(session, _auditing(session))
-
-    with pytest.raises(PermissionDenied, match="environment 'prod'"):
-        service.create(
-            devsec, name="b", url="https://b.example.org/simple", credential_secret="pypi"
-        )
-    with pytest.raises(PermissionDenied, match="would send secret 'pypi' of environment 'prod'"):
-        service.update(devsec, "a", {"url": "https://evil.example.org/simple"})
-
-    assert _uses(session, "pypi") == {
-        "dev": (SecretUseKind.PACKAGE_INDEX, first.id),
-        "prod": (SecretUseKind.PACKAGE_INDEX, first.id),
-    }
-    assert _url(session, PackageIndex, first.id) == "https://a.example.org/simple"
-    assert [reason for _, reason in _denials(session)] == [
-        "secret_bound_elsewhere",
-        "url_moves_bound_secret",
-    ]
-    service.update(devsec, "o", {"url": "https://moved.example.org/simple"})
-    assert _url(session, PackageIndex, other.id) == "https://moved.example.org/simple"
+    for environment in environments:
+        _secret(session, environment, secret, SecretUse.package_index(row))
+    return row
 
 
-def test_a_first_use_at_secret_create_records_what_it_bound(
+def test_naming_a_secret_bound_to_the_entry_is_allowed(
     session: Session, world: dict[str, PrincipalRef]
 ) -> None:
-    """The audit log says which index took the new secret, and who created it."""
-    index = _indexes(session).create(
-        world["admin"], name="corp", url="https://corp.example.org/simple", credential_secret="pypi"
+    """A manager names what an administrator bound to that very index."""
+    row = _indexes(session).create(
+        world["manager"], name="corp", url="https://corp.example.org/simple"
     )
-    _secret(session, "prod", "pypi")
+    _secret(session, "prod", "pypi", SecretUse.package_index(row))
 
-    event = (
+    _indexes(session).update(world["manager"], "corp", {"credential_secret": "pypi"})
+
+    assert session.execute(select(PackageIndex.credential_secret)).scalar_one() == "pypi"
+    assert _uses(session, "pypi") == {"prod": (SecretUseKind.PACKAGE_INDEX, row.id)}
+
+
+def test_a_manager_never_binds_an_unbound_secret(
+    session: Session, world: dict[str, PrincipalRef]
+) -> None:
+    """Naming an unbound secret is refused, on update and on create, and audited."""
+    _secret(session, "prod", "pypi")
+    indexes = PackageIndexService(session, _auditing(session))
+    indexes.create(world["manager"], name="corp", url="https://corp.example.org/simple")
+
+    with pytest.raises(PermissionDenied) as updated:
+        indexes.update(world["manager"], "corp", {"credential_secret": "pypi"})
+    with pytest.raises(PermissionDenied) as created:
+        indexes.create(
+            world["manager"], name="b", url="https://b.example.org/simple", credential_secret="pypi"
+        )
+
+    assert str(updated.value) == (
+        "Secret 'pypi' of environment 'prod' is not bound to package index 'corp'. Ask someone "
+        "who may manage secrets in 'prod' to bind it to this index: "
+        "lakana secret bind pypi --env prod --index corp"
+    )
+    assert str(created.value) == (
+        "Secret 'pypi' of environment 'prod' is not bound to package index 'b'. Register the "
+        "index without a credential first, then ask someone who may manage secrets in 'prod' to "
+        "bind it to the index: lakana secret bind pypi --env prod --index b"
+    )
+    assert _uses(session, "pypi") == {"prod": (None, None)}
+    assert _denials(session) == [(world["manager"].id, "secret_not_bound_to_entry")] * 2
+    assert _bound_events(session) == 0
+
+
+def test_a_secret_bound_elsewhere_is_refused_to_a_manager_and_an_administrator(
+    session: Session, world: dict[str, PrincipalRef]
+) -> None:
+    """Naming never changes a use, whoever names; `lakana secret bind` does."""
+    first = _credentialed_index(session, world, "pypi", name="a")
+    indexes = PackageIndexService(session, _auditing(session))
+    indexes.create(world["manager"], name="b", url="https://b.example.org/simple")
+
+    for who in ("manager", "admin"):
+        with pytest.raises(PermissionDenied) as caught:
+            indexes.update(world[who], "b", {"credential_secret": "pypi"})
+        assert str(caught.value) == (
+            "Secret 'pypi' of environment 'prod' is bound to package index 'a', not to package "
+            "index 'b'. Ask someone who may manage secrets in 'prod' to bind it to this index: "
+            "lakana secret bind pypi --env prod --index b"
+        )
+    assert _uses(session, "pypi") == {"prod": (SecretUseKind.PACKAGE_INDEX, first.id)}
+    assert [reason for _, reason in _denials(session)] == ["secret_bound_elsewhere"] * 2
+
+
+@pytest.mark.parametrize("how", ["clear", "delete"])
+def test_lowering_what_names_a_secret_does_not_let_a_manager_claim_it(
+    session: Session, world: dict[str, PrincipalRef], how: str
+) -> None:
+    """Clear or delete the other entry, move the URL, then name the secret: still refused."""
+    indexes = PackageIndexService(session, _auditing(session))
+    for name in ("a", "b"):
+        indexes.create(
+            world["manager"],
+            name=name,
+            url=f"https://{name}.example.org/simple",
+            credential_secret="pypi",
+        )
+    _secret(session, "prod", "pypi")
+    if how == "clear":
+        indexes.update(world["manager"], "a", {"credential_secret": None})
+    else:
+        indexes.delete(world["manager"], "a")
+    indexes.update(world["manager"], "b", {"credential_secret": None})
+    indexes.update(world["manager"], "b", {"url": "https://evil.example.org/simple"})
+
+    with pytest.raises(PermissionDenied, match="is not bound to package index 'b'"):
+        indexes.update(world["manager"], "b", {"credential_secret": "pypi"})
+
+    assert _uses(session, "pypi") == {"prod": (None, None)}
+
+
+def test_the_same_holds_for_repositories_and_across_kinds(
+    session: Session, world: dict[str, PrincipalRef]
+) -> None:
+    """A repository manager and an index manager cannot claim each other's secret either."""
+    repositories = _repositories(session)
+    indexes = PackageIndexService(session, _auditing(session))
+    repo = repositories.create(
+        world["manager"],
+        name="r",
+        kind=RepositoryKind.HTTPS,
+        url="https://git.example.org/r.git",
+        credential_secret="tok",
+    )
+    indexes.create(world["manager"], name="a", url="https://a.example.org/simple")
+    _secret(session, "prod", "tok")
+
+    with pytest.raises(PermissionDenied, match="is not bound to package index 'a'"):
+        indexes.update(world["manager"], "a", {"credential_secret": "tok"})
+    repositories.update(world["manager"], "r", {"credential_secret": None})
+    repositories.update(world["manager"], "r", {"url": "https://evil.example.org/r.git"})
+    with pytest.raises(PermissionDenied, match="is not bound to repository 'r'"):
+        repositories.update(world["manager"], "r", {"credential_secret": "tok"})
+    with pytest.raises(PermissionDenied) as created:
+        repositories.create(
+            world["manager"],
+            name="s",
+            kind=RepositoryKind.HTTPS,
+            url="https://git.example.org/s.git",
+            credential_secret="tok",
+        )
+    assert "Register the repository without a credential first" in str(created.value)
+    assert _uses(session, "tok") == {"prod": (None, None)}
+    assert [reason for _, reason in _denials(session)] == ["secret_not_bound_to_entry"] * 3
+    assert session.execute(select(Repository.name)).scalars().all() == ["r"]
+    assert repo.id is not None
+
+
+def _webhook_manifest(session: Session, world: dict[str, PrincipalRef], name: str) -> None:
+    """Deploy a project version whose job notifies the webhook secret `name` in prod.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    world
+        The fixture's principals.
+    name
+        The secret name.
+    """
+    prod = session.execute(select(Environment).where(Environment.name == "prod")).scalar_one()
+    repository = RepositoryService(session, AllowAllAuthorization()).create(
+        world["admin"], name="r", kind=RepositoryKind.HTTPS, url="https://git.example.org/r.git"
+    )
+    session.add(
+        JobVersion(
+            id=uuid.uuid4(),
+            repository_id=repository.id,
+            environment_id=prod.id,
+            commit_sha="a" * 40,
+            manifest_json={"jobs": {"nightly": {"notify": {"webhook": name}}}},
+            code_uri="file:///code",
+            code_sha256="0" * 64,
+        )
+    )
+    session.commit()
+
+
+def _delivery(session: Session, world: dict[str, PrincipalRef], name: str) -> None:
+    """Record that a notification went through the webhook secret `name` in prod.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    world
+        The fixture's principals.
+    name
+        The secret name.
+    """
+    prod = session.execute(select(Environment).where(Environment.name == "prod")).scalar_one()
+    repository = RepositoryService(session, AllowAllAuthorization()).create(
+        world["admin"], name="r", kind=RepositoryKind.HTTPS, url="https://git.example.org/r.git"
+    )
+    session.add(
+        NotificationDelivery(
+            id=uuid.uuid4(),
+            environment_id=prod.id,
+            repository_id=repository.id,
+            job="nightly",
+            event="test",
+            format="json",
+            secret_name=name,
+        )
+    )
+    session.commit()
+
+
+@pytest.mark.parametrize("known_through", ["storage", "manifest", "delivery"])
+@pytest.mark.parametrize("who", ["manager", "admin"])
+def test_a_secret_the_environment_uses_is_never_rebound_by_naming_it(
+    session: Session, world: dict[str, PrincipalRef], known_through: str, who: str
+) -> None:
+    """Storage, a deployed webhook or a delivery: refused for everyone, with the explicit way."""
+    _secret(session, "prod", "hook")
+    if known_through == "storage":
+        prod = session.execute(select(Environment).where(Environment.name == "prod")).scalar_one()
+        prod.storage_secret_ref = "hook"
+        session.commit()
+    elif known_through == "manifest":
+        _webhook_manifest(session, world, "hook")
+    else:
+        _delivery(session, world, "hook")
+    service = PackageIndexService(session, _auditing(session))
+    service.create(world["admin"], name="corp", url="https://corp.example.org/simple")
+
+    with pytest.raises(PermissionDenied) as caught:
+        service.update(world[who], "corp", {"credential_secret": "hook"})
+
+    assert str(caught.value) == (
+        "Secret 'hook' of environment 'prod' serves its environment (storage or webhooks), so "
+        "naming it for package index 'corp' will not move it. Ask someone who may manage secrets "
+        "in 'prod' to give the index a secret of its own and bind that, or to move this one "
+        "on purpose: lakana secret bind hook --env prod --index corp"
+    )
+    assert _uses(session, "hook") == {"prod": (None, None)}
+    assert _denials(session) == [(world[who].id, "secret_used_by_environment")]
+
+
+def test_a_secret_created_without_a_use_stays_unbound(
+    session: Session, world: dict[str, PrincipalRef]
+) -> None:
+    """Even the one index that names it does not take it; an explicit use binds and is audited."""
+    index = _indexes(session).create(
+        world["manager"], name="corp", url="https://corp.example.org/simple", credential_secret="p"
+    )
+    plain = _secret(session, "prod", "p")
+    own = _secret(session, "dev", "s3", SecretUse.environment())
+    bound = _secret(session, "dev", "p", SecretUse.package_index(index))
+
+    assert (plain.use_kind, plain.use_target_id) == (None, None)
+    assert (own.use_kind, own.use_target_id) == (SecretUseKind.ENVIRONMENT, None)
+    assert (bound.use_kind, bound.use_target_id) == (SecretUseKind.PACKAGE_INDEX, index.id)
+    events = (
         session.execute(
             select(AuditEvent).where(AuditEvent.event_type == AuditEventType.SECRET_BOUND)
         )
         .scalars()
-        .one()
+        .all()
     )
-    assert event.detail == {
-        "name": "pypi",
-        "use": "package_index",
-        "target": "corp",
-        "previous": None,
-    }
-    assert _uses(session, "pypi") == {"prod": (SecretUseKind.PACKAGE_INDEX, index.id)}
+    assert sorted(e.detail["target"] or "" for e in events) == ["", "corp"]
+    assert {e.principal_id for e in events} == {_admin_id(session)}
+
+
+def _admin_id(session: Session) -> uuid.UUID:
+    """Look up the administrator's id.
+
+    Parameters
+    ----------
+    session
+        Database session.
+
+    Returns
+    -------
+    uuid.UUID
+        The id.
+    """
+    return session.execute(select(Principal.id).where(Principal.name == "admin")).scalar_one()
+
+
+def test_an_unchanged_credential_checks_nothing(
+    session: Session, world: dict[str, PrincipalRef]
+) -> None:
+    """An unrelated update, or the same name again, does not ask what the secret is bound to."""
+    repositories = _repositories(session)
+    repositories.create(
+        world["manager"],
+        name="r",
+        kind=RepositoryKind.HTTPS,
+        url="https://git.example.org/r.git",
+        credential_secret="git",
+    )
+    _secret(session, "prod", "git")
+
+    repositories.update(world["manager"], "r", {"default_ref": "main"})
+    repositories.update(world["manager"], "r", {"credential_secret": "git"})
+
+    assert _uses(session, "git") == {"prod": (None, None)}
+    assert _denials(session) == []
+
+
+def test_a_revoked_secret_does_not_count(session: Session, world: dict[str, PrincipalRef]) -> None:
+    """Only active secrets are looked at: a revoked one bound elsewhere does not block naming."""
+    first = _indexes(session).create(world["manager"], name="a", url="https://a.example.org/simple")
+    old = _secret(session, "prod", "pypi", SecretUse.package_index(first))
+    SecretService(session, AllowAllAuthorization(), _KEYS).revoke(world["admin"], old.id)
+    _indexes(session).create(world["manager"], name="b", url="https://b.example.org/simple")
+
+    _indexes(session).update(world["manager"], "b", {"credential_secret": "pypi"})
+
+    assert (
+        session.execute(
+            select(PackageIndex.credential_secret).where(PackageIndex.name == "b")
+        ).scalar_one()
+        == "pypi"
+    )
+
+
+@pytest.mark.parametrize("kind", ["index", "repository"])
+def test_a_re_registered_entry_of_the_same_name_does_not_inherit_the_binding(
+    session: Session, world: dict[str, PrincipalRef], kind: str
+) -> None:
+    """The binding follows the id, so deleting and registering again starts unbound."""
+    if kind == "index":
+        service = _indexes(session)
+        row = service.create(world["manager"], name="x", url="https://x.example.org/simple")
+        _secret(session, "prod", "cred", SecretUse.package_index(row))
+        service.delete(world["manager"], "x")
+        service.create(world["manager"], name="x", url="https://x.example.org/simple")
+        match = "bound to a package index that was removed"
+        call = lambda: service.update(  # ruff: ignore[lambda-assignment]
+            world["manager"], "x", {"credential_secret": "cred"}
+        )
+    else:
+        repos = _repositories(session)
+        url = "https://git.example.org/x.git"
+        row = repos.create(world["manager"], name="x", kind=RepositoryKind.HTTPS, url=url)
+        _secret(session, "prod", "cred", SecretUse.repository(row))
+        repos.delete(world["manager"], "x")
+        repos.create(world["manager"], name="x", kind=RepositoryKind.HTTPS, url=url)
+        match = "bound to a repository that was removed"
+        call = lambda: repos.update(  # ruff: ignore[lambda-assignment]
+            world["manager"], "x", {"credential_secret": "cred"}
+        )
+    with pytest.raises(PermissionDenied, match=match):
+        call()
+
+
+def test_changing_the_url_of_a_credentialed_index_needs_manage_secret(
+    session: Session, world: dict[str, PrincipalRef]
+) -> None:
+    """The URL is part of the use: moving it moves the secret to another host."""
+    row = _credentialed_index(session, world, "pypi")
+    service = PackageIndexService(session, _auditing(session))
+
+    with pytest.raises(PermissionDenied) as caught:
+        service.update(world["manager"], "corp", {"url": "https://evil.example.org/simple"})
+
+    assert str(caught.value) == _URL_REFUSAL.format(use="package index 'corp'", secret="pypi")
+    assert _url(session, PackageIndex, row.id) == "https://corp.example.org/simple"
+    service.update(world["manager"], "corp", {"credential_secret": None})
+    with pytest.raises(PermissionDenied):
+        service.update(world["manager"], "corp", {"url": "https://other.example.org/simple"})
+    assert _url(session, PackageIndex, row.id) == "https://corp.example.org/simple"
+    service.update(world["admin"], "corp", {"url": "https://moved.example.org/simple"})
+    assert _url(session, PackageIndex, row.id) == "https://moved.example.org/simple"
+    assert [reason for _, reason in _denials(session)] == ["url_moves_bound_secret"] * 2
+
+
+def test_clearing_the_credential_does_not_free_the_url(
+    session: Session, world: dict[str, PrincipalRef]
+) -> None:
+    """Clear, move, name again: the secret stays bound to the index, so the move is refused."""
+    row = _credentialed_index(session, world, "pypi")
+    service = _indexes(session)
+
+    service.update(world["manager"], "corp", {"credential_secret": None})
+    with pytest.raises(PermissionDenied, match="Changing the URL of package index 'corp'"):
+        service.update(world["manager"], "corp", {"url": "https://evil.example.org/simple"})
+    with pytest.raises(PermissionDenied, match="Changing the URL of package index 'corp'"):
+        service.update(
+            world["manager"],
+            "corp",
+            {"url": "https://evil.example.org/simple", "credential_secret": "pypi"},
+        )
+
+    assert _url(session, PackageIndex, row.id) == "https://corp.example.org/simple"
+    assert _uses(session, "pypi") == {"prod": (SecretUseKind.PACKAGE_INDEX, row.id)}
+
+
+def test_clearing_the_credential_does_not_free_the_url_of_a_repository(
+    session: Session, world: dict[str, PrincipalRef]
+) -> None:
+    """The same for repositories, and an administrator may still move it."""
+    service = _repositories(session)
+    repo = service.create(
+        world["manager"],
+        name="analytics",
+        kind=RepositoryKind.HTTPS,
+        url="https://git.example.org/analytics.git",
+        credential_secret="git",
+    )
+    _secret(session, "prod", "git", SecretUse.repository(repo))
+
+    with pytest.raises(PermissionDenied) as caught:
+        service.update(world["manager"], "analytics", {"url": "https://evil.example.org/a.git"})
+    assert str(caught.value) == _URL_REFUSAL.format(use="repository 'analytics'", secret="git")
+    service.update(world["manager"], "analytics", {"credential_secret": None})
+    with pytest.raises(PermissionDenied, match="Changing the URL of repository 'analytics'"):
+        service.update(world["manager"], "analytics", {"url": "https://evil.example.org/a.git"})
+    assert _url(session, Repository, repo.id) == "https://git.example.org/analytics.git"
+    service.update(world["admin"], "analytics", {"url": "https://git.example.org/moved.git"})
+    assert _url(session, Repository, repo.id) == "https://git.example.org/moved.git"
+
+
+@pytest.mark.parametrize("role", [False, True])
+def test_rights_in_dev_never_bind_or_redirect_anything_in_prod(
+    session: Session, world: dict[str, PrincipalRef], role: bool
+) -> None:
+    """A dev secret manager cannot move an index whose secret also lives in prod."""
+    devsec = _scoped(session, world, role=role)
+    first = _credentialed_index(session, world, "pypi", ("dev", "prod"), name="a")
+    other = _credentialed_index(session, world, "dev-only", ("dev",), name="o")
+    service = PackageIndexService(session, _auditing(session))
+
+    with pytest.raises(PermissionDenied, match="would send secret 'pypi' of environment 'prod'"):
+        service.update(devsec, "a", {"url": "https://evil.example.org/simple"})
+
+    assert _url(session, PackageIndex, first.id) == "https://a.example.org/simple"
+    assert _denials(session) == [(devsec.id, "url_moves_bound_secret")]
+    service.update(devsec, "o", {"url": "https://moved.example.org/simple"})
+    assert _url(session, PackageIndex, other.id) == "https://moved.example.org/simple"

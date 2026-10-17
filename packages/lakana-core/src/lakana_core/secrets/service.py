@@ -25,7 +25,7 @@ from lakana_core.errors import AlreadyExistsError, NotFoundError, ValidationErro
 from lakana_core.models import AuditEventType, Environment, Secret
 from lakana_core.secrets.crypto import SecretBinding, encrypt_secret_values
 from lakana_core.secrets.keys import KeyProvider
-from lakana_core.secrets.uses import SecretUse, first_use, record_binding
+from lakana_core.secrets.uses import SecretUse, lock_entry, record_binding
 
 
 class SecretService:
@@ -120,8 +120,8 @@ class SecretService:
         values
             The plaintext key-value bag to encrypt and store.
         use
-            What the secret is for; `None` binds it on first use: to the one package index or
-            repository that names it, else it stays unbound (`first_use`).
+            What the secret is for; `None` leaves it unbound until `bind`. Naming a secret
+            from an index or repository binds nothing.
 
         Returns
         -------
@@ -144,8 +144,6 @@ class SecretService:
         """
         self._authz.authorize(p, Action.MANAGE_SECRET, Securable.environment_scope(environment))
         env = self._get_environment(environment)
-        if use is None:
-            use = first_use(self._session, name)
         secret_id = uuid.uuid4()
         encrypted = encrypt_secret_values(
             values, self._key_provider, SecretBinding(secret_id, env.id, name)
@@ -214,6 +212,9 @@ class SecretService:
         assert env is not None  # nosec B101 -- environment_id is a non-nullable FK with ON DELETE CASCADE
         scope = Securable.environment_scope(env.name)
         self._authz.authorize(p, Action.MANAGE_SECRET, scope)
+        # The entry first and the secret second, the order every naming and URL change takes too.
+        lock_entry(self._session, use)
+        self._session.refresh(secret, with_for_update=True)
         if secret.revoked_at is not None:
             raise ValidationError(f"Secret {secret_id} has been revoked and cannot be bound.")
         record_binding(self._session, p, secret, scope, use)

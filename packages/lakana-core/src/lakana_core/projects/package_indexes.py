@@ -4,10 +4,10 @@ Only `MANAGE_PACKAGE_INDEX` registers an index or binds a credential to one.
 The `ADMIN` role carries the action, and it can be granted on its own. A
 project's lock may only name a registered index's URL (a wheel's own URL in
 the lock may still point at another host, which receives no credential).
-Naming a secret binds it to the index on first use (`bind_named_secrets`): an unbound
-secret is bound, one bound to anything else is refused unless the principal may manage
-secrets in its environment, and the URL of an index with a bound secret changes only for
-such a principal. A build sends a secret's `password` only to the index it is bound to.
+Naming a secret binds nothing (`require_named_secrets_bound`): it must already be bound to
+the index, and binding or rebinding is `lakana secret bind`, which needs the right to manage
+secrets. The URL of an index with a bound secret changes only for a principal who has that
+right. A build sends a secret's `password` only to the index it is bound to.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ import uuid
 from collections.abc import Mapping
 
 from sqlalchemy import or_, select
-from sqlalchemy.exc import IntegrityError, InvalidRequestError
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.exc import StaleDataError
 
@@ -36,8 +36,8 @@ from lakana_core.projects.package_sources import RegisteredIndex, normalize_inde
 from lakana_core.secrets.uses import (
     SecretBindingRefused,
     SecretUse,
-    bind_named_secrets,
     record_refusal,
+    require_named_secrets_bound,
     require_secret_management_for_url_change,
 )
 
@@ -151,6 +151,38 @@ class PackageIndexService:
             raise NotFoundError(f"No package index named '{shown(name)}'.")
         return row
 
+    def _lock(self, row: PackageIndex) -> PackageIndex:
+        """Lock an index's row and read it afresh, before anything about it is decided.
+
+        A bind, a naming and a URL change of one index take this lock first, so they run one
+        after the other, and the one that waits sees what the other committed.
+
+        Parameters
+        ----------
+        row
+            The index found by name.
+
+        Returns
+        -------
+        PackageIndex
+            The row as committed now.
+
+        Raises
+        ------
+        NotFoundError
+            If another request deleted it since it was found.
+        """
+        locked = self._session.execute(
+            select(PackageIndex)
+            .where(PackageIndex.id == row.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).scalar_one_or_none()
+        if locked is None:
+            self._session.rollback()
+            raise NotFoundError(f"No package index named '{shown(row.name)}'.")
+        return locked
+
     def _clash(self, name: str, url: str, *, except_id: uuid.UUID | None = None) -> str | None:
         """Find a registered index that has this name or this URL.
 
@@ -244,9 +276,8 @@ class PackageIndexService:
         PermissionDenied
             Without `MANAGE_PACKAGE_INDEX`.
         SecretBindingRefused
-            A `PermissionDenied` raised without `MANAGE_SECRET` in a secret's environment,
-            when `credential_secret` names one bound elsewhere or wanted by another entry or
-            its environment.
+            A `PermissionDenied`: `credential_secret` names a secret that is not bound to this
+            index (unbound, bound elsewhere, or used by its environment).
         ValidationError
             If the name, the URL or the secret name is invalid.
         AlreadyExistsError
@@ -270,10 +301,8 @@ class PackageIndexService:
         )
         if credential_secret is not None:
             try:
-                bind_named_secrets(
+                require_named_secrets_bound(
                     self._session,
-                    self._authz,
-                    p,
                     name=credential_secret,
                     use=SecretUse.package_index(row),
                     registered=False,
@@ -384,8 +413,8 @@ class PackageIndexService:
     def update(self, p: PrincipalRef, name: str, changes: Mapping[str, str | None]) -> PackageIndex:
         """Change an index's URL or its credential secret.
 
-        Everything is validated before the row changes. A refusal over a secret rolls back
-        the bindings made so far and is recorded as a denial. The URL and the credential the row
+        The row is locked first. Everything is validated before it changes. A refusal over a
+        secret is rolled back and recorded as a denial. The URL and the credential the row
         would have afterwards are checked together (`normalize_index_url`), whichever of the two
         changes.
 
@@ -409,9 +438,9 @@ class PackageIndexService:
         PermissionDenied
             Without `MANAGE_PACKAGE_INDEX`.
         SecretBindingRefused
-            A `PermissionDenied` raised without `MANAGE_SECRET` in a secret's environment,
-            when the URL changes while a secret is bound to the index or when the credential
-            named is bound elsewhere or wanted by another entry or its environment.
+            A `PermissionDenied`: the URL changes while a secret is bound to the index and `p`
+            may not manage secrets in its environment, or the new `credential_secret` names a
+            secret that is not bound to this index.
         NotFoundError
             If no index has that name, including when a concurrent request
             deletes it before this commit.
@@ -426,7 +455,7 @@ class PackageIndexService:
             If the commit fails for a reason other than a collision.
         """
         self._authz.authorize(p, Action.MANAGE_PACKAGE_INDEX, Securable.instance_scope())
-        row = self._find(name)
+        row = self._lock(self._find(name))
         if not changes:
             raise ValidationError("Nothing to change; name at least one field.")
         fixed = set(changes) - UPDATABLE_FIELDS
@@ -445,18 +474,11 @@ class PackageIndexService:
             raise AlreadyExistsError(clash)
         use = SecretUse.package_index(row)
         try:
-            # Lock the row the secrets point at, so a concurrent bind and a URL change
-            # cannot both pass on what each read before the other committed.
-            try:
-                self._session.refresh(row, with_for_update=True)
-            except InvalidRequestError:
-                self._session.rollback()
-                raise NotFoundError(f"No package index named '{shown(name)}'.") from None
             if new_url != row.url:
                 require_secret_management_for_url_change(self._session, self._authz, p, use)
             if new_secret is not None and new_secret != row.credential_secret:
-                bind_named_secrets(
-                    self._session, self._authz, p, name=new_secret, use=use, registered=True
+                require_named_secrets_bound(
+                    self._session, name=new_secret, use=use, registered=True
                 )
         except SecretBindingRefused as refusal:
             self._session.rollback()

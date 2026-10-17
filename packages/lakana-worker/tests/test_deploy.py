@@ -58,6 +58,7 @@ from lakana_core.projects.run_policy import RunCaps
 from lakana_core.runs.store import DEPLOY_LOST_MESSAGE
 from lakana_core.secrets.keys import EnvKeyProvider
 from lakana_core.secrets.service import SecretService
+from lakana_core.secrets.uses import SecretUse
 from lakana_core.storage.fsspec_storage import FsspecStorage
 from lakana_core.storage.resolver import StorageResolver
 from lakana_worker import deploy as deploy_module
@@ -416,17 +417,21 @@ def _https_world(
     DeploySettings
         Settings trusting the server's certificate.
     """
-    if secret is not None:
-        SecretService(session, AllowAllAuthorization(), _KEY).create(
-            principal, environment="dev", name="git-token", values=secret
-        )
-    RepositoryService(session, AllowAllAuthorization()).create(
+    repository = RepositoryService(session, AllowAllAuthorization()).create(
         principal,
         name="remote",
         kind=RepositoryKind.HTTPS,
         url=server.url("analytics"),
         credential_secret="git-token",
     )
+    if secret is not None:
+        SecretService(session, AllowAllAuthorization(), _KEY).create(
+            principal,
+            environment="dev",
+            name="git-token",
+            values=secret,
+            use=SecretUse.repository(repository),
+        )
     return DeploySettings(ca_bundle=server.ca_file)
 
 

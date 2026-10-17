@@ -355,39 +355,6 @@ def record_binding(
     secret.use_kind, secret.use_target_id = use.kind, use.target_id
 
 
-def first_use(session: Session, name: str) -> SecretUse | None:
-    """Find the use a new secret takes on first use: the one entry that names it.
-
-    Parameters
-    ----------
-    session
-        Database session.
-    name
-        The secret's name.
-
-    Returns
-    -------
-    SecretUse or None
-        The package index or repository when exactly one of all of them names `name` as its
-        credential; `None` otherwise (none, or more than one: an administrator decides).
-    """
-    indexes = (
-        session.execute(select(PackageIndex).where(PackageIndex.credential_secret == name))
-        .scalars()
-        .all()
-    )
-    repositories = (
-        session.execute(select(Repository).where(Repository.credential_secret == name))
-        .scalars()
-        .all()
-    )
-    if len(indexes) + len(repositories) != 1:
-        return None
-    if indexes:
-        return SecretUse.package_index(indexes[0])
-    return SecretUse.repository(repositories[0])
-
-
 def resolve_use(session: Session, kind: SecretUseKind, target: str | None) -> SecretUse:
     """Turn a use as a caller names it into a `SecretUse`.
 
@@ -498,76 +465,67 @@ def used_by_its_environment(session: Session, environment: Environment, name: st
     return False
 
 
-def _named_by_another(session: Session, name: str, use: SecretUse) -> bool:
-    """Say whether an index or repository other than `use` names `name` as its credential.
+_SHORT = {SecretUseKind.PACKAGE_INDEX: "index", SecretUseKind.REPOSITORY: "repository"}
+
+
+def lock_entry(session: Session, use: SecretUse) -> None:
+    """Lock the index or repository row a binding points at, until the transaction ends.
+
+    Everything that binds a secret to an entry, names a secret for it or moves its URL takes
+    this lock first (and the secret rows after it), so those steps run one after the other
+    and the second one sees what the first committed.
 
     Parameters
     ----------
     session
         Database session.
-    name
-        The secret name.
     use
-        The entry that now names it; it does not count against itself.
+        The index or repository; the environment has no row and nothing is locked.
 
-    Returns
-    -------
-    bool
-        Whether another entry, of either kind, names it.
+    Raises
+    ------
+    NotFoundError
+        If the row has been removed.
     """
-    for model, kind in (
-        (PackageIndex, SecretUseKind.PACKAGE_INDEX),
-        (Repository, SecretUseKind.REPOSITORY),
-    ):
-        query = select(model.id).where(model.credential_secret == name)
-        if use.kind is kind and use.target_id is not None:
-            query = query.where(model.id != use.target_id)
-        if session.execute(query.limit(1)).first() is not None:
-            return True
-    return False
+    if use.target_id is None:
+        return
+    model = PackageIndex if use.kind is SecretUseKind.PACKAGE_INDEX else Repository
+    found = session.execute(
+        select(model.id).where(model.id == use.target_id).with_for_update()
+    ).first()
+    if found is None:
+        raise NotFoundError(f"The {_NOUNS[use.kind]} was removed by someone else; look again.")
 
 
-def bind_named_secrets(
-    session: Session,
-    authz: AuthorizationService,
-    p: PrincipalRef,
-    *,
-    name: str,
-    use: SecretUse,
-    registered: bool,
+def require_named_secrets_bound(
+    session: Session, *, name: str, use: SecretUse, registered: bool
 ) -> None:
-    """Bind every active secret called `name` to `use`: bind on first use.
+    """Refuse to name a secret for an index or repository it is not bound to.
 
-    An index or a repository names its credential by secret name, resolved in each
-    environment. Naming it binds a secret that is unbound and that nothing else wants: no other
-    index or repository names it, and its environment does not use it. Anything else (bound to
-    another use, named by several entries, or used by the environment) changes or settles its
-    use only for a principal who may manage that environment's secrets; for one the
-    environment itself uses, not even they are told to rebind it. The rows are locked while
-    this runs, so two principals naming one unbound secret at once cannot both bind it. Nothing
-    is committed here; the caller commits, or rolls back and calls `record_refusal`.
+    Naming a secret binds nothing, whoever names it. Every active secret called `name`
+    must already be bound to this very index or repository; binding, or changing a use, is
+    `lakana secret bind` (or creating the secret with its use) and needs the right to manage
+    secrets. A secret the environment itself uses (storage, a webhook) is refused with the
+    explicit way to move it. The secret rows are locked while this runs and read afresh, so a
+    bind that commits at the same moment is seen.
 
     Parameters
     ----------
     session
         Database session.
-    authz
-        Answers whether `p` may manage secrets in an environment.
-    p
-        The acting principal.
     name
         The secret name the index or repository names.
     use
         The index or repository, with its id.
     registered
         Whether `use` exists in the database; on a create it does not, and the refusal then
-        does not send anyone to bind an entry that was rolled back.
+        sends the caller to register it without a credential first.
 
     Raises
     ------
     SecretBindingRefused
-        If binding needs `MANAGE_SECRET` in a secret's environment and `p` lacks it; the message
-        names the cause and the next step.
+        If a secret of that name is not bound to `use`; the message names the cause and the
+        next step, and the exception carries the environment scope and the reason.
     """
     rows = session.execute(
         select(Secret, Environment)
@@ -575,54 +533,43 @@ def bind_named_secrets(
         .where(Secret.name == name, Secret.revoked_at.is_(None))
         .order_by(Environment.name)
         .with_for_update(of=Secret)
+        .execution_options(populate_existing=True)
     ).all()
+    short = _SHORT[use.kind]
     for secret, environment in rows:
         if _bound_to(secret, use):
             continue
+        env_name = _text(environment.name)
+        who = f"Secret '{_text(name)}' of environment '{env_name}'"
         scope = Securable.environment_scope(environment.name)
-        env_name, secret_name = _text(environment.name), _text(name)
-        who = f"Secret '{secret_name}' of environment '{env_name}'"
+        first = (
+            "Ask" if registered else f"Register the {short} without a credential first, then ask"
+        )
+        command = bind_command(environment.name, name, use)
         current = secret.use_kind
-        if current is None and used_by_its_environment(session, environment, name):
-            current = SecretUseKind.ENVIRONMENT
-        if current is SecretUseKind.ENVIRONMENT:
-            if authz.permits(p, Action.MANAGE_SECRET, scope):
-                record_binding(session, p, secret, scope, use)
-                continue
+        if current is SecretUseKind.ENVIRONMENT or (
+            current is None and used_by_its_environment(session, environment, name)
+        ):
             raise SecretBindingRefused(
-                f"{who} serves its environment (storage or webhooks), so it cannot be the "
-                f"credential of {use.wanted()}. Create a new secret for it and name that one.",
+                f"{who} serves its environment (storage or webhooks), so naming it for "
+                f"{use.wanted()} will not move it. {first} someone who may manage secrets in "
+                f"'{env_name}' to give the {short} a secret of its own and bind that, or to move "
+                f"this one on purpose: {command}",
                 scope,
                 "secret_used_by_environment",
             )
-        if current is None and not _named_by_another(session, name, use):
-            record_binding(session, p, secret, scope, use)
-            continue
-        if authz.permits(p, Action.MANAGE_SECRET, scope):
-            record_binding(session, p, secret, scope, use)
-            continue
         if current is None:
-            cause = (
-                f"{who} is named by more than one package index or repository and is not bound "
-                f"yet. Naming it for {use.wanted()} would bind it"
-            )
-            reason = "secret_named_by_several"
+            cause, reason = f"is not bound to {use.wanted()}", "secret_not_bound_to_entry"
         else:
-            cause = (
-                f"{who} is bound to {describe_use(session, current, secret.use_target_id)}. "
-                f"Naming it for {use.wanted()} would change its use"
+            described = describe_use(session, current, secret.use_target_id)
+            cause, reason = (
+                f"is bound to {described}, not to {use.wanted()}",
+                "secret_bound_elsewhere",
             )
-            reason = "secret_bound_elsewhere"
-        step = (
-            f"Ask someone who may manage secrets in '{env_name}' to run: "
-            f"{bind_command(environment.name, name, use)}"
-            if registered
-            else f"Register {use.wanted()} without a credential first, then ask someone who may "
-            f"manage secrets in '{env_name}' to run: {bind_command(environment.name, name, use)}"
-        )
+        this = "this" if registered else "the"
         raise SecretBindingRefused(
-            f"{cause}, which needs the right to manage secrets in '{env_name}' (the ADMIN role). "
-            f"{step}",
+            f"{who} {cause}. {first} someone who may manage secrets in '{env_name}' to bind it to "
+            f"{this} {short}: {command}",
             scope,
             reason,
         )
@@ -664,6 +611,7 @@ def require_secret_management_for_url_change(
         )
         .order_by(Environment.name)
         .with_for_update(of=Secret)
+        .execution_options(populate_existing=True)
     ).all()
     for secret_name, environment in rows:
         scope = Securable.environment_scope(environment)
