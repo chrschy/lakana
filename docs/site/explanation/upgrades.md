@@ -122,10 +122,11 @@ read the column list from the result.
 
 ### Iceberg tables are read by field id
 
-No migration. Lakana reads the data files of an Iceberg table by the field id of each column, as
+Migration `0033` runs automatically (see below). Lakana reads the data files of an Iceberg table by the field id of each column, as
 the Iceberg specification requires. After a schema change, an added column reads as NULL in older
 rows, a renamed column keeps its data, a column dropped and added again under its name is a new
-column, and a widened column reads in its new type. Queries, row filters and column masks that
+column (a type change through `evolve_schema` is one too: its older rows read as NULL), and a
+widened column reads in its new type. Queries, row filters and column masks that
 failed after such a change (``The data files of `TABLE` do not all have the column ...``) now
 run; that message remains only for raw-zone (external) tables. A field inside a struct, list or
 map column is read by name: after one was renamed, or dropped and added again, reads of the
@@ -138,14 +139,18 @@ widened to double still needs a range
 
 Row filters and column masks are bound to a column name, while a table is read by field id, so a
 rename could leave a policy on another column. From this release a read is refused, and nothing is
-shown, when a column was renamed (or dropped and added again under its name) since the policy was
-created, and the old or the new name is one the policy uses:
-`` `TABLE` has a row filter or column mask that uses column `COLUMN`, and a column was renamed since the policy was created ...``
+shown, when a column was renamed or replaced (dropped and added again, also by a type change
+through `evolve_schema`) since the policy was created, and the old or the new name is one the
+policy uses:
+`` `TABLE` has a row filter or column mask that uses column `COLUMN`, and a column was renamed or replaced since the policy was created ...``
 Each policy now records the table schema it was created against. A policy of an earlier release
 records none and is judged from the oldest schema of the table, so after the upgrade a table whose
-policy column was renamed at any time is refused until an administrator revokes the policy and
-creates it again for the column it is meant for. The order after a rename is: rename, revoke
-the policies that use the old or the new name, create them again; reads are refused in between
+policy column was renamed or replaced at any time is refused until an administrator creates the
+policy again for the column it is meant for and revokes the old one. Before you upgrade, list the
+row filters and column masks (the `list` subcommand of `lakana row-filter` and of
+`lakana column-mask`) and look for tables whose columns were renamed or retyped since the policy
+was made. The order after a rename is: rename, create the policy for the new name, revoke the old
+one. Reads are refused until the old one is revoked, and nothing shows in clear at any step
 ([Mask a column](../how-to/mask-a-column.md#after-a-rename),
 [Show some people only some rows](../how-to/filter-rows.md#after-a-rename)). Migration `0033` adds
 a column `schema_id` to the tables of row filters and column masks.
@@ -160,7 +165,6 @@ before this release are not checked. If such a file lacks field ids, every colum
 as NULL, with no error. Ask the owner of the table to write its rows again, with Lakana
 (`replace`) or with a client that writes field ids. Field ids that match no column of the table
 read as NULL as well.
-
 
 ## Notes for 0.12.0
 

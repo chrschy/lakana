@@ -104,3 +104,20 @@ def test_a_type_duckdb_cannot_read_here_refuses_the_table(field_type: IcebergTyp
         f"'gold.t' has the column 'x' of type {field_type}, which Lakana cannot read yet. "
         "Ask the owner of the table to store the column as another type."
     )
+
+
+def test_columns_that_differ_only_in_case_are_refused_with_a_next_step() -> None:
+    """DuckDB cannot read two such columns under a map; the reader is told which and what to do."""
+    fields = [
+        NestedField(1, "Region", StringType(), required=False),
+        NestedField(2, "region", StringType(), required=False),
+    ]
+
+    with pytest.raises(UnsupportedTableError) as caught:
+        read_fields("gold.t", fields)
+
+    assert str(caught.value) == (
+        "'gold.t' has the columns 'Region' and 'region', which differ only in letter case, and "
+        "Lakana compares column names without regard to case. Ask the owner of the table to "
+        "rename one of them."
+    )

@@ -55,6 +55,7 @@ from pyiceberg.types import (
 )
 
 from lakana_core.errors import StorageUnavailableError, UnsupportedTableError, ValidationError
+from lakana_core.identifiers import shown
 from lakana_core.query_rewrite import ReadField
 from lakana_core.storage.resolver import is_within_location
 
@@ -149,10 +150,19 @@ def read_fields(dotted: str, fields: Sequence[NestedField]) -> tuple[ReadField, 
     ------
     UnsupportedTableError
         If a column has a type DuckDB has none for. Leaving the column out would hide it
-        without a word, so the read is refused, naming the column and its type.
+        without a word, so the read is refused, naming the column and its type. Also if two
+        columns differ only in letter case, which DuckDB cannot read under a map.
     """
     entries = []
+    first: dict[str, str] = {}
     for column in fields:
+        earlier = first.setdefault(column.name.lower(), column.name)
+        if earlier != column.name:
+            raise UnsupportedTableError(
+                f"{dotted!r} has the columns {earlier!r} and {column.name!r}, which differ only "
+                "in letter case, and Lakana compares column names without regard to case. Ask "
+                "the owner of the table to rename one of them."
+            )
         duckdb_type = duckdb_type_of(column.field_type)
         if duckdb_type is None:
             raise UnsupportedTableError(
@@ -308,8 +318,7 @@ _TOO_MANY_FILES = (
 )
 _TIMED_OUT = (
     "Checking the data files the commit adds to `{table}` for Iceberg field ids took longer "
-    "than {seconds:g} seconds, so nothing was applied. Try the commit again, or split it into "
-    "smaller commits."
+    "than {seconds:g} seconds, so nothing was applied. Split the commit into smaller ones."
 )
 _FOOTER_TOO_LARGE = (
     "The commit adds `{file}` to `{table}`, whose Parquet footer is larger than 16 MiB, so "
@@ -432,7 +441,7 @@ def _timed_out(table: str) -> str:
     str
         The refusal's text.
     """
-    return _TIMED_OUT.format(table=table, seconds=CHECK_DEADLINE_SECONDS)
+    return _TIMED_OUT.format(table=shown(table), seconds=CHECK_DEADLINE_SECONDS)
 
 
 def _added_data_files(
@@ -514,7 +523,7 @@ def _added_data_files(
                         added.append(entry.data_file)
                 if len(added) > MAX_CHECKED_FILES:
                     raise ValidationError(
-                        _TOO_MANY_FILES.format(table=table, limit=MAX_CHECKED_FILES)
+                        _TOO_MANY_FILES.format(table=shown(table), limit=MAX_CHECKED_FILES)
                     )
         except ValidationError:
             raise
@@ -523,7 +532,9 @@ def _added_data_files(
                 "A manifest of a commit to %s could not be read (%s).", table, type(exc).__name__
             )
             if _is_unavailable(exc):
-                raise StorageUnavailableError(_STORAGE_UNAVAILABLE.format(table=table)) from None
+                raise StorageUnavailableError(
+                    _STORAGE_UNAVAILABLE.format(table=shown(table))
+                ) from None
             raise ValidationError(_UNREADABLE_MANIFEST.format(table=table)) from exc
     return added
 
@@ -570,7 +581,9 @@ def check_added_files_have_field_ids(
         if data_file.file_format != FileFormat.PARQUET:
             raise ValidationError(
                 _NOT_PARQUET.format(
-                    file=data_file.file_path, table=table, format=data_file.file_format.value
+                    file=shown(data_file.file_path),
+                    table=shown(table),
+                    format=data_file.file_format.value,
                 )
             )
     paths = [f.file_path for f in files if is_within_location(metadata.location, f.file_path)]
@@ -586,13 +599,15 @@ def check_added_files_have_field_ids(
             if outcome is None:
                 raise ValidationError(_timed_out(table))
             if outcome == "unavailable":
-                raise StorageUnavailableError(_STORAGE_UNAVAILABLE.format(table=table))
+                raise StorageUnavailableError(_STORAGE_UNAVAILABLE.format(table=shown(table)))
             if outcome == "unreadable":
-                raise ValidationError(_UNREADABLE_FILE.format(file=path, table=table))
+                raise ValidationError(_UNREADABLE_FILE.format(file=shown(path), table=shown(table)))
             if outcome == "too_large":
-                raise ValidationError(_FOOTER_TOO_LARGE.format(file=path, table=table))
+                raise ValidationError(
+                    _FOOTER_TOO_LARGE.format(file=shown(path), table=shown(table))
+                )
             if outcome == "no_ids":
-                raise ValidationError(_NO_FIELD_IDS.format(file=path, table=table))
+                raise ValidationError(_NO_FIELD_IDS.format(file=shown(path), table=shown(table)))
     finally:
         # A read that is stuck is not waited for: the commit is refused now.
         pool.shutdown(wait=False, cancel_futures=True)

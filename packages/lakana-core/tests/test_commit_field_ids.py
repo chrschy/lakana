@@ -529,6 +529,20 @@ def test_a_missing_data_file_is_refused(
     assert uri in str(caught.value)
 
 
+def test_a_file_name_with_a_line_break_is_escaped_in_the_refusal(
+    catalog: CatalogService, principal: PrincipalRef, tmp_path: Path
+) -> None:
+    """The client's own path is shown as the rest of the codebase shows one, never raw."""
+    ref, created = _created(catalog, principal, tmp_path)
+    uri = f"{created.metadata.location}/data/a\nb.parquet"
+
+    with pytest.raises(ValidationError) as caught:
+        _commit_files(catalog, principal, ref, created, [uri], 900_000_071)
+
+    assert "\n" not in str(caught.value)
+    assert "a\\nb.parquet" in str(caught.value)
+
+
 def test_a_commit_of_too_many_files_is_refused_before_any_footer_is_read(
     catalog: CatalogService,
     principal: PrincipalRef,
@@ -569,8 +583,7 @@ def test_a_check_that_outlasts_its_deadline_refuses_the_commit(
 
     assert str(caught.value) == (
         "Checking the data files the commit adds to `gold.sales` for Iceberg field ids took "
-        "longer than 60 seconds, so nothing was applied. Try the commit again, or split it into "
-        "smaller commits."
+        "longer than 60 seconds, so nothing was applied. Split the commit into smaller ones."
     )
 
 

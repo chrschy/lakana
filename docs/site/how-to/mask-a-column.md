@@ -153,40 +153,47 @@ brackets.
 A column added to the table later reads as NULL in the rows written before it, also under a
 mask, and a renamed column keeps its data. See [Show some people only some rows](filter-rows.md#when-a-tables-schema-changes).
 
-A mask is bound to a column **name**, not to the column itself. When the column is dropped or
-renamed and nothing takes its name, every query of the masked person that reads the table fails with
+A mask is bound to a column **name**, not to the column itself. When the column is dropped and
+nothing takes its name, every query of the masked person that reads the table fails with
 `Column mask references unknown column 'ssn'; known columns: ['id', 'name']`. Revoke the mask and
-create it again for the new column name.
+create it again for the column it is meant for. A rename is different: see the next section.
 
 ### After a rename
 
-A rename can also change what a mask covers: a column renamed *onto* the masked name would be
-masked in the old column's place, and the renamed column would show its values in clear under its
-new name. Lakana does not let that happen. Each mask records which version of the table's schema
-it was created against. When a column was renamed since, or dropped and added again under a name
-the mask uses (the masked column, or a column its expression reads), a read of the table by the
-masked person is refused, and nothing is shown:
+A rename can change what a mask covers: a column renamed *onto* the masked name would be masked in
+the old column's place, and the renamed column would show its values in clear under its new name.
+Lakana does not let that happen. Each mask records which version of the table's schema it was
+created against. When a column was renamed since, or replaced by a new column of the same name
+(dropped and added again), and the old or the new name is one the mask uses (the masked column, or
+a column its expression reads), a read of the table by the masked person is refused, and nothing
+is shown:
 
 <!-- output -->
 ```text
-`gold.customers` has a row filter or column mask that uses column `ssn`, and a column was renamed since the policy was created, so the policy may now cover a different column. Nothing is shown. An administrator must review the table's row filters and column masks, revoke each one that uses a renamed column, and create it again for the column it is meant for.
+`gold.customers` has a row filter or column mask that uses column `ssn`, and a column was renamed or replaced since the policy was created, so the policy may now cover a different column. Nothing is shown. An administrator must review the table's row filters and column masks, create each one that uses a renamed or replaced column again for the column it is meant for, and then revoke the old one.
 ```
 
-To make the table readable again, an administrator lists the masks and row filters of the table
-(the `list` subcommand of `lakana column-mask` and of `lakana row-filter`), revokes each one
-that uses a renamed column, and creates it again for the column it is meant for. A mask created after the rename
-records the new version of the schema, so it is not refused. A mask that an earlier release
-created has no recorded version: it is judged from the oldest schema of the table, so a rename
-from any time before also refuses the read until the mask is created again.
+A column is also replaced when a write with `evolve_schema` changes its type (not a widening, such
+as `int` to `long`): the column gets a new field id, reads of the table are refused until the mask
+is created again, and the rows written before read as NULL in that column.
 
 A rename therefore goes in this order:
 
 1. Rename the column. From then on, reads of the table by the masked person are refused. That is
    the point: nothing shows in clear while the mask is out of date.
-2. Revoke each mask that uses the old or the new name.
-3. Create the mask again for the column it is meant for. Lakana only accepts a mask on a column
-   the table has now, so it cannot be created before the rename.
+2. Create a mask for the column it is meant for. Lakana only accepts a mask on a column the table
+   has now, so it cannot be created before the rename. Reads are still refused, because the old
+   mask is still out of date, and two masks on one column read as `NULL`.
+3. Revoke the old mask. List the masks and row filters of the table with the `list` subcommand of
+   `lakana column-mask` and of `lakana row-filter`.
 4. Reads work again, with the mask on the right column.
+
+Do not revoke the old mask first: until the new one exists, the renamed column would show its
+values in clear.
+
+A mask created after the rename records the new version of the schema, so it is not refused. A
+mask that an earlier release created has no recorded version: it is judged from the oldest schema
+of the table, so a rename from any time before also refuses the read until it is created again.
 
 ## What a mask does not protect
 

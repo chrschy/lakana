@@ -18,10 +18,10 @@ from lakana_core.identifiers import shown
 
 POLICY_COLUMN_RENAMED = (
     "`{table}` has a row filter or column mask that uses column `{column}`, and a column "
-    "was renamed since the policy was created, so the policy may now cover a different "
-    "column. Nothing is shown. An administrator must review the table's row filters and "
-    "column masks, revoke each one that uses a renamed column, and create it again for the "
-    "column it is meant for."
+    "was renamed or replaced since the policy was created, so the policy may now cover a "
+    "different column. Nothing is shown. An administrator must review the table's row "
+    "filters and column masks, create each one that uses a renamed or replaced column "
+    "again for the column it is meant for, and then revoke the old one."
 )
 """Why a read of a table is refused when a rename touched a column of one of its policies."""
 
@@ -79,43 +79,44 @@ def _touched_by(metadata: TableMetadata, policy: PolicyColumns) -> set[str]:
         schema and the current one; empty when none did.
     """
     spelled = {name.lower(): name for name in policy.columns}
-    ordered = sorted(metadata.schemas, key=lambda schema: schema.schema_id)
-    if policy.schema_id is not None and all(s.schema_id != policy.schema_id for s in ordered):
-        # Without the schema the policy was written against there is nothing to compare, and
-        # a rename before the next schema would go unseen: every name of the policy is suspect.
-        return set(policy.columns)
-    start = ordered[0].schema_id if policy.schema_id is None else policy.schema_id
-    steps = [schema for schema in ordered if schema.schema_id >= start]
-    current = metadata.schema()
-    if all(schema.schema_id != current.schema_id for schema in steps):
-        steps.append(current)
-    touched: set[str] = set()
-    owner: dict[str, int] = {}
-    previous: dict[int, str] | None = None
-    for schema in steps:
-        names = {field.field_id: field.name.lower() for field in schema.fields}
-        for field_id, name in names.items():
-            if name in spelled and owner.setdefault(name, field_id) != field_id:
-                touched.add(spelled[name])
-        if previous is not None:
-            for field_id, name in names.items():
-                before = previous.get(field_id)
-                if before is not None and before != name:
-                    touched.update(spelled[n] for n in (before, name) if n in spelled)
-        previous = names
+    if policy.schema_id is None:
+        written = metadata.schemas[0]
+    else:
+        found = [schema for schema in metadata.schemas if schema.schema_id == policy.schema_id]
+        if not found:
+            # Without the schema the policy was written against there is nothing to compare:
+            # every name of the policy is suspect.
+            return set(policy.columns)
+        written = found[0]
+    # Schema ids are chosen by clients and the history can be set back, so only the two schemas
+    # that matter are compared: the one the policy was written against and the one a read uses.
+    before = {field.field_id: field.name.lower() for field in written.fields}
+    now = {field.field_id: field.name.lower() for field in metadata.schema().fields}
+    owner_before = {name: field_id for field_id, name in before.items()}
+    owner_now = {name: field_id for field_id, name in now.items()}
+    touched: set[str] = {
+        spelled[name]
+        for name in spelled
+        if name in owner_before and name in owner_now and owner_before[name] != owner_now[name]
+    }
+    for field_id, name in now.items():
+        was = before.get(field_id)
+        if was is not None and was != name:
+            touched.update(spelled[n] for n in (was, name) if n in spelled)
     return touched
 
 
 def renamed_policy_column(metadata: TableMetadata, policies: Iterable[PolicyColumns]) -> str | None:
     """Find a policy column that a rename may have moved onto another column.
 
-    Between a policy's schema and the current one, a field id that changed its name makes both
-    names suspect, and so does a name that now belongs to another field id (a column dropped,
-    a different one added under its name). The comparison ignores letter case, as the database
-    does. Each policy is judged from its own schema; one whose recorded schema the metadata
-    no longer has is affected in every column. A qualified column of a filter stored by a
-    release that accepted one (`t.region`) is listed by its qualifier; such a read fails in the
-    database before it can show a row, so it is closed without this rule.
+    Only the policy's schema and the current one are compared, not the schemas between them. A
+    field id that changed its name makes both names suspect, and so does a name that now belongs
+    to another field id (a column dropped, a different one added under its name). The comparison
+    ignores letter case, as the database does. Each policy is judged from its own schema; one
+    whose recorded schema the metadata no longer has is affected in every column. A qualified
+    column of a filter stored by a release that accepted one (`t.region`) is listed by its
+    qualifier; such a read fails in the database before it can show a row, so it is closed
+    without this rule.
 
     Parameters
     ----------

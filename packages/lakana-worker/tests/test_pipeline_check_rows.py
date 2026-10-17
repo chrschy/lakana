@@ -708,8 +708,8 @@ def _policy_needs(column: str, run_id: uuid.UUID) -> str:
     return (
         f"A row filter or column mask of yours on `gold.orders` uses the column `{column}`, "
         "which is not the same column in the checked snapshot and in the table now (it was "
-        "added or dropped since, or another column took its name), so the rows this check found "
-        "cannot be shown under it. The number of rows the check found remains: "
+        "added, dropped or renamed since, or another column took its name), so the rows this "
+        "check found cannot be shown under it. The number of rows the check found remains: "
         f"`lakana check list --run {run_id} --env dev`."
     )
 

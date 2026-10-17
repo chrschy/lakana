@@ -404,8 +404,10 @@ def failure(
         # DuckDB appends the cell it could not convert, which can be a masked value or one of a
         # row a filter hides; only the column and the two types are safe to say.
         text = (
-            f'a file of this table stores column "{cast["column"]}" as {cast["stored"]}, '
-            f"which cannot be read as {cast['wanted']}."
+            f'a file of a table this query reads stores column "{cast["column"]}" as '
+            f"{cast['stored']}, which cannot be read as {cast['wanted']}. Ask the owner of "
+            "that table to write its rows again, so that every file stores the column in "
+            "one type."
         )
     elif mapped and text.startswith("Conversion Error"):
         text = (

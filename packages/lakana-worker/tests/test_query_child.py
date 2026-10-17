@@ -1639,8 +1639,9 @@ def test_a_cast_the_map_asks_for_names_no_cell_value(tmp_path: Path, select: str
     assert error is not None
     assert error.kind == "invalid"
     assert error.message in {
-        'Query failed: a file of this table stores column "ssn" as VARCHAR, '
-        "which cannot be read as INTEGER.",
+        'Query failed: a file of a table this query reads stores column "ssn" as VARCHAR, '
+        "which cannot be read as INTEGER. Ask the owner of that table to write its rows again, "
+        "so that every file stores the column in one type.",
         _HIDDEN_CONVERSION,
     }
     assert stream == b"" or not list(pa.ipc.open_stream(stream))

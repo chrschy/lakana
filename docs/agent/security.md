@@ -2228,24 +2228,29 @@ work.
   guessing which of two independently-authored expressions should win. Policies apply to
   every role including `admin` — there is no bypass *of the rewriter itself* — and layer on
   top of `READ_TABLE` authorization, never replacing it.
-- **A policy binds to column names, so a rename of a column fails the read closed.** The table
-  is read by field id, and a rename through the Iceberg REST catalog can move a name onto
+- **A policy binds to column names, so a rename or a replaced column fails the read closed.** The
+  table is read by field id, and a rename through the Iceberg REST catalog can move a name onto
   another column (`ssn` to `ssn_old`, `email` to `ssn`): a mask on `ssn` would cover the email
-  column and `ssn_old` would show the real values. Each row filter and column mask records the
-  id of the table's current schema when it is created (`schema_id`; null for a raw table, a view
-  and an artifact, for a filter that reads no column, and for a policy of a release before the
-  column existed). For a read of an Iceberg table, `_resolve_sources`
-  collects, from the reader's applied policies, every column a mask covers or its expression
-  reads and every column a filter reads, and calls `policy.renames.renamed_policy_column` with the
-  table's metadata: from each policy's own schema (the table's oldest one when it has none) to the
-  current one, a field id that changed its name with the old or the new name among them, or a name
-  that now belongs to another field id, refuses the read before the query runs
-  (`PolicyColumnRenamedError`, cause `invalid_query`, text `POLICY_COLUMN_RENAMED`, which names the
-  first such column and no data). It applies to a read at a checked snapshot too, before the
-  comparison above. A refused read shows nothing and never runs without the policy. A recorded id the metadata does not have
-  makes every column of the policy suspect. Creating the
-  policy again records the new schema id and the read works. Binding policies to field ids is not
-  done yet. Pins: `test_pipeline_schema_evolution.py` (the `rename` tests), `test_policy_renames.py`.
+  column and `ssn_old` would show the real values. A column dropped and added again, also by a
+  type change through `evolve_schema` (a non-promotion gets a new field id under the same name),
+  is replaced the same way. Each row filter and column mask records the id of the table's current
+  schema when it is created (`schema_id`; null for a raw table, a view and an artifact, for a
+  filter that reads no column, and for a policy of a release before the column existed). For a
+  read of an Iceberg table, `_resolve_sources` collects, from the reader's applied policies, every
+  column a mask covers or its expression reads and every column a filter reads, and calls
+  `policy.renames.renamed_policy_column` with the table's metadata. Only the policy's schema (the
+  table's first one when it has none) and the CURRENT schema are compared, never the ones between,
+  because schema ids are chosen by clients and a set-back makes the current schema an older one: a
+  name whose owning field id differs, or a field id that changed its name with the old or the new
+  name among the policy's, refuses the read before the query runs (`PolicyColumnRenamedError`,
+  cause `invalid_query`, text `POLICY_COLUMN_RENAMED`, which names the first such column and no
+  data). A recorded id the metadata does not have makes every column of the policy suspect. It
+  applies to a read at a checked snapshot too, before the comparison above. A refused read shows
+  nothing and never runs without the policy. The repair order is rename, create the policy for the
+  new name, revoke the old one: the old policy is touched until it is revoked, so reads stay
+  refused, and revoking it first would leave a window without any policy (two masks on one column
+  collapse to `NULL`, filters are ANDed). Binding policies to field ids is not done yet. Pins:
+  `test_pipeline_schema_evolution.py` (the `rename` and set-back tests), `test_policy_renames.py`.
 - **Grants, row filters, and column masks bind to ids, never names.** A rename or a
   drop-and-recreate under the same name cannot evade either. An `EXTERNAL` table goes
   through this same rewriter and its own row filters/column masks apply to it, confined to

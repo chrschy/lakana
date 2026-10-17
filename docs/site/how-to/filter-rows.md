@@ -129,7 +129,8 @@ specification requires, so a filter keeps working after the schema changes:
 - **A renamed column** keeps its data under the new name, in old and new files alike. The filter
   itself does not follow the rename: see the next section.
 - **A column dropped and added again** under the same name is a new column. The rows written
-  before read as NULL, never as the old column's values.
+  before read as NULL, never as the old column's values. A write with `evolve_schema` that
+  changes a column's type (other than widening it) does the same.
 - **A widened column** (`int` to `long`, `float` to `double`) reads in its new type. A float
   column needs a range in a filter, as said above.
 
@@ -154,39 +155,47 @@ reads (a microsecond timestamp, for example) and writes the table's rows again.
 
 ## Filters and dropped columns
 
-A filter is bound to a column **name**, not to the column itself. When the column is dropped or
-renamed and nothing takes its name, a query of the filtered person that reads the table fails
-instead of showing rows. Revoke the filter and create it again for the new column name.
+A filter is bound to a column **name**, not to the column itself. When the column is dropped
+and nothing takes its name, a query of the filtered person that reads the table fails instead of
+showing rows. Revoke the filter and create it again for the column it is meant for. A rename is
+different: see the next section.
 
 ### After a rename
 
-A rename can also change what a filter covers: a column renamed *onto* the filtered name would
-be tested in the old column's place. The filter would test the other column's values and could pass
+A rename can change what a filter covers: a column renamed *onto* the filtered name would be
+tested in the old column's place. The filter would test the other column's values and could pass
 rows it was meant to hide, and the renamed column would no longer be filtered. Lakana does not let
-that happen. Each filter records which version of the table's schema it was created against. When a
-column was renamed since, or dropped and added again under a name the filter reads, a read of the
-table by the filtered person is refused, and nothing is shown:
+that happen. Each filter records which version of the table's schema it was created against. When
+a column was renamed since, or replaced by a new column of the same name (dropped and added
+again), and the old or the new name is one the filter reads, a read of the table by the filtered
+person is refused, and nothing is shown:
 
 <!-- output -->
 ```text
-`gold.customers` has a row filter or column mask that uses column `region`, and a column was renamed since the policy was created, so the policy may now cover a different column. Nothing is shown. An administrator must review the table's row filters and column masks, revoke each one that uses a renamed column, and create it again for the column it is meant for.
+`gold.customers` has a row filter or column mask that uses column `region`, and a column was renamed or replaced since the policy was created, so the policy may now cover a different column. Nothing is shown. An administrator must review the table's row filters and column masks, create each one that uses a renamed or replaced column again for the column it is meant for, and then revoke the old one.
 ```
 
-To make the table readable again, an administrator lists the row filters and column masks of the
-table (the `list` subcommand of `lakana row-filter` and of `lakana column-mask`), revokes each
-one that uses a renamed column, and creates it again for the column it is meant for. A filter
-created after the rename records the new version of the schema, so it is not refused. A filter that an earlier release
-created has no recorded version: it is judged from the oldest schema of the table, so a rename from
-any time before also refuses the read until the filter is created again.
+A column is also replaced when a write with `evolve_schema` changes its type (not a widening, such
+as `int` to `long`): the column gets a new field id, reads of the table are refused until the
+filter is created again, and the rows written before read as NULL in that column.
 
 A rename therefore goes in this order:
 
 1. Rename the column. From then on, reads of the table by the filtered person are refused. That is
    the point: no rows are passed or hidden by a filter that is out of date.
-2. Revoke each filter that uses the old or the new name.
-3. Create the filter again for the column it is meant for. Lakana only accepts a filter on a
-   column the table has now, so it cannot be created before the rename.
+2. Create a filter for the column it is meant for. Lakana only accepts a filter on a column the
+   table has now, so it cannot be created before the rename. Reads are still refused, because the
+   old filter is still out of date, and filters are ANDed, so the new one only narrows.
+3. Revoke the old filter. List the filters and masks of the table with the `list` subcommand of
+   `lakana row-filter` and of `lakana column-mask`.
 4. Reads work again, with the filter on the right column.
+
+Do not revoke the old filter first: until the new one exists, the person reads every row.
+
+A filter created after the rename records the new version of the schema, so it is not refused. A
+filter that an earlier release created has no recorded version: it is judged from the oldest
+schema of the table, so a rename from any time before also refuses the read until it is created
+again.
 
 A filter stored by an earlier release is judged by the same rule, even if its text would not be
 accepted by `create` today.

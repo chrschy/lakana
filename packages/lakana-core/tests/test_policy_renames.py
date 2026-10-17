@@ -140,6 +140,30 @@ def test_a_recorded_schema_the_metadata_lacks_touches_every_column_of_the_policy
     assert renamed_policy_column(metadata, [_policy("ssn", schema_id=999)]) == "ssn"
 
 
+def test_a_schema_set_back_to_the_policys_own_touches_nothing() -> None:
+    """Schema 1 stays in the metadata after a set-back to 0; only the current schema counts."""
+    metadata = _metadata(0, _schema(0, (2, "ssn")), _schema(1, (9, "ssn")))
+    assert renamed_policy_column(metadata, [_policy("ssn", schema_id=0)]) is None
+
+
+def test_a_policy_of_the_schema_that_was_set_back_from_is_touched() -> None:
+    """The policy was written for schema 1, whose `ssn` is another column than today's."""
+    metadata = _metadata(0, _schema(0, (2, "ssn")), _schema(1, (9, "ssn")))
+    assert renamed_policy_column(metadata, [_policy("ssn", schema_id=1)]) == "ssn"
+
+
+def test_a_column_renamed_and_renamed_back_touches_nothing() -> None:
+    """The current schema names the field as the policy's schema did."""
+    metadata = _metadata(2, _schema(0, (2, "ssn")), _schema(1, (2, "x")), _schema(2, (2, "ssn")))
+    assert renamed_policy_column(metadata, [_policy("ssn", schema_id=0)]) is None
+
+
+def test_schema_ids_need_not_rise_with_the_history() -> None:
+    """A client chose the ids 100 and 50: only the recorded and the current schema are compared."""
+    metadata = _metadata(50, _schema(100, (2, "ssn")), _schema(50, (9, "ssn")))
+    assert renamed_policy_column(metadata, [_policy("ssn", schema_id=100)]) == "ssn"
+
+
 def test_no_policy_touches_nothing() -> None:
     """With no policy there is no name to touch."""
     metadata = _metadata(1, _schema(0, (2, "ssn")), _schema(1, (2, "ssn_old")))
@@ -149,9 +173,9 @@ def test_no_policy_touches_nothing() -> None:
 def test_the_message_names_the_table_and_the_column_and_no_data() -> None:
     """The text says what happened and what to do next."""
     assert policy_column_renamed_message("ssn", "gold.staff") == (
-        "`gold.staff` has a row filter or column mask that uses column `ssn`, and a column was "
-        "renamed since the policy was created, so the policy may now cover a different column. "
-        "Nothing is shown. An administrator must review the table's row filters and column masks, "
-        "revoke each one that uses a renamed column, and create it again for the column it is "
-        "meant for."
+        "`gold.staff` has a row filter or column mask that uses column `ssn`, and a column "
+        "was renamed or replaced since the policy was created, so the policy may now cover a "
+        "different column. Nothing is shown. An administrator must review the table's row "
+        "filters and column masks, create each one that uses a renamed or replaced column "
+        "again for the column it is meant for, and then revoke the old one."
     )

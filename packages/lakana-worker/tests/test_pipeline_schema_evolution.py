@@ -18,6 +18,7 @@ import pyarrow.parquet as pq
 import pytest
 from pyiceberg.schema import Schema
 from pyiceberg.table import StaticTable
+from pyiceberg.table.update import SetCurrentSchemaUpdate
 from pyiceberg.table.update.schema import UpdateSchema
 from pyiceberg.types import (
     DecimalType,
@@ -655,11 +656,11 @@ def _refused(table: str, column: str) -> str:
         The message.
     """
     return (
-        f"`{table}` has a row filter or column mask that uses column `{column}`, and a column was "
-        "renamed since the policy was created, so the policy may now cover a different column. "
-        "Nothing is shown. An administrator must review the table's row filters and column "
-        "masks, revoke each one that uses a renamed column, and create it again for the "
-        "column it is meant for."
+        f"`{table}` has a row filter or column mask that uses column `{column}`, and a column "
+        "was renamed or replaced since the policy was created, so the policy may now cover a "
+        "different column. Nothing is shown. An administrator must review the table's row "
+        "filters and column masks, create each one that uses a renamed or replaced column "
+        "again for the column it is meant for, and then revoke the old one."
     )
 
 
@@ -876,10 +877,10 @@ def test_a_policy_created_after_the_rename_reads(
     assert {row["ssn_old"] for row in read.to_pylist()} == {"111", "222"}
 
 
-def test_the_documented_order_after_a_rename_ends_with_the_mask_on_the_right_column(
+def test_the_documented_order_after_a_rename_never_shows_a_value_in_clear(
     session: Session, principal: PrincipalRef, catalog: CatalogService, tmp_path: Path
 ) -> None:
-    """Rename, refused, revoke, create for the new name, read: nothing shows in clear on the way."""
+    """Rename, create for the new name, revoke the old one: every read is refused or masked."""
     ref, _ = _people(catalog, principal, "staff")
     stale = _mask(session, catalog, principal, "staff", "ssn")
     _rename(catalog, principal, ref, ("ssn", "social"))
@@ -887,12 +888,54 @@ def test_the_documented_order_after_a_rename_ends_with_the_mask_on_the_right_col
     _assert_nothing_shown(
         _query(session, principal, "SELECT * FROM gold.staff"), "gold.staff", "ssn"
     )
-    ColumnMaskService(session, AllowAllAuthorization(), catalog).revoke(principal, stale)
     _mask(session, catalog, principal, "staff", "social")
+    # The old mask is still in force and still touched, so the read is still refused.
+    _assert_nothing_shown(
+        _query(session, principal, "SELECT * FROM gold.staff"), "gold.staff", "ssn"
+    )
+    ColumnMaskService(session, AllowAllAuthorization(), catalog).revoke(principal, stale)
 
     read = _result(tmp_path, _query(session, principal, "SELECT * FROM gold.staff"))
     assert {row["social"] for row in read.to_pylist()} == {"hidden"}
     assert {row["email"] for row in read.to_pylist()} == {"x@example.org", "y@example.org"}
+
+
+def test_a_schema_set_back_to_the_one_a_policy_was_written_for_reads_again(
+    session: Session, principal: PrincipalRef, catalog: CatalogService, tmp_path: Path
+) -> None:
+    """A column replaced by a new one of its name refuses the read; the set-back undoes it."""
+    ref, _ = _people(catalog, principal, "staff")
+    _mask(session, catalog, principal, "staff", "ssn")
+    original = catalog.load_table(principal, ref)
+    table = _evolve(catalog, principal, ref, original, lambda u: u.delete_column("ssn"))
+    table = _evolve(catalog, principal, ref, table, lambda u: u.add_column("ssn", StringType()))
+    _assert_nothing_shown(
+        _query(session, principal, "SELECT * FROM gold.staff"), "gold.staff", "ssn"
+    )
+
+    first = original.metadata.current_schema_id
+    catalog.commit_table(
+        principal,
+        ref,
+        requirements=[],
+        updates=[SetCurrentSchemaUpdate(schema_id=first)],
+    )
+
+    read = _result(tmp_path, _query(session, principal, "SELECT * FROM gold.staff"))
+    assert {row["ssn"] for row in read.to_pylist()} == {"hidden"}
+
+
+def test_a_column_renamed_and_renamed_back_reads_as_before(
+    session: Session, principal: PrincipalRef, catalog: CatalogService, tmp_path: Path
+) -> None:
+    """The mask covers the column it covered when it was created."""
+    ref, _ = _people(catalog, principal, "staff")
+    _mask(session, catalog, principal, "staff", "ssn")
+    _rename(catalog, principal, ref, ("ssn", "x"), ("x", "ssn"))
+
+    read = _result(tmp_path, _query(session, principal, "SELECT * FROM gold.staff"))
+
+    assert {row["ssn"] for row in read.to_pylist()} == {"hidden"}
 
 
 def test_creating_the_policy_again_after_the_refusal_reads(
