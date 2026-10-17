@@ -80,7 +80,9 @@ def _count_tables(db_path: Path) -> int | None:
         read (the reset goes on: it is about to delete it).
     """
     try:
-        with sqlite3.connect(f"file:{quote(str(db_path))}?mode=ro", uri=True) as db:
+        with contextlib.closing(
+            sqlite3.connect(f"file:{quote(str(db_path))}?mode=ro", uri=True)
+        ) as db:
             return int(db.execute("SELECT COUNT(*) FROM tables").fetchone()[0])
     except (sqlite3.Error, OSError, TypeError, ValueError):
         return None

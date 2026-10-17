@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import pwd
 import shutil
@@ -36,7 +37,7 @@ def _instance(tmp_path: Path, *, tables: int = 3) -> DataDir:
         The prepared directory, with a database, a lake, a key and stale pidfiles.
     """
     root = prepare_data_dir(tmp_path / "instance")
-    with sqlite3.connect(root.db_path) as db:
+    with contextlib.closing(sqlite3.connect(root.db_path)) as db, db:
         db.execute("CREATE TABLE tables (id INTEGER PRIMARY KEY, name TEXT)")
         db.executemany("INSERT INTO tables (name) VALUES (?)", [(f"t{i}",) for i in range(tables)])
     (root.lake / "dev" / "bronze" / "readings").mkdir(parents=True)
@@ -602,3 +603,54 @@ def test_a_permission_error_while_deleting_gives_a_chmod_hint(
     text = " ".join(result.output.split())
     assert "chmod" in text and "again" in text
     assert root.db_path.exists()
+
+
+def test_a_marker_that_is_not_text_is_not_a_marker(tmp_path: Path) -> None:
+    """Bytes that are not UTF-8 in the marker file mean 'not an instance', not a traceback."""
+    root = _instance(tmp_path)
+    (root.root / MARKER_NAME).write_bytes(b"\xff\xfe\x00")
+    result = _reset(tmp_path, root.root, "--yes")
+    assert result.exit_code == 2
+    assert _untouched(root)
+
+
+def test_a_home_that_cannot_be_resolved_or_compared_is_skipped(tmp_path: Path) -> None:
+    """An OSError while resolving a home, or comparing with it, means 'not home'."""
+
+    class Unresolvable:
+        """A home whose path can't be resolved."""
+
+        def resolve(self) -> Path:
+            """Fail like a path whose parent can't be read.
+
+            Raises
+            ------
+            OSError
+                Always.
+            """
+            raise OSError("loop")
+
+    assert reset_module._is_or_holds_home(tmp_path, Unresolvable()) is False  # ty: ignore[invalid-argument-type]
+    assert reset_module._is_or_holds_home(tmp_path / "missing", tmp_path / "other") is False
+
+
+def test_without_a_mount_table_only_the_device_walk_applies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Off Linux there is no mountinfo: no table is read, and the reset proceeds."""
+    root = _instance(tmp_path)
+    monkeypatch.setattr(reset_module.sys, "platform", "darwin")
+    monkeypatch.setattr(reset_module, "_MOUNTINFO", tmp_path / "missing")
+    assert reset_module._mount_points() is None
+    result = _reset(tmp_path, root.root, "--yes")
+    assert result.exit_code == 0, result.output
+    assert not root.db_path.exists()
+
+
+def test_a_short_mountinfo_line_is_ignored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A line without a mount-point field is skipped; the others are still read."""
+    table = tmp_path / "mountinfo"
+    table.write_text("garbage\n22 1 8:1 / /data rw - ext4 /dev/sda1 rw\n")
+    monkeypatch.setattr(reset_module.sys, "platform", "linux")
+    monkeypatch.setattr(reset_module, "_MOUNTINFO", table)
+    assert reset_module._mount_points() == [Path("/data")]
