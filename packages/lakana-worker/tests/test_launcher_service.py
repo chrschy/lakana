@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import base64
 import io
+import os
 import socket
 import struct
 import subprocess
 import sys
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -512,6 +514,21 @@ def test_start_refuses_an_ingestion_root_that_is_a_system_mount(tmp_path: Path) 
     assert "ingestion root 'data'" in str(caught.value)
 
 
+def test_start_refuses_an_ingestion_root_too_big_to_check(tmp_path: Path) -> None:
+    """A root the probe could not walk to its end is refused, and the message says why."""
+    with pytest.raises(StartError, match="ingestion root 'data' has more than 100000 entries"):
+        _roots(tmp_path, FakeEngine(probe_exits={"data": 5}))
+
+
+def test_start_refuses_an_ingestion_root_with_what_the_probe_cannot_read(tmp_path: Path) -> None:
+    """An unreadable directory or an `lstat` error fails the root, naming it and not its path."""
+    with pytest.raises(
+        StartError, match="ingestion root 'data' holds something the task user"
+    ) as c:
+        _roots(tmp_path, FakeEngine(probe_exits={"data": 6}))
+    assert "/srv/data" not in str(c.value)
+
+
 def test_start_refuses_an_ingestion_root_that_could_not_be_checked(tmp_path: Path) -> None:
     """Any other probe result is a refusal: an unchecked root is not a safe one."""
     with pytest.raises(StartError, match="ingestion root 'data' could not be checked"):
@@ -594,14 +611,22 @@ def test_the_probe_script_refuses_a_system_mount_at_or_under_the_root(tmp_path: 
     """A proc, sysfs or devtmpfs mount exposes the host whatever the directory looks like."""
     root = tmp_path / "data"
     root.mkdir()
-    for line in (
-        f"31 30 0:5 / {root} rw - proc proc rw\n",
-        f"31 30 0:5 / {root}/dev rw - devtmpfs d rw\n",
-        f"31 30 0:5 / {root}/sys rw - sysfs s rw\n",
+    for fstype in (
+        "proc",
+        "sysfs",
+        "devtmpfs",
+        "debugfs",
+        "tracefs",
+        "cgroup",
+        "cgroup2",
+        "bpf",
+        "securityfs",
+        "pstore",
+        "configfs",
     ):
         info = tmp_path / "info"
-        info.write_text(line, encoding="utf-8")
-        assert _probe(root, info) == 3
+        info.write_text(f"31 30 0:5 / {root}/x rw - {fstype} s rw\n", encoding="utf-8")
+        assert _probe(root, info) == 3, fstype
 
 
 def test_the_probe_script_finds_a_socket_below_the_root_or_as_the_root(
@@ -622,7 +647,7 @@ def test_the_probe_script_finds_a_socket_below_the_root_or_as_the_root(
 def test_the_probe_script_stops_walking_after_a_bound(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A huge tree is not walked to its end: the socket in a deep directory is not reached."""
+    """A tree past the bound is refused, not passed: the part not seen could hold a socket."""
     root = tmp_path / "data"
     (root / "z").mkdir(parents=True)
     for number in range(6):
@@ -634,7 +659,28 @@ def test_the_probe_script_stops_walking_after_a_bound(
         listener.bind("s.sock")
         assert "_LIMIT = 100000" in INGEST_PROBE_SCRIPT
         assert _probe(root, info) == 4
-        assert _probe(root, info, INGEST_PROBE_SCRIPT.replace("_LIMIT = 100000", "_LIMIT = 5")) == 0
+        assert _probe(root, info, INGEST_PROBE_SCRIPT.replace("_LIMIT = 100000", "_LIMIT = 5")) == 5
+
+
+def test_the_probe_script_refuses_what_it_cannot_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A directory that cannot be listed can still be walked through by name: it is refused."""
+    root = tmp_path / "data"
+    (root / "closed").mkdir(parents=True)
+    info = tmp_path / "info"
+    info.write_text("", encoding="utf-8")
+    (root / "closed").chmod(0o000)
+    try:
+        if os.access(root / "closed", os.R_OK):  # running as root: nothing is unreadable
+            pytest.skip("the user can read every directory")
+        assert _probe(root, info) == 6
+    finally:
+        (root / "closed").chmod(0o700)
+    assert _probe(tmp_path / "missing", info) == 6
+    plain_file = tmp_path / "file"
+    plain_file.write_text("x", encoding="utf-8")
+    assert _probe(plain_file, info) == 0
 
 
 def _named(launcher: Launcher, kind: str = "task", ident: str = "t1") -> str:
@@ -1053,6 +1099,150 @@ def test_a_volume_that_cannot_be_asked_about_is_not_built(tmp_path: Path) -> Non
     _intercept(engine, lambda m, p, b: p.startswith("/volumes/"), EngineError("gone"))
 
     assert launcher.status(StatusRequest("3.13", KEY)) == {"complete": False}
+
+
+def test_a_run_checks_the_environment_again_after_the_pull(tmp_path: Path) -> None:
+    """A prune or an eviction during a pull must not let Docker create the volume empty."""
+    engine = FakeEngine()
+    launcher = _started(engine, tmp_path)
+    engine.images.clear()
+    engine.hooks["pull"] = engine.volumes.clear
+
+    with pytest.raises(EngineError, match="is not built"):
+        launcher.run(_run(), lambda line: None)
+
+    assert engine.created("task") == [] and engine.networks == {}
+
+
+def test_a_second_run_with_a_live_id_is_refused_and_leaves_the_first_alone(tmp_path: Path) -> None:
+    """The registry is keyed by name; a duplicate must not unregister the run that owns it."""
+    engine = FakeEngine(hold=True)
+    launcher = _started(engine, tmp_path)
+    results: list[dict[str, object]] = []
+    worker = threading.Thread(
+        target=lambda: results.append(launcher.run(_run(), lambda line: None))
+    )
+    worker.start()
+    _until(lambda: _task_started(engine))
+
+    with pytest.raises(EngineError, match="a run with the id t1 is already live"):
+        launcher.run(_run(), lambda line: None)
+
+    assert launcher.stop(StopRequest("t1")) == {"stopped": True}
+    worker.join(10)
+    assert results[0]["stopped"] is True
+
+
+def test_cleanup_lists_the_containers_before_it_looks_at_the_live_runs(tmp_path: Path) -> None:
+    """A run that registers after the listing is spared; one that registered before is too."""
+    engine = FakeEngine()
+    launcher = _started(engine, tmp_path)
+    engine.containers["late"] = {
+        "Name": "lakana-task-late",
+        "exit": None,
+        "spec": {"HostConfig": {"Mounts": []}},
+        "Labels": {"lakana.launcher.stack": "lakana", "lakana.launcher.owner": "w1"},
+    }
+    engine._released["late"] = threading.Event()
+    real = engine.request
+
+    def listing_then_register(
+        method: str, path: str, body: Any = None, *, query: Any = None, timeout: Any = 60.0
+    ) -> tuple[int, Any]:
+        answer = real(method, path, body, query=query, timeout=timeout)
+        if path == "/containers/json":
+            launcher._register("lakana-task-late", 3)
+        return answer
+
+    engine.request = listing_then_register  # ty: ignore[invalid-assignment]
+
+    assert launcher.cleanup(CleanupRequest("w1")) == {"removed": 0}
+    assert "late" in engine.containers
+
+
+def test_a_host_path_in_dockers_message_is_replaced_by_the_root_name(tmp_path: Path) -> None:
+    """The worker and its task log never learn where an ingestion root lives on the host."""
+    engine = FakeEngine()
+    launcher = _started(engine, tmp_path, ingestion_roots={"data": "/srv/data"})
+    _intercept(
+        engine,
+        lambda m, p, b: p == "/containers/create" and b["Labels"]["lakana.launcher.kind"] == "task",
+        (400, {"message": "invalid mount config: bind source path does not exist: /srv/data"}),
+    )
+
+    with pytest.raises(EngineError) as caught:
+        launcher.run(replace(_run(), roots=("data",)), lambda line: None)
+
+    assert "/srv/data" not in str(caught.value) and "ingestion root 'data'" in str(caught.value)
+    assert "/srv/data" not in launcher.redact("failed at /srv/data/sub")
+    assert "ingestion root 'data'/sub" in launcher.redact("failed at /srv/data/sub")
+
+
+def test_a_probe_failure_never_names_a_host_path(tmp_path: Path) -> None:
+    """Docker's text reaches the start-up error, so it is redacted there too."""
+    engine = FakeEngine()
+    _intercept(
+        engine,
+        lambda m, p, b: (
+            p == "/containers/create" and b["Labels"]["lakana.launcher.id"] == "ingest-data"
+        ),
+        (400, {"message": "bind source path does not exist: /srv/data"}),
+    )
+
+    with pytest.raises(StartError) as caught:
+        _roots(tmp_path, engine)
+
+    assert "/srv/data" not in str(caught.value)
+
+
+def test_an_engine_that_rejects_the_api_version_says_so_with_both_versions(tmp_path: Path) -> None:
+    """A future engine may refuse /v1.47; the next step is to upgrade Lakana, not Docker."""
+    engine = FakeEngine()
+    _intercept(
+        engine,
+        lambda m, p, b: p == "/version",
+        (400, {"message": "client version 1.47 is too old. Minimum supported API version is 1.52"}),
+    )
+
+    with pytest.raises(StartError, match=r"API version 1\.47 is not supported") as caught:
+        _started(engine, tmp_path)
+
+    assert "Minimum supported API version is 1.52" in str(caught.value)
+    assert "upgrade Lakana" in str(caught.value)
+
+
+def test_a_marker_that_disappears_during_eviction_is_not_an_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A concurrent eviction of another key may unlink a marker between the listing and its stat."""
+    engine = FakeEngine()
+    launcher = _started(engine, tmp_path, keep_environments=1)
+    ghost = tmp_path / "environments" / "lakana-env-ghost.complete"
+    real = Path.glob
+    monkeypatch.setattr(Path, "glob", lambda self, pattern: iter([ghost, *real(self, pattern)]))
+
+    launcher._evict(keep="lakana-env-other")
+
+    assert not ghost.exists()
+
+
+def test_a_task_that_writes_before_it_reads_its_input_does_not_block_the_launcher(
+    tmp_path: Path,
+) -> None:
+    """Input is sent while output is read, so a full pipe in one direction cannot stop the other."""
+    engine = FakeEngine(write_first=True, output=[b"x" * 60000] * 100)
+    launcher = _started(engine, tmp_path)
+    emitted: list[dict[str, object]] = []
+    big = replace(_run(), stdin=b"y" * (1 << 20))
+    results: list[dict[str, object]] = []
+    worker = threading.Thread(target=lambda: results.append(launcher.run(big, emitted.append)))
+
+    worker.start()
+    worker.join(15)
+
+    assert not worker.is_alive(), "the launcher is stuck writing input while the task writes output"
+    assert len(_logs(emitted)) == 60000 * 100
+    assert engine.stdin == [b"y" * (1 << 20)]
 
 
 def _task_started(engine: FakeEngine) -> bool:

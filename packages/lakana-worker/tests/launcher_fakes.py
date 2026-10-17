@@ -77,6 +77,8 @@ class FakeEngine:
         Whether ``GET /containers/{id}/json`` reports an out-of-memory kill.
     no_new_privileges_works
         Whether a container with that option starts.
+    write_first
+        Whether a container writes its output before it reads stdin.
     hold
         Whether a container's output waits until it is stopped, killed or removed.
     services
@@ -110,6 +112,7 @@ class FakeEngine:
     exit_code: int = 0
     oom: bool = False
     no_new_privileges_works: bool = True
+    write_first: bool = False
     hold: bool = False
     services: dict[str, str] = field(
         default_factory=lambda: {"server": "c-server", "egress": "c-egress"}
@@ -196,6 +199,7 @@ class FakeEngine:
                 "Labels": body["Labels"],
                 "spec": body,
                 "exit": None,
+                "running": False,
             }
             self._released[cid] = threading.Event()
             self.volumes.update(
@@ -286,6 +290,7 @@ class FakeEngine:
                 return 400, {"message": "exec /usr/local/bin/python: operation not permitted"}
             if container["Labels"]["lakana.launcher.kind"] == "task":
                 self._hook("start")
+            container["running"] = True
             return 204, b""
         if action == "wait":
             labels = container["Labels"]
@@ -300,6 +305,9 @@ class FakeEngine:
         if action == "json":
             return 200, {"State": {"OOMKilled": self.oom}}
         if action in ("kill", "stop"):
+            if not container.get("running"):
+                return 304, b""  # Docker ignores both on a container that is not running
+            container["running"] = False
             container["exit"] = 137
             self._released[cid].set()
             return 204, b""
@@ -371,17 +379,29 @@ class FakeEngine:
 
         def feed() -> None:
             """Read stdin, wait if holding, write the frames, close."""
-            if stdin:
+
+            def read_stdin() -> None:
                 received = b""
                 while chunk := theirs.recv(65536):
                     received += chunk
                 self.stdin.append(received)
-            if self.hold:
-                self._released[container_id].wait(10)
-            try:
+
+            def write_output() -> None:
+                if self.hold:
+                    self._released[container_id].wait(10)
                 if not self.hold or self.containers.get(container_id, {}).get("exit") is None:
                     for chunk in self.output:
                         theirs.sendall(struct.pack(">BxxxI", 1, len(chunk)) + chunk)
+
+            try:
+                if self.write_first:
+                    write_output()
+                    if stdin:
+                        read_stdin()
+                else:
+                    if stdin:
+                        read_stdin()
+                    write_output()
             except OSError:
                 pass  # the launcher closed its end: the caller left
             finally:

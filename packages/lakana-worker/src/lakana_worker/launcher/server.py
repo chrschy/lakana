@@ -18,7 +18,9 @@ import os
 import secrets
 import socket
 import socketserver
+import stat
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -32,7 +34,7 @@ from lakana_worker.launcher.requests import (
     container_name,
     parse_request,
 )
-from lakana_worker.launcher.service import Launcher
+from lakana_worker.launcher.service import Launcher, StartError
 
 logger = logging.getLogger("lakana_worker.launcher")
 
@@ -40,6 +42,10 @@ TOKEN_FILE = "launcher.token"
 _MAX_CONNECTIONS = 128
 _READ_TIMEOUT = 30.0
 """Seconds a connection has to send its request line; the wait for the result is not bounded."""
+_ROOT_UID = 0
+"""Who must own the socket's directory."""
+_TOKEN_TRIES = 8
+_INTERNAL_ERROR = "launcher internal error; see docker compose logs launcher"
 _SOCKET_UMASK = 0o117
 """Leaves the socket 0660: the owner and the worker's group may connect."""
 
@@ -51,6 +57,8 @@ class _CallerGone(Exception):
 def write_token(directory: Path) -> str:
     """Write a fresh token next to the socket, readable by the owner and the group only.
 
+    The file is written under a random temporary name, opened exclusively, and moved into place.
+
     Parameters
     ----------
     directory
@@ -60,17 +68,30 @@ def write_token(directory: Path) -> str:
     -------
     str
         The token (64 hex digits).
+
+    Raises
+    ------
+    StartError
+        If no free temporary name is found: something keeps creating files in the directory.
     """
     token = secrets.token_hex(32)
-    temporary = directory / f".{TOKEN_FILE}.{os.getpid()}"
-    with contextlib.suppress(FileNotFoundError):
-        temporary.unlink()
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o640)
-    with os.fdopen(descriptor, "w", encoding="ascii") as handle:
-        os.fchmod(handle.fileno(), 0o640)
-        handle.write(token)
-    os.replace(temporary, directory / TOKEN_FILE)
-    return token
+    for _ in range(_TOKEN_TRIES):
+        temporary = directory / f".{TOKEN_FILE}.{secrets.token_hex(8)}"
+        try:
+            descriptor = os.open(
+                temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o640
+            )
+        except FileExistsError:
+            continue
+        with os.fdopen(descriptor, "w", encoding="ascii") as handle:
+            os.fchmod(handle.fileno(), 0o640)
+            handle.write(token)
+        os.replace(temporary, directory / TOKEN_FILE)
+        return token
+    raise StartError(
+        f"cannot create the token file in {directory}: names keep being taken; check what else "
+        "writes to the launcher's socket volume"
+    )
 
 
 def _watch(connection: socket.socket, done: threading.Event, on_gone: Callable[[], None]) -> None:
@@ -131,40 +152,38 @@ class _Handler(socketserver.StreamRequestHandler):
 
     def handle(self) -> None:
         """Read the request, run it, answer; never let an error escape."""
-        if not self.server.slots.acquire(blocking=False):
-            # Read the request first: closing a socket with unread bytes resets the connection
-            # and the caller would never see the refusal.
-            self.connection.settimeout(1.0)
-            with contextlib.suppress(OSError):
-                self.rfile.readline(MAX_REQUEST_BYTES + 1)
-            self._try_send(
-                {
-                    "refused": "the launcher is busy: too many connections at once; retry, or "
-                    "lower the number of workers"
-                }
-            )
-            return
-        try:
-            self._serve()
-        finally:
-            self.server.slots.release()
+        self._serve()
 
     def _read_line(self) -> bytes | None:
-        """Read the request line, bounded in size and in time.
+        """Read the request line, bounded in size and by one deadline for the whole line.
 
         Returns
         -------
         bytes or None
-            The line, or `None` when none arrived in time (the caller was told).
+            The line (more than the limit when the caller sent more, which parsing refuses), or
+            `None` when it did not arrive in time (the caller was told).
         """
-        self.connection.settimeout(_READ_TIMEOUT)
+        deadline = time.monotonic() + _READ_TIMEOUT
+        data = bytearray()
+        late = False
         try:
-            raw = self.rfile.readline(MAX_REQUEST_BYTES + 1)
+            while b"\n" not in data and len(data) <= MAX_REQUEST_BYTES:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    late = True
+                    break
+                self.connection.settimeout(left)
+                chunk = self.connection.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
         except OSError:
+            late = True
+        if late:
             self._try_send({"refused": "no request line arrived in time; send the request at once"})
             return None
         self.connection.settimeout(None)
-        return raw
+        return bytes(data.split(b"\n", 1)[0] + b"\n") if b"\n" in data else bytes(data)
 
     def _serve(self) -> None:
         """Parse, supervise, answer."""
@@ -177,6 +196,10 @@ class _Handler(socketserver.StreamRequestHandler):
         except Refused as exc:
             logger.warning("Refused a request: %s", exc)
             self._try_send({"refused": str(exc)})
+            return
+        except Exception:
+            logger.exception("The launcher failed while reading a request")
+            self._try_send({"error": _INTERNAL_ERROR})
             return
         name: str | None = None
         done = threading.Event()
@@ -214,11 +237,11 @@ class _Handler(socketserver.StreamRequestHandler):
             return  # the run is cleaned up already
         except EngineError as exc:
             logger.error("Docker failed: %s", exc)
-            self._try_send({"error": str(exc)})
+            self._try_send({"error": self.server.launcher.redact(str(exc))})
             return
         except Exception:
             logger.exception("The launcher failed while serving a request")
-            self._try_send({"error": "launcher internal error; see docker compose logs launcher"})
+            self._try_send({"error": _INTERNAL_ERROR})
             return
         self._try_send({"result": result})
 
@@ -239,6 +262,58 @@ class LauncherServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer)
     daemon_threads = True
     request_queue_size = 64
 
+    def process_request(  # ty: ignore[invalid-method-override]
+        self, request: socket.socket, client_address: object
+    ) -> None:
+        """Hand a connection to a thread, or refuse it at once when every slot is taken.
+
+        The refusal is written here, in the accept loop, so a flood of connections does not
+        make a thread each.
+
+        Parameters
+        ----------
+        request
+            The connection.
+        client_address
+            Its address (a Unix socket has none).
+        """
+        if self.slots.acquire(blocking=False):
+            super().process_request(request, client_address)
+            return
+        with contextlib.suppress(OSError):
+            request.settimeout(0.5)
+            # Take what the caller already sent: closing with unread bytes would reset the
+            # connection and the caller would never see the refusal.
+            with contextlib.suppress(BlockingIOError):
+                request.recv(MAX_REQUEST_BYTES, socket.MSG_DONTWAIT)
+            request.sendall(
+                json.dumps(
+                    {
+                        "refused": "the launcher is busy: too many connections at once; retry, "
+                        "or lower the number of workers"
+                    }
+                ).encode("utf-8")
+                + b"\n"
+            )
+        self.shutdown_request(request)
+
+    def process_request_thread(  # ty: ignore[invalid-method-override]
+        self, request: socket.socket, client_address: object
+    ) -> None:
+        """Serve a connection in its thread, then give its slot back.
+
+        Parameters
+        ----------
+        request
+            The connection.
+        client_address
+            Its address.
+        """
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.slots.release()
+
     def __init__(self, path: str, *, launcher: Launcher, token: str) -> None:
         self.launcher = launcher
         self.token = token
@@ -251,6 +326,41 @@ class LauncherServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer)
             os.umask(previous)
 
 
+def _check_directory(directory: Path) -> None:
+    """Check that the socket's directory still has the protections the image gives it.
+
+    Parameters
+    ----------
+    directory
+        The socket's directory.
+
+    Raises
+    ------
+    StartError
+        If it is not owned by root, lacks the sticky or set-group-id bit, or is writable by
+        everyone: a bind mount or a volume from an older image would silently lose them.
+    """
+    try:
+        info = directory.stat()
+    except OSError as exc:
+        raise StartError(
+            f"cannot read the launcher's socket directory {directory} ({exc.strerror}); mount a "
+            "volume there"
+        ) from None
+    fix = (
+        f"The directory {directory} must be root-owned with mode 3770 (the launcher image "
+        "prepares it); recreate the volume from the current image."
+    )
+    if info.st_uid != _ROOT_UID:
+        raise StartError(f"The socket directory must belong to root. {fix}")
+    if not info.st_mode & stat.S_ISVTX:
+        raise StartError(f"The socket directory lacks the sticky bit. {fix}")
+    if not info.st_mode & stat.S_ISGID:
+        raise StartError(f"The socket directory lacks the set-group-id bit. {fix}")
+    if info.st_mode & stat.S_IWOTH:
+        raise StartError(f"The socket directory must not be writable by everyone. {fix}")
+
+
 def serve(launcher: Launcher) -> None:
     """Listen on the configured socket until the process ends.
 
@@ -258,11 +368,26 @@ def serve(launcher: Launcher) -> None:
     ----------
     launcher
         The started launcher.
+
+    Raises
+    ------
+    StartError
+        If the socket's directory is not as the image prepares it, something that is not a
+        socket sits at the socket path, or no token file can be written.
     """
     path = launcher.settings.socket
+    _check_directory(path.parent)
+    try:
+        existing = path.lstat()
+    except FileNotFoundError:
+        existing = None
+    if existing is not None and not stat.S_ISSOCK(existing.st_mode):
+        raise StartError(
+            f"{path} exists and is not a socket; remove it from the launcher's socket volume"
+        )
     token = write_token(path.parent)
-    with contextlib.suppress(FileNotFoundError):
-        path.unlink()
+    if existing is not None:
+        path.unlink(missing_ok=True)
     server = LauncherServer(str(path), launcher=launcher, token=token)
     logger.info("The launcher listens on %s.", path)
     server.serve_forever()

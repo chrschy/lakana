@@ -75,3 +75,26 @@ def test_main_exits_2_when_the_engine_is_not_fit_or_not_there(
 
     assert caught.value.code == 2
     assert str(error) in caplog.text
+
+
+@pytest.mark.parametrize(
+    "error", [StartError("the socket directory is wrong"), OSError("address in use")]
+)
+def test_main_exits_2_when_the_socket_cannot_be_served(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, error: Exception
+) -> None:
+    """A planted entry or a wrong directory is a message, not a traceback."""
+    for name, value in _ENV.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(Launcher, "start", lambda self: None)
+
+    def fail(launcher: Launcher) -> None:
+        raise error
+
+    monkeypatch.setattr(entry, "serve", fail)
+
+    with pytest.raises(SystemExit) as caught:
+        entry.main()
+
+    assert caught.value.code == 2
+    assert str(error) in caplog.text

@@ -112,19 +112,26 @@ class DockerEngine:
         self.socket_path = socket_path
         self.timeout = timeout
 
-    def _unreachable(self, exc: OSError) -> EngineError:
+    def _unreachable(self, exc: OSError, timeout: float | None) -> EngineError:
         """Describe a failure to talk to the socket.
 
         Parameters
         ----------
         exc
             The error.
+        timeout
+            The seconds the call was allowed.
 
         Returns
         -------
         EngineError
             Naming the socket and what to do.
         """
+        if isinstance(exc, TimeoutError):
+            return EngineError(
+                f"Docker did not answer within {timeout or 0:g} s; check `docker compose logs "
+                "launcher` and the load on the Docker host"
+            )
         reason = exc.strerror or type(exc).__name__
         return EngineError(
             f"cannot reach Docker at {self.socket_path} ({reason}); mount the Docker socket "
@@ -175,7 +182,7 @@ class DockerEngine:
             data = response.read(_MAX_RESPONSE)
             status = response.status
         except OSError as exc:
-            raise self._unreachable(exc) from None
+            raise self._unreachable(exc, timeout) from None
         except http.client.HTTPException as exc:
             raise EngineError(
                 f"Docker answered something that is not HTTP ({type(exc).__name__}); check "
@@ -229,7 +236,7 @@ class DockerEngine:
                 head += byte
         except OSError as exc:
             stream.close()
-            raise self._unreachable(exc) from None
+            raise self._unreachable(exc, self.timeout) from None
         if b"\r\n\r\n" not in head or b" 101 " not in head.split(b"\r\n", 1)[0] + b" ":
             stream.close()
             raise EngineError(

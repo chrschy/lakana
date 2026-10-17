@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import quote
 
-from lakana_worker.launcher.engine import Engine, EngineError
+from lakana_worker.launcher.engine import API_VERSION, Engine, EngineError
 from lakana_worker.launcher.requests import (
     LABEL_OWNER,
     LABEL_STACK,
@@ -64,6 +64,8 @@ _MAX_FRAME_PIECE = 1 << 20
 """The most one read of a container's output takes, whatever size a frame header claims."""
 _SPECIAL_MOUNT = 3
 _SOCKET_FOUND = 4
+_TOO_MANY = 5
+_UNREADABLE = 6
 """Exit statuses of the ingestion-root probe."""
 
 
@@ -127,6 +129,43 @@ class _Receiver(Protocol):
             The next bytes.
         """
         ...
+
+
+def _send_input(stream: socket.socket, data: bytes) -> None:
+    """Write a task's input and close the write side.
+
+    A task that exited at once leaves nothing to read its input: its exit status says so, so a
+    broken pipe is not an error here. Closing the stream ends the write too.
+
+    Parameters
+    ----------
+    stream
+        The attached stream.
+    data
+        The input.
+    """
+    with contextlib.suppress(OSError):
+        stream.sendall(data)
+        stream.shutdown(socket.SHUT_WR)
+
+
+def _mtime(path: Path) -> float:
+    """Read a file's modification time, 0 when it is gone.
+
+    Parameters
+    ----------
+    path
+        The file.
+
+    Returns
+    -------
+    float
+        Seconds since the epoch; 0 for a file removed meanwhile (the oldest).
+    """
+    try:
+        return path.stat().st_mtime
+    except FileNotFoundError:
+        return 0.0
 
 
 def _exact(stream: _Receiver, size: int) -> bytes | None:
@@ -213,7 +252,15 @@ class Launcher:
         status, version = self.engine.request("GET", "/version")
         text = str(version.get("Version", "")) if isinstance(version, dict) else ""
         head = text.split(".")[0]
-        if status != 200 or not head.isdigit() or int(head) < MIN_ENGINE_MAJOR:
+        if status != 200:
+            raise StartError(
+                f"Docker does not accept API version {API_VERSION.removeprefix('/v')}, the one "
+                f"this release of Lakana speaks (Docker Engine {MIN_ENGINE_MAJOR} or later): "
+                f"{self.redact(_message(version))}. API version 1.47 is not supported by this "
+                "Docker; upgrade Lakana to a release that supports it, or use a Docker Engine "
+                "that still serves this API version."
+            )
+        if not head.isdigit() or int(head) < MIN_ENGINE_MAJOR:
             raise StartError(
                 f"Docker Engine {MIN_ENGINE_MAJOR} or later is needed: it can keep a task's "
                 "network away from the host (gateway_mode_ipv4=isolated). This engine reports "
@@ -362,13 +409,13 @@ class Launcher:
                 code, refusal = self._run_probe(name, spec)
             except EngineError as exc:
                 raise StartError(
-                    f"cannot check ingestion root '{root}': {exc}; check that its directory "
-                    "exists on the host (LAKANA_LAUNCHER__INGESTION_ROOTS)"
+                    f"cannot check ingestion root '{root}': {self.redact(str(exc))}; check that "
+                    "its directory exists on the host (LAKANA_LAUNCHER__INGESTION_ROOTS)"
                 ) from None
             if refusal:
                 raise StartError(
                     f"cannot check ingestion root '{root}': Docker could not start the probe: "
-                    f"{refusal}; check that its directory exists on the host "
+                    f"{self.redact(refusal)}; check that its directory exists on the host "
                     "(LAKANA_LAUNCHER__INGESTION_ROOTS)"
                 )
             if code == _SPECIAL_MOUNT:
@@ -382,6 +429,19 @@ class Launcher:
                     f"ingestion root '{root}' holds a socket; a read-only mount does not stop a "
                     "task from connecting to it. Move the socket out of the directory or choose "
                     "another one (LAKANA_LAUNCHER__INGESTION_ROOTS)."
+                )
+            if code == _TOO_MANY:
+                raise StartError(
+                    f"ingestion root '{root}' has more than 100000 entries, so it cannot be "
+                    "checked for sockets. Point the root at a smaller directory "
+                    "(LAKANA_LAUNCHER__INGESTION_ROOTS)."
+                )
+            if code == _UNREADABLE:
+                raise StartError(
+                    f"ingestion root '{root}' holds something the task user cannot list or "
+                    "examine, so it cannot be checked for sockets. Make every directory in it "
+                    "readable by the task user (10001), or choose another directory "
+                    "(LAKANA_LAUNCHER__INGESTION_ROOTS)."
                 )
             if code != 0:
                 raise StartError(
@@ -445,10 +505,7 @@ class Launcher:
         try:
             volume = environment_volume(self.settings, request.python, request.environment)
             if not self._built(volume):
-                raise EngineError(
-                    f"the environment {request.environment[:12]} for Python {request.python} is "
-                    "not built (it may have been removed); build it first"
-                )
+                raise self._not_built(request.python, request.environment)
             self._touch(volume)
             if live.stopped.is_set():
                 return dict(_STOPPED_BEFORE_START)
@@ -463,13 +520,38 @@ class Launcher:
                     request, self.settings, no_new_privileges=self.no_new_privileges
                 )
                 self._ensure_image(spec["Image"])
+                # A pull takes minutes; a prune or an eviction in that time must not let Docker
+                # create the volume empty at the mount.
+                if not self._built(volume):
+                    raise self._not_built(request.python, request.environment)
                 return self._supervise(
                     name, spec, live, request.limits.timeout_seconds, emit, stdin=request.stdin
                 )
             finally:
                 self._close_network(network)
         finally:
-            self.forget(name)
+            self.forget(name, live)
+
+    @staticmethod
+    def _not_built(python: str, environment: str) -> EngineError:
+        """Describe a run for an environment that is not built.
+
+        Parameters
+        ----------
+        python
+            The Python version.
+        environment
+            The environment key.
+
+        Returns
+        -------
+        EngineError
+            The error to raise.
+        """
+        return EngineError(
+            f"the environment {environment[:12]} for Python {python} is not built (it may have "
+            "been removed); build it first"
+        )
 
     def build(self, request: BuildRequest, emit: Emit) -> dict[str, object]:
         """Build one environment, unless it is built already; one build per environment at once.
@@ -503,7 +585,7 @@ class Launcher:
             with lock:
                 return self._build_locked(request, emit, name, live, volume)
         finally:
-            self.forget(name)
+            self.forget(name, live)
 
     def _build_locked(
         self, request: BuildRequest, emit: Emit, name: str, live: _Live, volume: str
@@ -623,16 +705,21 @@ class Launcher:
         live.stopped.set()
         self._kill(live)
 
-    def forget(self, name: str) -> None:
+    def forget(self, name: str, live: _Live | None = None) -> None:
         """Drop a finished run: its registration and any abandonment of its name.
 
         Parameters
         ----------
         name
             The container's name.
+        live
+            The registration to drop. Another run's registration under the same name is left
+            alone; `None` (the socket server's call, after the run unregistered itself) drops
+            only the abandonment.
         """
         with self._lock:
-            self._live.pop(name, None)
+            if live is not None and self._live.get(name) is live:
+                del self._live[name]
             self._abandoned.discard(name)
 
     def status(self, request: StatusRequest) -> dict[str, object]:
@@ -686,13 +773,43 @@ class Launcher:
         -------
         _Live
             The registration.
+
+        Raises
+        ------
+        EngineError
+            If a run is registered under that name already.
         """
         live = _Live(grace)
         with self._lock:
+            if name in self._live:
+                ident = name.removeprefix(f"{self.settings.stack}-").split("-", 1)[-1]
+                raise EngineError(
+                    f"a run with the id {ident} is already live; wait for it to end or use "
+                    "another id"
+                )
             self._live[name] = live
             if name in self._abandoned:
                 live.stopped.set()
         return live
+
+    def redact(self, text: str) -> str:
+        """Replace the host path of every ingestion root in a text by the root's name.
+
+        Parameters
+        ----------
+        text
+            A message, such as Docker's.
+
+        Returns
+        -------
+        str
+            The text without any root's host path.
+        """
+        for name, path in sorted(
+            self.settings.ingestion_roots.items(), key=lambda item: -len(item[1])
+        ):
+            text = text.replace(path, f"ingestion root '{name}'")
+        return text
 
     def _kill(self, live: _Live) -> None:
         """Kill a container if it exists; a container that has not started ignores it.
@@ -768,11 +885,9 @@ class Launcher:
                     self._kill(live)
                 timer.start()
                 if stdin is not None:
-                    # A task that exited at once leaves nothing to read its input: its exit
-                    # status says so.
-                    with contextlib.suppress(OSError):
-                        stream.sendall(stdin)
-                        stream.shutdown(socket.SHUT_WR)
+                    # Input goes in while output is read: a task that writes before it reads
+                    # fills one pipe while the launcher fills the other.
+                    threading.Thread(target=_send_input, args=(stream, stdin), daemon=True).start()
                 for payload in read_frames(stream):
                     emit({"log": base64.b64encode(payload).decode("ascii")})
             finally:
@@ -830,7 +945,7 @@ class Launcher:
         """
         status, body = self.engine.request("POST", "/containers/create", spec, query={"name": name})
         if status != 201 or not isinstance(body, dict):
-            raise EngineError(f"Docker refused the container: {_message(body)}")
+            raise EngineError(f"Docker refused the container: {self.redact(_message(body))}")
         return str(body["Id"])
 
     def _remove_container(self, cid: str) -> None:
@@ -893,11 +1008,14 @@ class Launcher:
             How many containers were removed.
         """
         filters = json.dumps({"label": [f"{k}={v}" for k, v in sorted(wanted.items())]})
-        with self._lock:
-            live = set(self._live) if spare_live else set()
         _, containers = self.engine.request(
             "GET", "/containers/json", query={"all": "1", "filters": filters}
         )
+        _, networks = self.engine.request("GET", "/networks", query={"filters": filters})
+        # The live runs are read after the listing: a run registers before it creates anything,
+        # so everything listed that belongs to a live run is found among them.
+        with self._lock:
+            live = set(self._live) if spare_live else set()
         removed = 0
         for container in containers if isinstance(containers, list) else []:
             names = {str(n).lstrip("/") for n in container.get("Names", [])}
@@ -905,7 +1023,6 @@ class Launcher:
                 continue
             self._remove_container(str(container["Id"]))
             removed += 1
-        _, networks = self.engine.request("GET", "/networks", query={"filters": filters})
         for network in networks if isinstance(networks, list) else []:
             if network.get("Name") not in live:
                 self._close_network(str(network["Name"]))
@@ -1109,7 +1226,7 @@ class Launcher:
         """
         markers = sorted(
             (self.settings.state_dir / "environments").glob("*.complete"),
-            key=lambda m: m.stat().st_mtime,
+            key=_mtime,
             reverse=True,
         )
         for marker in markers[self.settings.keep_environments :]:

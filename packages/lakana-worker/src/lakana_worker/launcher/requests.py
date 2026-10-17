@@ -1225,35 +1225,51 @@ def probe_container_spec(settings: LauncherSettings, image: str) -> dict[str, An
 
 
 INGEST_PROBE_SCRIPT = """\
-import os, stat, sys
+import collections, os, stat, sys
 _LIMIT = 100000
+_SYSTEM = (
+    "proc", "sysfs", "devtmpfs", "devpts", "debugfs", "tracefs", "securityfs", "cgroup",
+    "cgroup2", "bpf", "efivarfs", "configfs", "pstore", "binfmt_misc", "fusectl", "mqueue",
+    "hugetlbfs", "nsfs", "autofs",
+)
 root, mountinfo = sys.argv[1], sys.argv[2]
 with open(mountinfo, encoding="utf-8", errors="replace") as handle:
     for line in handle:
         front, _, back = line.partition(" - ")
         fields, rest = front.split(), back.split()
-        if len(fields) > 4 and rest and rest[0] in ("proc", "sysfs", "devtmpfs"):
+        if len(fields) > 4 and rest and rest[0] in _SYSTEM:
             if fields[4] == root or fields[4].startswith(root + "/"):
                 sys.exit(3)
 try:
-    if stat.S_ISSOCK(os.lstat(root).st_mode):
-        sys.exit(4)
+    mode = os.lstat(root).st_mode
 except OSError:
-    pass
+    sys.exit(6)
+if stat.S_ISSOCK(mode):
+    sys.exit(4)
+if not stat.S_ISDIR(mode):
+    sys.exit(0)
 seen = 0
-for here, directories, files in os.walk(root, followlinks=False):
-    for entry in directories + files:
-        seen += 1
-        if seen > _LIMIT:
-            sys.exit(0)
-        try:
-            if stat.S_ISSOCK(os.lstat(os.path.join(here, entry)).st_mode):
-                sys.exit(4)
-        except OSError:
-            pass
+queue = collections.deque([root])
+while queue:
+    try:
+        with os.scandir(queue.popleft()) as entries:
+            for entry in entries:
+                seen += 1
+                if seen > _LIMIT:
+                    print("root %r has more than %d entries" % (root, _LIMIT), file=sys.stderr)
+                    sys.exit(5)
+                mode = entry.stat(follow_symlinks=False).st_mode
+                if stat.S_ISSOCK(mode):
+                    sys.exit(4)
+                if stat.S_ISDIR(mode):
+                    queue.append(entry.path)
+    except OSError:
+        sys.exit(6)
 """
-"""The script an ingestion-root probe runs: exit 3 for a proc, sysfs or devtmpfs mount at or below
-the root, 4 for a socket in a walk of at most 100000 entries, 0 otherwise."""
+"""The script an ingestion-root probe runs, failing closed. Exit 3: a system mount (proc, sysfs,
+cgroup, debugfs and the like) at or below the root. 4: a socket. 5: more than 100000 entries, so
+part of the root was not looked at. 6: something that cannot be listed or examined. 0 otherwise.
+The walk is breadth-first and never follows a link."""
 
 
 def ingestion_probe_spec(

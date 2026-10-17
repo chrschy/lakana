@@ -21,7 +21,7 @@ from lakana_worker.launcher import server as server_module
 from lakana_worker.launcher.engine import EngineError
 from lakana_worker.launcher.requests import StopRequest, environment_volume
 from lakana_worker.launcher.server import TOKEN_FILE, LauncherServer, serve, write_token
-from lakana_worker.launcher.service import Launcher
+from lakana_worker.launcher.service import Launcher, StartError
 
 RUN = {
     "op": "run",
@@ -190,15 +190,46 @@ def test_the_token_file_mode_does_not_depend_on_the_umask(tmp_path: Path) -> Non
     assert [p.name for p in tmp_path.iterdir()] == [TOKEN_FILE]
 
 
-def test_a_token_is_new_each_time_and_replaces_the_old_file(tmp_path: Path) -> None:
-    """A restart invalidates what a worker read before; a stale temporary file is cleared."""
-    stale = tmp_path / f".{TOKEN_FILE}.{os.getpid()}"
-    stale.write_text("stale", encoding="ascii")
+def test_a_token_is_new_each_time_and_the_temporary_name_is_not_guessable(
+    tmp_path: Path,
+) -> None:
+    """A restart invalidates what a worker read; planted entries at a guessable name do nothing."""
+    (tmp_path / f".{TOKEN_FILE}.{os.getpid()}").mkdir()
+    (tmp_path / f".{TOKEN_FILE}.1").write_text("planted", encoding="ascii")
 
     first = write_token(tmp_path)
     second = write_token(tmp_path)
 
     assert first != second and (tmp_path / TOKEN_FILE).read_text(encoding="ascii") == second
+
+
+def test_a_temporary_name_that_exists_is_replaced_by_another(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The worker may create the name between the check and the open; the open is exclusive."""
+    (tmp_path / f".{TOKEN_FILE}.aaaa").write_text("planted", encoding="ascii")
+    names = iter(["aaaa", "bbbb"])
+    real = server_module.secrets.token_hex
+    monkeypatch.setattr(
+        server_module.secrets, "token_hex", lambda n: next(names) if n == 8 else real(n)
+    )
+
+    token = write_token(tmp_path)
+
+    assert (tmp_path / TOKEN_FILE).read_text(encoding="ascii") == token
+    assert (tmp_path / f".{TOKEN_FILE}.aaaa").read_text(encoding="ascii") == "planted"
+
+
+def test_a_directory_that_never_gives_a_free_name_refuses_to_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After a few tries the launcher stops, with a message and not a traceback."""
+    (tmp_path / f".{TOKEN_FILE}.aaaa").write_text("planted", encoding="ascii")
+    real = server_module.secrets.token_hex
+    monkeypatch.setattr(server_module.secrets, "token_hex", lambda n: "aaaa" if n == 8 else real(n))
+
+    with pytest.raises(StartError, match="cannot create the token file"):
+        write_token(tmp_path)
 
 
 def test_an_engine_failure_answers_error_with_its_text(served: Served) -> None:
@@ -309,7 +340,7 @@ def test_a_silent_connection_is_closed_and_frees_its_slot(
     assert json.loads(data) == {
         "refused": "no request line arrived in time; send the request at once"
     }
-    assert served.server.slots._value == server_module._MAX_CONNECTIONS  # type: ignore[attr-defined]
+    _wait_for(lambda: served.server.slots._value == server_module._MAX_CONNECTIONS)
 
 
 def test_too_many_connections_are_refused_with_the_next_step(served: Served) -> None:
@@ -357,15 +388,146 @@ def test_bytes_a_caller_sends_after_its_request_are_ignored(served: Served) -> N
     assert json.loads(answer)["result"]["stopped"] is True
 
 
+def test_a_trickling_connection_is_cut_at_one_deadline_for_the_whole_line(
+    served: Served, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One byte before each timeout would otherwise hold a slot for ever."""
+    monkeypatch.setattr(server_module, "_READ_TIMEOUT", 0.4)
+    started = time.monotonic()
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.connect("l.sock")
+        answer = b""
+        for _ in range(40):
+            try:
+                client.sendall(b" ")
+            except OSError:
+                break
+            time.sleep(0.1)
+            client.settimeout(0.01)
+            try:
+                answer = client.recv(4096)
+            except TimeoutError:
+                continue
+            break
+
+    assert json.loads(answer) == {
+        "refused": "no request line arrived in time; send the request at once"
+    }
+    assert time.monotonic() - started < 2.0
+
+
+def test_a_deadline_that_has_passed_refuses_at_once(
+    served: Served, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No byte is waited for once the time is up."""
+    monkeypatch.setattr(server_module, "_READ_TIMEOUT", 0.0)
+
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.connect("l.sock")
+        data = client.recv(4096)
+
+    assert json.loads(data)["refused"].startswith("no request line arrived in time")
+
+
+def test_a_line_cut_short_by_the_end_of_the_connection_is_refused(served: Served) -> None:
+    """A caller that sends half a request and hangs up gets the schema refusal."""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.connect("l.sock")
+        client.sendall(b'{"op": "stop"')
+        client.shutdown(socket.SHUT_WR)
+        data = client.recv(4096)
+
+    assert json.loads(data) == {"refused": "a request is one JSON object"}
+
+
+def test_busy_connections_are_refused_without_a_thread_of_their_own(
+    served: Served, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusal is written in the accept loop, so a flood cannot make threads without bound."""
+    threads: list[object] = []
+    real = LauncherServer.process_request_thread
+    monkeypatch.setattr(
+        LauncherServer,
+        "process_request_thread",
+        lambda self, request, address: (threads.append(request), real(self, request, address))[1],
+    )
+    served.server.slots = threading.BoundedSemaphore(0)
+    clients = []
+    for _ in range(20):
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.connect("l.sock")
+        client.sendall(b"x" * 10)
+        clients.append(client)
+    answers = [client.recv(4096) for client in clients]
+    for client in clients:
+        client.close()
+
+    assert all(b"too many connections" in answer for answer in answers)
+    assert threads == []
+
+
+def test_an_exception_while_parsing_is_answered_and_logged(
+    served: Served, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bug in a field parser is not a dropped connection."""
+
+    def broken(raw: bytes, *, token: str, settings: object) -> object:
+        raise TypeError("unsupported operand")
+
+    monkeypatch.setattr(server_module, "parse_request", broken)
+
+    answer = _call({"op": "stop", "token": served.token, "id": "t9"})
+
+    assert answer == [{"error": "launcher internal error; see docker compose logs launcher"}]
+    assert "unsupported operand" in caplog.text
+
+
+def test_an_engine_error_never_carries_a_host_path_to_the_caller(
+    served: Served, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every error line passes through the launcher's redaction."""
+    served.launcher.settings = settings(Path("."), ingestion_roots={"data": "/srv/data"})
+
+    def broken(request: object, emit: object) -> dict[str, object]:
+        raise EngineError("cannot mount /srv/data")
+
+    monkeypatch.setattr(served.launcher, "handle", broken)
+
+    answer = _call({"op": "cleanup", "token": served.token, "owner": "w1"})
+
+    assert answer == [{"error": "cannot mount ingestion root 'data'"}]
+
+
+@pytest.fixture
+def shared(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Launcher:
+    """Start a launcher whose socket directory looks like the image's: sticky, set-group-id, root.
+
+    Parameters
+    ----------
+    tmp_path
+        The directory (it becomes the working directory).
+    monkeypatch
+        Makes the current user stand in for root.
+
+    Returns
+    -------
+    Launcher
+        A started launcher with its socket in that directory.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(server_module, "_ROOT_UID", os.getuid())
+    tmp_path.chmod(0o3770)
+    launcher = Launcher(settings(tmp_path), FakeEngine())
+    launcher.start()
+    return launcher
+
+
 def test_serve_listens_with_the_group_mode_and_replaces_a_stale_socket(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    shared: Launcher, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The socket is created 0660 by the umask, never changed by path afterwards."""
-    monkeypatch.chdir(tmp_path)
-    engine = FakeEngine()
-    launcher = Launcher(settings(tmp_path), engine)
-    launcher.start()
-    Path("l.sock").write_text("stale", encoding="utf-8")
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as stale:
+        stale.bind("l.sock")
     seen: dict[str, object] = {}
 
     def listen(self: LauncherServer, poll_interval: float = 0.5) -> None:
@@ -377,10 +539,68 @@ def test_serve_listens_with_the_group_mode_and_replaces_a_stale_socket(
     monkeypatch.setattr(LauncherServer, "serve_forever", listen)
     old = os.umask(0o022)
     try:
-        serve(launcher)
+        serve(shared)
         assert os.umask(0o022) == 0o022  # the umask of the process is restored
     finally:
         os.umask(old)
 
     assert seen["mode"] == 0o660 and seen["is_socket"] is True
     assert seen["token"] == seen["server_token"]
+
+
+def test_serve_creates_the_socket_when_there_is_none_to_replace(
+    shared: Launcher, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The first start of a fresh volume."""
+    seen: list[bool] = []
+    monkeypatch.setattr(
+        LauncherServer,
+        "serve_forever",
+        lambda self, poll_interval=0.5: seen.append(stat.S_ISSOCK(Path("l.sock").stat().st_mode)),
+    )
+
+    serve(shared)
+
+    assert seen == [True]
+
+
+def test_serve_names_a_socket_directory_that_is_missing(shared: Launcher) -> None:
+    """The volume was not mounted: the message says so."""
+    lost = Launcher(settings(Path("."), socket=Path("nowhere/l.sock")), FakeEngine())
+
+    with pytest.raises(StartError, match="cannot read the launcher's socket directory"):
+        serve(lost)
+
+
+def test_serve_refuses_something_that_is_not_a_socket_at_the_socket_path(
+    shared: Launcher,
+) -> None:
+    """A file or a directory planted there would make `bind` fail with a traceback."""
+    Path("l.sock").write_text("planted", encoding="utf-8")
+    with pytest.raises(StartError, match="is not a socket"):
+        serve(shared)
+    Path("l.sock").unlink()
+    Path("l.sock").mkdir()
+    with pytest.raises(StartError, match="is not a socket"):
+        serve(shared)
+
+
+@pytest.mark.parametrize(
+    ("mode", "owner_is_root", "text"),
+    [
+        (0o3770, False, "must belong to root"),
+        (0o2770, True, "sticky bit"),
+        (0o1770, True, "set-group-id bit"),
+        (0o3777, True, "must not be writable by everyone"),
+    ],
+)
+def test_serve_refuses_a_directory_that_lost_the_image_protections(
+    shared: Launcher, monkeypatch: pytest.MonkeyPatch, mode: int, owner_is_root: bool, text: str
+) -> None:
+    """A bind mount or a volume from an older image would silently lose the sticky protection."""
+    Path(".").chmod(mode)
+    if not owner_is_root:
+        monkeypatch.setattr(server_module, "_ROOT_UID", os.getuid() + 1)
+
+    with pytest.raises(StartError, match=text):
+        serve(shared)

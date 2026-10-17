@@ -20,7 +20,8 @@ def main() -> None:
     ------
     SystemExit
         With status 2 and the reason in the log when a setting is wrong, the engine is too old,
-        `no-new-privileges` is required and breaks, or Docker cannot be reached.
+        `no-new-privileges` is required and breaks, an ingestion root fails its probe, the socket
+        directory is not as the image prepares it, or Docker cannot be reached.
     """
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -29,10 +30,10 @@ def main() -> None:
         settings = load_settings(os.environ)
         launcher = Launcher(settings, DockerEngine(settings.docker_socket))
         launcher.start()
-    except (SettingsError, StartError, EngineError) as exc:
+        serve(launcher)
+    except (SettingsError, StartError, EngineError, OSError) as exc:
         logger.error("%s", exc)
         raise SystemExit(2) from None
-    serve(launcher)
 
 
 if __name__ == "__main__":

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import http.server
 import json
 import socketserver
 import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import ClassVar
@@ -148,7 +150,7 @@ def test_attach_to_an_unreachable_socket_names_the_mount(tmp_path: Path) -> None
         DockerEngine(tmp_path / "missing.sock").attach("c1", stdin=False)
 
 
-def _raw(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reply: bytes) -> Path:
+def _raw(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reply: bytes, delay: float = 0.0) -> Path:
     """Serve one fixed reply to every connection on a short relative path.
 
     Parameters
@@ -159,6 +161,8 @@ def _raw(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reply: bytes) -> Path:
         Changes it.
     reply
         The bytes to send before closing.
+    delay
+        Seconds to wait before sending them.
 
     Returns
     -------
@@ -173,7 +177,9 @@ def _raw(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reply: bytes) -> Path:
         def handle(self) -> None:
             """Read the request line, send the reply."""
             self.rfile.readline()
-            self.wfile.write(reply)
+            time.sleep(delay)
+            with contextlib.suppress(OSError):
+                self.wfile.write(reply)
 
     server = _Server("r.sock", Raw)
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -208,3 +214,25 @@ def test_a_connection_that_closes_inside_the_headers_is_not_attached(
 
     with pytest.raises(EngineError, match="did not attach"):
         DockerEngine(path).attach("c1", stdin=False)
+
+
+def test_a_read_timeout_says_the_engine_did_not_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A slow pull is not a missing socket: the next step differs."""
+    path = _raw(tmp_path, monkeypatch, b"HTTP/1.1 200 OK\r\n\r\n", delay=1.0)
+
+    with pytest.raises(EngineError, match=r"did not answer within 0\.2 s") as caught:
+        DockerEngine(path).request("GET", "/version", timeout=0.2)
+
+    assert "mount the Docker socket" not in str(caught.value)
+
+
+def test_an_attach_that_times_out_says_the_engine_did_not_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same message when the upgrade never comes."""
+    path = _raw(tmp_path, monkeypatch, b"HTTP/1.1 101 UPGRADED\r\n\r\n", delay=1.0)
+
+    with pytest.raises(EngineError, match=r"did not answer within 0\.2 s"):
+        DockerEngine(path, timeout=0.2).attach("c1", stdin=False)
