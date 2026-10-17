@@ -5,7 +5,10 @@ import logging
 import pytest
 from fastapi.testclient import TestClient
 from httpx import Response
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
+from lakana_core.models import AuditEvent, AuditEventType
 from tests.conftest import AUTH_HEADER
 
 
@@ -384,3 +387,180 @@ def test_a_bind_to_something_that_is_not_there_is_refused(
     response = client.put("/api/v1/environments/dev/secrets/s/use", headers=AUTH_HEADER, json=body)
 
     assert response.status_code == status
+
+
+def _nobody(client: TestClient) -> dict[str, str]:
+    """Create a service account that holds no grant and return its auth header.
+
+    Parameters
+    ----------
+    client
+        The administrator's client.
+
+    Returns
+    -------
+    dict of str to str
+        An Authorization header.
+    """
+    client.post(
+        "/api/v1/principals",
+        headers=AUTH_HEADER,
+        json={"name": "nobody", "type": "SERVICE_ACCOUNT"},
+    )
+    issued = client.post(
+        "/api/v1/principals/nobody/tokens", headers=AUTH_HEADER, json={"name": "nobody"}
+    )
+    return {"Authorization": f"Bearer {issued.json()['token']}"}
+
+
+def _events(client: TestClient, kind: AuditEventType) -> list[AuditEvent]:
+    """Read the audit events of one type.
+
+    Parameters
+    ----------
+    client
+        The test client, whose app holds the database.
+    kind
+        The event type.
+
+    Returns
+    -------
+    list of AuditEvent
+        The events, oldest first.
+    """
+    with Session(client.app.state.engine) as session:
+        return list(
+            session.execute(
+                select(AuditEvent)
+                .where(AuditEvent.event_type == kind)
+                .order_by(AuditEvent.occurred_at)
+            ).scalars()
+        )
+
+
+def test_a_caller_without_the_right_gets_403_before_the_target_is_looked_at(
+    client: TestClient, storage_root: str
+) -> None:
+    """A bad or a good target answers 403 alike, and the denial is audited."""
+    _create_dev_environment(client, storage_root)
+    client.post(
+        "/api/v1/environments/dev/secrets",
+        headers=AUTH_HEADER,
+        json={"name": "s", "values": {"k": "v"}},
+    )
+    client.post(
+        "/api/v1/package-indexes",
+        headers=AUTH_HEADER,
+        json={"name": "corp", "url": "https://corp.example.org/simple"},
+    )
+    nobody = _nobody(client)
+
+    statuses = [
+        client.put(
+            "/api/v1/environments/dev/secrets/s/use",
+            headers=nobody,
+            json={"kind": "package_index", "target": target},
+        ).status_code
+        for target in ("nope", "corp")
+    ]
+    created = client.post(
+        "/api/v1/environments/dev/secrets",
+        headers=nobody,
+        json={
+            "name": "t",
+            "values": {"k": "v"},
+            "use": {"kind": "package_index", "target": "nope"},
+        },
+    )
+
+    assert statuses == [403, 403]
+    assert created.status_code == 403
+    assert _events(client, AuditEventType.AUTHORIZATION_DENIED)
+    unbound = client.get("/api/v1/environments/dev/secrets", headers=AUTH_HEADER).json()
+    assert [(s["name"], s["use"]) for s in unbound] == [("s", None)]
+
+
+def test_a_successful_bind_is_audited(client: TestClient, storage_root: str) -> None:
+    """A bind writes a SECRET_BOUND event."""
+    _create_dev_environment(client, storage_root)
+    client.post(
+        "/api/v1/environments/dev/secrets",
+        headers=AUTH_HEADER,
+        json={"name": "s", "values": {"k": "v"}},
+    )
+    client.post(
+        "/api/v1/package-indexes",
+        headers=AUTH_HEADER,
+        json={"name": "corp", "url": "https://corp.example.org/simple"},
+    )
+
+    client.put(
+        "/api/v1/environments/dev/secrets/s/use",
+        headers=AUTH_HEADER,
+        json={"kind": "package_index", "target": "corp"},
+    )
+
+    assert len(_events(client, AuditEventType.SECRET_BOUND)) == 1
+
+
+def test_a_secret_is_created_with_its_use(client: TestClient, storage_root: str) -> None:
+    """POST with a use creates the secret bound, and every listing shows it."""
+    _create_dev_environment(client, storage_root)
+    client.post(
+        "/api/v1/package-indexes",
+        headers=AUTH_HEADER,
+        json={"name": "corp", "url": "https://corp.example.org/simple"},
+    )
+
+    created = client.post(
+        "/api/v1/environments/dev/secrets",
+        headers=AUTH_HEADER,
+        json={
+            "name": "pypi",
+            "values": {"password": "pw"},
+            "use": {"kind": "package_index", "target": "corp"},
+        },
+    )
+
+    assert created.status_code == 201, created.text
+    assert (created.json()["use"], created.json()["use_target"]) == ("package_index", "corp")
+    listed = client.get("/api/v1/environments/dev/secrets", headers=AUTH_HEADER).json()
+    assert [(s["use"], s["use_target"]) for s in listed] == [("package_index", "corp")]
+    assert len(_events(client, AuditEventType.SECRET_BOUND)) == 1
+
+
+@pytest.mark.parametrize(
+    ("use", "status"),
+    [
+        ({"kind": "package_index", "target": "nope"}, 404),
+        ({"kind": "environment", "target": "corp"}, 422),
+        ({"kind": "elsewhere"}, 422),
+        ({"kind": "repository"}, 422),
+    ],
+)
+def test_a_create_with_a_use_that_cannot_be_bound_creates_nothing(
+    client: TestClient, storage_root: str, use: dict[str, object], status: int
+) -> None:
+    """An unknown target is 404, a malformed use 422, and no secret is left behind.
+
+    Parameters
+    ----------
+    client
+        The administrator's client.
+    storage_root
+        The environment's storage root.
+    use
+        The use in the request body.
+    status
+        The expected status.
+    """
+    _create_dev_environment(client, storage_root)
+
+    response = client.post(
+        "/api/v1/environments/dev/secrets",
+        headers=AUTH_HEADER,
+        json={"name": "s", "values": {"k": "v"}, "use": use},
+    )
+
+    assert response.status_code == status
+    assert client.get("/api/v1/environments/dev/secrets", headers=AUTH_HEADER).json() == []

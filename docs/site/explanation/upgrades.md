@@ -133,13 +133,20 @@ repository that names it is refused until someone who manages secrets binds it, 
 gives the command. A secret that is both a webhook secret and an index credential stays unbound:
 bind it to its use, or give each its own secret.
 
-After you upgrade, an administrator lists the secrets of each environment and binds what shows
-no use:
+A secret stays unbound when several entries name it, because then its use is unknown, or when
+its environment uses it, because binding it to an index would stop it serving storage or
+webhooks. After you upgrade, an administrator lists the secrets of each environment and binds
+what shows no use: credentials of an index or a repository with `--index` or `--repository`;
+storage and webhook secrets with `--own-env`, so that nobody's naming can claim them. A secret
+bound to an index stops serving storage and webhooks, so bind a secret to an index only when
+it is that index's credential.
 
-<!-- not tested: needs an upgraded instance, and ENV, NAME and INDEX are placeholders -->
+<!-- not tested: needs an upgraded instance, and ENV, NAME, INDEX and REPO are placeholders -->
 ```bash
 lakana secret list --env ENV
 lakana secret bind NAME --env ENV --index INDEX
+lakana secret bind NAME --env ENV --repository REPO
+lakana secret bind NAME --env ENV --own-env
 ```
 
 A new URL for an index or a repository with a bound secret needs the right to manage secrets in

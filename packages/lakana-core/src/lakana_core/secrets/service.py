@@ -22,10 +22,10 @@ from sqlalchemy.orm import Session
 from lakana_core.audit.service import AuditService
 from lakana_core.auth import Action, AuthorizationService, PrincipalRef, Securable
 from lakana_core.errors import AlreadyExistsError, NotFoundError, ValidationError
-from lakana_core.models import AuditEventType, Environment, Secret
+from lakana_core.models import AuditEventType, Environment, Secret, SecretUseKind
 from lakana_core.secrets.crypto import SecretBinding, encrypt_secret_values
 from lakana_core.secrets.keys import KeyProvider
-from lakana_core.secrets.uses import SecretUse, lock_entry, record_binding, target_row
+from lakana_core.secrets.uses import SecretUse, lock_entry, record_binding, resolve_use, target_row
 
 
 class SecretService:
@@ -222,6 +222,42 @@ class SecretService:
         record_binding(self._session, p, secret, scope, use)
         self._session.commit()
         return secret
+
+    def use_from_names(
+        self, p: PrincipalRef, environment: str, kind: SecretUseKind, target: str | None
+    ) -> SecretUse:
+        """Turn a use as a caller names it into a `SecretUse`, after checking the right.
+
+        The right is checked first, so a caller who may not manage secrets learns nothing
+        about which indexes or repositories exist.
+
+        Parameters
+        ----------
+        p
+            The acting principal.
+        environment
+            The environment the secret is scoped to.
+        kind
+            The kind of use.
+        target
+            The index's or repository's name; `None` for the environment.
+
+        Returns
+        -------
+        SecretUse
+            The use, with the target's id.
+
+        Raises
+        ------
+        PermissionDenied
+            If `p` may not manage secrets in `environment`.
+        NotFoundError
+            If no index or repository has that name.
+        ValidationError
+            If the environment use is given a name, or an index or repository use none.
+        """
+        self._authz.authorize(p, Action.MANAGE_SECRET, Securable.environment_scope(environment))
+        return resolve_use(self._session, kind, target)
 
     def use_target_name(self, secret: Secret) -> str | None:
         """Name the index or repository a secret is bound to, for a listing.

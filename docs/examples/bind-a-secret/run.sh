@@ -6,9 +6,10 @@ set -euo pipefail
 # local instance and sets EXAMPLE_DIR and WORK.
 cd "$WORK"
 
+lakana index add corp --url https://pkgs.example.org/simple
 # docs:start create
-lakana secret create pypi-corp --env dev --value username=ci --value password=not-a-real-one
-lakana index add corp --url https://pkgs.example.org/simple --credential-secret pypi-corp
+lakana secret create pypi-corp --env dev --index corp \
+  --value username=ci --value password=not-a-real-one
 # docs:end create
 out=$(lakana --output json secret list --env dev)
 python3 -c 'import json,sys; s={x["name"]:(x["use"],x["use_target"]) for x in json.loads(sys.argv[1])}; assert s["pypi-corp"]==("package_index","corp"), s' "$out"

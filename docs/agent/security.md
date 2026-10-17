@@ -1869,8 +1869,8 @@ carries any of the three, and a grant below instance scope never satisfied these
   data access too (the rows or values a filter or mask hid). `DEPLOY` and `RUN` on an
   environment with a bound run principal, and `MANAGE_REPOSITORY` with both, reach the same
   data access. `MANAGE_PACKAGE_INDEX` can be granted as a single action; its holder cannot
-  send a secret to a host of their choice, because a secret is bound to one use and only
-  `MANAGE_SECRET` binds it (see "Package index credentials (M5c2c)"). The rule is not retroactive: what a
+  redirect a secret to a host of their choice, because a secret is bound to one use and only
+  `MANAGE_SECRET` binds it (see "Package index credentials (M5c2c)"). Under `LocalProcessRunner` a holder who also has `DEPLOY` and `RUN` still reads what the worker reads (one trust domain): binding stops an index manager from redirecting a secret, not code that runs in the worker, and becomes a boundary against such code only with the container runner. The rule is not retroactive: what a
   holder of one of the three created earlier (grants, memberships, tokens) stays.
 
 **Mint hygiene and TTL cap.** `TaskTokenService.mint` rejects a malformed asset-scope
@@ -2170,7 +2170,7 @@ From the threat model:
   repository, and cannot change the URL of an entry that has a bound secret without
   `MANAGE_SECRET` in the secret's environment. They never bind a secret. A refusal is recorded
   as `AUTHORIZATION_DENIED` with its reason. The residual is below, under "Package index
-  credentials (M5c2c)". See "The three actions that need the `ADMIN` role".
+  credentials (M5c2c)". Under `LocalProcessRunner` a holder who also has `DEPLOY` and `RUN` still reads what the worker reads (one trust domain): binding stops an index manager from redirecting a secret, not code that runs in the worker, and becomes a boundary against such code only with the container runner. See "The three actions that need the `ADMIN` role".
 - **Infrastructure compromise.**
 - **An external Iceberg REST client holding its own storage credentials.** Lakana's Iceberg
   REST endpoints vend no storage credentials of their own —
@@ -2478,7 +2478,7 @@ that uses it. User reference: `docs/site/reference/package-indexes.md`; how-to:
   secret keeps serving its environment's storage and webhooks; a webhook in a `lakana.yaml`
   that was never deployed is invisible to the migration (and never runs). `MANAGE_REPOSITORY`
   follows the same rules for a repository's `token`. Without `DEPLOY` a holder of
-  `MANAGE_PACKAGE_INDEX` can only stop projects (`index update --url`, `index remove`).
+  `MANAGE_PACKAGE_INDEX` can only stop projects (`index update --url`, `index remove`). Trust domain: under `LocalProcessRunner` a holder who also has `DEPLOY` and `RUN` still reads what the worker reads (one trust domain): binding stops an index manager from redirecting a secret, not code that runs in the worker, and becomes a boundary against such code only with the container runner.
 
 - **The invariant, which the tests pin:** a credential is offered only to the host (and port) of
   the registered index's URL, whatever the project's files say; it is never in the project's

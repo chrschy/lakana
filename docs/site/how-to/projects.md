@@ -830,7 +830,9 @@ lakana repo add analytics --kind https --url https://github.com/acme/analytics.g
 Create the secrets first. An administrator who registers the repository binds each secret of that
 name to it, in every environment they manage. Someone who may only register repositories
 (`MANAGE_REPOSITORY`) can name a secret only if it is already bound to that repository; see
-[Manage secrets](manage-secrets.md#bind-a-secret-to-its-use).
+[Manage secrets](manage-secrets.md#bind-a-secret-to-its-use). A new URL for a repository with a
+bound secret needs `MANAGE_SECRET` in that secret's environment too, because the URL is where the
+secret goes.
 
 - `https`: the secret's `token` is sent as the password with username `oauth2`, or with
   `--credential-username` (GitLab deploy tokens have their own).

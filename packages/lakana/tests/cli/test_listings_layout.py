@@ -377,7 +377,7 @@ _LISTINGS = {
                 "created_at": _TIME,
             }
         ],
-        whole=(("created_at", _TIME),),
+        whole=(("use", "package_index"), ("created_at", _TIME)),
         headers=("name", "use", "created_at"),
         key="warehouse-readonly-credentials",
         wraps_at=(80,),

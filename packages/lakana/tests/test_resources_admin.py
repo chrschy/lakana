@@ -6,6 +6,7 @@ column masks, secrets, and audit events.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -837,3 +838,33 @@ def test_client_exposes_the_admin_resources() -> None:
     assert isinstance(client.column_masks, ColumnMasks)
     assert isinstance(client.secrets, Secrets)
     assert isinstance(client.audit_events, AuditEvents)
+
+
+def test_secrets_create_with_a_use_sends_it_and_reads_it_back() -> None:
+    """`secrets.create(kind=..., target=...)` adds the use to the body; none leaves it out."""
+    bodies: list[bytes] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(request.read())
+        return httpx.Response(
+            201,
+            json={
+                "id": "s1",
+                "name": "pypi",
+                "environment": "dev",
+                "created_by": "admin1",
+                "created_at": "2024-01-01T00:00:00+00:00",
+                "format_version": 2,
+                "key_id": "env:0123456789abcdef",
+                "use": "package_index",
+                "use_target": "corp",
+            },
+        )
+
+    secrets = Secrets(_transport(handler))
+    bound = secrets.create("dev", "pypi", {"password": "pw"}, kind="package_index", target="corp")
+    secrets.create("dev", "pypi", {"password": "pw"})
+
+    assert json.loads(bodies[0])["use"] == {"kind": "package_index", "target": "corp"}
+    assert "use" not in json.loads(bodies[1])
+    assert (bound.use, bound.use_target) == ("package_index", "corp")

@@ -9,13 +9,11 @@ to.
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends
-from sqlalchemy.orm import Session
 
 from lakana_core.auth import PrincipalRef
 from lakana_core.errors import NotFoundError
 from lakana_core.models import Secret, SecretUseKind
 from lakana_core.secrets.service import SecretService
-from lakana_core.secrets.uses import resolve_use
 from lakana_server.api.platform.schemas import (
     SecretBind,
     SecretCreate,
@@ -23,7 +21,7 @@ from lakana_server.api.platform.schemas import (
     SecretRotate,
 )
 from lakana_server.api.routing import AuthenticateFirstRoute
-from lakana_server.deps import get_principal, get_secret_service, get_session
+from lakana_server.deps import get_principal, get_secret_service
 
 router = APIRouter(
     route_class=AuthenticateFirstRoute,
@@ -121,14 +119,23 @@ def create_secret(
         Mapped to 404 by `install_exception_handlers`.
     lakana_core.errors.AlreadyExistsError
         Mapped to 409.
+    lakana_core.errors.ValidationError
+        Mapped to 422: a use that names no target, or a name for the environment use.
     lakana_core.errors.LakanaError
         Unmapped, so defaults to 500 — raised if no secrets master key is
         configured. That is a deployment-misconfiguration condition, not
         invalid caller input, so it deliberately is not a `ValidationError`
         (422); see `lakana_core.secrets.keys.EnvKeyProvider`.
     """
+    use = (
+        service.use_from_names(
+            principal, environment_name, SecretUseKind(body.use.kind), body.use.target
+        )
+        if body.use is not None
+        else None
+    )
     created = service.create(
-        principal, environment=environment_name, name=body.name, values=body.values
+        principal, environment=environment_name, name=body.name, values=body.values, use=use
     )
     return _to_out(created, environment_name, service.use_target_name(created))
 
@@ -216,7 +223,6 @@ def bind_secret(
     body: SecretBind,
     principal: PrincipalRef = Depends(get_principal),
     service: SecretService = Depends(get_secret_service),
-    session: Session = Depends(get_session),
 ) -> SecretOut:
     """Bind a secret to a package index, a repository or its environment.
 
@@ -232,8 +238,6 @@ def bind_secret(
         The authenticated caller.
     service
         The secret service for this request.
-    session
-        The request's database session, to resolve the target's name.
 
     Returns
     -------
@@ -250,7 +254,7 @@ def bind_secret(
         Mapped to 403: the caller may not manage secrets in this environment.
     """
     existing = _find_by_name(service.list_for_environment(principal, environment_name), secret_name)
-    use = resolve_use(session, SecretUseKind(body.kind), body.target)
+    use = service.use_from_names(principal, environment_name, SecretUseKind(body.kind), body.target)
     bound = service.bind(principal, existing.id, use)
     return _to_out(bound, environment_name, service.use_target_name(bound))
 

@@ -503,6 +503,91 @@ def test_secret_bind_sends_exactly_one_use(tmp_path: Path) -> None:
         "--own-env",
     )
     assert both.exit_code == 2
-    assert "Pass exactly one of --index, --repository or --own-env" in both.output
+    assert "Pass only one of --index, --repository or --own-env" in both.output
     neither = invoke(make_state(tmp_path, api), "secret", "bind", "pypi", "--env", "dev")
     assert neither.exit_code == 2
+    assert "Pass exactly one of --index, --repository or --own-env" in neither.output
+
+
+def test_secret_create_with_a_use_sends_it(tmp_path: Path) -> None:
+    """`--index`, `--repository` and `--own-env` put the use into the create request."""
+    secret = {
+        "id": "s1",
+        "name": "pypi",
+        "environment": "dev",
+        "created_by": "a1",
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "format_version": 2,
+        "key_id": "env",
+        "use": "package_index",
+        "use_target": "corp",
+    }
+    api = FakeApi()
+    api.on("POST", "/api/v1/environments/dev/secrets", status=201, json=secret)
+
+    result = invoke(
+        make_state(tmp_path, api),
+        "secret",
+        "create",
+        "pypi",
+        "--env",
+        "dev",
+        "--value",
+        "password=pw",
+        "--index",
+        "corp",
+    )
+
+    assert result.exit_code == 0, result.stderr
+    assert json.loads(api.requests[-1].content)["use"] == {
+        "kind": "package_index",
+        "target": "corp",
+    }
+    own = invoke(
+        make_state(tmp_path, api),
+        "secret",
+        "create",
+        "pypi",
+        "--env",
+        "dev",
+        "--value",
+        "password=pw",
+        "--own-env",
+    )
+    assert own.exit_code == 0, own.stderr
+    assert json.loads(api.requests[-1].content)["use"] == {"kind": "environment", "target": None}
+    plain = invoke(
+        make_state(tmp_path, api),
+        "secret",
+        "create",
+        "pypi",
+        "--env",
+        "dev",
+        "--value",
+        "password=pw",
+    )
+    assert "use" not in json.loads(api.requests[-1].content)
+    assert plain.exit_code == 0, plain.stderr
+
+
+def test_secret_create_refuses_two_uses(tmp_path: Path) -> None:
+    """At most one use option is accepted, and nothing is sent."""
+    api = FakeApi()
+    result = invoke(
+        make_state(tmp_path, api),
+        "secret",
+        "create",
+        "pypi",
+        "--env",
+        "dev",
+        "--value",
+        "password=pw",
+        "--index",
+        "corp",
+        "--repository",
+        "repo",
+    )
+
+    assert result.exit_code == 2
+    assert "Pass only one of --index, --repository or --own-env" in result.output
+    assert api.requests == []

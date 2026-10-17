@@ -66,7 +66,14 @@ class Secrets:
     def __init__(self, transport: HttpTransport) -> None:
         self._transport = transport
 
-    def create(self, environment: str, name: str, values: dict[str, str]) -> Secret:
+    def create(
+        self,
+        environment: str,
+        name: str,
+        values: dict[str, str],
+        kind: str | None = None,
+        target: str | None = None,
+    ) -> Secret:
         """Create a secret.
 
         Parameters
@@ -79,6 +86,11 @@ class Secrets:
             The plaintext key-value bag to encrypt and store. Sent only in
             the request body — never echoed back in any response, and never
             held by the SDK afterward.
+        kind
+            What the secret is for, so that it is bound as it is created: ``package_index``,
+            ``repository`` or ``environment``. `None` leaves it unbound.
+        target
+            The index's or repository's name; `None` for the environment.
 
         Returns
         -------
@@ -88,7 +100,7 @@ class Secrets:
         Raises
         ------
         lakana.errors.NotFound
-            If the environment does not exist.
+            If the environment, or the named index or repository, does not exist.
         lakana.errors.Conflict
             If a secret of this name already exists in this environment.
         """
@@ -96,7 +108,11 @@ class Secrets:
         response = self._transport.request(
             ROUTES["secrets.create"],
             path_params={"environment_name": environment},
-            json={"name": request.name, "values": request.values},
+            json={
+                "name": request.name,
+                "values": request.values,
+                **({"use": {"kind": kind, "target": target}} if kind is not None else {}),
+            },
         )
         return _secret_from_json(response.json())
 
