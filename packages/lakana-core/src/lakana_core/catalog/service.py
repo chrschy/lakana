@@ -64,6 +64,7 @@ from lakana_core.catalog.append import (
 from lakana_core.catalog.commit import commit_metadata_pointer
 from lakana_core.catalog.datafiles import list_data_files
 from lakana_core.catalog.external_location import check_claim_free, parse_external_location
+from lakana_core.catalog.field_ids import check_added_files_have_field_ids
 from lakana_core.catalog.identity import artifact_refusal, resolve_table_id
 from lakana_core.catalog.json_schema import ColumnSpec, from_iceberg_schema
 from lakana_core.catalog.maintenance import (
@@ -2824,6 +2825,7 @@ class CatalogService:
         expected_metadata_location: str | None = None,
         internal_rollback: bool = False,
         after_swap: Callable[[], None] | None = None,
+        own_data_files: bool = False,
     ) -> LoadedTable:
         """Apply Iceberg updates to a table and publish them atomically.
 
@@ -2895,6 +2897,10 @@ class CatalogService:
             and before the guard's last check, so the rollback's own statements run in the
             swap's transaction, after the metadata file was uploaded and in the lock order of a
             write (`tables`, then `task_runs`). No request, route or token reaches it.
+        own_data_files
+            Only `CatalogService.append` and `write_batches` pass `True`: this service wrote
+            the commit's data files through pyiceberg, which always writes field ids, so their
+            footers are not read again. No request, route or token reaches this parameter.
 
         Returns
         -------
@@ -2913,7 +2919,10 @@ class CatalogService:
             table property that `ResolvedStorage.validate_table_properties`
             refuses; if `updates` includes an `AddSnapshotUpdate` whose
             `snapshot.manifest_list` does not lie under the table's own
-            location; if the metadata location computed from the table's
+            location; if a snapshot the commit adds names a data file that is not Parquet,
+            cannot be read, or has no Iceberg field ids
+            (`field_ids.check_added_files_have_field_ids`), unless `own_data_files`; if the
+            metadata location computed from the table's
             (unchanged) location falls outside the environment's storage
             root; if applying `updates` produces metadata pyiceberg
             rejects as invalid; if the commit would remove the table's current snapshot
@@ -3043,6 +3052,15 @@ class CatalogService:
                 raise ValidationError(
                     "A committed snapshot's manifest list must lie under the table's own location."
                 )
+        if not maintenance and not internal_rollback and not own_data_files:
+            # A file without field ids would read as NULL in every column: refused here, at
+            # the one commit path other clients reach, after the manifest list is known to lie
+            # under the table's location.
+            for table_update in updates:
+                if isinstance(table_update, AddSnapshotUpdate):
+                    check_added_files_have_field_ids(
+                        table_update.snapshot, current, resolved.file_io, ref.dotted()
+                    )
         if any(isinstance(u, RemovePropertiesUpdate) for u in updates) and not (
             self._may_see_state(p, ref)
         ):
@@ -3931,7 +3949,13 @@ class CatalogService:
                 target_snapshot_id=snapshot_id,
                 query_run_id=None,
             )
-            self.commit_table(p, ref, requirements=[*pins, *requirements], updates=updates)
+            self.commit_table(
+                p,
+                ref,
+                requirements=[*pins, *requirements],
+                updates=updates,
+                own_data_files=True,
+            )
         except Exception as exc:
             landed = self._settle_failed_write(
                 exc,
@@ -4337,6 +4361,7 @@ class CatalogService:
                     *requirements,
                 ],
                 updates=[*schema_updates, *snapshot_updates],
+                own_data_files=True,
             )
         except Exception as exc:
             landed = self._settle_failed_write(

@@ -7,14 +7,29 @@ widened one reads in its new type and a column a file lacks reads as NULL. The m
 top-level columns. DuckDB matches the fields inside a struct, list or map by name, so a read
 whose nested fields were renamed, moved or replaced since some of its files were written is
 refused instead (`refuse_changed_nested_fields`).
+
+A commit through the catalog that adds a data file without field ids is refused
+(`check_added_files_have_field_ids`): such a file would read as NULL in every column.
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 
+import pyarrow.parquet as pq
+from pyiceberg.io import FileIO
+from pyiceberg.manifest import (
+    DataFile,
+    DataFileContent,
+    FileFormat,
+    ManifestContent,
+    ManifestEntryStatus,
+)
 from pyiceberg.schema import Schema, index_name_by_id
 from pyiceberg.table.metadata import TableMetadata
+from pyiceberg.table.snapshots import Snapshot
 from pyiceberg.types import (
     BinaryType,
     BooleanType,
@@ -37,8 +52,11 @@ from pyiceberg.types import (
     UUIDType,
 )
 
-from lakana_core.errors import UnsupportedTableError
+from lakana_core.errors import UnsupportedTableError, ValidationError
 from lakana_core.query_rewrite import ReadField
+from lakana_core.storage.resolver import is_within_location
+
+logger = logging.getLogger(__name__)
 
 _PRIMITIVES: dict[type[IcebergType], str] = {
     BooleanType: "BOOLEAN",
@@ -244,3 +262,177 @@ def refuse_changed_nested_fields(
                     "nested column by name. Ask the owner of the table to write all of its rows "
                     "again (an overwrite), so that every data file has the new layout."
                 )
+
+
+_FIELD_ID = b"PARQUET:field_id"
+"""The Arrow field metadata key under which Parquet carries an Iceberg field id."""
+
+_FOOTER_READERS = 8
+"""How many data-file footers one commit reads at the same time."""
+
+_NO_FIELD_IDS = (
+    "The commit adds `{file}` to `{table}`, which has no Iceberg field ids. Lakana reads Iceberg "
+    "data by field id, as the Iceberg specification requires. Write the file with a client that "
+    "sets field ids."
+)
+_UNREADABLE_FILE = (
+    "The commit adds `{file}` to `{table}`, which could not be read as a Parquet file, so "
+    "nothing was applied. Write the data file before the commit, as Parquet with Iceberg field "
+    "ids."
+)
+_NOT_PARQUET = (
+    "The commit adds `{file}` to `{table}` as {format}, so nothing was applied. Lakana reads "
+    "Parquet data files only; write the file as Parquet."
+)
+_UNREADABLE_MANIFEST = (
+    "A manifest of the commit's snapshot for `{table}` could not be read, so nothing was "
+    "applied. Write the manifests and the manifest list before the commit."
+)
+
+
+def has_field_ids(file_io: FileIO, path: str) -> bool:
+    """Tell whether every top-level column of a Parquet file carries an Iceberg field id.
+
+    Parameters
+    ----------
+    file_io
+        Reads the table's storage.
+    path
+        The data file's URI.
+
+    Returns
+    -------
+    bool
+        Whether each column of the footer's schema has ``PARQUET:field_id`` metadata. Only
+        the footer is read.
+    """
+    with file_io.new_input(path).open() as stream:
+        schema = pq.read_schema(stream)
+    return all(field.metadata is not None and _FIELD_ID in field.metadata for field in schema)
+
+
+def _footer(file_io: FileIO, path: str) -> bool | None:
+    """Read one footer for the commit check, without letting its error text out.
+
+    Parameters
+    ----------
+    file_io
+        Reads the table's storage.
+    path
+        The data file's URI.
+
+    Returns
+    -------
+    bool or None
+        `has_field_ids`'s answer, or `None` when the footer could not be read; the log then
+        has the exception's class, never its text, which can name storage details.
+    """
+    try:
+        return has_field_ids(file_io, path)
+    except Exception as exc:  # any reader failure refuses the commit with a fixed text
+        logger.warning("A data file of a commit could not be read (%s).", type(exc).__name__)
+        return None
+
+
+def _added_data_files(
+    snapshot: Snapshot, metadata: TableMetadata, file_io: FileIO, table: str
+) -> list[DataFile]:
+    """List the data files a snapshot adds, from the manifests its parent does not have.
+
+    Parameters
+    ----------
+    snapshot
+        The snapshot a commit adds; its manifest list lies under the table's location.
+    metadata
+        The table's metadata before the commit.
+    file_io
+        Reads the table's storage.
+    table
+        The table's dotted name, for the message.
+
+    Returns
+    -------
+    list of DataFile
+        The live entries of status `ADDED` and content data, in manifest order. A manifest
+        outside the table's location is not opened: a read refuses such a table anyway.
+
+    Raises
+    ------
+    ValidationError
+        If the manifest list or a manifest cannot be read.
+    """
+    parent = (
+        None
+        if snapshot.parent_snapshot_id is None
+        else metadata.snapshot_by_id(snapshot.parent_snapshot_id)
+    )
+    try:
+        known = set() if parent is None else {m.manifest_path for m in parent.manifests(file_io)}
+        added = []
+        for manifest in snapshot.manifests(file_io):
+            if (
+                manifest.manifest_path in known
+                or manifest.content != ManifestContent.DATA
+                or not is_within_location(metadata.location, manifest.manifest_path)
+            ):
+                continue
+            for entry in manifest.fetch_manifest_entry(file_io, discard_deleted=True):
+                if (
+                    entry.status == ManifestEntryStatus.ADDED
+                    and entry.data_file.content == DataFileContent.DATA
+                ):
+                    added.append(entry.data_file)
+    except Exception as exc:  # any reader failure refuses the commit with a fixed text
+        raise ValidationError(_UNREADABLE_MANIFEST.format(table=table)) from exc
+    return added
+
+
+def check_added_files_have_field_ids(
+    snapshot: Snapshot, metadata: TableMetadata, file_io: FileIO, table: str
+) -> None:
+    """Refuse a snapshot that adds a data file without Iceberg field ids.
+
+    Only files the commit adds are read, each footer once, at most `_FOOTER_READERS` at a
+    time, and only under the table's location: a file elsewhere, or one whose path holds a
+    glob character, is not opened, and a read refuses the table for it. Files committed before
+    this check existed are not looked at. An entry a client marks `EXISTING` in a new manifest
+    is not looked at either; such a file reads as NULL, which hides nothing a policy protects.
+
+    Parameters
+    ----------
+    snapshot
+        The snapshot the commit adds.
+    metadata
+        The table's metadata before the commit.
+    file_io
+        Reads the table's storage.
+    table
+        The table's dotted name, for the message.
+
+    Raises
+    ------
+    ValidationError
+        For the first added file, in manifest order, that is not Parquet, cannot be read, or
+        lacks field ids; or if a manifest cannot be read. The message names that file and the
+        table, nothing else.
+    """
+    files = _added_data_files(snapshot, metadata, file_io, table)
+    for data_file in files:
+        if data_file.file_format != FileFormat.PARQUET:
+            raise ValidationError(
+                _NOT_PARQUET.format(
+                    file=data_file.file_path, table=table, format=data_file.file_format.value
+                )
+            )
+    paths = [f.file_path for f in files if is_within_location(metadata.location, f.file_path)]
+    pool = ThreadPoolExecutor(max_workers=_FOOTER_READERS)
+    try:
+        for path, outcome in zip(
+            paths, pool.map(lambda p: _footer(file_io, p), paths), strict=True
+        ):
+            if outcome is None:
+                raise ValidationError(_UNREADABLE_FILE.format(file=path, table=table))
+            if not outcome:
+                raise ValidationError(_NO_FIELD_IDS.format(file=path, table=table))
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)

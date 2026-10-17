@@ -2092,6 +2092,17 @@ prepared parameter`). A placeholder once bound to the rewriter's own URL list an
 URLs as data. `executor.execute_query`/`stream_query`/`describe_query` refuse a positional
 sequence outright (`TypeError`): only a name-to-value mapping is accepted.
 
+**A foreign commit cannot add a data file without field ids.** `commit_table` calls
+`field_ids.check_added_files_have_field_ids` for every `AddSnapshotUpdate`, after the manifest
+list is known to lie under the table's location and before anything is applied: it opens only
+manifests the parent snapshot does not have and that lie under the table's location, takes
+their `ADDED` data entries, and reads each footer once, eight at a time, only for a file under
+the table's location (a file elsewhere is never opened, and a read refuses the table for it).
+The first offending file in manifest order is named with the table; a reader's error text never
+reaches the caller (the log has the exception's class). `append` and `write_batches` pass
+`own_data_files=True`: pyiceberg wrote those files with field ids. Files committed before the
+check existed are not checked; a file without field ids reads as NULL in every column.
+
 **A submitted query holds no statement but a read, at any depth.** `check_blacklist` requires
 the statement as a whole to be an `exp.Query`, and `_reject_statements_inside` then walks the
 whole tree: a node of a statement class (`exp.DML`, which covers `INSERT`, `UPDATE`, `DELETE`,

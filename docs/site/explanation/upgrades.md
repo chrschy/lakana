@@ -137,11 +137,14 @@ a column name: after a rename of a filtered or masked column, or onto one, revie
 policies. A filter on a float column widened to double still needs a range
 ([Show some people only some rows](../how-to/filter-rows.md#columns-of-a-table-made-outside-lakana)).
 
-From this release on, Lakana refuses a commit of a data file that has no field ids, which is
-what a client that writes Parquet without them produces, so a table never gains a file that
-reads as NULL. Files that other Iceberg clients committed before this release are not checked.
-If such a file lacks field ids, every column of it reads as NULL, with no error. Ask the owner
-of the table to write its rows again with a client that writes field ids, such as pyiceberg.
+From this release on, a commit through the Iceberg REST catalog that adds a data file without
+field ids, for example one registered with pyiceberg's `add_files`, is refused and nothing is
+applied ([the refusal](../reference/checks.md#when-a-commit-through-the-iceberg-rest-catalog-is-refused)).
+Write the files with a client that sets field ids: pyiceberg's `append` and `overwrite` do, and
+Lakana's own writes always do. Files that other Iceberg clients committed before this release are
+not checked. If such a file lacks field ids, every column of it reads as NULL, with no error. Ask
+the owner of the table to write its rows again, with Lakana (`replace`) or with a client that
+writes field ids.
 
 
 ## Notes for 0.12.0
