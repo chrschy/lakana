@@ -1,0 +1,367 @@
+"""The launcher's settings, read once from its environment (`LAKANA_LAUNCHER__*`).
+
+Every error names the variable and says what to write. None echoes a value: the ingestion roots
+are host paths an operator may not want in a log.
+
+Only what a person needs to decide is a variable: the stack name, the allowed images, the allowed
+ingestion roots, the Unix socket, whether ``no-new-privileges`` is required, and the ceilings of a
+task's memory, CPUs and processes. Everything else (users, service names, the Docker socket's
+path, the state directory) is a module constant: a variable that nobody should change is a way to
+break the isolation.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from pathlib import Path
+
+PREFIX = "LAKANA_LAUNCHER__"
+SUPPORTED_PYTHONS = ("3.11", "3.12", "3.13", "3.14")
+"""The Python versions Lakana publishes a task image for."""
+
+DOCKER_SOCKET = Path("/var/run/docker.sock")
+"""Where the Compose bundle mounts the Docker Engine's socket into the launcher."""
+STATE_DIR = Path("/var/lib/lakana-launcher")
+"""The launcher's own volume: one completion marker per built environment."""
+EGRESS_KEY = Path("/run/lakana-egress/egress.key")
+"""The key that signs the egress proxy's tokens."""
+TASK_USER = "10001:10001"
+"""``uid:gid`` of every task container: the worker's own, so the harness owns its work directory."""
+BUILD_USER = "10002:10002"
+"""``uid:gid`` of every build container: another one, so a task cannot change its environment."""
+SERVER_SERVICE = "server"
+"""The Compose service a task network gets attached."""
+SERVER_ALIAS = "server"
+"""The name a task reaches that service by."""
+EGRESS_SERVICE = "egress"
+"""The Compose service of the build proxy."""
+MAX_SECONDS = 604800
+"""Ceiling of a request's timeout: one week."""
+KEEP_ENVIRONMENTS = 10
+"""How many built environments are kept, most recently used first."""
+FORBIDDEN_ROOTS = (
+    Path("/"),
+    Path("/run"),
+    Path("/var/run"),
+    Path("/var/lib/docker"),
+    Path("/proc"),
+    Path("/sys"),
+    Path("/dev"),
+    Path("/etc"),
+)
+"""Host directories no ingestion root may be, hold or sit under.
+
+A read-only bind of a directory that holds a socket still lets a task connect to it, and
+``/proc``, ``/sys``, ``/dev`` and ``/etc`` expose the host itself.
+"""
+
+_STACK = re.compile(r"\A[a-z0-9][a-z0-9_-]{0,62}\Z")
+_ROOT_NAME = re.compile(r"\A[a-z0-9][a-z0-9_-]{0,62}\Z")
+_NUMBER = re.compile(r"[0-9]{1,10}")
+_IMAGE = re.compile(
+    r"\A[a-z0-9][a-z0-9._/:-]{0,200}(?::[A-Za-z0-9._-]{1,128})?(?:@sha256:[0-9a-f]{64})?\Z"
+)
+
+
+class SettingsError(Exception):
+    """A setting is missing or malformed; the text names it and says what to write."""
+
+
+@dataclass(frozen=True)
+class LauncherSettings:
+    """What the launcher is allowed to do, as the operator set it.
+
+    Parameters
+    ----------
+    stack
+        The Compose project name; it prefixes every name the launcher creates and finds the
+        `server` and `egress` services (`com.docker.compose.project`).
+    images
+        Python version to task image: the allow-list of images.
+    work_volume
+        The named volume of the worker's attempt directories.
+    socket
+        Where the launcher listens; the token file sits next to it.
+    ingestion_roots
+        Name to absolute host directory, mounted read-only at ``/ingest/<name>`` when a run
+        names it.
+    no_new_privileges
+        ``auto`` (on where Docker allows it, detected at start) or ``on`` (refuse to start
+        without it).
+    max_memory_mb
+        Ceiling of a request's memory.
+    max_cpus
+        Ceiling of a request's CPUs.
+    max_pids
+        Ceiling of a request's process count.
+    work_volume
+        The named volume of the worker's attempt directories; ``<stack>-task-work`` unless a
+        test says otherwise. Not an environment variable.
+    docker_socket, state_dir, egress_key, task_user, build_user, server_service
+        The module constants of the same name; fields so that tests can point them elsewhere.
+    server_alias, egress_service, max_seconds, keep_environments
+        The module constants of the same name; fields for the same reason.
+    """
+
+    stack: str
+    images: Mapping[str, str]
+    work_volume: str = ""
+    socket: Path = Path("/run/lakana-launcher/launcher.sock")
+    ingestion_roots: Mapping[str, str] = field(default_factory=dict)
+    no_new_privileges: str = "auto"
+    max_memory_mb: int = 65536
+    max_cpus: float = 64.0
+    max_pids: int = 32768
+    docker_socket: Path = DOCKER_SOCKET
+    state_dir: Path = STATE_DIR
+    egress_key: Path = EGRESS_KEY
+    task_user: str = TASK_USER
+    build_user: str = BUILD_USER
+    server_service: str = SERVER_SERVICE
+    server_alias: str = SERVER_ALIAS
+    egress_service: str = EGRESS_SERVICE
+    max_seconds: int = MAX_SECONDS
+    keep_environments: int = KEEP_ENVIRONMENTS
+
+    def __post_init__(self) -> None:
+        """Name the work volume after the stack when none is given."""
+        if not self.work_volume:
+            object.__setattr__(self, "work_volume", f"{self.stack}-task-work")
+
+
+def _get(environ: Mapping[str, str], name: str) -> str | None:
+    """Read one setting, blank meaning unset.
+
+    Parameters
+    ----------
+    environ
+        The environment.
+    name
+        The name after the prefix.
+
+    Returns
+    -------
+    str or None
+        The stripped value.
+    """
+    value = environ.get(PREFIX + name, "").strip()
+    return value or None
+
+
+def _json_object(environ: Mapping[str, str], name: str, message: str) -> dict[str, object] | None:
+    """Read a setting that holds a JSON object.
+
+    Parameters
+    ----------
+    environ
+        The environment.
+    name
+        The name after the prefix.
+    message
+        The error for anything that is not an object.
+
+    Returns
+    -------
+    dict or None
+        The object; `None` when unset.
+
+    Raises
+    ------
+    SettingsError
+        With `message`.
+    """
+    text = _get(environ, name)
+    if text is None:
+        return None
+    try:
+        value = json.loads(text)
+    except ValueError:
+        raise SettingsError(message) from None
+    if not isinstance(value, dict):
+        raise SettingsError(message)
+    return value
+
+
+def _number(environ: Mapping[str, str], name: str, default: int, low: int, high: int) -> int:
+    """Read a whole-number setting within bounds.
+
+    Parameters
+    ----------
+    environ
+        The environment.
+    name
+        The name after the prefix.
+    default
+        The value when unset.
+    low
+        The least value.
+    high
+        The greatest value.
+
+    Returns
+    -------
+    int
+        The value.
+
+    Raises
+    ------
+    SettingsError
+        If it is not a whole number in range.
+    """
+    text = _get(environ, name)
+    if text is None:
+        return default
+    if _NUMBER.fullmatch(text) is None or not low <= int(text) <= high:
+        raise SettingsError(f"{PREFIX}{name} must be a whole number from {low} to {high}.")
+    return int(text)
+
+
+def _path(environ: Mapping[str, str], name: str, default: Path) -> Path:
+    """Read an absolute path setting.
+
+    Parameters
+    ----------
+    environ
+        The environment.
+    name
+        The name after the prefix.
+    default
+        The value when unset.
+
+    Returns
+    -------
+    Path
+        The path.
+
+    Raises
+    ------
+    SettingsError
+        If it is not absolute.
+    """
+    text = _get(environ, name)
+    if text is None:
+        return default
+    if not os.path.isabs(text) or os.path.normpath(text) != text:
+        raise SettingsError(f"{PREFIX}{name} must be an absolute path without '..'.")
+    return Path(text)
+
+
+def _is_under(path: Path, parent: Path) -> bool:
+    """Say whether a path is a directory inside another, or the same one.
+
+    Parameters
+    ----------
+    path
+        The candidate.
+    parent
+        The directory.
+
+    Returns
+    -------
+    bool
+        ``True`` when `path` is `parent` or below it.
+    """
+    return path == parent or parent in path.parents
+
+
+def _unsafe_root(path: Path, socket: Path) -> bool:
+    """Say whether a directory must never be an ingestion root.
+
+    Parameters
+    ----------
+    path
+        The root, absolute and normalised.
+    socket
+        The launcher's own socket.
+
+    Returns
+    -------
+    bool
+        ``True`` when `path` is, sits under or holds a directory of `FORBIDDEN_ROOTS`, the
+        directory of the Docker socket or the directory of the launcher's socket.
+    """
+    if path == Path("/"):
+        return True
+    sensitive = (*FORBIDDEN_ROOTS[1:], DOCKER_SOCKET.parent, socket.parent)
+    return any(_is_under(path, bad) or _is_under(bad, path) for bad in sensitive)
+
+
+def load_settings(environ: Mapping[str, str]) -> LauncherSettings:
+    """Read and check every `LAKANA_LAUNCHER__*` setting.
+
+    Parameters
+    ----------
+    environ
+        The process environment.
+
+    Returns
+    -------
+    LauncherSettings
+        The settings.
+
+    Raises
+    ------
+    SettingsError
+        For the first setting that is missing or malformed.
+    """
+    stack = _get(environ, "STACK")
+    if stack is None:
+        raise SettingsError(
+            f"{PREFIX}STACK is not set; the Compose bundle sets it to the project name "
+            "(${COMPOSE_PROJECT_NAME})."
+        )
+    if _STACK.match(stack) is None:
+        raise SettingsError(
+            f"{PREFIX}STACK must be the Compose project name: lower-case letters, digits, '-' "
+            "and '_', at most 63."
+        )
+    images_message = (
+        f"{PREFIX}IMAGES must be a JSON object from Python version to task image, such as "
+        '{"3.14": "ghcr.io/chrschy/lakana-task:0.14.0-py3.14"}; the versions are '
+        f"{', '.join(SUPPORTED_PYTHONS)}."
+    )
+    images = _json_object(environ, "IMAGES", images_message)
+    if images is None:
+        raise SettingsError(f"{PREFIX}IMAGES is not set. " + images_message)
+    if not images or not all(
+        key in SUPPORTED_PYTHONS and isinstance(value, str) and _IMAGE.match(value)
+        for key, value in images.items()
+    ):
+        raise SettingsError(images_message)
+    roots_message = (
+        f"{PREFIX}INGESTION_ROOTS must be a JSON object from a name (lower-case letters, digits, "
+        "'-' and '_') to an absolute host directory that is not a system directory, not the "
+        "Docker socket's directory and not the launcher's own: / and anything that holds or sits "
+        "under /run, /var/run, /var/lib/docker, /proc, /sys, /dev or /etc is refused."
+    )
+    socket = _path(environ, "SOCKET", LauncherSettings.socket)
+    roots = _json_object(environ, "INGESTION_ROOTS", roots_message) or {}
+    for key, value in roots.items():
+        if (
+            _ROOT_NAME.match(key) is None
+            or not isinstance(value, str)
+            or not os.path.isabs(value)
+            or os.path.normpath(value) != value
+            or _unsafe_root(Path(value), socket)
+        ):
+            raise SettingsError(roots_message)
+    no_new_privileges = (_get(environ, "NO_NEW_PRIVILEGES") or "auto").lower()
+    if no_new_privileges not in ("auto", "on"):
+        raise SettingsError(
+            f"{PREFIX}NO_NEW_PRIVILEGES must be auto or on (auto leaves it off where Docker "
+            "refuses it, as Docker installed as a snap does)."
+        )
+    return LauncherSettings(
+        stack=stack,
+        images={str(k): str(v) for k, v in images.items()},
+        socket=socket,
+        ingestion_roots={str(k): str(v) for k, v in roots.items()},
+        no_new_privileges=no_new_privileges,
+        max_memory_mb=_number(environ, "MAX_MEMORY_MB", 65536, 64, 1 << 24),
+        max_cpus=float(_number(environ, "MAX_CPUS", 64, 1, 1024)),
+        max_pids=_number(environ, "MAX_PIDS", 32768, 16, 4_194_304),
+    )

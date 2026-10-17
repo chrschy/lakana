@@ -57,3 +57,21 @@ type = layers
 layers =
     lakana_server | lakana_worker
     lakana_core
+
+# The launcher holds the Docker socket, so it is root on the host: it must stay small and
+# reviewable. It imports nothing of Lakana's other packages and no third-party package;
+# `packages/lakana-worker/tests/test_launcher_imports.py` also keeps it off the worker's
+# other modules, which a forbidden contract cannot name without listing each one.
+[importlinter:contract:launcher-stands-alone]
+name = lakana_worker.launcher imports only the standard library and itself
+type = forbidden
+source_modules =
+    lakana_worker.launcher
+forbidden_modules =
+    lakana
+    lakana_core
+    lakana_server
+    duckdb
+    httpx
+    pydantic
+    sqlalchemy
