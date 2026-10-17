@@ -10,8 +10,10 @@ from lakana_core import query_rewrite
 from lakana_core.errors import ValidationError
 from lakana_core.query_rewrite import (
     TableSource,
+    ViewDefinition,
     _cte_alias,
     check_blacklist,
+    expand_views,
     extract_table_refs,
     rewrite_query,
 )
@@ -1129,3 +1131,190 @@ def test_a_source_that_lists_only_its_declared_columns_needs_some() -> None:
 def test_named_columns_of_a_statement_that_does_not_parse_is_empty() -> None:
     """A statement sqlglot cannot parse names no column, so no error is blamed on the reader."""
     assert query_rewrite.named_columns("SELECT tier FROM (") == frozenset()
+
+
+_NOT_A_READ = [
+    pytest.param("DELETE FROM bronze.t RETURNING *", "DELETE", id="delete"),
+    pytest.param("dElEtE fRoM bronze.t ReTuRnInG *", "DELETE", id="delete-mixed-case"),
+    pytest.param("INSERT INTO bronze.t VALUES (1) RETURNING *", "INSERT", id="insert"),
+    pytest.param(
+        "INSERT OR REPLACE INTO bronze.t VALUES (1) RETURNING *", "INSERT", id="insert-or-replace"
+    ),
+    pytest.param("UPDATE bronze.t SET a = 1 RETURNING *", "UPDATE", id="update"),
+    pytest.param(
+        "MERGE INTO bronze.t USING bronze.s ON t.a = s.a WHEN MATCHED THEN DELETE",
+        "MERGE",
+        id="merge",
+    ),
+    pytest.param("CREATE TABLE x AS SELECT 1", "CREATE", id="create"),
+    pytest.param("DROP TABLE x", "DROP", id="drop"),
+    pytest.param("ATTACH ':memory:' AS x", "ATTACH", id="attach"),
+    pytest.param("DETACH x", "DETACH", id="detach"),
+    pytest.param("USE x", "USE", id="use"),
+    pytest.param("PRAGMA version", "PRAGMA", id="pragma"),
+    pytest.param("BEGIN TRANSACTION", "BEGIN", id="transaction"),
+    pytest.param("INSTALL httpfs", "INSTALL", id="install"),
+    pytest.param("UPDATE EXTENSIONS", "UPDATE", id="update-extensions"),
+    pytest.param("COMMENT ON TABLE bronze.t IS 'x'", "COMMENT", id="comment"),
+    pytest.param("DESCRIBE bronze.t", "DESCRIBE", id="describe"),
+    pytest.param("SHOW TABLES", "SHOW", id="show"),
+    pytest.param("SUMMARIZE SELECT 1", "SUMMARIZE", id="summarize"),
+]
+"""Statements that are not a read, each with the keyword its refusal names."""
+
+_STATEMENT_POSITIONS = [
+    pytest.param("WITH m AS ({s}) SELECT * FROM m", id="cte"),
+    pytest.param("WITH m AS MATERIALIZED ({s}) SELECT * FROM m", id="materialized-cte"),
+    pytest.param("WITH ok AS (SELECT 1 AS a), m AS ({s}) SELECT * FROM ok", id="second-cte"),
+    pytest.param("WITH a AS (WITH b AS ({s}) SELECT * FROM b) SELECT * FROM a", id="nested-cte"),
+    pytest.param("SELECT * FROM (WITH b AS ({s}) SELECT * FROM b) AS q", id="cte-in-subquery"),
+    pytest.param(
+        "SELECT 1 AS a UNION ALL (WITH b AS ({s}) SELECT * FROM b)", id="cte-in-set-operation"
+    ),
+    pytest.param(
+        "SELECT * FROM bronze.x, LATERAL (WITH b AS ({s}) SELECT * FROM b) AS l",
+        id="cte-in-lateral",
+    ),
+]
+"""Every place sqlglot's duckdb dialect parses a statement inside a query (verified 30.22)."""
+
+
+@pytest.mark.parametrize("position", _STATEMENT_POSITIONS)
+@pytest.mark.parametrize(("statement", "keyword"), _NOT_A_READ)
+def test_a_statement_that_is_not_a_read_is_refused_wherever_it_sits(
+    statement: str, keyword: str, position: str
+) -> None:
+    """DuckDB 2 runs DML inside a CTE and reports the whole text as a SELECT.
+
+    Parameters
+    ----------
+    statement
+        The statement that is not a read.
+    keyword
+        The keyword the refusal names.
+    position
+        Where in the query the statement sits.
+    """
+    with pytest.raises(ValidationError, match=keyword):
+        check_blacklist(position.format(s=statement))
+
+
+def test_dml_inside_a_cte_is_refused_with_the_reason() -> None:
+    """The message says what a query may do and that depth does not matter."""
+    with pytest.raises(ValidationError) as caught:
+        check_blacklist("WITH m AS (DELETE FROM bronze.t RETURNING *) SELECT * FROM m")
+
+    assert str(caught.value) == (
+        "A query reads data and cannot change it: `DELETE` is not allowed, also not inside a "
+        "CTE or subquery."
+    )
+
+
+@pytest.mark.parametrize(
+    ("sql", "keyword"),
+    [
+        ("WITH m AS (CHECKPOINT) SELECT 1", "CHECKPOINT"),
+        ("WITH m AS (VACUUM) SELECT 1", "VACUUM"),
+    ],
+)
+def test_a_cte_body_sqlglot_reads_as_something_else_is_refused(sql: str, keyword: str) -> None:
+    """The parser reads `CHECKPOINT` as a column and `VACUUM` as a command; neither is a query.
+
+    Parameters
+    ----------
+    sql
+        A CTE whose body is a statement sqlglot has no class for.
+    keyword
+        The keyword the refusal names.
+    """
+    with pytest.raises(ValidationError, match=f"`{keyword}` is not allowed"):
+        check_blacklist(sql)
+
+
+def test_the_rewrite_refuses_dml_inside_a_cte_on_its_own() -> None:
+    """Defence in depth: a caller that skipped `check_blacklist` is refused all the same."""
+    with pytest.raises(ValidationError, match="`DELETE` is not allowed"):
+        rewrite_query(
+            "WITH m AS (DELETE FROM gold.sales RETURNING *) SELECT * FROM m",
+            sources={"gold.sales": _parquet("a.parquet")},
+        )
+    with pytest.raises(ValidationError, match="`DELETE` is not allowed"):
+        extract_table_refs("WITH m AS (DELETE FROM gold.sales RETURNING *) SELECT * FROM m")
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "WITH m AS (VALUES (1)) SELECT * FROM m",
+        "WITH m AS (PIVOT bronze.t ON a USING sum(b)) SELECT * FROM m",
+        "WITH m AS (FROM bronze.t) SELECT * FROM m",
+        "SELECT * FROM (FROM bronze.t SELECT a) AS s",
+        "SELECT * FROM (bronze.v JOIN bronze.x ON v.a = x.a)",
+        "SELECT 'DELETE FROM t' AS s",
+        'SELECT 1 AS "delete"',
+        "SELECT update FROM (SELECT 1 AS update)",
+    ],
+)
+def test_a_read_that_merely_names_a_statement_keyword_passes(sql: str) -> None:
+    """Over-refusal guard: reads in DuckDB's own spellings stay allowed.
+
+    Parameters
+    ----------
+    sql
+        A read.
+    """
+    check_blacklist(sql)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT getvariable('v_0_files') AS u",
+        "SELECT GETVARIABLE('v_0_files') AS u",
+        "SELECT \"getvariable\"('v_0_files') AS u",
+        "SELECT main.getvariable('v_0_files') AS u",
+        "SELECT system.main.getvariable('v_0_files') AS u",
+        "SELECT list_transform([1], lambda x: getvariable('v_0_files')) AS u",
+        "SELECT id FROM bronze.t WHERE getvariable('v_0_files') IS NOT NULL",
+        "WITH c AS (SELECT getvariable('v_0_schema') AS s) SELECT * FROM c",
+    ],
+)
+def test_user_sql_cannot_read_a_variable_of_the_connection(sql: str) -> None:
+    """The query path sets values as DuckDB variables under predictable names.
+
+    Parameters
+    ----------
+    sql
+        A query that reads a variable.
+    """
+    with pytest.raises(ValidationError, match="getvariable may not be called directly"):
+        check_blacklist(sql)
+
+
+@pytest.mark.parametrize(
+    ("sql", "message"),
+    [
+        ("SET VARIABLE v_0_files = ['x']", "not SET"),
+        ("RESET VARIABLE v_0_files", "Only a single query"),
+    ],
+)
+def test_user_sql_cannot_set_a_variable_of_the_connection(sql: str, message: str) -> None:
+    """Pin: a variable can be neither set nor reset by a submitted statement.
+
+    Parameters
+    ----------
+    sql
+        A statement that changes a variable.
+    message
+        Text the refusal must contain.
+    """
+    with pytest.raises(ValidationError, match=message):
+        check_blacklist(sql)
+
+
+def test_a_views_stored_sql_cannot_read_a_variable_either() -> None:
+    """A view expands into the reader's query, so its stored SQL is checked the same way."""
+    view = ViewDefinition(name="gold.v", sql="SELECT getvariable('v_0_files') AS u")
+
+    with pytest.raises(ValidationError, match="getvariable may not be called directly"):
+        expand_views("SELECT * FROM gold.v", lambda dotted: view if dotted == "gold.v" else None)

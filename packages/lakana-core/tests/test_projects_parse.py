@@ -409,3 +409,18 @@ def test_an_asset_of_exactly_the_statement_limit_parses() -> None:
         [_asset(sql)], defaults=AssetDefaults(), limits=DeployLimits(statement_chars=len(sql))
     )
     assert parsed.sql == sql
+
+
+def test_a_statement_that_changes_data_inside_a_cte_fails_the_deploy_at_its_file() -> None:
+    """The deploy names the file, the line and the reason."""
+    sql = "WITH gone AS (DELETE FROM bronze.x RETURNING *) SELECT * FROM gone"
+
+    with pytest.raises(ProjectValidationError) as caught:
+        parse_assets([_asset(sql)], defaults=AssetDefaults())
+
+    [issue] = caught.value.issues
+    assert (issue.path, issue.line) == ("assets/silver/weather.sql", 1)
+    assert issue.message == (
+        "A query reads data and cannot change it: `DELETE` is not allowed, also not inside a "
+        "CTE or subquery."
+    )

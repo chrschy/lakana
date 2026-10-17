@@ -105,6 +105,7 @@ _BLACKLISTED_FUNCTIONS = frozenset(
         "enable_logging",
         "duckdb_prepared_statements",
         "duckdb_variables",
+        "getvariable",
         "duckdb_views",
         "duckdb_tables",
         "duckdb_columns",
@@ -185,7 +186,11 @@ siblings dump whatever this connection's catalog holds (today only DuckDB's
 own built-ins, but a view or macro created inside the connection would show
 its SQL); `pg_get_viewdef`/`pg_get_constraintdef`/`pg_get_expr`/
 `get_block_size` are scalar macros over those same catalog dumps, and
-`duckdb_profiling_settings` exposes profiling configuration. None has a use
+`duckdb_profiling_settings` exposes profiling configuration. `getvariable`
+reads a DuckDB variable of the connection, and the query path sets the values
+a statement reads (file lists, the field-id map, a watermark) as variables
+under names anyone can predict, so it is refused like `duckdb_variables`.
+None has a use
 in a governed query.
 
 `stats` is the odd one out: it is a *scalar* that reads column statistics.
@@ -265,6 +270,55 @@ _PLACEHOLDER_MESSAGE = "Query parameters/placeholders are not allowed in a submi
 Deliberately fixed text: it never echoes the placeholder, the query, or any
 resolved file URL back to the caller.
 """
+
+_NOT_A_READ: tuple[type[exp.Expr], ...] = (
+    exp.DML,
+    exp.Create,
+    exp.Drop,
+    exp.Alter,
+    exp.TruncateTable,
+    exp.Attach,
+    exp.Detach,
+    exp.Install,
+    exp.Use,
+    exp.Set,
+    exp.Pragma,
+    exp.Command,
+    exp.Transaction,
+    exp.Commit,
+    exp.Rollback,
+    exp.Comment,
+    exp.Describe,
+    exp.Show,
+    exp.Summarize,
+    exp.Analyze,
+    exp.Export,
+    exp.Kill,
+    exp.Cache,
+    exp.Uncache,
+    exp.Refresh,
+    exp.LoadData,
+)
+"""sqlglot's classes of statements that are not a read, refused at any depth of a query.
+
+`exp.DML` covers `INSERT`, `UPDATE`, `DELETE`, `MERGE` and `COPY`. `exp.Command` is what
+sqlglot falls back to for a statement it has no class for (`VACUUM`, `RESET`). Checked
+against sqlglot 30.22: a `SELECT`, a set operation, `VALUES`, `PIVOT`, a DuckDB `FROM`-first
+query and a parenthesised join contain none of these classes.
+"""
+
+_READ_BODIES: tuple[type[exp.Expr], ...] = (exp.Query, exp.Pivot)
+"""What the body of a CTE may be. sqlglot reads `WITH m AS (CHECKPOINT)` as a CTE whose body
+is a column named `CHECKPOINT`, which no class above matches, so the body is checked too."""
+
+_NOT_A_READ_MESSAGE = (
+    "A query reads data and cannot change it: `{keyword}` is not allowed, also not inside a "
+    "CTE or subquery."
+)
+"""Why a query holding a statement that is not a read is refused."""
+
+_KEYWORD_CHARS = 40
+"""The most characters of a refused statement's leading word the message repeats."""
 
 _PARAMETER_PREFIX = "__lakana_urls_"
 """Leading text of every parameter name the rewriter binds a URL list under."""
@@ -566,6 +620,59 @@ def _reject_placeholders(parsed: exp.Expr) -> None:
         raise ValidationError(_PLACEHOLDER_MESSAGE)
 
 
+def _leading_keyword(node: exp.Expr, dialect: str) -> str:
+    """Name a refused statement by its first word, as sqlglot writes it.
+
+    Parameters
+    ----------
+    node
+        The refused node.
+    dialect
+        The SQL dialect to render it in.
+
+    Returns
+    -------
+    str
+        The first word in capitals, at most `_KEYWORD_CHARS` characters: `DELETE`, `INSERT`,
+        `BEGIN`, or for an `exp.Command` the command's own keyword (`VACUUM`).
+    """
+    text = str(node.this) if isinstance(node, exp.Command) else node.sql(dialect=dialect)
+    words = text.split(None, 1)
+    return (words[0] if words else node.key).upper()[:_KEYWORD_CHARS]
+
+
+def _reject_statements_inside(parsed: exp.Expr, dialect: str) -> None:
+    """Refuse a statement that is not a read, wherever in the tree it sits.
+
+    DuckDB 2 runs DML inside a CTE (`WITH m AS (DELETE ... RETURNING *) SELECT ...`) and its
+    `extract_statements` calls the whole text a `SELECT`; sqlglot parses it as an `exp.Select`
+    holding an `exp.Delete`. Requiring the statement as a whole to be a query is therefore not
+    enough: every node is looked at, and so is the body of every CTE.
+
+    Parameters
+    ----------
+    parsed
+        The parsed statement. Not modified.
+    dialect
+        The SQL dialect it was parsed as, for naming the refused keyword.
+
+    Raises
+    ------
+    ValidationError
+        If any node is one of `_NOT_A_READ`, or a CTE's body is not one of `_READ_BODIES`. The
+        message names the statement's first word and nothing else of the query.
+    """
+    for node in parsed.walk():
+        if isinstance(node, _NOT_A_READ):
+            raise ValidationError(
+                _NOT_A_READ_MESSAGE.format(keyword=_leading_keyword(node, dialect))
+            )
+        if isinstance(node, exp.CTE) and not isinstance(node.this, _READ_BODIES):
+            raise ValidationError(
+                _NOT_A_READ_MESSAGE.format(keyword=_leading_keyword(node.this, dialect))
+            )
+
+
 def _parameter_name(token: str, index: int) -> str:
     """Name the parameter one CTE's URL list binds under.
 
@@ -685,7 +792,8 @@ def _parse_checked(sql: str, dialect: str) -> exp.Expr:
         would bind to the rewriter's own URL lists — see
         `_reject_placeholders`. Or if it contains a `WITH RECURSIVE` clause, whose scope
         bindings `_cte_reference_ids` cannot classify soundly — see
-        `_reject_recursive_ctes`. `check_blacklist` already refuses these
+        `_reject_recursive_ctes`. Or if it holds a statement that is not a read
+        anywhere, see `_reject_statements_inside`. `check_blacklist` already refuses these
         first in `lakana_worker.pipeline.run_one`, so this is defence in
         depth: the promise `extract_table_refs` makes its caller is that
         every name it leaves out is genuinely not a table, and it cannot
@@ -694,6 +802,7 @@ def _parse_checked(sql: str, dialect: str) -> exp.Expr:
     """
     parsed = sqlglot.parse_one(sql, dialect=dialect)
     _reject_placeholders(parsed)
+    _reject_statements_inside(parsed, dialect)
     _reject_recursive_ctes(parsed)
     _require_unambiguous_references(parsed, dialect)
     return parsed
@@ -1444,6 +1553,10 @@ def check_blacklist(sql: str, dialect: str = "duckdb") -> None:
     table's resolved file URLs as parameters, and a user placeholder would
     bind to them and return them as data — see `_reject_placeholders`.
 
+    A fourth structural rule: no statement that is not a read may sit anywhere
+    inside the query, in a CTE, a subquery, a set operation or a `LATERAL` join,
+    in any letter case — see `_reject_statements_inside`.
+
     Parameters
     ----------
     sql
@@ -1461,7 +1574,8 @@ def check_blacklist(sql: str, dialect: str = "duckdb") -> None:
         `exp.Install` — rather than a generic command node, confirmed against
         the pinned `sqlglot` version, not assumed); if it is a `LOAD` or
         `CREATE SECRET` command; if it contains a query parameter or
-        placeholder; if the statement as a whole is not a query; or if it
+        placeholder; if the statement as a whole is not a query; if a statement that
+        is not a read sits anywhere inside it; or if it
         contains a `WITH RECURSIVE` clause.
     """
     parsed = sqlglot.parse_one(sql, dialect=dialect)
@@ -1489,4 +1603,5 @@ def check_blacklist(sql: str, dialect: str = "duckdb") -> None:
             f"Only a single query may be submitted, not {parsed.key.upper()}; "
             "submit one SELECT statement."
         )
+    _reject_statements_inside(parsed, dialect)
     _reject_recursive_ctes(parsed)
