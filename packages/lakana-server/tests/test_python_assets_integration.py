@@ -1179,11 +1179,12 @@ def test_a_private_package_deploys_builds_and_runs(stack: _Stack, wheelhouse: Pa
     """The milestone's test: neither the project nor the task ever holds the password."""
     fixture = _index_fixture()
     admin, name, env = stack.admin, unique_name(), _environment_with_events(stack)
+    secret = f"idx-{name}"
     with fixture.serving() as indexes:
-        admin.package_indexes.create(name, indexes.registered.url(), credential_secret="team-index")
+        admin.package_indexes.create(name, indexes.registered.url(), credential_secret=secret)
         admin.secrets.create(
             env,
-            "team-index",
+            secret,
             {"username": fixture.USERNAME, "password": fixture.PASSWORD},
             kind="package_index",
             target=name,
@@ -1243,8 +1244,9 @@ def test_a_deploy_without_the_secret_stops_and_names_the_command(
 ) -> None:
     fixture = _index_fixture()
     admin, name, env = stack.admin, unique_name(), _environment_with_events(stack)
+    secret = f"idx-{name}"
     with fixture.serving() as indexes:
-        admin.package_indexes.create(name, indexes.registered.url(), credential_secret="team-index")
+        admin.package_indexes.create(name, indexes.registered.url(), credential_secret=secret)
         project = _deploy(
             stack,
             wheelhouse,
@@ -1256,8 +1258,8 @@ def test_a_deploy_without_the_secret_stops_and_names_the_command(
         )
     assert project.deploy is not None
     assert project.deploy.error_message == (
-        f"uv.lock: the package index '{name}' needs the secret 'team-index' in environment "
-        f"'{env}', which does not exist. Create it with `lakana secret create team-index --env "
+        f"uv.lock: the package index '{name}' needs the secret '{secret}' in environment "
+        f"'{env}', which does not exist. Create it with `lakana secret create {secret} --env "
         f'{env} --index {name} --values-stdin` (a JSON object with "username" and "password")'
     )
 
@@ -1268,11 +1270,12 @@ def test_a_wrong_password_fails_for_good_and_a_rotated_secret_recovers(
     """One attempt, the message with the command, and no new deploy afterwards."""
     fixture = _index_fixture()
     admin, name, env = stack.admin, unique_name(), _environment_with_events(stack)
+    secret = f"idx-{name}"
     with fixture.serving() as indexes:
-        admin.package_indexes.create(name, indexes.registered.url(), credential_secret="team-index")
+        admin.package_indexes.create(name, indexes.registered.url(), credential_secret=secret)
         admin.secrets.create(
             env,
-            "team-index",
+            secret,
             {"username": fixture.USERNAME, "password": "wrong-pw"},
             kind="package_index",
             target=name,
@@ -1290,14 +1293,14 @@ def test_a_wrong_password_fails_for_good_and_a_rotated_secret_recovers(
         (attempt,) = _attempts(stack, run.id, "gold.answers")
         assert attempt.error_message == (
             f"environment build failed: The package index '{name}' refused the credential in "
-            f"secret 'team-index' of environment '{env}'. Set it again with `lakana secret "
-            f"rotate team-index --env {env} --values-stdin`. If the password is right, check "
+            f"secret '{secret}' of environment '{env}'. Set it again with `lakana secret "
+            f"rotate {secret} --env {env} --values-stdin`. If the password is right, check "
             "that its account may read the package: the index also answers 403 when the account "
             "may not read a package or file."
         )
         assert "wrong-pw" not in admin.runs.log(env, run.id, "gold.answers").text
         admin.secrets.rotate(
-            env, "team-index", {"username": fixture.USERNAME, "password": fixture.PASSWORD}
+            env, secret, {"username": fixture.USERNAME, "password": fixture.PASSWORD}
         )
         again = admin.runs.start(env, project.repository, select=["gold.answers"])
         stack.succeed(env, again.id)
@@ -1336,11 +1339,12 @@ def test_a_package_without_a_wheel_fails_the_build_for_good(
     """R6.2: a project with a credential installs wheels only; the message is the how-to's."""
     fixture = _index_fixture()
     admin, name, env = stack.admin, unique_name(), _environment_with_events(stack)
+    secret = f"idx-{name}"
     with fixture.serving() as indexes:
-        admin.package_indexes.create(name, indexes.registered.url(), credential_secret="team-index")
+        admin.package_indexes.create(name, indexes.registered.url(), credential_secret=secret)
         admin.secrets.create(
             env,
-            "team-index",
+            secret,
             {"username": fixture.USERNAME, "password": fixture.PASSWORD},
             kind="package_index",
             target=name,
@@ -1375,13 +1379,14 @@ def test_a_project_that_names_another_host_gives_that_host_no_credential(
     """
     fixture = _index_fixture()
     admin, env = stack.admin, _environment_with_events(stack)
+    secret = f"idx-{unique_name()}"
     with fixture.serving() as indexes:
         registered, other = indexes.registered.url(), indexes.other.url()
-        admin.package_indexes.create("team", registered, credential_secret="team-index")
+        admin.package_indexes.create("team", registered, credential_secret=secret)
         try:
             admin.secrets.create(
                 env,
-                "team-index",
+                secret,
                 {"username": fixture.USERNAME, "password": fixture.PASSWORD},
                 kind="package_index",
                 target="team",
@@ -1418,14 +1423,12 @@ def test_a_project_that_names_another_host_gives_that_host_no_credential(
                 row = session.execute(
                     select(Environment).where(Environment.name == env)
                 ).scalar_one()
-                # Other tests of this module leave their own indexes in the shared stack.
-                (access,) = [
-                    found
-                    for found in resolve_index_access(
-                        session, stack.engine.key_provider, row.id, row.name, sources.registered
-                    )
-                    if found.name == "team"
-                ]
+                # Other tests of this module leave their own indexes, each with a secret of its
+                # own in its own environment: only this test's index has one here.
+                ours = [found for found in sources.registered if found.name == "team"]
+                (access,) = resolve_index_access(
+                    session, stack.engine.key_provider, row.id, row.name, ours
+                )
             assert (access.name, access.url) == ("team", registered)
             assert access.password == fixture.PASSWORD
             acquire(stack.runtime.venvs, lock, code_dir, output.append, lambda: [access]).release()
