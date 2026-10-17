@@ -2049,7 +2049,7 @@ hidden from the caller. It is blocked together with `current_setting`, `duckdb_s
 `duckdb_secrets`, `duckdb_extensions`, `duckdb_databases`, `duckdb_memory`,
 `duckdb_temporary_files`, `duckdb_external_file_cache`, `duckdb_logs`,
 `duckdb_logs_parsed`, `duckdb_log_contexts`, `enable_logging`,
-`duckdb_prepared_statements`, `duckdb_variables`, `duckdb_views`, `duckdb_tables`,
+`duckdb_prepared_statements`, `duckdb_variables`, `getvariable`, `duckdb_views`, `duckdb_tables`,
 `duckdb_columns`, `duckdb_constraints`, `duckdb_dependencies`, `duckdb_indexes`,
 `duckdb_schemas`, `duckdb_sequences`, the `pragma_*` table functions (`pragma_version`,
 `pragma_platform`, `pragma_user_agent`, `pragma_database_size`, `pragma_metadata_info`,
@@ -2083,6 +2083,17 @@ it. An incremental write's watermark binds the same way, under `$__lakana_waterm
 (`catalog.watermark.wrap_incremental`), and `executor.execute_query`/`stream_query`/
 `describe_query` refuse a positional sequence outright (`TypeError`): only a name-to-value
 mapping binds.
+
+**A submitted query holds no statement but a read, at any depth.** `check_blacklist` requires
+the statement as a whole to be an `exp.Query`, and `_reject_statements_inside` then walks the
+whole tree: a node of a statement class (`exp.DML`, which covers `INSERT`, `UPDATE`, `DELETE`,
+`MERGE` and `COPY`, and `CREATE`, `DROP`, `ALTER`, `ATTACH`, `SET`, `PRAGMA`, `USE`, `INSTALL`,
+a transaction, `DESCRIBE`, `SHOW`, `SUMMARIZE`, `COMMENT` and any `exp.Command`) is refused,
+and so is a CTE whose body is not a query or a `PIVOT` (sqlglot reads `WITH m AS (CHECKPOINT)`
+as a column named `CHECKPOINT`). DuckDB 2 executes DML inside a CTE and `extract_statements`
+reports it as a `SELECT`; DuckDB 1.5 rejects it with a parser error. `_parse_checked` runs the
+same walk, so `rewrite_query`, `extract_table_refs` and `expand_views` refuse it on their own.
+`test_query_rewrite_guard_properties.py` nests every statement in random read shapes.
 
 **A DuckDB error must never echo a mask or filter's own text back to a caller.** A row
 filter's or column mask's restricted-subset expression is spliced directly into the

@@ -105,6 +105,21 @@ tables share a name (`gold.orders JOIN silver.orders`, or a subquery over `silve
 inside a query over `gold.orders`), nothing changes: the query runs as before, and a column qualified with that name
 fails in the database as before. Give each table an alias.
 
+### A query that changes data is refused wherever the statement sits
+
+No migration. A query, an asset, a check or a view whose SQL holds `INSERT`, `UPDATE`,
+`DELETE`, `MERGE`, `COPY`, `CREATE`, `DROP`, `ATTACH`, `SET` or another statement that is not a
+read is refused also when the statement sits inside a CTE or a subquery:
+``A query reads data and cannot change it: `DELETE` is not allowed, also not inside a CTE or
+subquery.`` DuckDB 1.5 rejects these shapes itself; the next major DuckDB release runs them, so
+Lakana refuses them first. A query may not call `getvariable` either.
+
+`DESCRIBE`, `SUMMARIZE`, `SHOW` and `SELECT ... INTO` are refused in a query too, also inside
+a subquery or a CTE (`SELECT * FROM (SUMMARIZE t)` no longer works). `DESCRIBE`, `SUMMARIZE`
+and `SHOW` were never allowed as the whole statement; `SELECT ... INTO` is now refused there
+too. To get the numbers, use an aggregate query (`SELECT count(*), min(x), max(x) FROM t`) and
+read the column list from the result.
+
 ## Notes for 0.12.0
 
 This release changed a lot: who may hand out access, which package sources a project may
