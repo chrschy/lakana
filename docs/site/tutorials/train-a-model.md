@@ -30,15 +30,14 @@ lakana server start --local
 ## Start a project
 
 Create a new project. The name is `forecasts`, so that it does not clash with the `analytics`
-project of "Getting started". The last command removes the sample asset and its check that
-`lakana init` writes:
+project of "Getting started". The option `--no-sample` leaves out the sample that `lakana init`
+writes, so the project holds only what you write:
 
 <!-- source: docs/examples/train-and-predict/run.sh#init -->
 ```bash
 cd ~
-lakana init forecasts
+lakana init forecasts --no-sample
 cd forecasts
-rm -r assets/bronze/example.sql checks
 ```
 
 `lakana init` prints a list of next steps, as in "Getting started". This tutorial gives its own

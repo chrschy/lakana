@@ -39,20 +39,21 @@ lakana init analytics
 cd analytics
 # docs:end init
 capture_end
-grep -Eq '^Created a Lakana project in .*analytics\.$' "$captured"
+grep -Eq '^Created a Lakana project in .*analytics, with a small sample' "$captured"
+# The query the init output suggests is the one the tutorial shows at the end.
+grep -Fq 'lakana sql "SELECT * FROM gold.station_ranking ORDER BY warmth_rank"' "$captured"
+grep -Fxq 'Then the two commands that build the sample:' "$captured"
 grep -Eq "^  lakana run --env dev$" "$captured"
+grep -Eq "^  lakana deploy --env dev$" "$captured"
 grep -Fq "If 'git commit' says it does not know who you are" "$captured"
 test -f lakana.yaml
 
-# docs:start remove-sample
-rm -r assets/bronze/example.sql checks
-# docs:end remove-sample
-test ! -e assets/bronze/example.sql
-test ! -e checks
-
-# The tutorial shows each of these files by its own path; here they are copied in.
-cp -R "$EXAMPLE_DIR/project/." .
-test "$(find assets -name '*.sql' | wc -l)" -eq 2
+# `lakana init` wrote the sample the tutorial shows by its own paths: the files under project/
+# are the ones it wrote (a unit test compares them with the CLI's templates; here the project
+# itself is compared).
+diff -r "$EXAMPLE_DIR/project/assets" assets
+diff -r "$EXAMPLE_DIR/project/checks" checks
+test "$(find assets -name '*.sql' | wc -l)" -eq 3
 test "$(find checks -name '*.sql' | wc -l)" -eq 1
 
 # docs:start git-identity
@@ -64,7 +65,7 @@ test "$(git config --global user.email)" = "you@example.com"
 # docs:start commit
 git init
 git add -A
-git commit -m "First assets"
+git commit -m "Initial project"
 # docs:end commit
 
 capture_start
@@ -77,6 +78,7 @@ grep -q '^Registered repository analytics' "$captured"
 grep -Fxq "Hint: run 'lakana run --env dev' to run what you just deployed." "$captured"
 grep -Eq '^Deployed analytics in dev at [0-9a-f]{40}$' "$captured"
 grep -Eq '^│ added +│ bronze\.readings +│$' "$captured"
+grep -Eq '^│ added +│ gold\.station_ranking +│$' "$captured"
 grep -Eq '^│ added +│ silver\.station_temperatures +│$' "$captured"
 grep -Fxq 'Checks:' "$captured"
 grep -Fxq '  silver.station_temperatures: plausible_range' "$captured"
@@ -87,17 +89,17 @@ lakana run --env dev
 # docs:end run
 capture_end
 grep -Eq '^Run [0-9a-f-]{36} succeeded$' "$captured"
-grep -Eq '^│ bronze\.readings +│ succeeded +│ 1/3 +│ [0-9.]+s +│ 4 +│ +│$' "$captured"
-grep -Eq '^│ silver\.station_temperatures +│ succeeded +│ 1/3 +│ [0-9.]+s +│ 2 +│ +│$' "$captured"
+grep -Eq '^│ bronze\.readings +│ succeeded +│ 1/3 +│ [0-9.]+s +│ 18 +│ +│$' "$captured"
+grep -Eq '^│ gold\.station_ranking +│ succeeded +│ 1/3 +│ [0-9.]+s +│ 3 +│ +│$' "$captured"
+grep -Eq '^│ silver\.station_temperatures +│ succeeded +│ 1/3 +│ [0-9.]+s +│ 3 +│ +│$' "$captured"
 grep -Eq '^silver\.station_temperatures +passed +1 of 1 checks passed$' "$captured"
 grep -Eq '^  plausible_range +passed$' "$captured"
 
 # docs:start query
-lakana sql "SELECT station_id, avg_temp_c FROM silver.station_temperatures ORDER BY station_id"
+lakana sql "SELECT * FROM gold.station_ranking ORDER BY warmth_rank"
 # docs:end query
-out=$(lakana --output json sql "SELECT station_id, avg_temp_c FROM silver.station_temperatures ORDER BY station_id")
-python3 -c 'import json,sys; assert json.loads(sys.argv[1]) == [{"station_id":"A1","avg_temp_c":5.0},{"station_id":"B2","avg_temp_c":2.0}], sys.argv[1]' "$out"
-
+out=$(lakana --output json sql "SELECT * FROM gold.station_ranking ORDER BY warmth_rank")
+python3 -c 'import json,sys; assert json.loads(sys.argv[1]) == [{"station_id":"C3","avg_temp_c":9.0,"warmth_rank":1},{"station_id":"A1","avg_temp_c":4.0,"warmth_rank":2},{"station_id":"B2","avg_temp_c":1.0,"warmth_rank":3}], sys.argv[1]' "$out"
 # The how-to "Stop a query" shows how to find a query, and "Deploy with Docker Compose" how to see
 # the workers. Every query of this instance has ended by now, so the first listing needs --all;
 # the second lists the one worker the local instance started.
@@ -169,3 +171,19 @@ lakana --output json audit list --event-type PAT_ISSUED --all
 # docs:end delegation-audit
 out=$(lakana --output json audit list --event-type GRANT_CREATED --all)
 python3 -c 'import json,sys; e=json.loads(sys.argv[1]); assert e and all(x["event_type"] == "GRANT_CREATED" and x["principal_id"] for x in e), e' "$out"
+
+# The tutorial ends with how to start over: stop the instance, then reset it. The runner's
+# instance is still running here, so the command must refuse and delete nothing.
+capture_start
+set +e
+# docs:start reset
+lakana server reset --local
+# docs:end reset
+status=$?
+set -e
+capture_end
+test "$status" -ne 0
+grep -Fq 'Lakana is running from' "$captured"
+grep -Fq 'Ctrl-C' "$captured"
+test -n "$(lakana --output json sql 'SELECT 1 AS one')"
+lakana sql "SELECT * FROM gold.station_ranking" >/dev/null

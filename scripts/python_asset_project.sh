@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Turn a `lakana init` project into one with a Python asset, installed from an offline wheel
-# directory, for the smoke tests. Writes assets/silver/doubled.py (reads bronze.example,
-# which `lakana init` creates), copies the wheel directory into the project as `wheelhouse/`,
+# directory, for the smoke tests. Writes assets/bronze/example.sql (one row, the input the
+# smoke tests read), assets/silver/doubled.py (reads bronze.example), copies the wheel
+# directory into the project as `wheelhouse/`,
 # points uv at it alone (`no-index`), and locks with `uv lock --offline`: neither the lock nor
 # the worker's venv build asks a package index, and the wheels travel with the committed code.
 #
@@ -23,7 +24,16 @@ if [ $# -gt 4 ] || { [ $# -eq 4 ] && [ "$4" != "artifact" ]; }; then
   echo "$usage" >&2
   exit 2
 fi
-mkdir -p "$project/assets/silver" "$project/wheelhouse"
+mkdir -p "$project/assets/bronze" "$project/assets/silver" "$project/wheelhouse"
+cat > "$project/assets/bronze/example.sql" <<'SQL'
+/* lakana
+description: One row, the input of the smoke tests.
+columns:
+  id: A constant identifier.
+  greeting: A friendly constant.
+*/
+SELECT 1 AS id, 'hello' AS greeting
+SQL
 cat > "$project/assets/silver/doubled.py" <<'PY'
 import polars as pl
 from lakana import asset

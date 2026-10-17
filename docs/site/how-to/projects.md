@@ -9,14 +9,20 @@ jobs and their schedules are declared in `lakana.yaml` (see "Jobs" below).
 
 <!-- not tested: moved as is; sorted in the second pull request -->
 ```bash
-lakana init analytics          # lakana.yaml, assets/bronze/example.sql, a check for it in checks/,
-                               # tests/, pyproject.toml, .github/workflows/lakana-deploy.yml,
+lakana init analytics          # lakana.yaml, a sample (three assets, one check), tests/,
+                               # pyproject.toml, .github/workflows/lakana-deploy.yml,
                                # .gitlab-ci.yml
 cd analytics && git init && git add -A && git commit -m "Initial project"
 ```
 
-`lakana init` ends with the next steps: commit, register, `lakana deploy --env dev` and
-`lakana run --env dev`. If git cannot find a name and email from the new directory (a fresh
+The sample is a source, `assets/bronze/readings.sql`, which generates its rows (nothing is
+downloaded), two assets built from it (`assets/silver/station_temperatures.sql` and
+`assets/gold/station_ranking.sql`) and one check, so a new project deploys, runs and can be queried
+without writing a line; "Getting started" walks through it. It is written unless your default
+profile (or `--url` or `LAKANA_URL`) points at an instance on another machine; `--sample` and
+`--no-sample` decide it either way. The sample has no Python asset, because one needs the lock
+described below. `lakana init` ends with the next steps: commit, register,
+`lakana deploy --env dev`, `lakana run --env dev` and a query of the result. If git cannot find a name and email from the new directory (a fresh
 machine), `init` adds one line with the two `git config` commands, worded as a condition: use it
 only if `git commit` says it does not know who you are. A per-directory identity (git's
 `includeIf`) is not visible until the repository exists, so you may see the line and not need it.
@@ -342,7 +348,7 @@ input tables.
 
 <!-- not tested: moved as is; sorted in the second pull request -->
 ```bash
-lakana init analytics && cd analytics
+lakana init analytics --no-sample && cd analytics
 ```
 
 **2. Add two small SQL assets** that hold the data. They are ordinary SQL assets with literal

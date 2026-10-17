@@ -5,7 +5,7 @@ the table is built, and you know what happens to the table when the test fails. 
 project that you have deployed once (see [Getting started](../tutorials/getting-started.md)).
 
 The guide works on one small project, the example `docs/examples/check-your-data/` of the Lakana
-repository. Copy its `project/` folder into a new folder, or run `lakana init` and add the files
+repository. Copy its `project/` folder into a new folder, or run `lakana init --no-sample` and add the files
 that each step shows; every file the guide names is shown in full.
 
 In short:
@@ -96,9 +96,10 @@ The comment at the top is optional. It may hold a `description` and, as
 must read the table that its directory names. Lakana counts the rows it returns; the columns you
 select are for you, when you run the check yourself to see what is wrong.
 
-`lakana init` writes one check for its example asset, `checks/bronze/example/id_is_present.sql`.
-If you delete the example asset, delete its check too (`rm -r assets/bronze/example.sql checks`),
+`lakana init` writes one check for its sample, `checks/silver/station_temperatures/plausible_range.sql`.
+If you delete the sample asset `assets/silver/station_temperatures.sql`, delete its check too,
 or the deploy is refused because the check belongs to a table that your project no longer builds.
+`lakana init --no-sample` writes neither.
 
 The rest of this guide uses a project of two assets. The first writes six readings, one of them
 without a station and one of 999 degrees:

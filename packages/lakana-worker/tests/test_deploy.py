@@ -2544,18 +2544,19 @@ def test_the_project_lakana_init_writes_deploys_with_its_check(
 ) -> None:
     """The template the CLI ships passes the deploy rules (parity of the two)."""
     from lakana.cli import project_init
+    from lakana.cli._sample import SAMPLE
 
     files = {
         relative: text.format(repo="analytics", version="0.0.0")
         for relative, text in project_init.TEMPLATES.items()
-    }
+    } | SAMPLE
     commit(world.repo_path, files)
     run = _submit_and_run(session, principal, world)
     assert (run.status, run.error_message) == (DeployStatus.SUCCEEDED, None)
     version = session.get(JobVersion, run.job_version_id)
     assert version is not None
     assert [entry["name"] for entry in version.manifest_json["checks"]] == [
-        "bronze.example/id_is_present"
+        "silver.station_temperatures/plausible_range"
     ]
 
 
