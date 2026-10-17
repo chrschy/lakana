@@ -648,14 +648,14 @@ def execute_query(
     ----------
     sql
         SQL to execute — already rewritten so that every table
-        reference is a `read_parquet`/`read_csv`/`read_json` call against a
-        named `$<name>` parameter, never a bare catalog name and never a
+        reference is a `read_parquet`/`read_csv`/`read_json` call over a
+        `getvariable('<name>')` variable, never a bare catalog name and never a
         file list spelled out in the SQL text.
     parameters
-        Values to bind to `sql`'s named placeholders, as
+        Values the query process sets as variables before it runs `sql`, as
         `lakana_core.query_rewrite.RewrittenQuery.parameters` comes. Only a
         mapping is accepted: nothing binds positionally (see `_named`).
-        Each resolved file list is bound as one LIST value, which is the
+        Each resolved file list is set as one LIST value, which is the
         whole point: DuckDB treats a bound string as a filename to look for,
         so a storage object key containing a quote fails as "no files found"
         instead of executing as SQL. Only the types the platform binds can be
@@ -762,7 +762,7 @@ def stream_query(
     sql
         Rewritten SQL, as for `execute_query`.
     parameters
-        Values for `sql`'s named placeholders, as for `execute_query`: the
+        Values set as variables for `sql`, as for `execute_query`: the
         rewriter's URL lists plus, for an incremental append, the watermark.
     restrict_local_filesystem
         As for `execute_query`.
@@ -818,7 +818,7 @@ def describe_query(
     sql
         Rewritten SQL.
     parameters
-        Values for its named placeholders, as for `execute_query`.
+        Values set as variables for it, as for `execute_query`.
     restrict_local_filesystem
         As for `execute_query`.
     limits

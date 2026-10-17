@@ -223,6 +223,40 @@ def test_a_variable_read_streams_more_rows_than_its_memory_limit_could_hold(
     assert sum(batch.num_rows for batch in batches) == 1_000_000
 
 
+def test_the_statement_runs_without_parameters(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`sql` is called with the statement alone: given parameters it holds the whole result.
+
+    DuckDB does not count a materialised result against `memory_limit`, so no memory limit can
+    show that regression; the call itself is what is checked.
+    """
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    real_connect = duckdb.connect
+
+    class Spy:
+        """A connection that records how `sql` is called."""
+
+        def __init__(self) -> None:
+            self.inner = real_connect(":memory:")
+
+        def sql(self, *args: object, **kwargs: object) -> object:
+            calls.append((args, kwargs))
+            return self.inner.sql(*args, **kwargs)  # ty: ignore[invalid-argument-type]
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self.inner, name)
+
+    monkeypatch.setattr(query_child.duckdb, "connect", lambda *_a, **_k: Spy())
+    request = _request(
+        "SELECT len(getvariable('v_0_files')) AS n", parameters={"v_0_files": ["a", "b"]}
+    )
+
+    code, stream, stderr = _main(request)
+
+    assert (code, stderr) == (EXIT_OK, "")
+    assert _table(stream).to_pylist() == [{"n": 2}]
+    assert calls == [((request.sql,), {})]
+
+
 def test_a_failing_statement_never_echoes_a_value_it_was_given(tmp_path: Path) -> None:
     """The URL is a variable's value, never SQL text, so DuckDB's error cannot quote it."""
     path = tmp_path / "X-Amz-Signature=SECRET123.parquet"
@@ -598,7 +632,7 @@ class _Planner:
 
 def _kind(
     exc: BaseException,
-    statement: tuple[str, dict[str, object] | None] | None = None,
+    statement: str | None = None,
     planner: _Planner | None = None,
     asked: threading.Event | None = None,
 ) -> str:
@@ -677,17 +711,17 @@ def test_an_out_of_memory_message_names_the_setting_and_drops_duckdbs_own_advice
 @pytest.mark.parametrize(
     ("exc", "plans", "statement", "kind"),
     [
-        (duckdb.PermissionException(_REFUSAL), True, ("SELECT 1", None), "out_of_memory"),
-        (OSError(_REFUSAL), True, ("SELECT 1", None), "out_of_memory"),
-        (duckdb.PermissionException(_REFUSAL), False, ("SELECT 1", None), "invalid"),
-        (OSError(_REFUSAL), False, ("SELECT 1", None), "invalid"),
+        (duckdb.PermissionException(_REFUSAL), True, "SELECT 1", "out_of_memory"),
+        (OSError(_REFUSAL), True, "SELECT 1", "out_of_memory"),
+        (duckdb.PermissionException(_REFUSAL), False, "SELECT 1", "invalid"),
+        (OSError(_REFUSAL), False, "SELECT 1", "invalid"),
         (duckdb.PermissionException(_REFUSAL), True, None, "invalid"),
-        (duckdb.PermissionException("Permission Error: no"), True, ("SELECT 1", None), "invalid"),
-        (OSError("IO Error: " + _REFUSAL), True, ("SELECT 1", None), "transient"),
+        (duckdb.PermissionException("Permission Error: no"), True, "SELECT 1", "invalid"),
+        (OSError("IO Error: " + _REFUSAL), True, "SELECT 1", "transient"),
     ],
 )
 def test_a_refusal_is_a_spill_only_if_the_statement_plans(
-    exc: BaseException, plans: bool, statement: tuple[str, None] | None, kind: str
+    exc: BaseException, plans: bool, statement: str | None, kind: str
 ) -> None:
     assert _kind(exc, statement, _Planner(plans=plans)) == kind
 
@@ -702,7 +736,7 @@ def test_an_ask_during_the_second_planning_stays_visible(raises: bool) -> None:
             raise duckdb.InterruptException("Interrupt Error: Interrupted!")
 
     planner = _Planner(plans=True, during=during)
-    kind = _kind(duckdb.PermissionException(_REFUSAL), ("SELECT 1", None), planner, asked)
+    kind = _kind(duckdb.PermissionException(_REFUSAL), "SELECT 1", planner, asked)
     assert kind == "interrupted"
 
 
@@ -721,13 +755,13 @@ def test_an_ask_during_the_second_planning_stays_visible(raises: bool) -> None:
 def test_only_one_select_is_planned_again(sql: str) -> None:
     """`EXPLAIN a; b` runs `b`: user SQL must never execute a second time."""
     planner = _Planner(plans=True)
-    assert _kind(duckdb.PermissionException(_REFUSAL), (sql, None), planner) == "invalid"
+    assert _kind(duckdb.PermissionException(_REFUSAL), sql, planner) == "invalid"
     assert planner.planned == []
 
 
 def test_one_select_is_planned_again_as_the_statement_duckdb_extracted() -> None:
     planner = _Planner(plans=True)
-    statement = ("SELECT 1; -- trailing", None)
+    statement = "SELECT 1; -- trailing"
     assert _kind(duckdb.PermissionException(_REFUSAL), statement, planner) == "out_of_memory"
     assert planner.planned == ["EXPLAIN SELECT 1; -- trailing"]
 
@@ -1248,7 +1282,7 @@ def _refused_spill_through_a_spy(sql: str) -> tuple[ErrorDocument, _Spy]:
             document = query_child.failure(
                 spy,  # ty: ignore[invalid-argument-type]
                 exc,
-                (sql, None),
+                sql,
                 threading.Event(),
             )
             return document, spy

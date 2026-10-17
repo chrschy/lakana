@@ -1,4 +1,4 @@
-"""User SQL must never reach the rewriter's own bound parameters.
+"""User SQL must never reach the rewriter's own variables.
 
 `lakana_core.query_rewrite.rewrite_query` hands DuckDB each table's resolved
 file list as a DuckDB variable — on S3, presigned URLs of the raw files. A

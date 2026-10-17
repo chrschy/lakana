@@ -1,10 +1,10 @@
 """What the worker and a query child say to each other.
 
 The worker starts one process per query (`lakana_worker.query_child`) and hands it one JSON
-document on standard input: the rewritten SQL, its bound values and what DuckDB is configured
-with. Nothing else crosses: no database URL, no storage credential, no token, no secret. The
-child answers with an Arrow IPC stream on standard output and, when the statement failed, one
-JSON line on standard error.
+document on standard input: the rewritten SQL, the values it reads as variables and what
+DuckDB is configured with. Nothing else crosses: no database URL, no storage credential, no
+token, no secret. The child answers with an Arrow IPC stream on standard output and, when
+the statement failed, one JSON line on standard error.
 
 This module imports the standard library only. The child imports it, and every import the child
 makes is paid by every query (importing `lakana_core.config` alone costs 130 ms).

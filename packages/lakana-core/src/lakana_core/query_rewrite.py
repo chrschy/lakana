@@ -1426,9 +1426,9 @@ def rewrite_query(
     -------
     RewrittenQuery
         `sql` with every reference in `sources` replaced by a uniquely-named
-        CTE (`read_parquet($<name>)` or the matching reader), keeping the
+        CTE (`read_parquet(getvariable('v_<n>_files'))` or the matching reader), keeping the
         original reference's alias so the rest of the query still resolves,
-        plus the URL lists to bind to those named parameters. This is what lets a
+        plus the URL lists to set as those variables. This is what lets a
         multi-level Lakana name (`gold.sales.monthly`) run against DuckDB at
         all — the name never reaches DuckDB's own catalog, only the
         rewritten form does. A source with no `row_filters` or

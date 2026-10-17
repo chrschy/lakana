@@ -125,7 +125,7 @@ _VARIABLE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
 """A name the child sets a variable under. DuckDB binds no name in `SET VARIABLE`, so the name
 is written into the statement, double-quoted, and must be an identifier."""
 
-_Statement = tuple[str, dict[str, object] | None]
+_Statement = str
 
 
 def strip_duckdb_context(message: str) -> str:
@@ -330,7 +330,7 @@ def _is_refused_spill(
     exc
         The `duckdb.Error` or `OSError` that ended the statement.
     statement
-        The SQL and its bound values; `None` when nothing may be planned again (a describe).
+        The SQL; `None` when nothing may be planned again (a describe).
 
     Returns
     -------
@@ -339,12 +339,11 @@ def _is_refused_spill(
     """
     if statement is None or not _is_permission_refusal(exc):
         return False
-    sql, parameters = statement
     try:
-        statements = connection.extract_statements(sql)
+        statements = connection.extract_statements(statement)
         if len(statements) != 1 or statements[0].type != duckdb.StatementType.SELECT:
             return False
-        connection.execute(f"EXPLAIN {statements[0].query}", parameters)
+        connection.execute(f"EXPLAIN {statements[0].query}")
     except (duckdb.Error, OSError):
         return False
     return True
@@ -365,7 +364,7 @@ def failure(
     exc
         The `duckdb.Error` or `OSError` that ended the statement.
     statement
-        The SQL and its bound values, or `None` when nothing may be planned again.
+        The SQL, or `None` when nothing may be planned again.
     asked
         Set once the child was asked to stop; the failure is then `interrupted`, whatever DuckDB
         said. An interrupt DuckDB reports without that ask is a lost cause (`invalid`, as before,
@@ -460,7 +459,7 @@ def _stream(
     sink
         Where the stream goes (standard output).
     statement
-        The SQL and its bound values, for the classification of an error.
+        The SQL, for the classification of an error.
     asked
         Set once the child was asked to stop; checked before each batch.
 
@@ -555,8 +554,8 @@ def set_variables(
     for name, value in variables.items():
         if _VARIABLE_NAME.fullmatch(name) is None:
             raise ValueError(f"query variable {ascii(name)[:60]} is not an identifier")
-        # B608: `name` is an identifier, checked above; the value is bound.
-        statement = f'SET VARIABLE "{name}" = '  # nosec B608
+        # `name` is an identifier, checked above; the value is bound.
+        statement = f'SET VARIABLE "{name}" = '
         if isinstance(value, list):
             connection.execute(statement + "?::VARCHAR[]", [value])
         else:
@@ -604,7 +603,7 @@ def serve(
                     return ErrorDocument(INTERRUPTED, _ASKED)
                 set_variables(connection, request.parameters)
                 if request.mode != DESCRIBE:
-                    statement = (request.sql, None)
+                    statement = request.sql
                 # `sql` and not `execute`: its relation streams through `to_arrow_reader`, and it
                 # is the call whose result keeps an Arrow export in DuckDB 2. Nothing is bound to
                 # the statement; what it reads was set as variables above.

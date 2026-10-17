@@ -268,7 +268,7 @@ def test_rewrite_replaces_a_reference_with_a_scoped_read() -> None:
 
 
 def test_rewrite_never_puts_a_resolved_url_in_the_sql() -> None:
-    """The resolved URL is bound, never rendered — the whole injection defence.
+    """The resolved URL is set as a variable, never rendered — the whole injection defence.
 
     A storage object key is attacker-controlled text (a raw-zone landing
     area accepts arbitrary writes by design), so a key containing a single
@@ -442,7 +442,7 @@ def test_rewrite_emits_one_cte_for_a_table_referenced_twice() -> None:
 
 
 def test_rewrite_binds_one_parameter_per_cte_in_placeholder_order() -> None:
-    """Each CTE binds its own named parameter, in the order the CTEs are generated."""
+    """Each CTE reads its own variable, in the order the CTEs are generated."""
     rewritten = rewrite_query(
         "SELECT a.id FROM bronze.a AS a JOIN gold.b AS b ON a.id = b.id",
         sources={"bronze.a": _parquet("a.parquet"), "gold.b": _parquet("b.csv")},

@@ -223,7 +223,7 @@ def test_date_timestamp_and_decimal_keys_decode_to_python_values(
     column: pa.Array,
     expected: Watermark,
 ) -> None:
-    """Bounds decode to the values DuckDB compares against (a bound parameter)."""
+    """Bounds decode to the values DuckDB compares against (a variable)."""
     catalog = _catalog(session, principal, tmp_path)
     _write(catalog, principal, WriteMode.CREATE, pa.table({"id": column}))
 
