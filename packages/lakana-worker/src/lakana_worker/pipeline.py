@@ -174,7 +174,6 @@ from lakana_worker.executor import (
     stream_query,
 )
 from lakana_worker.memory import MACHINE_MEMORY_ADVICE
-from lakana_worker.query_protocol import UNCONVERTED_VALUE
 
 if TYPE_CHECKING:
     from pyiceberg.table.metadata import TableMetadata
@@ -332,19 +331,25 @@ def _redact(message: str, locations: Sequence[str]) -> str:
     return message
 
 
-_VALUE_ERROR = re.compile(r"^Query failed: (?:Conversion|Invalid Input|Out of Range) Error")
-"""The start of the engine's text for a value it could not convert or compute, as a query child
-words a failure."""
+_KEEPS_ITS_TEXT = re.compile(
+    r"^Query failed: (?:(?:Binder|Catalog|Parser) Error"
+    r"|a file of a table this query reads stores column )"
+)
+"""The start of the engine's text for a failure that carries no stored value, as a query child
+words it: a name or a statement the reader wrote that the engine cannot resolve or parse, and the
+child's own fixed text for a file that stores a column in another type."""
 
 
 def _without_the_value(failure: LakanaError, restricted: frozenset[str]) -> LakanaError:
-    """Replace the engine's text for a value it could not convert or compute, on a policy read.
+    """Replace the engine's text for a failure, on a read under a row filter or column mask.
 
     A row filter or column mask expression runs on every stored value, also on the ones the
-    policy hides, and the engine's text for a failure quotes the value. A query that reads a
-    table under such a policy therefore never shows that text; the reader gets one fixed
-    message, of the same kind (an invalid query). Every other failure, among them the reader's
-    own binder errors, a catalog error, a cancel and a transient error, is returned as it is.
+    policy hides, and the engine's text for a failure can quote a value. A query that reads a
+    table under such a policy therefore keeps that text only for the kinds known to carry no
+    stored value (binder, catalog and parser errors, see `_KEEPS_ITS_TEXT`); every other
+    failure of the engine gets one fixed message, of the same kind (an invalid query). What is
+    not the engine's text (a cancel, a timeout, a transient or memory error, the worker's own
+    wording) is returned as it is.
 
     Parameters
     ----------
@@ -364,9 +369,7 @@ def _without_the_value(failure: LakanaError, restricted: frozenset[str]) -> Laka
     if not restricted or type(failure) is not ValidationError:
         return failure
     text = str(failure)
-    if _VALUE_ERROR.match(text) is None and not text.startswith(
-        f"Query failed: {UNCONVERTED_VALUE}"
-    ):
+    if not text.startswith("Query failed: ") or _KEEPS_ITS_TEXT.match(text) is not None:
         return failure
     only = next(iter(restricted)) if len(restricted) == 1 else None
     return ValidationError(policy_read_failure(only))

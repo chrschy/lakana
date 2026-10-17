@@ -131,18 +131,29 @@ and `/api/v1/column-masks` in the REST API.
 ## An expression must not fail on any stored value
 
 A mask runs on every stored value, also on the ones it hides. Lakana checks the expression when you
-create it, but not against the values in the table. If it fails on one, for example a conversion of text
-that is not a number, everyone it applies to gets this message instead of the database's, which would
-quote the value:
+create it, but not against the values in the table. If it fails on one, for example because it
+compares a text column with a number, everyone it applies to gets this message, and the query
+engine's text is not shown:
 
 <!-- output -->
 ```text
-The query failed on a value it could not convert or compute, under a row filter or column mask on `gold.customers`; the value is not shown. Check the casts and functions in the query. If the query has none that could fail, a row filter or column mask on the table fails on some stored values: ask an administrator to check it (for example with try_cast or TRY).
+The query failed on a value it could not convert or compute, under a row filter or column mask on `gold.customers`; the value is not shown. Check the casts and functions in the query. If it has none that could fail, a row filter or column mask on the table compares a value with one of another type: ask an administrator to check it.
 ```
 
-The same message appears when a person's own query fails on a value under a row filter or column mask. Where a conversion
-may meet a value it cannot convert, write it so that it returns `NULL` instead of failing: `try_cast`,
-`try_strptime` or `TRY(...)`. A query on a table with no filter or mask keeps the database's own message.
+Write the expression so that it compares like with like:
+
+- Quote the value for a text column: `code = '5'`, not `code = 5`.
+- Compare columns only with columns of the same type.
+- Use only a BOOLEAN column on its own as a condition.
+
+A mask cannot convert a value (`CAST`, `try_cast` and `TRY` are refused). If a comparison needs
+the value in another type, store the column in that type, or add a column of that type and
+mask that one. To change an expression, revoke it and create the new one.
+
+The same message appears when a person's own query fails on a value of a table under a filter or
+mask. In their own query, `try_cast`, `try_strptime` and `TRY(...)` return
+`NULL` instead of failing. Binder, catalog and parser errors, and errors on a table with no filter
+or mask, are shown as before.
 
 ## When Lakana refuses
 

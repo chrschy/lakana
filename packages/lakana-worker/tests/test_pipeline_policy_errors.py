@@ -18,7 +18,7 @@ from sqlalchemy import update
 from sqlalchemy.orm import Session
 
 from lakana_core.auth import AllowAllAuthorization, PrincipalRef
-from lakana_core.catalog.query_service import QueryService
+from lakana_core.catalog.query_service import QueryService, WriteTarget
 from lakana_core.catalog.service import CatalogService
 from lakana_core.config import StorageConfig
 from lakana_core.identifiers import NamespacePath, TableRef
@@ -94,6 +94,7 @@ def catalog(session: Session, principal: PrincipalRef, tmp_path: Path) -> Catalo
             "secret": pa.array([_SECRET], pa.string()),
             "num": pa.array([_BIG], pa.int32()),
             "code": pa.array([_SECRET], pa.string()),
+            "low": pa.array([-(2**31)], pa.int32()),
         }
     )
     for name in ("people", "plain"):
@@ -117,8 +118,8 @@ def _mask(
     """Put a column mask on `gold.people` for ``admin``, with any expression.
 
     The service refuses the expressions these tests need (a cast, a product), so the mask is
-    created with ``NULL`` and the stored expression is then replaced: a mask created by an
-    earlier version, or edited in the database, can hold any text.
+    created with ``NULL`` and the stored expression is then replaced, as an edit in the database
+    can do.
 
     Parameters
     ----------
@@ -273,13 +274,51 @@ def test_a_failing_row_filter_shows_the_fixed_message(
     _assert_fixed(run, "gold.people", captured.out + captured.err + caplog.text)
 
 
+@pytest.mark.parametrize("expression", ["code = 5", "code = num", "code", "NOT code", "-low > 0"])
 def test_a_row_filter_the_service_accepts_can_fail_on_a_stored_value(
-    session: Session, principal: PrincipalRef, catalog: CatalogService
+    session: Session, principal: PrincipalRef, catalog: CatalogService, expression: str
 ) -> None:
-    """Comparing a text column with a number converts the text, which fails on the value."""
-    _filter(session, principal, catalog, "people", "code = num", stored=False)
+    """A text column compared with a number, or used as a condition, fails on the value."""
+    _filter(session, principal, catalog, "people", expression, stored=False)
 
     run = _query(session, principal, "SELECT id FROM gold.people")
+
+    _assert_fixed(run, "gold.people", "")
+
+
+def test_a_column_mask_the_service_accepts_can_fail_on_a_stored_value(
+    session: Session, principal: PrincipalRef, catalog: CatalogService
+) -> None:
+    """A mask that compares a text column with a number fails on the stored value."""
+    ColumnMaskService(session, AllowAllAuthorization(), catalog).create(
+        principal,
+        principal="admin",
+        environment="dev",
+        namespace="gold",
+        table="people",
+        column="secret",
+        expression='"secret" = "num"',
+    )
+
+    run = _query(session, principal, "SELECT secret FROM gold.people")
+
+    _assert_fixed(run, "gold.people", "")
+
+
+def test_an_asset_run_under_a_failing_filter_records_the_fixed_message(
+    session: Session, principal: PrincipalRef, catalog: CatalogService
+) -> None:
+    """A write that reads a policy-bound table records the same message."""
+    _filter(session, principal, catalog, "people", "code = 5", stored=False)
+    run = QueryService(session, AllowAllAuthorization()).submit_write(
+        principal,
+        "dev",
+        "SELECT id FROM gold.people",
+        WriteTarget(table="gold.copy", mode=WriteMode.CREATE),
+    )
+
+    run_one(session, run.id, AllowAllAuthorization())
+    session.refresh(run)
 
     _assert_fixed(run, "gold.people", "")
 
@@ -312,10 +351,10 @@ def test_a_cast_of_the_readers_own_query_under_a_policy_shows_the_fixed_message(
     _assert_fixed(run, "gold.people", "")
 
 
-def test_a_conversion_error_on_a_table_without_a_policy_keeps_the_engine_text(
+def test_a_conversion_error_on_a_table_without_a_policy_keeps_the_text_of_the_field_id_read(
     session: Session, principal: PrincipalRef, catalog: CatalogService
 ) -> None:
-    """The data is the reader's own: the text stays as it was."""
+    """The data is the reader's own: the text is the field-id read's, as without this fix."""
     _mask(session, principal, catalog, "secret", "NULL")
 
     run = _query(session, principal, "SELECT CAST(code AS INTEGER) FROM gold.plain")
@@ -328,7 +367,7 @@ def test_a_conversion_error_on_a_table_without_a_policy_keeps_the_engine_text(
 def test_a_binder_error_under_a_policy_keeps_its_message(
     session: Session, principal: PrincipalRef, catalog: CatalogService
 ) -> None:
-    """Only the kinds that quote a value are replaced."""
+    """A binder error names no stored value, so its text stays."""
     _mask(session, principal, catalog, "secret", "NULL")
 
     run = _query(session, principal, "SELECT nope FROM gold.people")
@@ -337,3 +376,26 @@ def test_a_binder_error_under_a_policy_keeps_its_message(
     assert run.error_message is not None
     assert run.error_message.startswith("Query failed: Binder Error")
     assert "The query failed on a value" not in run.error_message
+
+
+def test_a_failure_of_a_kind_that_is_not_listed_is_replaced_under_a_policy(
+    session: Session, principal: PrincipalRef, catalog: CatalogService
+) -> None:
+    """Only binder, catalog and parser errors keep their text; any other kind is replaced."""
+    _mask(session, principal, catalog, "secret", "NULL")
+
+    run = _query(session, principal, "SELECT timezone('HIDDEN-X', now()) FROM gold.people")
+
+    _assert_fixed(run, "gold.people", "")
+
+
+def test_a_catalog_error_under_a_policy_keeps_its_message(
+    session: Session, principal: PrincipalRef, catalog: CatalogService
+) -> None:
+    """A function that does not exist is a catalog error: its text stays."""
+    _mask(session, principal, catalog, "secret", "NULL")
+
+    run = _query(session, principal, "SELECT no_such_function(id) FROM gold.people")
+
+    assert run.error_message is not None
+    assert run.error_message.startswith("Query failed: Catalog Error")

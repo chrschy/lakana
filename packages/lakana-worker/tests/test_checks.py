@@ -806,7 +806,7 @@ def test_a_check_under_a_failing_mask_has_the_fixed_text_in_its_error(
         column="name",
         expression="NULL",
     )
-    # The service refuses a cast; a stored expression can hold one all the same.
+    # The service refuses a cast; an edit in the database can store one.
     session.execute(update(ColumnMask).values(expression="CAST(name AS INTEGER) || 'x'"))
     session.commit()
 

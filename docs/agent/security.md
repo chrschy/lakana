@@ -2301,12 +2301,12 @@ work.
 - **No stored value in an error on a policy-bound read.** A row filter or column mask
   expression runs on every stored value, hidden ones included, and the query engine's text for a
   failure quotes the value. When a query reads at least one table with a filter or mask applied
-  to the reader, an error of the kind Conversion, Invalid Input or Out of Range is replaced, in
-  full, by the fixed message of `lakana_core.policy.read_errors.policy_read_failure` (it names the
+  to the reader, a failure of the query engine keeps its text only for the kinds known to carry no
+  stored value (Binder, Catalog, Parser); every other one is replaced, in full, by the fixed message of `lakana_core.policy.read_errors.policy_read_failure` (it names the
   table when exactly one has a policy). The parent does it, in `_without_the_value` of
   `lakana_worker/pipeline.py`, from the error document's text, so the query child knows nothing of
   policies; it covers ad-hoc queries, asset runs, checks and views alike, and the stored
-  `error_message` and a check's `error` hold the fixed text. Other kinds keep their handling. A
+  `error_message` and a check's `error` hold the fixed text. Cancellation, timeout, transient and memory errors keep their handling. A
   query that reads no policy-bound table keeps the engine's text. A new error path on a policy-bound
   read goes through the same function.
 - **A read at the snapshot of a check shows only the columns the table has now.**

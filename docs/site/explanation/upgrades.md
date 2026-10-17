@@ -96,10 +96,8 @@ Each cell is a summary. The page named in the last column has the detail. The ch
 ### Errors under a row filter or column mask
 
 No migration. A query that reads a table under a row filter or column mask no longer shows the
-database's text for a conversion or computation failure (`Conversion Error`, `Invalid Input Error`,
-`Out of Range Error`): the run's error, and a check's error, hold one fixed message that names
-the table and does not show the value. Other errors, and the same failures on a table with no filter or
-mask, keep their text.
+database's text for a failure, except binder, catalog and parser errors: the run's error, and a check's error, hold one fixed message that names
+the table and does not show the value. Other errors, and errors on a table with no filter or mask, keep their text.
 
 ### Columns can be qualified with the table's name
 

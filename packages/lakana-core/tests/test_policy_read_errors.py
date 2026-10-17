@@ -13,7 +13,8 @@ def test_the_message_names_the_table_and_says_what_to_do() -> None:
 
     assert "under a row filter or column mask on `gold.people`; the value is not shown." in named
     assert "on one of the tables; the value is not shown." in unnamed
-    assert "try_cast or TRY" in named
+    assert "compares a value with one of another type" in named
+    assert "try_cast" not in named
     assert "`gold.pe\\nple`" in policy_read_failure("gold.pe\nple")
 
 

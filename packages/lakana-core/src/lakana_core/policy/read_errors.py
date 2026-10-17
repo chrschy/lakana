@@ -15,9 +15,9 @@ POLICY_READ_FAILED_PREFIX = "The query failed on a value it could not convert or
 
 _UNDER = ", under a row filter or column mask on "
 _ADVICE = (
-    "; the value is not shown. Check the casts and functions in the query. If the query has "
-    "none that could fail, a row filter or column mask on the table fails on some stored "
-    "values: ask an administrator to check it (for example with try_cast or TRY)."
+    "; the value is not shown. Check the casts and functions in the query. If it has none that "
+    "could fail, a row filter or column mask on the table compares a value with one of another "
+    "type: ask an administrator to check it."
 )
 
 
