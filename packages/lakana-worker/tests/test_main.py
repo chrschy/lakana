@@ -19,7 +19,7 @@ from unittest import mock
 import pytest
 
 from lakana_core.projects.limits import DeployLimits
-from lakana_worker import deploy_sweep
+from lakana_worker import deploy_sweep, pipeline
 from lakana_worker.__main__ import configure_logging, main, make_worker_id
 from lakana_worker.python_support import PythonSupport
 from lakana_worker.python_tasks import PythonRuntime
@@ -833,6 +833,23 @@ def test_main_installs_the_drain_for_running_queries(
     assert len(installed) == 1
     assert installed[0][0] is poll.call_args.kwargs["drain"]
     assert installed[0][1] == pytest.approx(7.0)
+
+
+def test_main_installs_the_maintenance_timeout_from_the_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`LAKANA_RUN__MAINTENANCE_TIMEOUT` reaches the pipeline's deadline."""
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{tmp_path}/lakana.db")
+    monkeypatch.setenv("LAKANA_RUN__MAINTENANCE_TIMEOUT", "7")
+    with (
+        mock.patch("lakana_worker.__main__.poll_forever"),
+        mock.patch("lakana_worker.__main__.SchedulerLoop") as scheduler_mock,
+        mock.patch("lakana_worker.__main__.signal.signal"),
+        mock.patch("lakana_worker.__main__.RunEngine"),
+    ):
+        scheduler_mock.return_value.start.return_value.is_alive.return_value = False
+        main()
+    assert pytest.approx(7.0) == pipeline._MAINTENANCE_TIMEOUT
 
 
 _CHILD_TIMEOUT_SECONDS = 120

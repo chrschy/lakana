@@ -11,6 +11,7 @@ mode's API and worker processes can share one database file.
 
 import logging
 import os
+import ssl
 import uuid
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
@@ -18,9 +19,9 @@ from typing import cast
 
 import pytest
 from sqlalchemy import create_engine as sqlalchemy_create_engine
-from sqlalchemy import select, text, update
+from sqlalchemy import event, select, text, update
 from sqlalchemy.engine.interfaces import DBAPIConnection
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from lakana_core.config import DatabaseConfig
@@ -457,3 +458,94 @@ def test_a_connection_that_cannot_even_roll_back_does_not_stop_the_start(
     with caplog.at_level(logging.WARNING, logger="lakana_core.db"):
         _keepalive_listener(60)(_dbapi(connection), None)
     assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
+
+
+def test_a_pre_ping_that_the_driver_answers_with_a_raw_reset_replaces_the_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """pg8000 raises a bare `ConnectionResetError` from a ping; the pool must replace, not raise."""
+    seen: list[object] = []
+
+    def reset_once(self: object, dbapi_connection: object) -> bool:
+        seen.append(dbapi_connection)
+        if len(seen) == 1:
+            raise ConnectionResetError("Connection reset by peer")
+        return True
+
+    monkeypatch.setattr(type(_probe_dialect()), "do_ping", reset_once)
+    engine = create_engine(DatabaseConfig(url=f"sqlite:///{tmp_path}/lakana.db"))
+    try:
+        with engine.connect() as connection:
+            first = connection.connection.dbapi_connection
+        with engine.connect() as connection:  # the ping on this checkout raises the reset
+            assert connection.execute(text("SELECT 1")).scalar_one() == 1
+            assert connection.connection.dbapi_connection is not first
+    finally:
+        engine.dispose()
+
+
+def test_a_raw_reset_during_a_statement_invalidates_the_connection(tmp_path: Path) -> None:
+    """The statement that meets the reset fails, but the pool must not keep the dead connection."""
+    engine = create_engine(DatabaseConfig(url=f"sqlite:///{tmp_path}/lakana.db"))
+    try:
+
+        def reset(*_args: object) -> None:
+            raise ConnectionResetError("Connection reset by peer")
+
+        with engine.connect() as connection:
+            event.listen(engine, "before_cursor_execute", reset)
+            with pytest.raises(ConnectionResetError):
+                connection.execute(text("SELECT 1"))
+            assert connection.invalidated
+            event.remove(engine, "before_cursor_execute", reset)
+        with engine.connect() as connection:
+            assert connection.execute(text("SELECT 1")).scalar_one() == 1
+    finally:
+        engine.dispose()
+
+
+def test_an_ordinary_statement_error_does_not_invalidate_the_connection(tmp_path: Path) -> None:
+    """Only an `OSError` counts as a dead connection; a bad statement leaves it in the pool."""
+    engine = create_engine(DatabaseConfig(url=f"sqlite:///{tmp_path}/lakana.db"))
+    try:
+        with engine.connect() as connection:
+            with pytest.raises(OperationalError):
+                connection.execute(text("SELECT * FROM missing_table"))
+            assert not connection.invalidated
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [ssl.SSLCertVerificationError("bad certificate"), PermissionError(), FileNotFoundError()],
+)
+def test_a_local_or_trust_error_is_not_taken_for_a_dead_connection(
+    tmp_path: Path, error: OSError
+) -> None:
+    """A refused certificate or a missing file does not say the peer went away."""
+    engine = create_engine(DatabaseConfig(url=f"sqlite:///{tmp_path}/lakana.db"))
+    try:
+
+        def fail(*_args: object) -> None:
+            raise error
+
+        with engine.connect() as connection:
+            event.listen(engine, "before_cursor_execute", fail)
+            with pytest.raises(type(error)):
+                connection.execute(text("SELECT 1"))
+            assert not connection.invalidated
+            event.remove(engine, "before_cursor_execute", fail)
+    finally:
+        engine.dispose()
+
+
+def _probe_dialect() -> object:
+    """Return a SQLite dialect instance, to patch the class the engines under test use.
+
+    Returns
+    -------
+    object
+        A SQLite dialect.
+    """
+    return sqlalchemy_create_engine("sqlite://").dialect

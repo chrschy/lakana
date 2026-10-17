@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import itertools
 import os
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -25,6 +27,7 @@ from lakana_core.catalog.maintenance import (
     FAILED_SNAPSHOT_KEEP_DAYS,
     MAX_ORPHAN_AGE_HOURS,
     MIN_ORPHAN_AGE_HOURS,
+    MaintenanceStopped,
     old_failed_tags,
     referenced_paths,
     select_expired_snapshots,
@@ -1435,3 +1438,108 @@ def test_a_spared_snapshot_is_never_selected(
     assert oldest not in select_expired_snapshots(
         daily, now=later, keep_days=7, keep_last=1, spare={oldest}
     )
+
+
+def _stops_after(checks: int) -> Callable[[], bool]:
+    """Build a stop signal that lets `checks` questions pass and then says stop.
+
+    Parameters
+    ----------
+    checks
+        How many times it answers `False` first.
+
+    Returns
+    -------
+    Callable
+        The signal.
+    """
+    asked = itertools.count(1)
+    return lambda: next(asked) > checks
+
+
+def test_a_stop_before_anything_ran_changes_nothing_and_a_later_run_completes(
+    session: Session, principal: PrincipalRef, catalog: CatalogService
+) -> None:
+    """A deadline that is already over leaves the table as it was, and says so."""
+    ref = _ref("gold.daily")
+    location = _location(catalog, principal, "gold.daily")
+    stray = location / "data" / "stray.parquet"
+    stray.write_bytes(b"x")
+
+    with pytest.raises(MaintenanceStopped) as stopped:
+        catalog.maintain(principal, ref, now=_later(30), should_stop=_stops_after(0))
+
+    assert stopped.value.report.snapshots_expired == ()
+    assert stopped.value.report.files_deleted == 0
+    assert stray.exists()
+    assert len(catalog.load_table(principal, ref).metadata.snapshots) == 8
+    report = catalog.maintain(principal, ref, now=_later(30))
+    assert len(report.snapshots_expired) == 3
+    assert not stray.exists()
+
+
+def test_a_stopped_dry_run_writes_no_audit_row(
+    session: Session, principal: PrincipalRef, catalog: CatalogService
+) -> None:
+    """A dry run records nothing, stopped or not."""
+    with pytest.raises(MaintenanceStopped):
+        catalog.maintain(
+            principal, _ref("gold.daily"), dry_run=True, now=_later(30), should_stop=_stops_after(0)
+        )
+
+    assert (
+        session.execute(
+            select(AuditEvent).where(AuditEvent.event_type == AuditEventType.TABLE_MAINTAINED)
+        ).first()
+        is None
+    )
+
+
+def test_a_stop_after_the_expiry_skips_the_orphans_and_the_next_run_deletes_them(
+    session: Session, principal: PrincipalRef, catalog: CatalogService
+) -> None:
+    """The expiry is one commit; stopping after it leaves a valid table with its orphans."""
+    ref = _ref("gold.daily")
+    stray = _location(catalog, principal, "gold.daily") / "data" / "stray.parquet"
+    stray.write_bytes(b"x")
+
+    with pytest.raises(MaintenanceStopped) as stopped:
+        catalog.maintain(principal, ref, now=_later(30), should_stop=_stops_after(1))
+
+    assert len(stopped.value.report.snapshots_expired) == 3
+    assert stopped.value.report.files_deleted == 0
+    assert stray.exists()
+    loaded = catalog.load_table(principal, ref)
+    assert len(loaded.metadata.snapshots) == 5
+    assert StaticTable.from_metadata(loaded.metadata_location).scan().to_arrow().num_rows == 8
+    event = session.execute(
+        select(AuditEvent).where(AuditEvent.event_type == AuditEventType.TABLE_MAINTAINED)
+    ).scalar_one()
+    assert event.detail["stopped"] is True
+    resumed = catalog.maintain(principal, ref, now=_later(30))
+    assert resumed.snapshots_expired == ()
+    assert not stray.exists()
+
+
+def test_a_stop_between_files_keeps_what_was_deleted_and_the_next_run_finishes(
+    session: Session, principal: PrincipalRef, catalog: CatalogService
+) -> None:
+    """Orphans go one at a time; a stop between two leaves the rest for the next run."""
+    ref = _ref("gold.daily")
+    data = _location(catalog, principal, "gold.daily") / "data"
+    strays = [data / f"stray-{index}.parquet" for index in range(4)]
+    for stray in strays:
+        stray.write_bytes(b"x")
+
+    with pytest.raises(MaintenanceStopped) as stopped:
+        catalog.maintain(principal, ref, now=_later(30), should_stop=_stops_after(4))
+
+    assert stopped.value.report.files_deleted == 2
+    assert stopped.value.report.note is not None
+    assert "the next run removes the rest" in stopped.value.report.note
+    assert sum(stray.exists() for stray in strays) == 2
+    report = catalog.maintain(principal, ref, now=_later(30))
+    assert not any(stray.exists() for stray in strays)
+    assert report.files_deleted >= 2
+    loaded = catalog.load_table(principal, ref)
+    assert StaticTable.from_metadata(loaded.metadata_location).scan().to_arrow().num_rows == 8

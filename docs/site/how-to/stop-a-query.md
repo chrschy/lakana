@@ -151,6 +151,7 @@ does not cancel when you interrupt it: `client.sql` leaves the query running unl
 | What ends it | Status and cause | What the message says |
 |---|---|---|
 | The time limit (`LAKANA_QUERY_LIMITS__TIMEOUT_SECONDS`, 900 s) | `FAILED`, `timeout` | `Query exceeded the time limit (900 s). Aggregate or filter earlier, add a LIMIT, or ask the operator to raise LAKANA_QUERY_LIMITS__TIMEOUT_SECONDS.` A write says that storing the result counts toward the limit instead. The worker asks the query to stop first. If the query has not stopped after `LAKANA_QUERY_LIMITS__KILL_GRACE_SECONDS` (10 s), its process is ended and the message adds: `The query did not stop when asked and was ended after the grace period (10 s, LAKANA_QUERY_LIMITS__KILL_GRACE_SECONDS).` |
+| The time limit of a maintenance run (`LAKANA_RUN__MAINTENANCE_TIMEOUT`, 1800 s) | `FAILED`, `timeout` | `Maintenance ran past its time limit (1800 s) and stopped at a safe point; the table is consistent. Run maintenance on this table again to continue where it stopped, or ask the operator to raise LAKANA_RUN__MAINTENANCE_TIMEOUT.` See [A maintenance run past its time limit](#a-maintenance-run-past-its-time-limit). |
 | The worker's memory limit | `FAILED`, `out_of_memory` | `Query failed: this query made the worker exceed its memory limit (3686 MB) and was stopped.` and what to do: read or compute less, or ask the operator to raise the limit. The largest consumer is ended first: the worker compares every running query and every running Python task, so a large task can be ended instead of a query. See [Memory limits](deploy-with-compose.md#memory-limits). |
 | A worker that shuts down | `FAILED`, `cancelled` | `The query was stopped because the worker is shutting down. Run it again.` The worker gives a running query the drain grace first (`LAKANA_RUN__DRAIN_GRACE_SECONDS`, 20 s). Run the query again. |
 | A query process that ended unexpectedly | `FAILED`, `internal` | `Query failed: the query process ended without a complete result (exit status N). Nothing was stored. Run the query again; if it fails the same way, tell the operator: the worker's log has the details.` Or, when a signal from outside the worker ended it: `Query failed: the query process was ended from outside the worker (signal N). Nothing was stored.` followed by the advice to read or compute less, give the worker more memory, or run the query again. |
@@ -175,11 +176,25 @@ under that first reason, with the sentence that it was ended after the grace per
 | `not_found` | A table, namespace or environment it names does not exist, or you may not see it. |
 | `permission_denied` | You may not do what it asks, for example write to that table. |
 | `result_too_large` | The result is larger than the limit. Filter or aggregate earlier, or add a `LIMIT`. |
-| `timeout` | It ran longer than the time limit. |
+| `timeout` | It ran longer than the time limit, or, for a maintenance run, longer than `LAKANA_RUN__MAINTENANCE_TIMEOUT`. |
 | `out_of_memory` | The worker's memory limit was reached. |
 | `cancelled` | A cancel request, or a worker that shut down, stopped it. |
 | `worker_lost` | The worker that ran it was lost or lost its connection to the database. Run it again. |
 | `internal` | Anything else, such as a query process that ended without a result. The message says what to do. |
+
+## A maintenance run past its time limit
+
+A maintenance run (`lakana table maintain`) ends by itself after `LAKANA_RUN__MAINTENANCE_TIMEOUT`
+(30 minutes by default). The worker looks at the clock before it expires snapshots, before it looks
+for orphaned files and before it deletes each file, and stops at the first of these points after the
+limit. The run is `FAILED` with the cause `timeout`.
+
+- **The table is consistent.** Expiring snapshots is one commit, and files are deleted one by one,
+  so the table never sits half-changed. What was expired or deleted stays so; `lakana query status
+  ID --env dev` still shows the report of that part.
+- **Run maintenance on the table again.** The next run continues with the snapshots and files that
+  are left and finishes if it has the time. A very large table may need a few runs; ask the operator
+  to raise `LAKANA_RUN__MAINTENANCE_TIMEOUT` if one run is never enough.
 
 ## A worker that is lost
 
@@ -295,7 +310,9 @@ retried by itself.
   RUN; it is not a query of its own.` followed by the same advice. Cancel the run; see [Projects
   and deploys](projects.md).
 - **A maintenance run that has started.** A queued one is cancelled; one that has started cannot be
-  stopped while its worker is alive (once its worker is gone, a cancel ends it at once). The refusal says `Query run ID is a maintenance run that has already started. It cannot be
+  stopped while its worker is alive (once its worker is gone, a cancel ends it at once); it ends by
+  itself at the first safe point after `LAKANA_RUN__MAINTENANCE_TIMEOUT`, 30 minutes by default, as described under
+  [A maintenance run past its time limit](#a-maintenance-run-past-its-time-limit). The refusal says `Query run ID is a maintenance run that has already started. It cannot be
   stopped and ends by itself; follow it with: lakana query status ID --env dev`.
 - **The input query of a Python task.** A query that a Python task sends to load its inputs is an
   ordinary query, and you can cancel it. The task's attempt then fails as a failure it may retry

@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pyarrow as pa
 import pytest
+from pyiceberg.table import StaticTable
 from pyiceberg.table.refs import SnapshotRefType
 from pyiceberg.table.update import SetSnapshotRefUpdate
 from sqlalchemy import select
@@ -19,19 +20,21 @@ from lakana_core.auth import AllowAllAuthorization, PrincipalRef
 from lakana_core.catalog.maintenance import MaintenanceReport
 from lakana_core.catalog.query_service import QueryService
 from lakana_core.catalog.service import CatalogService, failed_snapshot_tag
-from lakana_core.config import StorageConfig
+from lakana_core.config import RunConfig, StorageConfig
 from lakana_core.identifiers import TableRef
 from lakana_core.models import (
     AuditEvent,
     AuditEventType,
     Principal,
     PrincipalType,
+    QueryErrorCause,
     QueryRunStatus,
     WriteMode,
 )
 from lakana_core.secrets.keys import EnvKeyProvider
 from lakana_core.secrets.service import SecretService
 from lakana_core.storage.resolver import StorageResolver
+from lakana_worker import pipeline
 from lakana_worker.pipeline import run_one
 
 
@@ -220,3 +223,89 @@ def test_a_maintenance_failure_never_leaks_a_storage_credential(
     assert "Listing failed:" in run.error_message
     assert "<redacted>" in run.error_message
     assert "MAINTENANCE_SECRET_MUST_NOT_LEAK" not in run.error_message
+
+
+def test_the_maintenance_timeout_defaults_to_thirty_minutes() -> None:
+    """The setting exists and its default works without configuration."""
+    assert RunConfig().maintenance_timeout == 1800
+
+
+def test_a_maintenance_run_past_its_deadline_stops_between_steps_and_the_next_run_finishes(
+    session: Session, principal: PrincipalRef, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The deadline ends the run after the expiry: a timeout failure that says how to go on."""
+    catalog = CatalogService(session, StorageResolver(session), AllowAllAuthorization())
+    catalog.create_environment(
+        principal,
+        name="dev",
+        storage=StorageConfig(scheme="file", root=f"file://{tmp_path}", options={}),
+    )
+    ref = TableRef.from_dotted("dev", "gold.daily")
+    for index, mode in enumerate([WriteMode.CREATE, WriteMode.APPEND, WriteMode.APPEND]):
+        data = pa.table({"id": pa.array([index], pa.int64())})
+        catalog.write_batches(
+            principal, ref, mode=mode, schema=data.schema, batches=data.to_batches()
+        )
+    stray = Path(catalog.load_table(principal, ref).metadata.location.removeprefix("file://"))
+    stray = stray / "data" / "stray.parquet"
+    stray.write_bytes(b"x")
+    real_maintain = CatalogService.maintain
+
+    def aged(self: CatalogService, p: PrincipalRef, ref: TableRef, **kwargs: object) -> object:
+        """Run the maintenance as if the files were old, passing the stop signal on.
+
+        Parameters
+        ----------
+        self
+            The catalog service.
+        p
+            The caller.
+        ref
+            The table.
+        **kwargs
+            The maintenance options, passed on.
+
+        Returns
+        -------
+        object
+            What the maintenance did.
+        """
+        return real_maintain(
+            self,
+            p,
+            ref,
+            now=datetime.now(UTC) + timedelta(days=30),
+            **kwargs,  # ty: ignore[invalid-argument-type]
+        )
+
+    monkeypatch.setattr(CatalogService, "maintain", aged)
+    # Time stands still for the start and the first question, then jumps past the limit.
+    ticks = iter([0.0, 0.0])
+    monkeypatch.setattr(pipeline, "_clock", lambda: next(ticks, 10_000.0))
+    monkeypatch.setattr(pipeline, "_MAINTENANCE_TIMEOUT", 60.0)
+    service = QueryService(session, AllowAllAuthorization())
+    run = service.submit_maintenance(principal, "dev", "gold.daily", keep_days=0, keep_last=1)
+
+    run_one(session, run.id, AllowAllAuthorization())
+    session.refresh(run)
+
+    assert run.status == QueryRunStatus.FAILED
+    assert run.error_cause == QueryErrorCause.TIMEOUT.value
+    assert run.error_message is not None
+    assert "LAKANA_RUN__MAINTENANCE_TIMEOUT" in run.error_message
+    assert "lakana table maintain dev gold.daily" in run.error_message
+    assert run.maintenance is not None
+    assert len(run.maintenance["report"]["snapshots_expired"]) == 2
+    assert run.maintenance["report"]["stopped"] is True
+    assert "next run" in run.maintenance["report"]["note"]
+    assert stray.exists()
+    loaded = catalog.load_table(principal, ref)
+    assert len(loaded.metadata.snapshots) == 1
+    assert StaticTable.from_metadata(loaded.metadata_location).scan().to_arrow().num_rows == 3
+
+    monkeypatch.setattr(pipeline, "_clock", lambda: 0.0)
+    again = service.submit_maintenance(principal, "dev", "gold.daily", keep_days=0, keep_last=1)
+    run_one(session, again.id, AllowAllAuthorization())
+    session.refresh(again)
+    assert again.status == QueryRunStatus.SUCCEEDED, again.error_message
+    assert not stray.exists()

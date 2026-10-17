@@ -40,6 +40,7 @@ from lakana_worker.executor import check_limits, install_drain, install_heartbea
 from lakana_worker.heartbeat import WorkerHeartbeat
 from lakana_worker.memory import resolve_limit, start_watchdog
 from lakana_worker.notify import DeliveryLoop, NotifySettings
+from lakana_worker.pipeline import install_maintenance_timeout
 from lakana_worker.poller import WorkerPool, poll_forever
 from lakana_worker.python_support import PythonSupport, detect, worker_cache_dir
 from lakana_worker.python_tasks import PythonRuntime, token_ttl
@@ -367,6 +368,7 @@ def main() -> None:
     drain = threading.Event()
     signal.signal(signal.SIGTERM, lambda signum, frame: drain.set())
     install_drain(drain, settings.run.drain_grace_seconds)
+    install_maintenance_timeout(settings.run.maintenance_timeout)
     runtime = _python_runtime(settings, python)
     limiter = DenialAuditLimiter(settings.denial_audit.per_principal_per_minute)
     authorization = functools.partial(_authorization, limiter=limiter)

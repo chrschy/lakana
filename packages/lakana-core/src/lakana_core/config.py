@@ -413,6 +413,10 @@ def _checked_server_url(value: str) -> str:
     return value.rstrip("/")
 
 
+DEFAULT_MAINTENANCE_TIMEOUT = 1800.0
+"""Seconds a maintenance run may take before it stops at a safe point (30 minutes)."""
+
+
 class RunConfig(BaseModel):
     """Operator settings of the run engine (`LAKANA_RUN__*`; Python assets too).
 
@@ -449,6 +453,10 @@ class RunConfig(BaseModel):
         behind (also at worker start), and between the sweeps of the artifact store that the
         worker holding the scheduler role runs (expired uploads, files and manifest objects
         no version names); 0 turns both off, and then nothing collects those leftovers.
+    maintenance_timeout
+        Seconds one `lakana table maintain` run may take. The worker checks the time between
+        steps and between files, stops at the first safe point, and fails the run with the
+        timeout cause; running maintenance again continues where it stopped.
     index_url
         An extra package index for the venv build (a `SecretStr`: it may carry a password).
     https_proxy
@@ -473,6 +481,7 @@ class RunConfig(BaseModel):
     venv_max_bytes: int = Field(default=5 * 1024**3, gt=0)
     kill_grace: float = Field(default=10.0, ge=0)
     sweep_interval: float = Field(default=3600.0, ge=0)
+    maintenance_timeout: float = Field(default=DEFAULT_MAINTENANCE_TIMEOUT, gt=0)
     index_url: SecretStr | None = None
     https_proxy: SecretStr | None = None
     no_proxy: str | None = None

@@ -22,7 +22,7 @@ from pyiceberg.io import FileIO
 from pyiceberg.table.metadata import TableMetadata
 from pyiceberg.table.refs import SnapshotRefType
 
-from lakana_core.errors import ValidationError
+from lakana_core.errors import LakanaError, ValidationError
 from lakana_core.storage.base import StoredObject
 from lakana_core.storage.resolver import is_owned_by_location_given_nested, is_within_location
 
@@ -134,6 +134,28 @@ class MaintenanceReport:
             "conflict": self.conflict,
             "tags_removed": list(self.tags_removed),
         }
+
+
+class MaintenanceStopped(LakanaError):
+    """A maintenance run was asked to stop and did, at a point that leaves the table consistent.
+
+    Parameters
+    ----------
+    report
+        What the run had done by then. Expired snapshots and deleted orphans stay so, and a
+        later run continues with what is left.
+    """
+
+    def __init__(self, report: MaintenanceReport) -> None:
+        """Keep the report of what was done.
+
+        Parameters
+        ----------
+        report
+            What the run had done by then.
+        """
+        super().__init__("Maintenance was stopped before it finished.")
+        self.report = report
 
 
 def select_expired_snapshots(

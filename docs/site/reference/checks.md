@@ -244,6 +244,12 @@ check older than 7 days` (`removed 2 tags of failed checks` for several). A dry 
 1 tag of a failed check older than 7 days`. The part is left out when no tag was removed. See [The tag of a failed
 check](#the-tag-of-a-failed-check).
 
+A maintenance run stops at the first safe point after `LAKANA_RUN__MAINTENANCE_TIMEOUT` (30
+minutes by default). It then fails with the cause `timeout`, and the table stays
+consistent; what it had expired or deleted stays so, and running `lakana table maintain` on the table
+again continues where it stopped. See [A maintenance run past its time
+limit](../how-to/stop-a-query.md#a-maintenance-run-past-its-time-limit).
+
 ### `lakana runs show` and `lakana run`
 
 After the table of tasks, both print one group for every task with checks. A group is a heading
