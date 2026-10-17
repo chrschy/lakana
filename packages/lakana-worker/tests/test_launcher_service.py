@@ -25,6 +25,7 @@ from lakana_worker.launcher.requests import (
     BuildRequest,
     CleanupRequest,
     Limits,
+    Refused,
     RunRequest,
     StatusRequest,
     StopRequest,
@@ -494,49 +495,109 @@ def test_an_ingestion_root_is_probed_by_a_container_that_is_then_removed(tmp_pat
         }
     ]
     assert probe["NetworkDisabled"] is True
-    assert probe["Cmd"] == ["/ingest/data", "/proc/self/mountinfo"]
+    assert probe["Cmd"] == ["/ingest/data", "/proc/self/mountinfo", "100000"]
     assert engine.containers == {}
 
 
-def test_start_refuses_an_ingestion_root_with_a_socket_and_never_names_its_path(
+def _reason(tmp_path: Path, engine: FakeEngine) -> str:
+    """Start with the root `data` and return why it was marked unusable.
+
+    Parameters
+    ----------
+    tmp_path
+        The state directory.
+    engine
+        The fake engine.
+
+    Returns
+    -------
+    str
+        The reason the launcher recorded for `data`.
+    """
+    return _roots(tmp_path, engine).unusable_roots["data"]
+
+
+def test_a_root_with_a_socket_is_unusable_and_its_reason_never_names_its_path(
     tmp_path: Path,
 ) -> None:
     """A read-only mount does not stop a task from connecting to a socket under it."""
-    with pytest.raises(StartError, match="ingestion root 'data' holds a socket") as caught:
-        _roots(tmp_path, FakeEngine(probe_exits={"data": 4}))
-    assert "/srv/data" not in str(caught.value) and "INGESTION_ROOTS" in str(caught.value)
+    reason = _reason(tmp_path, FakeEngine(probe_exits={"data": 4}))
+
+    assert "ingestion root 'data' holds a socket" in reason
+    assert "/srv/data" not in reason and "INGESTION_ROOTS" in reason
 
 
-def test_start_refuses_an_ingestion_root_that_is_a_system_mount(tmp_path: Path) -> None:
+def test_a_root_that_is_a_system_mount_is_unusable(tmp_path: Path) -> None:
     """A root behind a symlink to /proc, /sys or /dev would hand the host to every task."""
-    with pytest.raises(StartError, match="proc, sysfs or devtmpfs mount") as caught:
-        _roots(tmp_path, FakeEngine(probe_exits={"data": 3}))
-    assert "ingestion root 'data'" in str(caught.value)
+    reason = _reason(tmp_path, FakeEngine(probe_exits={"data": 3}))
+
+    assert "proc, sysfs or devtmpfs" in reason and "ingestion root 'data'" in reason
 
 
-def test_start_refuses_an_ingestion_root_too_big_to_check(tmp_path: Path) -> None:
-    """A root the probe could not walk to its end is refused, and the message says why."""
-    with pytest.raises(StartError, match="ingestion root 'data' has more than 100000 entries"):
-        _roots(tmp_path, FakeEngine(probe_exits={"data": 5}))
+def test_a_root_past_the_entry_cap_is_unusable_and_the_reason_names_the_setting(
+    tmp_path: Path,
+) -> None:
+    """The cap is a setting, and the message says which."""
+    reason = _reason(tmp_path, FakeEngine(probe_exits={"data": 5}))
+
+    assert "ingestion root 'data' has more than 100000 entries" in reason
+    assert "LAKANA_LAUNCHER__PROBE_MAX_ENTRIES" in reason
 
 
-def test_start_refuses_an_ingestion_root_with_what_the_probe_cannot_read(tmp_path: Path) -> None:
-    """An unreadable directory or an `lstat` error fails the root, naming it and not its path."""
-    with pytest.raises(
-        StartError, match="ingestion root 'data' holds something the task user"
-    ) as c:
-        _roots(tmp_path, FakeEngine(probe_exits={"data": 6}))
-    assert "/srv/data" not in str(c.value)
+def test_the_probe_gets_the_entry_cap_from_the_settings(tmp_path: Path) -> None:
+    """The container's script reads the cap as its third argument."""
+    engine = FakeEngine()
+
+    _started(engine, tmp_path, ingestion_roots={"data": "/srv/data"}, probe_max_entries=7)
+
+    assert engine.created("probe")[-1]["Cmd"] == ["/ingest/data", "/proc/self/mountinfo", "7"]
 
 
-def test_start_refuses_an_ingestion_root_that_could_not_be_checked(tmp_path: Path) -> None:
-    """Any other probe result is a refusal: an unchecked root is not a safe one."""
-    with pytest.raises(StartError, match="ingestion root 'data' could not be checked"):
-        _roots(tmp_path, FakeEngine(probe_exits={"data": 1}))
+def test_a_root_with_something_unreadable_is_unusable_and_the_reason_says_what_to_do(
+    tmp_path: Path,
+) -> None:
+    """`lost+found` at the top of a filesystem is the usual cause."""
+    reason = _reason(tmp_path, FakeEngine(probe_exits={"data": 6}))
+
+    assert "ingestion root 'data' holds something the task user" in reason
+    assert "lost+found" in reason and "subdirectory" in reason and "10001" in reason
+    assert "/srv/data" not in reason
 
 
-def test_start_names_docker_when_it_refuses_an_ingestion_probe(tmp_path: Path) -> None:
-    """A root that does not exist on the host fails the probe's create; the message says so."""
+def test_a_root_that_could_not_be_checked_is_unusable(tmp_path: Path) -> None:
+    """Any other probe result marks the root: an unchecked root is not a safe one."""
+    reason = _reason(tmp_path, FakeEngine(probe_exits={"data": 1}))
+
+    assert "ingestion root 'data' could not be checked" in reason
+
+
+def test_the_launcher_starts_with_an_unusable_root_and_refuses_only_the_requests_naming_it(
+    tmp_path: Path,
+) -> None:
+    """Every task that names no such root keeps working; the refusal carries the reason."""
+    engine = FakeEngine(probe_exits={"data": 6})
+    launcher = _roots(tmp_path, engine)
+
+    with pytest.raises(Refused, match="ingestion root 'data' holds something the task user"):
+        launcher.run(replace(_run(), roots=("data",)), lambda line: None)
+
+    assert engine.created("task") == [] and launcher._live == {}
+    assert launcher.run(_run(), lambda line: None)["exit"] == 0
+
+
+def test_a_usable_root_still_works_beside_an_unusable_one(tmp_path: Path) -> None:
+    """The marking is per root."""
+    engine = FakeEngine(probe_exits={"bad": 4})
+    launcher = _started(engine, tmp_path, ingestion_roots={"good": "/srv/good", "bad": "/srv/bad"})
+
+    assert set(launcher.unusable_roots) == {"bad"}
+    assert launcher.run(replace(_run(), roots=("good",)), lambda line: None)["exit"] == 0
+
+
+def test_a_probe_docker_refuses_marks_the_root_unusable_with_dockers_reason(
+    tmp_path: Path,
+) -> None:
+    """A root that does not exist on the host fails the probe's create; the reason says so."""
     engine = FakeEngine()
     _intercept(
         engine,
@@ -546,12 +607,15 @@ def test_start_names_docker_when_it_refuses_an_ingestion_probe(tmp_path: Path) -
         (400, {"message": "bind source path does not exist"}),
     )
 
-    with pytest.raises(StartError, match="cannot check ingestion root 'data'") as caught:
-        _roots(tmp_path, engine)
-    assert "bind source path does not exist" in str(caught.value)
+    reason = _reason(tmp_path, engine)
+
+    assert "cannot check ingestion root 'data'" in reason
+    assert "bind source path does not exist" in reason
 
 
-def test_start_names_the_root_when_its_probe_does_not_start(tmp_path: Path) -> None:
+def test_a_probe_that_does_not_start_marks_the_root_unusable_and_is_removed(
+    tmp_path: Path,
+) -> None:
     """Docker may accept the create and refuse the start (a missing source, a bad mount)."""
     engine = FakeEngine()
     _intercept(
@@ -560,13 +624,13 @@ def test_start_names_the_root_when_its_probe_does_not_start(tmp_path: Path) -> N
         (400, {"message": "mount denied"}),
     )
 
-    with pytest.raises(StartError, match="cannot check ingestion root 'data'") as caught:
-        _roots(tmp_path, engine)
-    assert "mount denied" in str(caught.value)
+    reason = _reason(tmp_path, engine)
+
+    assert "cannot check ingestion root 'data'" in reason and "mount denied" in reason
     assert engine.containers == {}
 
 
-def _probe(root: Path, mountinfo: Path, script: str = INGEST_PROBE_SCRIPT) -> int:
+def _probe(root: Path, mountinfo: Path, limit: int = 100000) -> int:
     """Run the ingestion probe's script on the host, as the container would run it.
 
     Parameters
@@ -575,8 +639,8 @@ def _probe(root: Path, mountinfo: Path, script: str = INGEST_PROBE_SCRIPT) -> in
         The directory to check.
     mountinfo
         The mountinfo file to read.
-    script
-        The script.
+    limit
+        The entry cap, as the launcher passes it.
 
     Returns
     -------
@@ -584,7 +648,7 @@ def _probe(root: Path, mountinfo: Path, script: str = INGEST_PROBE_SCRIPT) -> in
         Its exit status.
     """
     return subprocess.run(
-        [sys.executable, "-I", "-c", script, str(root), str(mountinfo)],
+        [sys.executable, "-I", "-c", INGEST_PROBE_SCRIPT, str(root), str(mountinfo), str(limit)],
         check=False,
         capture_output=True,
     ).returncode
@@ -657,9 +721,8 @@ def test_the_probe_script_stops_walking_after_a_bound(
     monkeypatch.chdir(root / "z")
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
         listener.bind("s.sock")
-        assert "_LIMIT = 100000" in INGEST_PROBE_SCRIPT
         assert _probe(root, info) == 4
-        assert _probe(root, info, INGEST_PROBE_SCRIPT.replace("_LIMIT = 100000", "_LIMIT = 5")) == 5
+        assert _probe(root, info, limit=5) == 5
 
 
 def test_the_probe_script_refuses_what_it_cannot_read(
@@ -1189,10 +1252,35 @@ def test_a_probe_failure_never_names_a_host_path(tmp_path: Path) -> None:
         (400, {"message": "bind source path does not exist: /srv/data"}),
     )
 
-    with pytest.raises(StartError) as caught:
-        _roots(tmp_path, engine)
+    assert "/srv/data" not in _reason(tmp_path, engine)
 
-    assert "/srv/data" not in str(caught.value)
+
+def test_any_other_answer_to_the_version_request_is_not_called_an_api_problem(
+    tmp_path: Path,
+) -> None:
+    """A 500, or something that is not Docker, has another cause and another next step."""
+    engine = FakeEngine()
+    _intercept(engine, lambda m, p, b: p == "/version", (500, {"message": "daemon is starting"}))
+
+    with pytest.raises(StartError, match="answered status 500") as caught:
+        _started(engine, tmp_path)
+
+    assert "daemon is starting" in str(caught.value)
+    assert "API version" not in str(caught.value)
+
+
+def test_redaction_replaces_whole_path_components_only(tmp_path: Path) -> None:
+    """`/srv` is a root; `/srv2` and `/x/srv` are other places."""
+    launcher = _started(
+        FakeEngine(), tmp_path, ingestion_roots={"data": "/srv", "other": "/srv/other"}
+    )
+
+    redacted = launcher.redact("at /srv2/a, /x/srv/b, /srv/other/c, /srv: and /srv.")
+
+    assert redacted == (
+        "at /srv2/a, /x/srv/b, ingestion root 'other'/c, ingestion root 'data': and "
+        "ingestion root 'data'."
+    )
 
 
 def test_an_engine_that_rejects_the_api_version_says_so_with_both_versions(tmp_path: Path) -> None:

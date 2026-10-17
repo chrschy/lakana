@@ -235,6 +235,9 @@ class _Handler(socketserver.StreamRequestHandler):
             result = self.server.launcher.handle(request, self._send)
         except _CallerGone:
             return  # the run is cleaned up already
+        except Refused as exc:
+            self._try_send({"refused": self.server.launcher.redact(str(exc))})
+            return
         except EngineError as exc:
             logger.error("Docker failed: %s", exc)
             self._try_send({"error": self.server.launcher.redact(str(exc))})
@@ -278,7 +281,11 @@ class LauncherServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer)
             Its address (a Unix socket has none).
         """
         if self.slots.acquire(blocking=False):
-            super().process_request(request, client_address)
+            try:
+                super().process_request(request, client_address)
+            except BaseException:
+                self.slots.release()  # no thread was started to give the slot back
+                raise
             return
         with contextlib.suppress(OSError):
             request.settimeout(0.5)
@@ -348,8 +355,10 @@ def _check_directory(directory: Path) -> None:
             "volume there"
         ) from None
     fix = (
-        f"The directory {directory} must be root-owned with mode 3770 (the launcher image "
-        "prepares it); recreate the volume from the current image."
+        f"The directory {directory} must be root-owned with mode 3770, which the launcher image "
+        "prepares. Mount the volume at /run/lakana-launcher in both services (launcher and "
+        "worker), then run `docker compose down` and `docker volume rm <project>_launcher-socket` "
+        "so the next start creates it from the image."
     )
     if info.st_uid != _ROOT_UID:
         raise StartError(f"The socket directory must belong to root. {fix}")

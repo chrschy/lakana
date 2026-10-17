@@ -585,6 +585,36 @@ def test_serve_refuses_something_that_is_not_a_socket_at_the_socket_path(
         serve(shared)
 
 
+def test_a_run_naming_an_unusable_root_is_refused_with_the_reason(served: Served) -> None:
+    """The caller gets a `refused` line; nothing else is affected."""
+    served.launcher.unusable_roots["data"] = "ingestion root 'data' holds a socket"
+    served.launcher.settings = settings(Path("."), ingestion_roots={"data": "/srv/data"})
+
+    answer = _call({**RUN, "token": served.token, "roots": ["data"]})
+
+    assert answer == [{"refused": "ingestion root 'data' holds a socket"}]
+
+
+def test_a_slot_is_given_back_when_its_thread_cannot_start(
+    served: Served, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed `Thread.start` must not use up one of the 128 slots for ever."""
+
+    def fail(self: object, request: object, client_address: object) -> None:
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(server_module.socketserver.ThreadingMixIn, "process_request", fail)
+    before = served.server.slots._value
+    ours, theirs = socket.socketpair()
+
+    with pytest.raises(RuntimeError, match="start new thread"):
+        served.server.process_request(ours, None)
+
+    assert served.server.slots._value == before
+    ours.close()
+    theirs.close()
+
+
 @pytest.mark.parametrize(
     ("mode", "owner_is_root", "text"),
     [
@@ -602,5 +632,9 @@ def test_serve_refuses_a_directory_that_lost_the_image_protections(
     if not owner_is_root:
         monkeypatch.setattr(server_module, "_ROOT_UID", os.getuid() + 1)
 
-    with pytest.raises(StartError, match=text):
+    with pytest.raises(StartError, match=text) as caught:
         serve(shared)
+
+    assert "Mount the volume at /run/lakana-launcher in both services" in str(caught.value)
+    assert "docker compose down" in str(caught.value)
+    assert "docker volume rm <project>_launcher-socket" in str(caught.value)

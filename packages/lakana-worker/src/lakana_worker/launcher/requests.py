@@ -1226,13 +1226,12 @@ def probe_container_spec(settings: LauncherSettings, image: str) -> dict[str, An
 
 INGEST_PROBE_SCRIPT = """\
 import collections, os, stat, sys
-_LIMIT = 100000
 _SYSTEM = (
     "proc", "sysfs", "devtmpfs", "devpts", "debugfs", "tracefs", "securityfs", "cgroup",
     "cgroup2", "bpf", "efivarfs", "configfs", "pstore", "binfmt_misc", "fusectl", "mqueue",
     "hugetlbfs", "nsfs", "autofs",
 )
-root, mountinfo = sys.argv[1], sys.argv[2]
+root, mountinfo, _LIMIT = sys.argv[1], sys.argv[2], int(sys.argv[3])
 with open(mountinfo, encoding="utf-8", errors="replace") as handle:
     for line in handle:
         front, _, back = line.partition(" - ")
@@ -1267,9 +1266,9 @@ while queue:
         sys.exit(6)
 """
 """The script an ingestion-root probe runs, failing closed. Exit 3: a system mount (proc, sysfs,
-cgroup, debugfs and the like) at or below the root. 4: a socket. 5: more than 100000 entries, so
-part of the root was not looked at. 6: something that cannot be listed or examined. 0 otherwise.
-The walk is breadth-first and never follows a link."""
+cgroup, debugfs and the like) at or below the root. 4: a socket. 5: more entries than the cap
+(its third argument), so part of the root was not looked at. 6: something that cannot be listed
+or examined. 0 otherwise. The walk is breadth-first and never follows a link."""
 
 
 def ingestion_probe_spec(
@@ -1304,7 +1303,7 @@ def ingestion_probe_spec(
     return {
         "Image": image,
         "Entrypoint": ["/usr/local/bin/python", "-I", "-c", INGEST_PROBE_SCRIPT],
-        "Cmd": [f"/ingest/{name}", "/proc/self/mountinfo"],
+        "Cmd": [f"/ingest/{name}", "/proc/self/mountinfo", str(settings.probe_max_entries)],
         "User": settings.task_user,
         "NetworkDisabled": True,
         "Labels": labels(settings, "probe", f"ingest-{name}", "launcher"),

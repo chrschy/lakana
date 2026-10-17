@@ -7,7 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from lakana_worker.launcher.settings import LauncherSettings, SettingsError, load_settings
+from lakana_worker.launcher.settings import (
+    KNOWN_SETTINGS,
+    LauncherSettings,
+    SettingsError,
+    load_settings,
+)
 
 _IMAGES = '{"3.13": "ghcr.io/chrschy/lakana-task:0.14.0-py3.13"}'
 
@@ -78,6 +83,18 @@ def test_the_task_limits_are_settings() -> None:
     )
 
     assert (settings.max_memory_mb, settings.max_cpus, settings.max_pids) == (8192, 4.0, 512)
+
+
+def test_the_probe_cap_is_a_known_setting_with_a_default() -> None:
+    """A root with many files needs a higher cap, so it is a variable and a documented name."""
+    base = {"LAKANA_LAUNCHER__STACK": "lakana", "LAKANA_LAUNCHER__IMAGES": _IMAGES}
+
+    assert "PROBE_MAX_ENTRIES" in KNOWN_SETTINGS
+    assert load_settings(base).probe_max_entries == 100000
+    assert (
+        load_settings({**base, "LAKANA_LAUNCHER__PROBE_MAX_ENTRIES": "5000000"}).probe_max_entries
+        == 5000000
+    )
 
 
 def test_an_allowed_ingestion_root_is_kept() -> None:
@@ -159,6 +176,11 @@ def _roots(path: str) -> dict[str, str]:
             {**_BASE, "LAKANA_LAUNCHER__MAX_PIDS": "\u00b2"},
             "LAKANA_LAUNCHER__MAX_PIDS must be",
             id="pids-superscript",
+        ),
+        pytest.param(
+            {**_BASE, "LAKANA_LAUNCHER__PROBE_MAX_ENTRIES": "0"},
+            "LAKANA_LAUNCHER__PROBE_MAX_ENTRIES must be",
+            id="probe-cap-zero",
         ),
         pytest.param(
             {**_BASE, "LAKANA_LAUNCHER__MAX_CPUS": "0"},

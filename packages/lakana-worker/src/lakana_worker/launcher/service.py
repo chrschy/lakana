@@ -14,6 +14,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import socket
 import struct
 import threading
@@ -29,6 +30,7 @@ from lakana_worker.launcher.requests import (
     LABEL_STACK,
     BuildRequest,
     CleanupRequest,
+    Refused,
     Request,
     RunRequest,
     StatusRequest,
@@ -233,6 +235,7 @@ class Launcher:
         self.no_new_privileges = settings.no_new_privileges == "on"
         self._live: dict[str, _Live] = {}
         self._abandoned: set[str] = set()
+        self.unusable_roots: dict[str, str] = {}
         self._lock = threading.Lock()
         self._build_locks: dict[str, threading.Lock] = {}
 
@@ -252,13 +255,19 @@ class Launcher:
         status, version = self.engine.request("GET", "/version")
         text = str(version.get("Version", "")) if isinstance(version, dict) else ""
         head = text.split(".")[0]
-        if status != 200:
+        if status == 400:
             raise StartError(
                 f"Docker does not accept API version {API_VERSION.removeprefix('/v')}, the one "
                 f"this release of Lakana speaks (Docker Engine {MIN_ENGINE_MAJOR} or later): "
                 f"{self.redact(_message(version))}. API version 1.47 is not supported by this "
                 "Docker; upgrade Lakana to a release that supports it, or use a Docker Engine "
                 "that still serves this API version."
+            )
+        if status != 200:
+            raise StartError(
+                f"Docker answered status {status} to the version request: "
+                f"{self.redact(_message(version))}. Check that the socket mounted into the "
+                "launcher is Docker's, and `docker compose logs launcher`."
             )
         if not head.isdigit() or int(head) < MIN_ENGINE_MAJOR:
             raise StartError(
@@ -393,62 +402,80 @@ class Launcher:
     def _check_ingestion_roots(self) -> None:
         """Look at every allowed ingestion root from inside a container, as a task would.
 
-        Raises
-        ------
-        StartError
-            If a root is, or holds, a proc, sysfs or devtmpfs mount or a socket, or cannot be
-            checked. The message names the root, never its host path.
+        A root that fails is recorded in `unusable_roots` with the reason; the launcher starts
+        anyway, and only requests that name the root are refused.
         """
+        self.unusable_roots = {}
         for root in sorted(self.settings.ingestion_roots):
-            image = self._probe_image()
-            name = container_name(self.settings, "probe", f"ingest-{root}")
-            spec = ingestion_probe_spec(
-                self.settings, image, root, no_new_privileges=self.no_new_privileges
+            problem = self._root_problem(root)
+            if problem is not None:
+                self.unusable_roots[root] = problem
+                logger.warning("%s The launcher refuses requests that name it.", problem)
+
+    def _root_problem(self, root: str) -> str | None:
+        """Probe one ingestion root.
+
+        Parameters
+        ----------
+        root
+            The root's name.
+
+        Returns
+        -------
+        str or None
+            Why the root cannot be used (naming it, never its host path), or `None`.
+        """
+        image = self._probe_image()
+        name = container_name(self.settings, "probe", f"ingest-{root}")
+        spec = ingestion_probe_spec(
+            self.settings, image, root, no_new_privileges=self.no_new_privileges
+        )
+        setting = "(LAKANA_LAUNCHER__INGESTION_ROOTS)"
+        try:
+            code, refusal = self._run_probe(name, spec)
+        except EngineError as exc:
+            return (
+                f"cannot check ingestion root '{root}': {self.redact(str(exc))}; check that its "
+                f"directory exists on the host {setting}"
             )
-            try:
-                code, refusal = self._run_probe(name, spec)
-            except EngineError as exc:
-                raise StartError(
-                    f"cannot check ingestion root '{root}': {self.redact(str(exc))}; check that "
-                    "its directory exists on the host (LAKANA_LAUNCHER__INGESTION_ROOTS)"
-                ) from None
-            if refusal:
-                raise StartError(
-                    f"cannot check ingestion root '{root}': Docker could not start the probe: "
-                    f"{self.redact(refusal)}; check that its directory exists on the host "
-                    "(LAKANA_LAUNCHER__INGESTION_ROOTS)"
-                )
-            if code == _SPECIAL_MOUNT:
-                raise StartError(
-                    f"ingestion root '{root}' is, or holds, a proc, sysfs or devtmpfs mount; a "
-                    "task would see the host through it. Choose a plain data directory "
-                    "(LAKANA_LAUNCHER__INGESTION_ROOTS), not a link to one."
-                )
-            if code == _SOCKET_FOUND:
-                raise StartError(
-                    f"ingestion root '{root}' holds a socket; a read-only mount does not stop a "
-                    "task from connecting to it. Move the socket out of the directory or choose "
-                    "another one (LAKANA_LAUNCHER__INGESTION_ROOTS)."
-                )
-            if code == _TOO_MANY:
-                raise StartError(
-                    f"ingestion root '{root}' has more than 100000 entries, so it cannot be "
-                    "checked for sockets. Point the root at a smaller directory "
-                    "(LAKANA_LAUNCHER__INGESTION_ROOTS)."
-                )
-            if code == _UNREADABLE:
-                raise StartError(
-                    f"ingestion root '{root}' holds something the task user cannot list or "
-                    "examine, so it cannot be checked for sockets. Make every directory in it "
-                    "readable by the task user (10001), or choose another directory "
-                    "(LAKANA_LAUNCHER__INGESTION_ROOTS)."
-                )
-            if code != 0:
-                raise StartError(
-                    f"ingestion root '{root}' could not be checked (the probe ended with "
-                    f"{code if code is not None else 'no exit status'}); check its permissions "
-                    "and `docker compose logs launcher`"
-                )
+        if refusal:
+            return (
+                f"cannot check ingestion root '{root}': Docker could not start the probe: "
+                f"{self.redact(refusal)}; check that its directory exists on the host {setting}"
+            )
+        if code == _SPECIAL_MOUNT:
+            return (
+                f"ingestion root '{root}' is, or holds, a proc, sysfs or devtmpfs mount; a task "
+                f"would see the host through it. Choose a plain data directory {setting}, not a "
+                "link to one."
+            )
+        if code == _SOCKET_FOUND:
+            return (
+                f"ingestion root '{root}' holds a socket; a read-only mount does not stop a "
+                "task from connecting to it. Move the socket out of the directory or choose "
+                f"another one {setting}."
+            )
+        if code == _TOO_MANY:
+            return (
+                f"ingestion root '{root}' has more than {self.settings.probe_max_entries} "
+                "entries, so it was not checked for sockets. Raise "
+                "LAKANA_LAUNCHER__PROBE_MAX_ENTRIES, or point the root at a smaller directory "
+                f"{setting}."
+            )
+        if code == _UNREADABLE:
+            return (
+                f"ingestion root '{root}' holds something the task user cannot list or examine, "
+                "so it cannot be checked for sockets. `lost+found` at the top of a filesystem is "
+                "the usual cause: point the root at a subdirectory, or make the directories "
+                f"readable by uid 10001 {setting}."
+            )
+        if code != 0:
+            return (
+                f"ingestion root '{root}' could not be checked (the probe ended with "
+                f"{code if code is not None else 'no exit status'}); check its permissions and "
+                "`docker compose logs launcher`"
+            )
+        return None
 
     # --- operations ---------------------------------------------------------------------
 
@@ -494,12 +521,17 @@ class Launcher:
 
         Raises
         ------
+        Refused
+            If the run names an ingestion root that failed its start-up probe.
         EngineError
             If Docker refuses a step or the environment is not built; the container and network
             are removed first.
         Exception
             Whatever `emit` raises when the caller is gone; likewise.
         """
+        for root in request.roots:
+            if root in self.unusable_roots:
+                raise Refused(self.unusable_roots[root])
         name = container_name(self.settings, "task", request.task)
         live = self._register(name, request.kill_grace_seconds)
         try:
@@ -808,7 +840,9 @@ class Launcher:
         for name, path in sorted(
             self.settings.ingestion_roots.items(), key=lambda item: -len(item[1])
         ):
-            text = text.replace(path, f"ingestion root '{name}'")
+            # Whole path components only: `/srv` is not found inside `/srv2` or `/x/srv`.
+            pattern = rf"(?<![\w.-]){re.escape(path)}(?![\w-]|\.\w)"
+            text = re.sub(pattern, lambda _match, name=name: f"ingestion root '{name}'", text)
         return text
 
     def _kill(self, live: _Live) -> None:

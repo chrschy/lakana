@@ -74,6 +74,7 @@ KNOWN_SETTINGS = (
     "MAX_MEMORY_MB",
     "MAX_CPUS",
     "MAX_PIDS",
+    "PROBE_MAX_ENTRIES",
 )
 """The names after the prefix that the launcher reads."""
 _CONSTANT_NOW = frozenset(
@@ -158,6 +159,9 @@ class LauncherSettings:
         Ceiling of a request's CPUs.
     max_pids
         Ceiling of a request's process count.
+    probe_max_entries
+        Most entries the start-up probe looks at in one ingestion root; a root with more is
+        unusable until the cap is raised.
     work_volume
         The named volume of the worker's attempt directories; ``<stack>-task-work`` unless a
         test says otherwise. Not an environment variable.
@@ -176,6 +180,7 @@ class LauncherSettings:
     max_memory_mb: int = 65536
     max_cpus: float = 64.0
     max_pids: int = 32768
+    probe_max_entries: int = 100000
     docker_socket: Path = DOCKER_SOCKET
     state_dir: Path = STATE_DIR
     egress_key: Path = EGRESS_KEY
@@ -465,4 +470,5 @@ def load_settings(environ: Mapping[str, str]) -> LauncherSettings:
         max_memory_mb=_number(environ, "MAX_MEMORY_MB", 65536, 64, 1 << 24),
         max_cpus=float(_number(environ, "MAX_CPUS", 64, 1, 1024)),
         max_pids=_number(environ, "MAX_PIDS", 32768, 16, 4_194_304),
+        probe_max_entries=_number(environ, "PROBE_MAX_ENTRIES", 100000, 1, 1_000_000_000),
     )
