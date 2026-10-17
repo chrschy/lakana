@@ -28,22 +28,37 @@ def test_the_two_required_settings_and_the_defaults() -> None:
     assert (settings.max_memory_mb, settings.max_cpus, settings.max_pids) == (65536, 64.0, 32768)
 
 
-def test_only_what_a_person_needs_is_a_setting() -> None:
-    """Users, service names, paths of the stack and the like are constants, not variables."""
-    settings = load_settings(
-        {
-            "LAKANA_LAUNCHER__STACK": "lakana",
-            "LAKANA_LAUNCHER__IMAGES": _IMAGES,
-            "LAKANA_LAUNCHER__TASK_USER": "0:0",
-            "LAKANA_LAUNCHER__BUILD_USER": "0:0",
-            "LAKANA_LAUNCHER__DOCKER_SOCKET": "/elsewhere.sock",
-            "LAKANA_LAUNCHER__SERVER_SERVICE": "other",
-            "LAKANA_LAUNCHER__KEEP_ENVIRONMENTS": "1",
-            "LAKANA_LAUNCHER__MAX_SECONDS": "1",
-        }
-    )
+@pytest.mark.parametrize(
+    "name",
+    [
+        "TASK_USER",
+        "BUILD_USER",
+        "DOCKER_SOCKET",
+        "STATE_DIR",
+        "EGRESS_KEY",
+        "SERVER_SERVICE",
+        "SERVER_ALIAS",
+        "EGRESS_SERVICE",
+        "MAX_SECONDS",
+        "KEEP_ENVIRONMENTS",
+        "WORK_VOLUME",
+    ],
+)
+def test_only_what_a_person_needs_is_a_setting(name: str) -> None:
+    """Users, service names, paths of the stack and the like are constants, not variables.
 
-    assert settings == load_settings(
+    Parameters
+    ----------
+    name
+        A former variable, after the prefix.
+    """
+    environ = {"LAKANA_LAUNCHER__STACK": "lakana", "LAKANA_LAUNCHER__IMAGES": _IMAGES}
+    environ["LAKANA_LAUNCHER__" + name] = "0:0"
+
+    with pytest.raises(SettingsError, match=f"{name} is not a setting .it is a constant now"):
+        load_settings(environ)
+
+    settings = load_settings(
         {"LAKANA_LAUNCHER__STACK": "lakana", "LAKANA_LAUNCHER__IMAGES": _IMAGES}
     )
     assert settings.task_user == "10001:10001" and settings.build_user == "10002:10002"
@@ -197,6 +212,52 @@ def _roots(path: str) -> dict[str, str]:
         pytest.param(_roots("/dev/shm"), "INGESTION_ROOTS must be", id="root-under-dev"),
         pytest.param(_roots("/etc"), "INGESTION_ROOTS must be", id="root-etc"),
         pytest.param(_roots("/etc/ssl"), "INGESTION_ROOTS must be", id="root-under-etc"),
+        pytest.param(_roots("//"), "INGESTION_ROOTS must be", id="root-double-slash"),
+        pytest.param(_roots("//run"), "INGESTION_ROOTS must be", id="root-double-slash-run"),
+        pytest.param(
+            _roots("//var/run"), "INGESTION_ROOTS must be", id="root-double-slash-var-run"
+        ),
+        pytest.param(
+            _roots("//var/lib/docker/volumes"),
+            "INGESTION_ROOTS must be",
+            id="root-double-slash-docker",
+        ),
+        pytest.param(
+            _roots("//srv/landing"), "INGESTION_ROOTS must be", id="root-double-slash-plain"
+        ),
+        pytest.param(
+            {**_BASE, "LAKANA_LAUNCHER__SOCKET": "//run/x.sock"},
+            "SOCKET must be an absolute path",
+            id="socket-double-slash",
+        ),
+        pytest.param(
+            _roots("/var/lib/containerd"), "INGESTION_ROOTS must be", id="root-containerd"
+        ),
+        pytest.param(_roots("/var/snap/docker"), "INGESTION_ROOTS must be", id="root-snap-docker"),
+        pytest.param(_roots("/var/snap"), "INGESTION_ROOTS must be", id="root-holds-snap-docker"),
+        pytest.param(_roots("/root"), "INGESTION_ROOTS must be", id="root-root-home"),
+        pytest.param(_roots("/root/data"), "INGESTION_ROOTS must be", id="root-under-root-home"),
+        pytest.param(_roots("/boot"), "INGESTION_ROOTS must be", id="root-boot"),
+        pytest.param(
+            {**_BASE, "LAKANA_LAUNCHER__IMAGES": '{"3.13": "a:1", "3.13": "b:2"}'},
+            "repeats",
+            id="images-repeated-key",
+        ),
+        pytest.param(
+            {**_BASE, _ROOTS: '{"a": "/srv/a", "a": "/srv/b"}'},
+            "INGESTION_ROOTS must be",
+            id="roots-repeated-key",
+        ),
+        pytest.param(
+            {**_BASE, "LAKANA_LAUNCHER__MAX_MEMORY": "1"},
+            "LAKANA_LAUNCHER__MAX_MEMORY is not a setting; the settings are",
+            id="unknown-variable",
+        ),
+        pytest.param(
+            {**_BASE, "LAKANA_LAUNCHER__TASK_USER": "0:0"},
+            "LAKANA_LAUNCHER__TASK_USER is not a setting",
+            id="former-variable",
+        ),
         pytest.param(
             {**_roots("/srv"), "LAKANA_LAUNCHER__SOCKET": "/srv/launcher/launcher.sock"},
             "INGESTION_ROOTS must be",

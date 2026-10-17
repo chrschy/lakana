@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import ipaddress
 import json
 import math
 import re
@@ -48,6 +49,10 @@ _HOST = re.compile(
     r"\A(?=.{1,253}\Z)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*\Z"
 )
 _CONTROL = re.compile(r"[\x00-\x20\x7f]")
+_URL_CHARS = re.compile(r"[A-Za-z0-9._~:/@!$&'()*+,;=%\[\]-]+")
+_NUMERIC_HOST = re.compile(r"[0-9.]+|0[xX][0-9a-fA-F.]*")
+MIN_CPUS = 0.01
+"""Least CPU share Docker accepts; below it a share rounds to no limit at all."""
 
 _ID_RULE = "lower-case letters, digits and '-', at most 63"
 _OWNER_RULE = "letters, digits, '.', '_', ':' and '-', at most 128"
@@ -268,6 +273,52 @@ class CleanupRequest:
 Request = RunRequest | BuildRequest | StopRequest | StatusRequest | CleanupRequest
 
 
+def _encodes(text: str) -> bool:
+    """Say whether a string can be written as UTF-8.
+
+    JSON accepts a lone surrogate escape, which no UTF-8 encoder takes.
+
+    Parameters
+    ----------
+    text
+        The string.
+
+    Returns
+    -------
+    bool
+        ``False`` for a string with a lone surrogate.
+    """
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def _unique_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Build a request object, refusing a field named twice.
+
+    Parameters
+    ----------
+    pairs
+        The key and value pairs in document order.
+
+    Returns
+    -------
+    dict
+        The object.
+
+    Raises
+    ------
+    Refused
+        If a key occurs twice: the last one would silently win.
+    """
+    result = dict(pairs)
+    if len(result) != len(pairs):
+        raise Refused("a request repeats the field of a JSON object; send each field once")
+    return result
+
+
 def _no_constant(name: str) -> NoReturn:
     """Refuse `NaN`, `Infinity` and `-Infinity`, which JSON does not have.
 
@@ -314,7 +365,25 @@ def _pattern(data: dict[str, Any], key: str, pattern: re.Pattern[str], rule: str
     return value
 
 
-def _integer(data: dict[str, Any], key: str, low: int, high: int) -> int:
+def _raise_with(setting: str | None) -> str:
+    """Name the setting that raises a ceiling.
+
+    Parameters
+    ----------
+    setting
+        The variable's name after the prefix, or `None` for a fixed ceiling.
+
+    Returns
+    -------
+    str
+        A parenthesis for a refusal's text, or nothing.
+    """
+    return f" (LAKANA_LAUNCHER__{setting}; the operator raises it)" if setting else ""
+
+
+def _integer(
+    data: dict[str, Any], key: str, low: int, high: int, setting: str | None = None
+) -> int:
     """Read a whole number within bounds; `True` is not a number here.
 
     Parameters
@@ -327,6 +396,8 @@ def _integer(data: dict[str, Any], key: str, low: int, high: int) -> int:
         The least value.
     high
         The greatest value.
+    setting
+        The launcher setting that raises `high`, named in the refusal.
 
     Returns
     -------
@@ -340,7 +411,7 @@ def _integer(data: dict[str, Any], key: str, low: int, high: int) -> int:
     """
     value = data[key]
     if type(value) is not int or not low <= value <= high:
-        raise Refused(f"{key}: an integer from {low} to {high}")
+        raise Refused(f"{key}: an integer from {low} to {high}" + _raise_with(setting))
     return value
 
 
@@ -368,13 +439,17 @@ def _limits(data: dict[str, Any], settings: LauncherSettings) -> Limits:
     if (
         type(cpus) not in (int, float)
         or not math.isfinite(cpus)
-        or not 0 < cpus <= settings.max_cpus
+        or not MIN_CPUS <= cpus <= settings.max_cpus
     ):
-        raise Refused(f"cpus: a number above 0 and at most {settings.max_cpus:g}")
+        raise Refused(
+            f"cpus: a number from {MIN_CPUS:g} to {settings.max_cpus:g}" + _raise_with("MAX_CPUS")
+        )
     return Limits(
-        memory_mb=_integer(data, "memory_mb", MIN_MEMORY_MB, settings.max_memory_mb),
+        memory_mb=_integer(
+            data, "memory_mb", MIN_MEMORY_MB, settings.max_memory_mb, "MAX_MEMORY_MB"
+        ),
         cpus=float(cpus),
-        pids=_integer(data, "pids", 1, settings.max_pids),
+        pids=_integer(data, "pids", 1, settings.max_pids, "MAX_PIDS"),
         timeout_seconds=_integer(data, "timeout_seconds", 1, settings.max_seconds),
     )
 
@@ -407,6 +482,36 @@ def _python(data: dict[str, Any], settings: LauncherSettings) -> str:
     return value
 
 
+def _allowed_host(host: str) -> bool:
+    """Say whether a host name may be reached by a build.
+
+    A host name is allowed. A number is allowed only as a public IP address: loopback,
+    link-local (the cloud metadata address), private and unspecified addresses, and the short
+    spellings a resolver would turn into one, are not.
+
+    Parameters
+    ----------
+    host
+        A lower-case host from a request.
+
+    Returns
+    -------
+    bool
+        ``True`` if the build may be told to reach it.
+    """
+    if _HOST.match(host) is None:
+        return False
+    if _NUMERIC_HOST.fullmatch(host) is None:
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return not (
+        address.is_loopback or address.is_link_local or address.is_private or address.is_unspecified
+    )
+
+
 def _host_of(url: str, *, schemes: tuple[str, ...], userinfo: bool) -> str | None:
     """Return the host of a URL the launcher will hand to uv, or `None` for a bad one.
 
@@ -424,7 +529,7 @@ def _host_of(url: str, *, schemes: tuple[str, ...], userinfo: bool) -> str | Non
     str or None
         The lower-case host.
     """
-    if len(url) > MAX_URL_CHARS or _CONTROL.search(url):
+    if len(url) > MAX_URL_CHARS or _CONTROL.search(url) or _URL_CHARS.fullmatch(url) is None:
         return None
     try:
         parts = urlsplit(url)
@@ -435,7 +540,7 @@ def _host_of(url: str, *, schemes: tuple[str, ...], userinfo: bool) -> str | Non
     if (
         parts.scheme not in schemes
         or host is None
-        or _HOST.match(host) is None
+        or not _allowed_host(host)
         or parts.query
         or parts.fragment
         or (not userinfo and "@" in parts.netloc)
@@ -473,7 +578,10 @@ def _credential(item: object) -> IndexCredential:
     texts = isinstance(username, str) and isinstance(password, str)
     if host is None or not texts or not password:
         raise Refused(f"indexes: {rule}")
-    if any(len(v) > MAX_CREDENTIAL_CHARS or "\x00" in v for v in (username, password)):
+    if any(
+        len(v) > MAX_CREDENTIAL_CHARS or "\x00" in v or not _encodes(v)
+        for v in (username, password)
+    ):
         raise Refused(f"indexes: {rule}")
     return IndexCredential(url=url, host=host, username=username, password=password)
 
@@ -499,7 +607,11 @@ def _run(data: dict[str, Any], settings: LauncherSettings) -> RunRequest:
         For the first field that breaks its rule.
     """
     stdin = data["stdin"]
-    if not isinstance(stdin, str) or len(stdin.encode("utf-8")) > MAX_STDIN_BYTES:
+    if (
+        not isinstance(stdin, str)
+        or not _encodes(stdin)
+        or len(stdin.encode("utf-8")) > MAX_STDIN_BYTES
+    ):
         raise Refused("stdin: a string of at most 256 KiB")
     roots = data["roots"]
     names = ", ".join(sorted(settings.ingestion_roots)) or "none is set"
@@ -552,10 +664,13 @@ def _build(data: dict[str, Any], settings: LauncherSettings) -> BuildRequest:
     if (
         not isinstance(hosts, list)
         or not 1 <= len(hosts) <= MAX_HOSTS
-        or not all(isinstance(h, str) and _HOST.match(h) for h in hosts)
+        or not all(isinstance(h, str) and _allowed_host(h) for h in hosts)
         or len(set(hosts)) != len(hosts)
     ):
-        raise Refused("hosts: a list of 1 to 32 distinct lower-case host names without a port")
+        raise Refused(
+            "hosts: a list of 1 to 32 distinct lower-case host names without a port, or public "
+            "IP addresses"
+        )
     operator = data["operator_index"]
     operator_host = None
     if operator is not None:
@@ -613,14 +728,18 @@ def parse_request(raw: bytes, *, token: str, settings: LauncherSettings) -> Requ
     if len(raw) > MAX_REQUEST_BYTES:
         raise Refused("a request is one JSON line of at most 512 KiB")
     try:
-        data = json.loads(raw.decode("utf-8"), parse_constant=_no_constant)
+        data = json.loads(
+            raw.decode("utf-8"), parse_constant=_no_constant, object_pairs_hook=_unique_pairs
+        )
     except (UnicodeDecodeError, ValueError, RecursionError):
         raise Refused("a request is one JSON object") from None
     if not isinstance(data, dict):
         raise Refused("a request is one JSON object")
     sent = data.get("token")
-    if not isinstance(sent, str) or not hmac.compare_digest(
-        sent.encode("utf-8"), token.encode("utf-8")
+    if (
+        not isinstance(sent, str)
+        or not _encodes(sent)
+        or not hmac.compare_digest(sent.encode("utf-8"), token.encode("utf-8"))
     ):
         raise Refused(
             "the request does not carry the launcher's token; LAKANA_RUN__LAUNCHER_SOCKET "
@@ -858,7 +977,7 @@ def _host_config(
         "Devices": [],
         "Memory": memory,
         "MemorySwap": memory,
-        "NanoCpus": int(limits.cpus * 1_000_000_000),
+        "NanoCpus": round(limits.cpus * 1_000_000_000),
         "PidsLimit": limits.pids,
         "CapDrop": ["ALL"],
         "CapAdd": [],
@@ -921,7 +1040,8 @@ def run_container_spec(
     ]
     return {
         "Image": settings.images[request.python],
-        "Cmd": ["/env/bin/python", "-P", "-m", "lakana.runner"],
+        "Entrypoint": ["/env/bin/python", "-P", "-m", "lakana.runner"],
+        "Cmd": [],
         "User": settings.task_user,
         "WorkingDir": "/code",
         "Env": [
@@ -1035,7 +1155,8 @@ def build_container_spec(
     ]
     return {
         "Image": settings.images[request.python],
-        "Cmd": ["/usr/local/bin/python", "-I", "/opt/lakana-task/build.py"],
+        "Entrypoint": ["/usr/local/bin/python", "-I", "/opt/lakana-task/build.py"],
+        "Cmd": [],
         "User": settings.build_user,
         "WorkingDir": "/src",
         "Env": env,
@@ -1079,7 +1200,8 @@ def probe_container_spec(settings: LauncherSettings, image: str) -> dict[str, An
     )
     return {
         "Image": image,
-        "Cmd": ["/usr/local/bin/python", "-c", "pass"],
+        "Entrypoint": ["/usr/local/bin/python", "-c", "pass"],
+        "Cmd": [],
         "User": settings.task_user,
         "NetworkDisabled": True,
         "Labels": labels(settings, "probe", "no-new-privileges", "launcher"),

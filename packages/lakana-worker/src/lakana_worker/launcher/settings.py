@@ -52,12 +52,45 @@ FORBIDDEN_ROOTS = (
     Path("/sys"),
     Path("/dev"),
     Path("/etc"),
+    Path("/var/lib/containerd"),
+    Path("/var/snap/docker"),
+    Path("/root"),
+    Path("/boot"),
 )
 """Host directories no ingestion root may be, hold or sit under.
 
 A read-only bind of a directory that holds a socket still lets a task connect to it, and
-``/proc``, ``/sys``, ``/dev`` and ``/etc`` expose the host itself.
+``/proc``, ``/sys``, ``/dev``, ``/etc``, ``/root`` and ``/boot`` expose the host itself, and
+the data directories of Docker and containerd hold every volume and image. The list is checked
+on the literal path. Docker resolves a symlink on the host, which the launcher cannot see, so
+symlinked roots are checked at start by a probe container and documented as an operator rule.
 """
+KNOWN_SETTINGS = (
+    "STACK",
+    "IMAGES",
+    "INGESTION_ROOTS",
+    "SOCKET",
+    "NO_NEW_PRIVILEGES",
+    "MAX_MEMORY_MB",
+    "MAX_CPUS",
+    "MAX_PIDS",
+)
+"""The names after the prefix that the launcher reads."""
+_CONSTANT_NOW = frozenset(
+    {
+        "TASK_USER",
+        "BUILD_USER",
+        "DOCKER_SOCKET",
+        "STATE_DIR",
+        "EGRESS_KEY",
+        "SERVER_SERVICE",
+        "SERVER_ALIAS",
+        "EGRESS_SERVICE",
+        "MAX_SECONDS",
+        "KEEP_ENVIRONMENTS",
+        "WORK_VOLUME",
+    }
+)
 
 _STACK = re.compile(r"\A[a-z0-9][a-z0-9_-]{0,62}\Z")
 _ROOT_NAME = re.compile(r"\A[a-z0-9][a-z0-9_-]{0,62}\Z")
@@ -65,6 +98,34 @@ _NUMBER = re.compile(r"[0-9]{1,10}")
 _IMAGE = re.compile(
     r"\A[a-z0-9][a-z0-9._/:-]{0,200}(?::[A-Za-z0-9._-]{1,128})?(?:@sha256:[0-9a-f]{64})?\Z"
 )
+
+
+class _Repeated(ValueError):
+    """A JSON object names one key twice."""
+
+
+def _unique_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """Build an object from its pairs, refusing a repeated key.
+
+    Parameters
+    ----------
+    pairs
+        The key and value pairs in document order.
+
+    Returns
+    -------
+    dict
+        The object.
+
+    Raises
+    ------
+    _Repeated
+        If a key occurs twice.
+    """
+    result = dict(pairs)
+    if len(result) != len(pairs):
+        raise _Repeated
+    return result
 
 
 class SettingsError(Exception):
@@ -82,8 +143,6 @@ class LauncherSettings:
         `server` and `egress` services (`com.docker.compose.project`).
     images
         Python version to task image: the allow-list of images.
-    work_volume
-        The named volume of the worker's attempt directories.
     socket
         Where the launcher listens; the token file sits next to it.
     ingestion_roots
@@ -178,7 +237,9 @@ def _json_object(environ: Mapping[str, str], name: str, message: str) -> dict[st
     if text is None:
         return None
     try:
-        value = json.loads(text)
+        value = json.loads(text, object_pairs_hook=_unique_pairs)
+    except _Repeated:
+        raise SettingsError(f"{PREFIX}{name} repeats a key; {message}") from None
     except ValueError:
         raise SettingsError(message) from None
     if not isinstance(value, dict):
@@ -245,9 +306,28 @@ def _path(environ: Mapping[str, str], name: str, default: Path) -> Path:
     text = _get(environ, name)
     if text is None:
         return default
-    if not os.path.isabs(text) or os.path.normpath(text) != text:
+    if not _plain_absolute(text):
         raise SettingsError(f"{PREFIX}{name} must be an absolute path without '..'.")
     return Path(text)
+
+
+def _plain_absolute(text: str) -> bool:
+    """Say whether a path is absolute, normalised and spelled with one leading slash.
+
+    POSIX keeps exactly two leading slashes through normalisation, and the kernel reads
+    ``//run`` as ``/run``, so a comparison of the literal text would miss it.
+
+    Parameters
+    ----------
+    text
+        The path.
+
+    Returns
+    -------
+    bool
+        ``True`` for a path such as ``/srv/landing``.
+    """
+    return os.path.isabs(text) and os.path.normpath(text) == text and not text.startswith("//")
 
 
 def _is_under(path: Path, parent: Path) -> bool:
@@ -308,6 +388,15 @@ def load_settings(environ: Mapping[str, str]) -> LauncherSettings:
     SettingsError
         For the first setting that is missing or malformed.
     """
+    for name in sorted(environ):
+        if name.startswith(PREFIX) and name[len(PREFIX) :] not in KNOWN_SETTINGS:
+            short = name[len(PREFIX) :]
+            reason = " (it is a constant now)" if short in _CONSTANT_NOW else ""
+            raise SettingsError(
+                f"{name} is not a setting{reason}; the settings are "
+                + ", ".join(PREFIX + known for known in KNOWN_SETTINGS)
+                + "."
+            )
     stack = _get(environ, "STACK")
     if stack is None:
         raise SettingsError(
@@ -344,8 +433,7 @@ def load_settings(environ: Mapping[str, str]) -> LauncherSettings:
         if (
             _ROOT_NAME.match(key) is None
             or not isinstance(value, str)
-            or not os.path.isabs(value)
-            or os.path.normpath(value) != value
+            or not _plain_absolute(value)
             or _unsafe_root(Path(value), socket)
         ):
             raise SettingsError(roots_message)

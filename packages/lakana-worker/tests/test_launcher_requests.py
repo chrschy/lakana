@@ -29,6 +29,7 @@ from lakana_worker.launcher.requests import (
     environment_volume,
     network_spec,
     parse_request,
+    probe_container_spec,
     run_container_spec,
     uv_index_value,
 )
@@ -160,7 +161,7 @@ HOSTILE: list[Any] = [
     pytest.param(_with(RUN, owner="worker 1"), "owner:", id="owner-space"),
     pytest.param(_with(RUN, owner="w/1"), "owner:", id="owner-slash"),
     pytest.param(
-        _with(RUN, memory_mb=100_000), "memory_mb: an integer from 64", id="memory-ceiling"
+        _with(RUN, memory_mb=100_000), "memory_mb: an integer from 64 to", id="memory-ceiling"
     ),
     pytest.param(_with(RUN, memory_mb=True), "memory_mb:", id="memory-bool"),
     pytest.param(_with(RUN, memory_mb=1.5), "memory_mb:", id="memory-float"),
@@ -227,6 +228,81 @@ HOSTILE: list[Any] = [
         id="cleanup-owner-shell",
     ),
     pytest.param({"op": "stop", "token": TOKEN}, "stop takes exactly", id="stop-missing"),
+    pytest.param(
+        _with(RUN, Mounts=[{"Type": "bind", "Source": "/"}]), "run takes exactly", id="extra-Mounts"
+    ),
+    pytest.param(
+        _with(RUN, SecurityOpt=["seccomp=unconfined"]), "run takes exactly", id="extra-SecurityOpt"
+    ),
+    pytest.param(
+        _with(BUILD, Mounts=[{"Type": "bind", "Source": "/"}]),
+        "build takes exactly",
+        id="build-extra-Mounts",
+    ),
+    pytest.param(
+        _with(BUILD, SecurityOpt=["apparmor=unconfined"]),
+        "build takes exactly",
+        id="build-extra-SecurityOpt",
+    ),
+    pytest.param(
+        _with(RUN, cpus=1e-10),
+        "cpus: a number from 0.01 to 64 .LAKANA_LAUNCHER__MAX_CPUS",
+        id="cpus-tiny",
+    ),
+    pytest.param(_with(RUN, cpus=5e-324), "cpus:", id="cpus-denormal"),
+    pytest.param(_with(RUN, cpus=0.001), "cpus:", id="cpus-below-floor"),
+    pytest.param(_with(RUN, cpus=-1), "cpus:", id="cpus-negative"),
+    pytest.param(_with(RUN, cpus=-0.5), "cpus:", id="cpus-negative-float"),
+    pytest.param(_with(RUN, cpus=64.5), "LAKANA_LAUNCHER__MAX_CPUS", id="cpus-over-ceiling"),
+    pytest.param(
+        _with(RUN, memory_mb=10**9), "LAKANA_LAUNCHER__MAX_MEMORY_MB", id="memory-names-setting"
+    ),
+    pytest.param(_with(RUN, pids=10**9), "LAKANA_LAUNCHER__MAX_PIDS", id="pids-names-setting"),
+    pytest.param(
+        _with(RUN, token="\ud800"), "does not carry the launcher's token", id="token-surrogate"
+    ),
+    pytest.param(_with(RUN, stdin="a\ud800"), "stdin:", id="stdin-surrogate"),
+    pytest.param(
+        _with(
+            BUILD,
+            indexes=[
+                {"url": "https://pkgs.example.org/simple", "username": "", "password": "a\ud800"}
+            ],
+        ),
+        "indexes:",
+        id="password-surrogate",
+    ),
+    pytest.param(
+        _with(
+            BUILD,
+            indexes=[
+                {"url": "https://pkgs.example.org/simple", "username": "\udfff", "password": "p"}
+            ],
+        ),
+        "indexes:",
+        id="username-surrogate",
+    ),
+    pytest.param(_with(RUN, owner="w\ud800"), "owner:", id="owner-surrogate"),
+    pytest.param(
+        _with(
+            BUILD,
+            operator_index="https://op:pw@pkgs.example.org\\@evil.org/",
+            hosts=["pkgs.example.org", "evil.org"],
+        ),
+        "operator_index:",
+        id="operator-backslash",
+    ),
+    pytest.param(_with(BUILD, hosts=["127.0.0.1"], indexes=[]), "hosts:", id="host-loopback"),
+    pytest.param(_with(BUILD, hosts=["169.254.169.254"], indexes=[]), "hosts:", id="host-metadata"),
+    pytest.param(_with(BUILD, hosts=["10.1.2.3"], indexes=[]), "hosts:", id="host-rfc1918-10"),
+    pytest.param(_with(BUILD, hosts=["172.16.0.1"], indexes=[]), "hosts:", id="host-rfc1918-172"),
+    pytest.param(_with(BUILD, hosts=["192.168.0.1"], indexes=[]), "hosts:", id="host-rfc1918-192"),
+    pytest.param(_with(BUILD, hosts=["0.0.0.0"], indexes=[]), "hosts:", id="host-unspecified"),
+    pytest.param(_with(BUILD, hosts=["::1"], indexes=[]), "hosts:", id="host-ipv6-loopback"),
+    pytest.param(_with(BUILD, hosts=["fd00::1"], indexes=[]), "hosts:", id="host-ipv6-ula"),
+    pytest.param(_with(BUILD, hosts=["fe80::1"], indexes=[]), "hosts:", id="host-ipv6-link-local"),
+    pytest.param(_with(BUILD, hosts=["::"], indexes=[]), "hosts:", id="host-ipv6-unspecified"),
+    pytest.param(_with(BUILD, hosts=["127.1"], indexes=[]), "hosts:", id="host-short-ipv4"),
     pytest.param(_with(RUN, op="exec"), "op must be one of", id="op-exec"),
     pytest.param(
         _with(RUN, token="x" * 64), "does not carry the launcher's token", id="wrong-token"
@@ -417,7 +493,7 @@ def test_the_run_spec_fixes_every_field_that_matters() -> None:
 
     host = spec["HostConfig"]
     assert spec["Image"] == "ghcr.io/chrschy/lakana-task:0.14.0-py3.13"
-    assert spec["Cmd"] == ["/env/bin/python", "-P", "-m", "lakana.runner"]
+    assert spec["Entrypoint"] == ["/env/bin/python", "-P", "-m", "lakana.runner"]
     assert spec["User"] == "10001:10001"
     assert spec["WorkingDir"] == "/code"
     assert (host["CapDrop"], host["CapAdd"], host["Privileged"]) == (["ALL"], [], False)
@@ -462,7 +538,10 @@ def test_the_build_spec_mounts_only_code_environment_and_cache() -> None:
 
     host = spec["HostConfig"]
     assert spec["User"] == "10002:10002"
-    assert spec["Cmd"] == ["/usr/local/bin/python", "-I", "/opt/lakana-task/build.py"]
+    assert spec["Entrypoint"] == ["/usr/local/bin/python", "-I", "/opt/lakana-task/build.py"]
+    assert (host["CapDrop"], host["CapAdd"], host["Privileged"]) == (["ALL"], [], False)
+    assert (host["ReadonlyRootfs"], host["PidMode"], host["IpcMode"]) == (True, "", "private")
+    assert (host["Binds"], host["Devices"]) == ([], [])
     assert [(m["Source"], m["Target"], m["ReadOnly"]) for m in host["Mounts"]] == [
         ("lakana-task-work", "/src", True),
         (environment_volume(SETTINGS, "3.13", KEY), "/env", False),
@@ -532,3 +611,68 @@ def test_the_operator_index_comes_first_and_keeps_its_own_credential() -> None:
         "https://op:pw@mirror.example.org/simple "
         "lakana-registered-0=https://ci:p%40ss%20word@pkgs.example.org/simple"
     )
+
+
+@pytest.mark.parametrize(
+    ("raw", "reason"),
+    [
+        pytest.param(
+            b'{"op": "stop", "op": "run", "token": "' + TOKEN.encode() + b'", "id": "a"}',
+            "repeats the field",
+            id="repeated-op",
+        ),
+        pytest.param(
+            b'{"op": "stop", "token": "' + TOKEN.encode() + b'", "id": "a", "id": "b"}',
+            "repeats the field",
+            id="repeated-id",
+        ),
+    ],
+)
+def test_a_repeated_json_key_is_refused(raw: bytes, reason: str) -> None:
+    """The last of two equal keys must not silently win.
+
+    Parameters
+    ----------
+    raw
+        The bytes on the socket.
+    reason
+        Part of the refusal's text.
+    """
+    with pytest.raises(Refused, match=reason):
+        parse_request(raw, token=TOKEN, settings=SETTINGS)
+
+
+def test_public_ip_literals_and_host_names_are_allowed_hosts() -> None:
+    """Only loopback, link-local, private and unspecified literals are refused."""
+    build = parse_request(
+        _raw(_with(BUILD, hosts=["8.8.8.8", "pkgs.example.org"])), token=TOKEN, settings=SETTINGS
+    )
+    assert isinstance(build, BuildRequest)
+
+
+def test_the_smallest_cpu_share_is_a_real_limit() -> None:
+    """A share Docker would read as no limit never reaches a spec."""
+    run = parse_request(_raw(_with(RUN, cpus=0.01)), token=TOKEN, settings=SETTINGS)
+    assert isinstance(run, RunRequest)
+
+    assert run_container_spec(run, SETTINGS, no_new_privileges=True)["HostConfig"]["NanoCpus"] == (
+        10_000_000
+    )
+
+
+def test_every_spec_overrides_the_entrypoint_with_its_own_command() -> None:
+    """The image's own entrypoint never wraps the launcher's command."""
+    run = parse_request(_raw(RUN), token=TOKEN, settings=SETTINGS)
+    build = parse_request(_raw(BUILD), token=TOKEN, settings=SETTINGS)
+    assert isinstance(run, RunRequest) and isinstance(build, BuildRequest)
+
+    specs = [
+        run_container_spec(run, SETTINGS, no_new_privileges=True),
+        build_container_spec(build, SETTINGS, no_new_privileges=True, proxy_url=None),
+        probe_container_spec(SETTINGS, "ghcr.io/chrschy/lakana-task:0.14.0-py3.13"),
+    ]
+    for spec in specs:
+        assert spec["Cmd"] == []
+        assert spec["Entrypoint"][0].startswith("/")
+    assert specs[0]["Entrypoint"] == ["/env/bin/python", "-P", "-m", "lakana.runner"]
+    assert specs[1]["Entrypoint"] == ["/usr/local/bin/python", "-I", "/opt/lakana-task/build.py"]
