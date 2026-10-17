@@ -291,7 +291,11 @@ def test_master_key_creation_leaves_no_temp_file_behind(tmp_path: Path) -> None:
 
     load_or_create_master_key(data_dir)
 
-    assert {p.name for p in data_dir.root.iterdir()} == {"lake", "master.key"}
+    assert {p.name for p in data_dir.root.iterdir()} == {
+        "lake",
+        "master.key",
+        ".lakana-local-instance",
+    }
 
 
 def test_master_key_survives_a_concurrent_creator_winning_the_race(
@@ -328,7 +332,11 @@ def test_master_key_survives_a_concurrent_creator_winning_the_race(
 
     assert key == winner_key
     # The loser's temp file must not survive the race.
-    assert {p.name for p in data_dir.root.iterdir()} == {"lake", "master.key"}
+    assert {p.name for p in data_dir.root.iterdir()} == {
+        "lake",
+        "master.key",
+        ".lakana-local-instance",
+    }
 
 
 def test_a_zero_byte_master_key_is_refused(tmp_path: Path) -> None:

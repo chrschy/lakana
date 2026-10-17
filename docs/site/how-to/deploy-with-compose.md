@@ -1143,7 +1143,11 @@ to run. A single-action grant of one of them that was made before this rule has 
 `no effect: <ACTION> needs the ADMIN role`). See
 [Upgrade policy](../explanation/upgrades.md#delegation-needs-the-admin-role).
 
-## Reset
+## Starting over
+
+This is for a Compose deployment. For the instance on your own machine, stop it and run
+`lakana server reset --local` (see "Getting started"); that command refuses a Compose or remote
+instance.
 
 <!-- not tested: moved as is; sorted in the second pull request -->
 ```bash

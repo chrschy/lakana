@@ -525,16 +525,26 @@ another program or a Lakana instance started with a different `--data-dir` has i
 (`lakana server status --data-dir DIR` checks an instance); pass another `--port`: `start` points
 the `local` profile at it, so later commands find the instance without `--url` (add
 `--profile local` if another profile is your default). It holds
-`lakana.db` (SQLite, WAL mode), `lake/` (storage root), `master.key` (mode `0600`) and the
-running instance's pidfiles. On first start, a `local` profile is saved automatically
+`lakana.db` (SQLite, WAL mode), `lake/` (storage root), `master.key` (mode `0600`), the
+running instance's pidfiles and `.lakana-local-instance`, the marker that `lakana server reset`
+requires. On first start, a `local` profile is saved automatically
 (`default_environment: dev`) and becomes the default profile if none exists yet.
 
 `lakana server start --local` binds only to `127.0.0.1` — it is never reachable from another
 machine, whatever `--port` you pick.
 
-There is no `reset` command: stop the instance (Ctrl-C, SIGTERM, or — on POSIX — closing the
-terminal, which sends SIGHUP) and delete the data directory to start completely over,
-including a fresh `master.key` and a fresh bootstrap credential on the next `start`.
+To start completely over, stop the instance (Ctrl-C, SIGTERM, or — on POSIX — closing the
+terminal, which sends SIGHUP) and run `lakana server reset --local` (`--data-dir DIR` for another
+data directory, `--yes` to skip the question). It names what it deletes (`lakana.db` and its
+SQLite side files, `lake/`, `master.key`, the pidfiles, and the number of tables) and asks
+first; the next `start` is a first run with a fresh `master.key` and a fresh bootstrap
+credential. It never touches your projects. It works on this machine's instance only (it
+refuses a remote `--url` or profile, and a Compose deployment). It refuses while the instance
+runs, if the data directory is a symlink, a filesystem root, your home directory or a folder
+that holds it, if anything it would delete is a symlink, and if the directory lacks the file
+`.lakana-local-instance`, which every `lakana server start --local` writes into its data
+directory. A data directory that an older `lakana` created has no such file: start the instance
+once with the current version, stop it, and run the reset.
 
 If a first run is interrupted after the `local` profile is saved but before its `dev`
 environment is created, the next `start` notices `dev` is missing and creates it itself (if that

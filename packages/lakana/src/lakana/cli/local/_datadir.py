@@ -16,6 +16,34 @@ from lakana.cli._state import CliError
 
 _MASTER_KEY_BYTES = 32
 
+MARKER_NAME = ".lakana-local-instance"
+"""The file `prepare_data_dir` writes into every local instance's data directory."""
+
+MARKER_TEXT = "lakana local instance\n"
+"""The marker's exact content."""
+
+
+def write_marker(root: Path) -> None:
+    """Mark `root` as a local instance's data directory; a marker that is there stays.
+
+    Parameters
+    ----------
+    root
+        The data directory.
+
+    Raises
+    ------
+    OSError
+        If the marker can't be written.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(root / MARKER_NAME, flags, 0o600)
+    except FileExistsError:
+        return
+    with os.fdopen(fd, "w") as handle:
+        handle.write(MARKER_TEXT)
+
 
 def default_data_dir(environ: Mapping[str, str] | None = None) -> Path:
     """Return the default data directory.
@@ -181,7 +209,8 @@ def prepare_data_dir(path: Path) -> DataDir:
     Returns
     -------
     DataDir
-        The checked directory, with `lake/` created.
+        The checked directory, with `lake/` created and the marker file written (the marker
+        is what `lakana server reset` requires before it deletes anything).
 
     Raises
     ------
@@ -237,6 +266,7 @@ def prepare_data_dir(path: Path) -> DataDir:
     data_dir = DataDir(path)
     try:
         data_dir.lake.mkdir(exist_ok=True)
+        write_marker(path)
     except OSError as exc:
         raise CliError(f"Can't prepare data directory {data_dir.lake}: {exc}", 3) from exc
     return data_dir

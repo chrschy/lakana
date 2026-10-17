@@ -120,6 +120,60 @@ def default_client_factory(state: CliState) -> lakana.Client:
     return lakana.Client(url=state.url, token=config.token, timeout=state.timeout)
 
 
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def selected_url(state: CliState, *, include_default: bool = False) -> str | None:
+    """Return the platform URL the user has aimed this invocation at, without contacting it.
+
+    In order: `--url`, `LAKANA_URL`, the URL of the profile chosen with `--profile` or
+    `LAKANA_PROFILE`, and, if `include_default`, the URL of the file's default profile.
+
+    Parameters
+    ----------
+    state
+        The CLI state with `--url`, `--profile` and the profile file's path.
+    include_default
+        Whether the default profile counts when nothing chose one.
+
+    Returns
+    -------
+    str or None
+        The URL, or `None` when nothing names one.
+
+    Raises
+    ------
+    ConfigError
+        If the profile file can't be read (symlink, permissions, invalid TOML).
+    """
+    url = state.url or os.environ.get("LAKANA_URL")
+    if url:
+        return url
+    data = _profiles.load(state.profile_path())
+    name = state.profile or os.environ.get("LAKANA_PROFILE")
+    if name is None and include_default:
+        name = data.get("default_profile")
+    if name is None:
+        return None
+    return data.get("profiles", {}).get(name, {}).get("url")
+
+
+def is_loopback_url(url: str) -> bool:
+    """Report whether a URL names this machine.
+
+    Parameters
+    ----------
+    url
+        The URL.
+
+    Returns
+    -------
+    bool
+        `True` for `127.0.0.1`, `localhost` and `::1`.
+    """
+    return urlsplit(url).hostname in _LOOPBACK_HOSTS
+
+
 def _login_client(url: str, token: str) -> lakana.Client:
     """Build a client from explicit credentials, for `lakana login`.
 

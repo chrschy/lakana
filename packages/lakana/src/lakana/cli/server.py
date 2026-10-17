@@ -1,4 +1,4 @@
-"""`lakana server start --local` and `lakana server status`: run Lakana on this machine."""
+"""`lakana server start --local`, `status` and `reset`: run Lakana on this machine."""
 
 from __future__ import annotations
 
@@ -20,7 +20,15 @@ import typer
 
 from lakana.cli import _output, _profiles
 from lakana.cli._filelock import try_locked
-from lakana.cli._state import CliError, CliState, state_of
+from lakana.cli._state import (
+    CliError,
+    CliState,
+    confirm,
+    is_loopback_url,
+    selected_url,
+    state_of,
+)
+from lakana.cli.local import _reset
 from lakana.cli.local._datadir import (
     DataDir,
     default_data_dir,
@@ -903,6 +911,111 @@ def status(
         ),
     )
     raise typer.Exit(0 if running else 1)
+
+
+def _refuse_remote_target(state: CliState) -> None:
+    """Refuse a reset when `--url`, `LAKANA_URL` or a chosen profile points off this machine.
+
+    The reset never talks to a server; this only stops someone who is aimed at a remote
+    instance from believing the command reset it.
+
+    Parameters
+    ----------
+    state
+        The CLI state with `--url` and `--profile`.
+
+    Raises
+    ------
+    CliError
+        If the explicit URL, or the URL of the profile chosen with `--profile` or
+        `LAKANA_PROFILE`, is not a loopback address (exit 2).
+    """
+    url = selected_url(state)
+    if url is not None and not is_loopback_url(url):
+        raise CliError(
+            f"{url} is a remote instance; 'lakana server reset' resets only the instance on "
+            "this machine",
+            hint="to start a team instance over, use the Compose bundle: see "
+            "'Starting over' in docs/site/how-to/deploy-with-compose.md",
+        )
+
+
+@server_app.command("reset")
+def reset(
+    ctx: typer.Context,
+    local: Annotated[
+        bool, typer.Option("--local", help="Reset this machine's own instance.")
+    ] = False,
+    data_dir: Annotated[
+        Path | None, typer.Option("--data-dir", help="Data directory (default: XDG).")
+    ] = None,
+    yes: Annotated[bool, typer.Option("--yes", help="Don't ask for confirmation.")] = False,
+) -> None:
+    """Delete this machine's local instance's data, so the next start is a first run.
+
+    Deletes the database, the tables' files and the secrets key of the instance in the data
+    directory, and nothing else: your project files are never touched. It refuses while the
+    instance runs, and in any directory that is not a local instance's data directory.
+
+    Parameters
+    ----------
+    ctx
+        The Typer context.
+    local
+        Required: the reset applies to the instance on this machine only.
+    data_dir
+        The data directory; defaults to `default_data_dir()`.
+    yes
+        Skip the confirmation prompt.
+
+    Raises
+    ------
+    CliError
+        Without `--local`, or aimed at a remote instance (exit 2); if the directory is not a
+        local instance's, is a symlink, the home directory or a filesystem root, or an
+        instance runs (exit 2); if the user declines or there is no terminal and no
+        `--yes` (exit 2); if a pidfile or a deletion fails (exit 3).
+    """
+    state = state_of(ctx)
+    if not local:
+        raise CliError(
+            "'lakana server reset' resets the instance on this machine only; "
+            "it can't reset a remote or Compose instance",
+            hint="add --local for this machine's instance. For a Compose deployment, see "
+            "'Starting over' in docs/site/how-to/deploy-with-compose.md",
+        )
+    _refuse_remote_target(state)
+    given = data_dir or default_data_dir()
+    root_path = _reset.refuse_unsafe_root(given, Path.home())
+    if root_path is None:
+        sys.stdout.write(f"Nothing to reset: there is no local instance in {given}.\n")
+        return
+    root = DataDir(root_path)
+    with try_locked(root.lock_path) as acquired:
+        if not acquired:
+            raise CliError(
+                f"Lakana is running from {root.root}; nothing was deleted",
+                hint="stop it with Ctrl-C in its terminal, then run the reset again",
+            )
+        info = _read_pidfile_or_fail(root.server_pid)
+        if (
+            info is not None
+            and info[1] is not None
+            and pid_alive(info[0])
+            and _probe_health(f"http://127.0.0.1:{info[1]}")
+        ):
+            raise CliError(
+                f"Lakana is running from {root.root} at http://127.0.0.1:{info[1]}; "
+                "nothing was deleted",
+                hint="stop it with Ctrl-C in its terminal, then run the reset again",
+            )
+        plan = _reset.plan_reset(root_path)
+        sys.stdout.write("\n".join(plan.describe()) + "\n")
+        confirm(state, "Delete them?", yes)
+        _reset.delete_targets(plan)
+    sys.stdout.write(
+        "Reset. Start again with 'lakana server start --local'; the next start is a first run.\n"
+    )
 
 
 def register(app: typer.Typer) -> None:
