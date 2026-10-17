@@ -19,6 +19,7 @@ from pathlib import Path
 
 import duckdb
 import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from lakana_worker import query_child
@@ -1550,3 +1551,37 @@ def test_a_field_id_map_is_set_as_a_duckdb_map() -> None:
 
     assert code == EXIT_OK
     assert _table(stream).to_pylist() == [{"k": [1, 2], "t": "VARCHAR", "d": True}]
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        pytest.param(((1, "id", "NOT A TYPE"),), id="a type DuckDB cannot parse"),
+        pytest.param(((1, "id", "STRUCT(a"),), id="a type that is cut off"),
+        pytest.param(((1, "id", "INTEGER"),), id="a value the mapped type cannot hold"),
+    ],
+)
+def test_a_schema_map_duckdb_rejects_fails_closed(
+    tmp_path: Path, fields: tuple[tuple[int, str, str], ...]
+) -> None:
+    """DuckDB's refusal of the map ends the query as an ordinary failure naming no file."""
+    path = tmp_path / "X-Amz-Signature=SECRET123.parquet"
+    field = pa.field("id", pa.string(), metadata={b"PARQUET:field_id": b"1"})
+    pq.write_table(pa.table({"id": ["abc"]}, schema=pa.schema([field])), path)
+    request = _request(
+        "SELECT * FROM read_parquet(getvariable('v_0_files'), schema = getvariable('v_0_schema'))",
+        parameters={"v_0_files": [str(path)], "v_0_schema": fields},
+        restrict_local_filesystem=False,
+    )
+
+    code, stream, stderr = _main(request)
+
+    error = decode_error(stderr.encode())
+    assert code == EXIT_FAILED
+    assert error is not None
+    assert error.kind in {"invalid", "internal"}
+    assert error.message.startswith("Query failed: ")
+    assert stream == b"" or not list(pa.ipc.open_stream(stream))
+    for text in (error.message, stderr, repr(stream)):
+        assert str(path) not in text
+        assert "SECRET123" not in text

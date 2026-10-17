@@ -64,7 +64,7 @@ import signal
 import sys
 import threading
 import traceback
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import BinaryIO, NoReturn, TextIO
 
 import duckdb
@@ -354,6 +354,7 @@ def failure(
     exc: BaseException,
     statement: _Statement | None,
     asked: threading.Event,
+    files: Sequence[str] = (),
 ) -> ErrorDocument:
     """Classify a DuckDB failure and word it for the user.
 
@@ -369,17 +370,23 @@ def failure(
         Set once the child was asked to stop; the failure is then `interrupted`, whatever DuckDB
         said. An interrupt DuckDB reports without that ask is a lost cause (`invalid`, as before,
         with a message that says so).
+    files
+        The file URLs of the reads, as variables carried them. DuckDB quotes a file by its
+        name when it cannot read or convert it, and a URL can hold a signature, so each is
+        replaced by ``<file>`` in the message.
 
     Returns
     -------
     ErrorDocument
-        The kind and the message for the user. The message never echoes the SQL.
+        The kind and the message for the user. The message never echoes the SQL or a file.
     """
     if asked.is_set():
         return ErrorDocument(INTERRUPTED, _ASKED)
     if _is_interrupt(exc):
         return ErrorDocument(INVALID, _LOST_CAUSE)
     text = strip_duckdb_context(str(exc))
+    for url in sorted(set(files), key=len, reverse=True):
+        text = text.replace(url, "<file>")
     message = f"Query failed: {text}"
     if _is_transient(exc):
         return ErrorDocument(TRANSIENT, message)
@@ -443,6 +450,7 @@ def _stream(
     sink: BinaryIO,
     statement: _Statement | None,
     asked: threading.Event,
+    files: Sequence[str] = (),
 ) -> ErrorDocument | None:
     """Write a result to the sink as an Arrow IPC stream, end marker included.
 
@@ -462,6 +470,8 @@ def _stream(
         The SQL, for the classification of an error.
     asked
         Set once the child was asked to stop; checked before each batch.
+    files
+        The file URLs of the reads, for `failure` to keep out of a message.
 
     Returns
     -------
@@ -479,7 +489,7 @@ def _stream(
             except StopIteration:
                 break
             except (duckdb.Error, OSError) as exc:
-                return failure(connection, exc, statement, asked)
+                return failure(connection, exc, statement, asked, files)
             writer.write_batch(batch)
         writer.close()
         sink.flush()
@@ -605,6 +615,9 @@ def serve(
     try:
         connection = session.open()
         statement: _Statement | None = None
+        files = [
+            url for value in request.parameters.values() if isinstance(value, list) for url in value
+        ]
         try:
             if request.mode == CHECK:
                 refused = _check(connection, request)
@@ -626,8 +639,8 @@ def serve(
                     return ErrorDocument(INVALID, NO_RESULT_MESSAGE)
                 reader = result.to_arrow_reader(request.batch_rows)
         except (duckdb.Error, OSError) as exc:
-            return failure(connection, exc, statement, asked)
-        return _stream(connection, reader, sink, statement, asked)
+            return failure(connection, exc, statement, asked, files)
+        return _stream(connection, reader, sink, statement, asked, files)
     except BaseException as exc:  # the statement's thread must hand back a document
         _report_unexpected(exc)
         return ErrorDocument(
