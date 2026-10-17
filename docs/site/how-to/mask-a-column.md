@@ -150,14 +150,8 @@ brackets.
 | `The columns of table 'gold.customers' could not be read; the server's log has the cause. Create the mask again when the table is readable.` (7) | Storage or the table's metadata could not be read. Ask the person who runs the instance to look at the server's log, then try again. |
 | `The column-mask expression is 100001 characters long; the most Lakana accepts is 100000 (LAKANA_QUERY_LIMITS__MAX_STATEMENT_CHARS). ...` (8) | The expression is far longer than a mask needs. Shorten it. |
 
-After an append that adds a column, the files written before it do not have it. A read under a
-row filter or a column mask on the table selects every column, so **every reader under any filter or
-mask of that table fails**, whichever column the mask names, and nothing is shown. A query that does
-not name the new column gets ``The data files of `gold.customers` do not all have the column `tier`
-(it was added after some or all of them were written). ...``; a query that names it gets the
-database's own "Referenced column ... not found" line and a hint that the table's older files lack
-the column. Both end with: ask the owner of the table to write it again, so that every file has the
-column. See [Show some people only some rows](filter-rows.md#when-a-table-gains-a-column).
+A column added to the table later reads as NULL in the rows written before it, also under a
+mask, and a renamed column keeps its data. See [Show some people only some rows](filter-rows.md#when-a-tables-schema-changes).
 
 A mask does not follow a column that is dropped or renamed afterwards. From then on every query of
 the masked person that reads the table fails with `Column mask references unknown column 'ssn'; known

@@ -1442,10 +1442,13 @@ found through a query run of their own that is bound to the check result
   has a column of that name** (compared without regard to case); otherwise the database's
   message stands. If no column is
   left, the query fails with `NO_COLUMN_LEFT`. Both have the cause `invalid_query`.
-- **Files that lack a column (`pipeline._schema_mismatch_failure`), any read.** A read under
-  a row filter, a column mask or a checked snapshot selects **every declared column** in the one
-  CTE over the files, so after a schema-changing append every reader under any policy of the
-  table fails, whichever column the policy names (the files of one glob differ, or the column is
+- **Files that lack a column (`pipeline._schema_mismatch_failure`), raw-zone reads.** An
+  Iceberg read projects every file onto the schema it uses through DuckDB's field-id map
+  (`v_<n>_schema`, `catalog.field_ids.read_fields`), so its files never lack a column and a
+  binder error's candidates are the read's own columns. A raw-zone table's files are read by
+  name, and a read under a row filter or a column mask selects **every declared column** in the
+  one CTE over the files, so after one of them lacks a column every reader under any policy of
+  the table fails, whichever column the policy names (the files of one glob differ, or the column is
   "not found" in the one file the read binds against). Both database texts list a file's
   columns, which may include one the caller may not see, so neither reaches the caller: the
   glob wording is replaced by a text naming the table(s) that declare the column, and the "not
@@ -1455,8 +1458,9 @@ found through a query run of their own that is bound to the check result
   cut (`_without_candidates`), plus a hint naming the projected tables that declare the column and
   saying their older files lack it. A "not found" for a table read with a plain `*` keeps the
   database's text. It only
-  rewrites the message of a read that already failed. The real fix, reading by Iceberg field id,
-  is a separate issue, and when it lands this message goes.
+  rewrites the message of a read that already failed. A field inside a nested column is read by
+  name; `refuse_changed_nested_fields` refuses a read whose nested fields moved since a live
+  file was written, by the schemas of the snapshot's ancestry, and names no file.
 - **A failed read of a check's snapshot looks again (`pipeline._snapshot_gone_after_failure`).**
   Maintenance may remove the snapshot between resolution and read. After a failure that
   is not a worker stop, the run asks `_resolve_sources` again with the caller's own rights

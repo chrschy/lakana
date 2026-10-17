@@ -3119,7 +3119,9 @@ def test_run_one_keeps_resolved_locations_out_of_the_error_message(
     assert run.status == QueryRunStatus.FAILED
     assert run.error_message is not None
     assert str(tmp_path) not in run.error_message
-    assert _REDACTED in run.error_message
+    # The read is mapped by field id, so the child, not the redaction here, takes the
+    # location out of the message.
+    assert "<file>" in run.error_message
 
 
 def test_run_one_restricts_the_local_filesystem_when_storage_is_not_local(

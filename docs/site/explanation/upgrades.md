@@ -120,6 +120,26 @@ and `SHOW` were never allowed as the whole statement; `SELECT ... INTO` is now r
 too. To get the numbers, use an aggregate query (`SELECT count(*), min(x), max(x) FROM t`) and
 read the column list from the result.
 
+### Iceberg tables are read by field id
+
+No migration. Lakana reads the data files of an Iceberg table by the field id of each column, as
+the Iceberg specification requires. After a schema change, an added column reads as NULL in older
+rows, a renamed column keeps its data, a column dropped and added again under its name is a new
+column, and a widened column reads in its new type. Queries, row filters and column masks that
+failed after such a change (``The data files of `TABLE` do not all have the column ...``) now
+run; that message remains only for raw-zone (external) tables. A field inside a struct, list or
+map column is read by name: after one was renamed, or dropped and added again, reads of the
+table are refused with ``'TABLE' cannot be read: the field ...`` until its rows are written
+again. A filter on a float column widened to double still needs a range
+([Show some people only some rows](../how-to/filter-rows.md#columns-of-a-table-made-outside-lakana)).
+
+From this release on, Lakana refuses a commit of a data file that has no field ids, which is
+what a client that writes Parquet without them produces, so a table never gains a file that
+reads as NULL. Files that other Iceberg clients committed before this release are not checked.
+If such a file lacks field ids, every column of it reads as NULL, with no error. Ask the owner
+of the table to write its rows again with a client that writes field ids, such as pyiceberg.
+
+
 ## Notes for 0.12.0
 
 This release changed a lot: who may hand out access, which package sources a project may

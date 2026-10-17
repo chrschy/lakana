@@ -77,7 +77,7 @@ from lakana_core.policy.row_filters import RowFilterService
 from lakana_core.projects.checks import CheckSpec
 from lakana_core.query_rewrite import TableSource, rewrite_query
 from lakana_core.runs.check_rows import submit_check_rows
-from lakana_core.runs.checks import record_result
+from lakana_core.runs.checks import column_not_shown_message, record_result
 from lakana_core.runs.tasks import Written
 from lakana_core.secrets.keys import KeyProvider
 from lakana_core.storage.resolver import StorageResolver
@@ -1525,8 +1525,8 @@ def test_another_error_keeps_its_own_message(
     message, cause = _failure(session, tmp_path, ana, result)
 
     assert message is not None
-    assert "Conversion Error" in message
-    assert "is not shown" not in message
+    assert message.startswith("Query failed: a value could not be converted")
+    assert "of the checked snapshot" not in message
     assert cause == QueryErrorCause.INVALID_QUERY.value
 
 
@@ -1790,7 +1790,7 @@ def test_a_query_through_a_view_that_fails_keeps_its_own_error(
     message, cause = _failure(session, tmp_path, ana, result)
 
     assert message is not None
-    assert "Conversion Error" in message
+    assert message.startswith("Query failed: a value could not be converted")
     assert "no longer plans" not in message
     assert "has not been published" not in message
     assert "lakana check rows" not in message
@@ -2508,21 +2508,13 @@ def test_a_files_mismatch_on_a_column_no_table_declares_keeps_the_databases_mess
     assert _schema_mismatch_failure(conversion, tables, frozenset(), frozenset()) is None
 
 
-def test_a_row_filter_on_a_column_an_older_file_lacks_fails_with_a_clear_message(
+def test_a_row_filter_on_a_column_an_older_file_lacks_reads_it_as_null(
     session: Session, admin: PrincipalRef, tmp_path: Path
 ) -> None:
-    """The snapshot holds an older file written before `tier` and a newer one with it.
-
-    The filter reads `tier`; the read fails closed (never unfiltered rows) and says why in
-    the table's and the column's name, without the columns of either file.
-    """
+    """The checked snapshot has a file without `tier`; the filter reads NULL there and applies."""
     _write(session, admin, _GOOD, WriteMode.CREATE)
     snapshot = _write(
-        session,
-        admin,
-        _orders([-1], ["eu"], tier=["gold"]),
-        WriteMode.APPEND,
-        evolve_schema=True,
+        session, admin, _orders([-1], ["eu"], tier=["gold"]), WriteMode.APPEND, evolve_schema=True
     )
     result = _checked(
         session, admin, snapshot_id=snapshot, sql="SELECT id FROM gold.orders WHERE id < 0"
@@ -2530,18 +2522,15 @@ def test_a_row_filter_on_a_column_an_older_file_lacks_fails_with_a_clear_message
     ana = _reader(session, admin, "ana", "orders")
     _filter(session, admin, "ana", "tier = 'gold'")
 
-    message, cause = _failure(session, tmp_path, ana, result)
-
-    assert message == _files_lack("tier", "`gold.orders`")
-    assert cause == QueryErrorCause.INVALID_QUERY.value
+    assert _rows(session, tmp_path, ana, result) == [{"id": -1}]
     plain = _reader(session, admin, "cy", "orders")
     assert _rows(session, tmp_path, plain, result) == [{"id": -1}]
 
 
-def test_an_ordinary_read_under_a_filter_on_a_column_an_older_file_lacks_says_the_same(
+def test_an_ordinary_read_under_a_filter_on_a_column_an_older_file_lacks_shows_what_passes(
     session: Session, admin: PrincipalRef, tmp_path: Path
 ) -> None:
-    """Not only a check's rows: any query of the table fails closed with the same text."""
+    """The row written before `tier` existed reads NULL and fails the filter; nothing else does."""
     _write(session, admin, _GOOD, WriteMode.CREATE)
     _write(
         session, admin, _orders([6], ["eu"], tier=["gold"]), WriteMode.APPEND, evolve_schema=True
@@ -2556,18 +2545,16 @@ def test_an_ordinary_read_under_a_filter_on_a_column_an_older_file_lacks_says_th
 
     run, rows = _run(session, tmp_path, run_id)
 
-    assert (run.status, rows) == (QueryRunStatus.FAILED, [])
-    assert run.error_message == _files_lack("tier", "`gold.orders`")
+    assert (run.status, rows) == (QueryRunStatus.SUCCEEDED, [{"id": 6}])
 
 
-def test_a_filter_on_a_column_widened_since_still_applies_to_the_snapshots_own_values(
+def test_a_filter_on_a_column_widened_since_fails_closed_with_the_columns_own_text(
     session: Session, admin: PrincipalRef, tmp_path: Path
 ) -> None:
-    """A widened type keeps the field id, so the filter is judged by the column and applies.
+    """A widened column is not shown in the checked snapshot, and the read maps only shown ones.
 
-    The column itself is withheld (its type is another now), but the filter reads the
-    snapshot's files, where `qty` holds what it held then: no error, and the rows that fail the
-    filter are never shown.
+    The filter reads `qty`, which the read of the snapshot does not map, so the read fails
+    closed with the text that says the column is not shown, and no row of either file appears.
     """
     narrow = pa.table({"id": pa.array([2, -1], pa.int64()), "qty": pa.array([5, 6], pa.int32())})
     result = _warned_run(session, admin, narrow, "SELECT * FROM gold.orders WHERE id < 0")
@@ -2576,10 +2563,10 @@ def test_a_filter_on_a_column_widened_since_still_applies_to_the_snapshots_own_v
     ana = _reader(session, admin, "ana", "orders")
     _filter(session, admin, "ana", "qty > 6")
 
-    assert _rows(session, tmp_path, ana, result) == []
-    other = _reader(session, admin, "cy", "orders")
-    _filter(session, admin, "cy", "qty > 5")
-    assert _rows(session, tmp_path, other, result) == [{"id": -1}]
+    message, cause = _failure(session, tmp_path, ana, result)
+
+    assert message == column_not_shown_message("qty", "gold.orders", result.run_id, "dev")
+    assert cause == QueryErrorCause.INVALID_QUERY.value
 
 
 def _add_a_column_without_writing(session: Session, admin: PrincipalRef) -> None:
@@ -2608,14 +2595,15 @@ def _add_a_column_without_writing(session: Session, admin: PrincipalRef) -> None
     )
 
 
-@pytest.mark.parametrize("policy", ["mask", "filter"])
-def test_a_column_added_without_a_write_fails_a_read_that_needs_it_with_a_clear_message(
-    session: Session, admin: PrincipalRef, tmp_path: Path, policy: str
+@pytest.mark.parametrize(("policy", "expected"), [("mask", [{"id": 1}]), ("filter", [])])
+def test_a_column_added_without_a_write_reads_as_null_under_a_policy(
+    session: Session,
+    admin: PrincipalRef,
+    tmp_path: Path,
+    policy: str,
+    expected: list[dict[str, int]],
 ) -> None:
-    """No file has `tier` yet: the mask expression or the filter reads it.
-
-    The database would list the columns of the file as candidates; the message names the
-    table and the column and nothing else, and the read fails closed.
+    """No file has `tier` yet: a mask built from it is NULL, a filter on it passes nothing.
 
     Parameters
     ----------
@@ -2627,25 +2615,28 @@ def test_a_column_added_without_a_write_fails_a_read_that_needs_it_with_a_clear_
         The storage root.
     policy
         What makes the read name `tier`: a column mask's expression or a row filter.
+    expected
+        The rows the reader sees.
     """
     _write(session, admin, _GOOD, WriteMode.CREATE)
     _add_a_column_without_writing(session, admin)
     ana = _reader(session, admin, "ana", "orders")
-    sql = "SELECT id FROM gold.orders"
     if policy == "mask":
         _mask_as(session, admin, "ana", "email", "tier")
     else:
         _filter(session, admin, "ana", "tier = 'x'")
-    run_id = QueryService(session, AllowAllAuthorization()).submit_query(ana, "dev", sql).id
+    run_id = (
+        QueryService(session, AllowAllAuthorization())
+        .submit_query(ana, "dev", "SELECT id FROM gold.orders")
+        .id
+    )
 
     run, rows = _run(session, tmp_path, run_id)
 
-    assert (run.status, rows) == (QueryRunStatus.FAILED, [])
-    assert run.error_message == _files_lack("tier", "`gold.orders`")
-    assert run.error_cause == QueryErrorCause.INVALID_QUERY.value
+    assert (run.status, rows) == (QueryRunStatus.SUCCEEDED, expected)
 
 
-def test_a_reader_who_wrote_the_missing_column_gets_the_databases_text_without_candidates(
+def test_a_reader_who_wrote_a_missing_column_gets_the_databases_text_and_no_hint(
     session: Session, admin: PrincipalRef, tmp_path: Path
 ) -> None:
     """`SELECT tier FROM (SELECT id FROM gold.orders)` is the reader's own mistake."""
@@ -2659,7 +2650,9 @@ def test_a_reader_who_wrote_the_missing_column_gets_the_databases_text_without_c
     run, rows = _run(session, tmp_path, run_id)
 
     assert (run.status, rows) == (QueryRunStatus.FAILED, [])
-    assert run.error_message == _named_column_text("`gold.orders`")
+    assert run.error_message is not None
+    assert run.error_message.startswith(_NOT_FOUND_LINE)
+    assert "older data files" not in run.error_message
 
 
 def test_a_view_that_leaves_the_column_out_is_not_blamed_on_the_files(
@@ -2684,22 +2677,26 @@ def test_a_view_that_leaves_the_column_out_is_not_blamed_on_the_files(
 
     assert (run.status, rows) == (QueryRunStatus.FAILED, [])
     assert run.error_message is not None
-    assert "Candidate" not in run.error_message
-    assert "do not all have the column" not in run.error_message
+    assert "older data files" not in run.error_message
 
 
 @pytest.mark.parametrize(
-    "sql",
+    ("sql", "expected"),
     [
-        "SELECT tier FROM gold.orders",
-        "SELECT id FROM gold.orders WHERE tier = 'x'",
-        "SELECT o.tier FROM gold.orders AS o",
+        ("SELECT id, tier FROM gold.orders", [{"id": 1, "tier": None}]),
+        ("SELECT id FROM gold.orders WHERE tier = 'x'", []),
+        ("SELECT o.id, o.tier FROM gold.orders AS o", [{"id": 1, "tier": None}]),
+        ("SELECT id FROM gold.orders", [{"id": 1}]),
     ],
 )
-def test_a_reader_who_names_the_new_column_gets_the_hint_about_the_files(
-    session: Session, admin: PrincipalRef, tmp_path: Path, sql: str
+def test_a_reader_who_names_a_column_no_file_has_yet_reads_it_as_null(
+    session: Session,
+    admin: PrincipalRef,
+    tmp_path: Path,
+    sql: str,
+    expected: list[dict[str, object]],
 ) -> None:
-    """The most common way to meet the failure: the reader asks for the column that was added.
+    """Under a filter on another column, by bare name, in a WHERE and through an alias.
 
     Parameters
     ----------
@@ -2710,7 +2707,9 @@ def test_a_reader_who_names_the_new_column_gets_the_hint_about_the_files(
     tmp_path
         The storage root.
     sql
-        A query that names `tier` in another place each time.
+        A query that names `tier` in another place each time, or not at all.
+    expected
+        The rows the reader sees.
     """
     _write(session, admin, _GOOD, WriteMode.CREATE)
     _add_a_column_without_writing(session, admin)
@@ -2720,17 +2719,13 @@ def test_a_reader_who_names_the_new_column_gets_the_hint_about_the_files(
 
     run, rows = _run(session, tmp_path, run_id)
 
-    assert (run.status, rows) == (QueryRunStatus.FAILED, [])
-    if "o.tier" in sql:
-        assert run.error_message is not None and "Candidate" not in run.error_message
-    else:
-        assert run.error_message == _named_column_text("`gold.orders`")
+    assert (run.status, rows) == (QueryRunStatus.SUCCEEDED, expected)
 
 
-def test_a_reader_who_names_the_new_column_of_a_table_with_mixed_files_gets_the_same_text(
+def test_a_reader_reads_a_new_column_of_a_table_with_mixed_files(
     session: Session, admin: PrincipalRef, tmp_path: Path
 ) -> None:
-    """An older file and a newer one that has `tier`: the text is the same as with no file."""
+    """An older file and a newer one that has `tier` read NULL and the value respectively."""
     _write(session, admin, _GOOD, WriteMode.CREATE)
     _write(
         session, admin, _orders([6], ["eu"], tier=["gold"]), WriteMode.APPEND, evolve_schema=True
@@ -2739,33 +2734,16 @@ def test_a_reader_who_names_the_new_column_of_a_table_with_mixed_files_gets_the_
     _filter(session, admin, "ana", "region = 'eu'")
     run_id = (
         QueryService(session, AllowAllAuthorization())
-        .submit_query(ana, "dev", "SELECT tier FROM gold.orders")
-        .id
-    )
-
-    run, _ = _run(session, tmp_path, run_id)
-
-    assert run.error_message == _named_column_text("`gold.orders`")
-
-
-def test_a_filter_on_another_column_fails_the_same_way_after_a_schema_change(
-    session: Session, admin: PrincipalRef, tmp_path: Path
-) -> None:
-    """The policy names `region`, not `tier`, and the read still fails: it selects every column."""
-    _write(session, admin, _GOOD, WriteMode.CREATE)
-    _add_a_column_without_writing(session, admin)
-    ana = _reader(session, admin, "ana", "orders")
-    _filter(session, admin, "ana", "region = 'eu'")
-    run_id = (
-        QueryService(session, AllowAllAuthorization())
-        .submit_query(ana, "dev", "SELECT id FROM gold.orders")
+        .submit_query(ana, "dev", "SELECT id, tier FROM gold.orders")
         .id
     )
 
     run, rows = _run(session, tmp_path, run_id)
 
-    assert (run.status, rows) == (QueryRunStatus.FAILED, [])
-    assert run.error_message == _files_lack("tier", "`gold.orders`")
+    assert (run.status, rows) == (
+        QueryRunStatus.SUCCEEDED,
+        [{"id": 1, "tier": None}, {"id": 6, "tier": "gold"}],
+    )
 
 
 def test_a_reader_without_the_grant_keeps_the_original_failure_at_the_second_look(

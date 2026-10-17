@@ -114,32 +114,34 @@ or a column whose type was widened. A filter names top-level columns only:
 - **A float column that was widened to double.** Rows written before the widening hold 32-bit
   values and rows written after hold 64-bit ones, so `1.1` is not the same number in both. What
   an equality with a decimal literal (`price = 1.1`) or its negation (`price <> 1.1`,
-  `NOT (price = 1.1)`) matches depends on the order of the table's data files and on how the
-  filter is written, so a filter meant to hide such rows can show some. Always write a range
+  `NOT (price = 1.1)`) matches depends on how the filter is
+  written, so a filter meant to hide such rows can show some. Always write a range
   (`price > 1.09 AND price < 1.11`) in a filter. A query can also use a rounded value
   (`round(price, 2) = 1.1`). Both match the rows of old and new files alike, in either order.
-  Schema changes are tracked in [#104](https://github.com/chrschy/lakana/issues/104).
 
-## When a table gains a column
+## When a table's schema changes
 
-After an append that adds a column, the files written before it do not have it. A read under a
-row filter or a column mask on the table selects every column, so **every reader under any filter
-or mask of that table fails**, whichever column the filter names, until the files agree. Nothing
-is shown unfiltered. What the reader sees depends on whether their own query names the new column:
+Lakana reads an Iceberg table's data files by the field id of each column, as the Iceberg
+specification requires, so a filter keeps working after the schema changes:
 
-- A query that does not name it (`SELECT id FROM gold.customers`) gets ``The data files of
-  `gold.customers` do not all have the column `tier` (it was added after some or all of them were
-  written). A read under a row filter or column mask selects every column of the table, so it
-  fails on them whichever column the policy names. Ask the owner of the table to write it again,
-  so that every file has the column.``
-- A query that names it (`SELECT tier FROM gold.customers`, or `WHERE tier = 'vip'`) gets the
-  database's own line, without its list of candidate columns, and a hint: ``Query failed: Binder Error: Referenced column "tier" not found in FROM clause! `gold.orders` declares the column `tier`; if the query reads it from there, older data files of the table lack it (it was added after some or all of them were written). Ask the owner of the table to write it again, so that every file has the column.``
-  The hint is the same whatever order the files are in. If your query has a mistake of its own (a
-  subquery that leaves `tier` out), fix the query; the hint says only that the table's older files
-  lack the column too.
+- **An added column** reads as NULL in the rows written before it was added. A filter on it
+  (`tier = 'gold'`) passes none of those rows; `tier IS NULL` passes all of them.
+- **A renamed column** keeps its data under the new name, in old and new files alike. The filter
+  itself does not follow the rename: see the next section.
+- **A column dropped and added again** under the same name is a new column. The rows written
+  before read as NULL, never as the old column's values.
+- **A widened column** (`int` to `long`, `float` to `double`) reads in its new type. A float
+  column needs a range in a filter, as said above.
 
-The owner writes the table's data again (a `replace`), which gives every file all the columns, and
-the reads run again. Readers under no filter or mask are not affected by these messages.
+A field inside a struct, list or map column is read by name. After such a field was renamed, or
+dropped and added again, every read of the table fails with ``'gold.customers' cannot be read:
+the field `town` of its column `address` was renamed, ...`` until its owner writes all of its rows
+again (an overwrite). Nothing is shown in the meantime.
+
+A raw-zone (external) table has no field ids: its files are read by column name. When some of its
+files lack a column it declares, a read under a filter or a mask of that table fails with
+``The data files of `TABLE` do not all have the column `COLUMN` ...``, and nothing is shown
+unfiltered. Write the files again so that every file has the column.
 
 ## Filters and dropped columns
 

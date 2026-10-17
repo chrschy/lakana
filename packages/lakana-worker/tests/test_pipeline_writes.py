@@ -362,7 +362,13 @@ def test_an_incremental_write_sets_the_watermark_beside_the_url_lists(
     assert [row["id"] for row in _rows(catalog, principal, "gold.events")] == [1, 2, 3, 4]
     [(sql, parameters)] = seen
     assert isinstance(parameters, dict)
-    assert sorted(parameters) == ["v_0_files", "v_1_files", "v_watermark"]
+    assert sorted(parameters) == [
+        "v_0_files",
+        "v_0_schema",
+        "v_1_files",
+        "v_1_schema",
+        "v_watermark",
+    ]
     assert parameters["v_watermark"] == 2
     assert "> getvariable('v_watermark')" in sql
     assert "$" not in sql
