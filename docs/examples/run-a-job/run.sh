@@ -22,9 +22,8 @@ capture_end() {
 trap '[ -z "$capturing" ] || { exec >&3 2>&4; cat "$captured"; }; rm -f "$captured"' EXIT
 
 cd ~
-lakana init readings >/dev/null
+lakana init readings --no-sample >/dev/null
 cd readings
-rm -r assets/bronze/example.sql checks
 cp -R "$EXAMPLE_DIR/project/assets/." assets/
 git config --global user.name "Your Name"
 git config --global user.email "you@example.com"

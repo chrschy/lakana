@@ -11,14 +11,20 @@ from typing import IO
 
 import pytest
 import yaml
-from conftest import FakeApi, invoke, make_state
+from conftest import FakeApi, invoke, make_state, write_profile_file
 
 from lakana import __version__
+from lakana.cli._sample import SAMPLE
 
+_SAMPLE = {
+    "assets/bronze/readings.sql",
+    "assets/silver/station_temperatures.sql",
+    "assets/gold/station_ranking.sql",
+    "checks/silver/station_temperatures/plausible_range.sql",
+}
 _EXPECTED = {
     "lakana.yaml",
-    "assets/bronze/example.sql",
-    "checks/bronze/example/id_is_present.sql",
+    *_SAMPLE,
     "tests/test_example.py",
     "pyproject.toml",
     ".github/workflows/lakana-deploy.yml",
@@ -52,19 +58,97 @@ def test_init_writes_the_project_without_prompts(tmp_path: Path) -> None:
     assert "lakana repo add analytics" in result.stdout
 
 
-def test_init_writes_one_check_for_the_example_table(tmp_path: Path) -> None:
-    """The check selects from the example table and returns the rows that are wrong."""
+def test_the_sample_is_one_source_three_sql_assets_and_one_check(tmp_path: Path) -> None:
+    """The sample builds bronze, then silver, then gold from generated rows, with one check."""
     target = tmp_path / "analytics"
     invoke(make_state(tmp_path, FakeApi()), "init", str(target))
-    assert (target / "checks/bronze/example/id_is_present.sql").read_text() == (
-        "/* lakana\n"
-        "description: Every row has an id. A check returns the rows that are wrong; no rows "
-        "means it passed.\n"
-        "*/\n"
-        "SELECT id, greeting\n"
-        "FROM bronze.example\n"
-        "WHERE id IS NULL\n"
+    sample = {name: (target / name).read_text() for name in _SAMPLE}
+    for name, text in sample.items():
+        assert text.startswith("/* lakana\ndescription: "), name
+    assert "FROM bronze.readings" in sample["assets/silver/station_temperatures.sql"]
+    assert "FROM silver.station_temperatures" in sample["assets/gold/station_ranking.sql"]
+    assert (
+        "FROM silver.station_temperatures"
+        in (sample["checks/silver/station_temperatures/plausible_range.sql"])
     )
+    bronze = sample["assets/bronze/readings.sql"]
+    assert "FROM " in bronze and "read_" not in bronze and "http" not in bronze
+    assert "random" not in "".join(sample.values()).lower()
+    assert sum(len(text) for text in sample.values()) < 10_000
+    assert not (target / "assets" / "bronze" / "example.sql").exists()
+
+
+def test_the_sample_can_be_left_out(tmp_path: Path) -> None:
+    """`--no-sample` writes the project without assets or checks; the CI files stay."""
+    target = tmp_path / "analytics"
+    result = invoke(make_state(tmp_path, FakeApi()), "init", str(target), "--no-sample")
+    assert result.exit_code == 0, result.output
+    assert _files(target) == _EXPECTED - _SAMPLE
+    assert "small sample" not in result.stdout
+    assert "lakana deploy --env dev" in result.stdout
+
+
+def _remote_profile(tmp_path: Path, name: str = "team") -> None:
+    """Write a profile file whose default profile points off this machine.
+
+    Parameters
+    ----------
+    tmp_path
+        Pytest's per-test directory.
+    name
+        The profile's name.
+    """
+    write_profile_file(
+        tmp_path / "lakana" / "config.toml",
+        f'default_profile = "{name}"\n[profiles.{name}]\n'
+        'url = "https://lakana.example.org"\ntoken = "t"\n',
+    )
+
+
+def test_the_sample_is_on_in_local_mode_and_off_for_a_remote_default_profile(
+    tmp_path: Path,
+) -> None:
+    """A local or absent profile gets the sample; a team instance's profile does not."""
+    state = make_state(tmp_path, FakeApi())
+    local = tmp_path / "local"
+    write_profile_file(
+        tmp_path / "lakana" / "config.toml",
+        'default_profile = "local"\n[profiles.local]\nurl = "http://127.0.0.1:8765"\ntoken = "t"\n',
+    )
+    invoke(state, "init", str(local))
+    assert _files(local) == _EXPECTED
+    _remote_profile(tmp_path)
+    remote = tmp_path / "remote"
+    result = invoke(state, "init", str(remote))
+    assert _files(remote) == _EXPECTED - _SAMPLE
+    assert "--sample" in result.stdout
+    forced = tmp_path / "forced"
+    invoke(state, "init", str(forced), "--sample")
+    assert _files(forced) == _EXPECTED
+    by_env = tmp_path / "by_env"
+    invoke(
+        make_state(tmp_path, FakeApi()),
+        "init",
+        str(by_env),
+        env={"LAKANA_URL": "https://lakana.example.org"},
+    )
+    assert _files(by_env) == _EXPECTED - _SAMPLE
+
+
+def test_a_broken_profile_file_does_not_stop_init(tmp_path: Path) -> None:
+    """Init is offline: a profile file it can't read means 'local', not an error."""
+    write_profile_file(tmp_path / "lakana" / "config.toml", "this is not toml [[[")
+    target = tmp_path / "analytics"
+    result = invoke(make_state(tmp_path, FakeApi()), "init", str(target))
+    assert result.exit_code == 0, result.output
+    assert _files(target) == _EXPECTED
+
+
+def test_the_sample_files_are_the_ones_the_tutorial_shows() -> None:
+    """The tutorial's files under docs/examples equal what `lakana init` writes."""
+    examples = Path(__file__).resolve().parents[4] / "docs" / "examples" / "getting-started"
+    for name, text in SAMPLE.items():
+        assert (examples / "project" / name).read_text() == text, name
 
 
 def test_ci_templates_separate_dev_and_prod_credentials(tmp_path: Path) -> None:
@@ -136,7 +220,7 @@ def test_midway_write_failure_cleans_up(tmp_path: Path, monkeypatch: pytest.Monk
     real_open = Path.open
 
     def flaky(self: Path, mode: str = "r") -> IO[str]:
-        if self.name == "example.sql":
+        if self.name == "station_ranking.sql":
             raise OSError("disk full")
         return real_open(self, mode)
 
@@ -310,9 +394,22 @@ def _git_env(monkeypatch: pytest.MonkeyPatch, home: Path, *, identity: bool) -> 
             monkeypatch.setenv(f"GIT_{who}_EMAIL", "ada@example.org")
 
 
-def test_next_steps_end_with_the_first_run(tmp_path: Path) -> None:
-    """The list goes on past the deploy: `lakana run --env dev` is the last step."""
+def test_next_steps_name_the_two_commands_that_build_the_sample(tmp_path: Path) -> None:
+    """After the setup steps, the two commands are deploy and run, then a query to look."""
     result = invoke(make_state(tmp_path, FakeApi()), "init", str(tmp_path / "p"), "--repo", "p")
+    lines = result.stdout.splitlines()
+    first = lines.index("Then the two commands that build the sample:")
+    assert lines[first + 1 : first + 3] == ["  lakana deploy --env dev", "  lakana run --env dev"]
+    assert lines.index("  lakana repo add p --kind local --url " + str(tmp_path / "p")) < first
+    assert lines[first + 3] == "Then look at the result:"
+    assert lines[first + 4].startswith('  lakana sql "SELECT * FROM gold.station_ranking')
+
+
+def test_next_steps_without_the_sample_end_with_the_first_run(tmp_path: Path) -> None:
+    """Without the sample the list is the plain one: deploy and run are its last steps."""
+    result = invoke(
+        make_state(tmp_path, FakeApi()), "init", str(tmp_path / "p"), "--repo", "p", "--no-sample"
+    )
     steps = result.stdout.split("Next:")[1].splitlines()
     commands = [line.strip() for line in steps if line.startswith("  ")]
     assert commands[-2:] == ["lakana deploy --env dev", "lakana run --env dev"]

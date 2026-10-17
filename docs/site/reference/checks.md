@@ -15,7 +15,7 @@ a set-back can end as, the commands, the routes, who may read the results and wh
 | The table | One that an asset of the project builds, or reads. It must not be an artifact. The SQL must read it. |
 | The most | 50 checks of one table. |
 
-`lakana init` writes one check, `checks/bronze/example/id_is_present.sql`, for its example asset.
+`lakana init` writes one check, `checks/silver/station_temperatures/plausible_range.sql`, for its sample asset (`--no-sample` leaves it out).
 
 ## The comment
 

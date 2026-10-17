@@ -16,6 +16,34 @@ from lakana.cli._state import CliError
 
 _MASTER_KEY_BYTES = 32
 
+MARKER_NAME = ".lakana-local-instance"
+"""The file `prepare_data_dir` writes into every local instance's data directory."""
+
+MARKER_TEXT = "lakana local instance\n"
+"""The marker's exact content."""
+
+
+def write_marker(root: Path) -> None:
+    """Mark `root` as a local instance's data directory; a marker that is there stays.
+
+    Parameters
+    ----------
+    root
+        The data directory.
+
+    Raises
+    ------
+    OSError
+        If the marker can't be written.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(root / MARKER_NAME, flags, 0o600)
+    except FileExistsError:
+        return
+    with os.fdopen(fd, "w") as handle:
+        handle.write(MARKER_TEXT)
+
 
 def default_data_dir(environ: Mapping[str, str] | None = None) -> Path:
     """Return the default data directory.
@@ -181,7 +209,8 @@ def prepare_data_dir(path: Path) -> DataDir:
     Returns
     -------
     DataDir
-        The checked directory, with `lake/` created.
+        The checked directory, with `lake/` created and the marker file written (the marker
+        is what `lakana server reset` requires before it deletes anything).
 
     Raises
     ------
@@ -237,6 +266,7 @@ def prepare_data_dir(path: Path) -> DataDir:
     data_dir = DataDir(path)
     try:
         data_dir.lake.mkdir(exist_ok=True)
+        write_marker(path)
     except OSError as exc:
         raise CliError(f"Can't prepare data directory {data_dir.lake}: {exc}", 3) from exc
     return data_dir
@@ -269,7 +299,7 @@ def _read_master_key(path: Path) -> str:
         If the path is a symlink (exit 2); if, on POSIX, it isn't owned by
         the current user or is accessible to group/other (exit 2); if its
         contents don't decode as exactly 32 bytes of base64, or aren't
-        valid UTF-8 (exit 3, with a hint to delete the data directory and
+        valid UTF-8 (exit 3, with a hint to run `lakana server reset --local` and
         rotate the key — the file itself is corrupt or wrong-mode); or if
         opening or reading it otherwise raises `OSError` for any other
         reason, e.g. the path is a directory, or a transient I/O error
@@ -292,15 +322,17 @@ def _read_master_key(path: Path) -> str:
             info = os.fstat(handle.fileno())
             if os.name != "nt" and info.st_uid != os.getuid():
                 raise CliError(
-                    f"{path} is not owned by the current user; delete the data directory "
-                    f"to rotate the key"
+                    f"{path} is not owned by the current user; stop Lakana and run "
+                    f"'lakana server reset --local' to rotate the key"
                 )
             if os.name != "nt" and stat.S_IMODE(info.st_mode) & 0o077:
                 raise CliError(f"{path} is accessible by other users; run: chmod 600 {path}")
             text = handle.read().strip()
     except UnicodeDecodeError as exc:
         raise CliError(
-            f"{path} is not a valid master key; delete the data directory to rotate it", 3
+            f"{path} is not a valid master key; stop Lakana and run "
+            "'lakana server reset --local' to rotate it",
+            3,
         ) from exc
     except OSError as exc:
         raise CliError(f"Can't read {path}: {exc}", 3) from exc
@@ -308,11 +340,15 @@ def _read_master_key(path: Path) -> str:
         key_bytes = base64.b64decode(text, validate=True)
     except (binascii.Error, ValueError) as exc:
         raise CliError(
-            f"{path} is not a valid master key; delete the data directory to rotate it", 3
+            f"{path} is not a valid master key; stop Lakana and run "
+            "'lakana server reset --local' to rotate it",
+            3,
         ) from exc
     if len(key_bytes) != _MASTER_KEY_BYTES:
         raise CliError(
-            f"{path} is not a valid master key; delete the data directory to rotate it", 3
+            f"{path} is not a valid master key; stop Lakana and run "
+            "'lakana server reset --local' to rotate it",
+            3,
         )
     return text
 

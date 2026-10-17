@@ -16,7 +16,9 @@ from typing import Annotated
 import typer
 
 from lakana import __version__
-from lakana.cli._state import CliError
+from lakana.cli._sample import SAMPLE, SAMPLE_QUERY
+from lakana.cli._state import CliError, CliState, is_loopback_url, selected_url, state_of
+from lakana.errors import ConfigError
 
 _NAME = re.compile(r"\A[A-Za-z0-9_-]{1,255}\Z")
 
@@ -27,25 +29,6 @@ defaults:
   materialize: table
 requirements:
   fields: [description]
-"""
-
-_EXAMPLE_SQL = """\
-/* lakana
-description: An example asset. Replace it with your own SQL.
-columns:
-  id: A constant identifier.
-  greeting: A friendly constant.
-*/
-SELECT 1 AS id, 'hello' AS greeting
-"""
-
-_EXAMPLE_CHECK = """\
-/* lakana
-description: Every row has an id. A check returns the rows that are wrong; no rows means it passed.
-*/
-SELECT id, greeting
-FROM bronze.example
-WHERE id IS NULL
 """
 
 _TEST = '''\
@@ -191,14 +174,14 @@ lakana-deploy:
 
 TEMPLATES: dict[str, str] = {
     "lakana.yaml": _LAKANA_YAML,
-    "assets/bronze/example.sql": _EXAMPLE_SQL,
-    "checks/bronze/example/id_is_present.sql": _EXAMPLE_CHECK,
     "tests/test_example.py": _TEST,
     "pyproject.toml": _PYPROJECT,
     ".github/workflows/lakana-deploy.yml": _GITHUB,
     ".gitlab-ci.yml": _GITLAB,
 }
-"""Relative path → template; `{repo}` and `{version}` are substituted with `str.format`."""
+"""Relative path → template; `{repo}` and `{version}` are substituted with `str.format`.
+
+The sample project is separate (`lakana.cli._sample.SAMPLE`) and written verbatim."""
 
 
 def _is_dev_build(version: str) -> bool:
@@ -250,7 +233,7 @@ def _git_lacks_identity(directory: Path) -> bool:
     return False
 
 
-def write_project(directory: Path, repo: str) -> list[Path]:
+def write_project(directory: Path, repo: str, *, sample: bool = True) -> list[Path]:
     """Write every template into `directory`, refusing to overwrite anything.
 
     Parameters
@@ -259,6 +242,8 @@ def write_project(directory: Path, repo: str) -> list[Path]:
         The project directory; created if missing.
     repo
         The repository name for `lakana.yaml` and `pyproject.toml`.
+    sample
+        Whether to write the sample assets and check as well.
 
     Returns
     -------
@@ -272,15 +257,18 @@ def write_project(directory: Path, repo: str) -> list[Path]:
         not a directory (nothing is written); exit 3 on a filesystem error
         (files already written are removed).
     """
-    targets = {directory / relative: text for relative, text in TEMPLATES.items()}
+    texts = {
+        relative: text.format(repo=repo, version=__version__)
+        for relative, text in TEMPLATES.items()
+    }
+    if sample:
+        texts.update(SAMPLE)
+    targets = {directory / relative: text for relative, text in texts.items()}
     existing = [str(path) for path in targets if os.path.lexists(path)]
     if existing:
         raise CliError(f"Refusing to overwrite: {', '.join(existing)}")
     parents = {directory} | {
-        directory / parent
-        for relative in TEMPLATES
-        for parent in Path(relative).parents
-        if parent.name
+        directory / parent for relative in texts for parent in Path(relative).parents if parent.name
     }
     for parent in sorted(parents):
         if os.path.lexists(parent) and not parent.is_dir():
@@ -292,7 +280,7 @@ def write_project(directory: Path, repo: str) -> list[Path]:
         for path, text in targets.items():
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("x") as handle:
-                handle.write(text.format(repo=repo, version=__version__))
+                handle.write(text)
             written.append(path)
     except OSError as exc:
         for path in written:
@@ -301,20 +289,54 @@ def write_project(directory: Path, repo: str) -> list[Path]:
     return written
 
 
+def _points_off_this_machine(state: CliState) -> bool:
+    """Report whether the user's default profile or URL aims at an instance on another machine.
+
+    Parameters
+    ----------
+    state
+        The CLI state.
+
+    Returns
+    -------
+    bool
+        `True` only when a URL is selected and it is not a loopback address. A missing, broken
+        or local profile means local mode (a new user has none yet).
+    """
+    try:
+        url = selected_url(state, include_default=True)
+    except ConfigError:
+        return False
+    return url is not None and not is_loopback_url(url)
+
+
 def init(
+    ctx: typer.Context,
     directory: Annotated[Path, typer.Argument(help="Project directory (default: here).")] = Path(),
     repo: Annotated[
         str | None, typer.Option("--repo", help="Repository name (default: the directory name).")
+    ] = None,
+    sample: Annotated[
+        bool | None,
+        typer.Option(
+            "--sample/--no-sample",
+            help="Write a small sample to build and query (default: yes for a local instance).",
+        ),
     ] = None,
 ) -> None:
     """Create a Lakana project that deploys unchanged.
 
     Parameters
     ----------
+    ctx
+        The Typer context.
     directory
         Where to write it.
     repo
         The repository name.
+    sample
+        `--sample` or `--no-sample`. Left out, the sample is written unless your default
+        profile points at an instance on another machine.
 
     Raises
     ------
@@ -327,18 +349,43 @@ def init(
         raise CliError(
             f"{name!r} is not a valid repository name (letters, digits, '-' and '_'); pass --repo"
         )
-    write_project(target, name)
-    lines = [
-        f"Created a Lakana project in {target}.",
-        "Next:",
+    skipped = sample is None and _points_off_this_machine(state_of(ctx))
+    with_sample = sample if sample is not None else not skipped
+    write_project(target, name, sample=with_sample)
+    setup = [
         f"  cd {shlex.quote(str(target))}",
         "  git init && git add -A && git commit -m 'Initial project'",
         f"  lakana repo add {name} --kind local --url {shlex.quote(str(target))}",
-        "  lakana deploy --env dev",
-        "  lakana run --env dev",
-        "Local repositories must lie under LAKANA_REPO_ROOTS "
-        "(local mode allows your home directory).",
     ]
+    if with_sample:
+        lines = [
+            f"Created a Lakana project in {target}, with a small sample: generated readings "
+            "from three weather stations, three SQL assets built from them, and one check.",
+            "Next:",
+            *setup,
+            "Then the two commands that build the sample:",
+            "  lakana deploy --env dev",
+            "  lakana run --env dev",
+            "Then look at the result:",
+            f'  lakana sql "{SAMPLE_QUERY}"',
+        ]
+    else:
+        lines = [
+            f"Created a Lakana project in {target}.",
+            "Next:",
+            *setup,
+            "  lakana deploy --env dev",
+            "  lakana run --env dev",
+        ]
+        if skipped:
+            lines.append(
+                "No sample was written: your default profile points at an instance on another "
+                "machine. Add --sample to a new project to get one."
+            )
+    lines.append(
+        "Local repositories must lie under LAKANA_REPO_ROOTS "
+        "(local mode allows your home directory)."
+    )
     if _git_lacks_identity(target):
         lines.append(
             "If 'git commit' says it does not know who you are, set a name and email first: "

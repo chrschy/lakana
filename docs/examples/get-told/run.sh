@@ -57,9 +57,8 @@ port=$(cat "$WORK/receiver.port")
 test -n "$port"
 
 cd ~
-lakana init readings >/dev/null
+lakana init readings --no-sample >/dev/null
 cd readings
-rm -r assets/bronze/example.sql checks
 cp -R "$EXAMPLE_DIR/project/assets/." assets/
 git config --global user.name "Your Name"
 git config --global user.email "you@example.com"

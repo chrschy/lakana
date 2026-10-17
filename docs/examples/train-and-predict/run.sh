@@ -36,14 +36,13 @@ trap '[ -z "$capturing" ] || { exec >&3 2>&4; cat "$captured"; }; rm -f "$captur
 capture_start
 # docs:start init
 cd ~
-lakana init forecasts
+lakana init forecasts --no-sample
 cd forecasts
-rm -r assets/bronze/example.sql checks
 # docs:end init
 capture_end
 grep -Eq '^Created a Lakana project in .*forecasts\.$' "$captured"
 test -f lakana.yaml
-test ! -e assets/bronze/example.sql
+test ! -e assets
 test ! -e checks
 
 # The tutorial shows each of these files by its own path; here they are copied in.

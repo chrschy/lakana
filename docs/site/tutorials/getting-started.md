@@ -1,7 +1,7 @@
 # Getting started
 
-At the end of this tutorial you will have a Lakana instance running on your own machine, two
-tables built by a project you deployed, and one query answered from those tables. You do not need
+At the end of this tutorial you will have a Lakana instance running on your own machine, three
+tables built by a sample project you deployed, and one query answered from those tables. You do not need
 Docker or a database server.
 
 Lakana is pre-beta: the API and the data layout may change between 0.x releases, so do not put
@@ -114,18 +114,21 @@ lakana init analytics
 cd analytics
 ```
 
-`lakana init` lists what to do next. Yours shows your own folder, and a note about the
-development build if you installed from a checkout:
+`lakana init` writes a small sample, and lists what to do next. Yours shows your own folder, and
+a note about the development build if you installed from a checkout:
 
 <!-- output -->
 ```text
-Created a Lakana project in /home/you/analytics.
+Created a Lakana project in /home/you/analytics, with a small sample: generated readings from three weather stations, three SQL assets built from them, and one check.
 Next:
   cd /home/you/analytics
   git init && git add -A && git commit -m 'Initial project'
   lakana repo add analytics --kind local --url /home/you/analytics
+Then the two commands that build the sample:
   lakana deploy --env dev
   lakana run --env dev
+Then look at the result:
+  lakana sql "SELECT * FROM gold.station_ranking ORDER BY warmth_rank"
 Local repositories must lie under LAKANA_REPO_ROOTS (local mode allows your home directory).
 If 'git commit' says it does not know who you are, set a name and email first: git config --global user.name 'Your Name' && git config --global user.email you@example.com
 Note: lakana 0.8.1.dev6+g6af3c5d2a is a development build, so the CI install `lakana==0.8.1.dev6+g6af3c5d2a` can't be installed from the index. Ignore this until you use CI; then edit the pinned version in .github/workflows/lakana-deploy.yml and .gitlab-ci.yml.
@@ -133,72 +136,98 @@ Note: lakana 0.8.1.dev6+g6af3c5d2a is a development build, so the CI install `la
 
 You now have a folder `analytics` with a `lakana.yaml` file, which holds the project's settings.
 `lakana init` also wrote files for CI and for Python assets; this tutorial leaves them as they
-are. It wrote a sample asset, too, `assets/bronze/example.sql`, and a check for it in `checks/`.
-Remove both, so that your project holds only what you wrote. (The check has to go with the asset:
-it names a table that your project would no longer build, and a deploy refuses such a check.)
+are. The rest of what it wrote is the sample, and the next sections read it, so that you know
+what you are about to build. You do not need to write anything. (To start a project without the
+sample, run `lakana init --no-sample`.)
 
-<!-- source: docs/examples/getting-started/run.sh#remove-sample -->
-```bash
-rm -r assets/bronze/example.sql checks
-```
-
-## Write two assets
+## The sample
 
 An **asset** is one file that describes one table. Lakana runs the file and stores the result as
 the table. Its path decides the table's name: `assets/bronze/readings.sql` becomes the table
 `bronze.readings`. Here `bronze` is the namespace, a folder of tables, and `readings` is the name.
 
 Many teams sort tables into layers. **Bronze** tables hold data as it comes in. **Silver**
-tables hold data that has been cleaned or summed up from bronze. Lakana does not require this;
-this tutorial follows it because it is a common way to keep order.
+tables hold data that has been cleaned or summed up from bronze. **Gold** tables are the ones
+people read. Lakana does not require this; the sample follows it because it is a common way to
+keep order.
 
-Create the file `assets/bronze/readings.sql` with this content. It holds four temperature
-readings from two weather stations, written by hand so that you need no data file.
+The first asset, `assets/bronze/readings.sql`, is the source. It holds eighteen temperature
+readings from three weather stations. The query generates them, so you need no data file, and
+the table is the same on every machine:
 
 <!-- source: docs/examples/getting-started/project/assets/bronze/readings.sql -->
 ```sql
 /* lakana
-description: Four temperature readings from two weather stations, written by hand.
+description: Eighteen generated readings from three weather stations, six days each.
 columns:
   station_id: The station that took the reading.
+  day: The day of the reading.
   temp_c: The temperature in degrees Celsius.
 */
-SELECT 'A1' AS station_id, 4.0 AS temp_c
-UNION ALL SELECT 'A1', 6.0
-UNION ALL SELECT 'B2', 1.0
-UNION ALL SELECT 'B2', 3.0
+SELECT
+  stations.station_id,
+  DATE '2026-01-01' + CAST(days.n AS INTEGER) AS day,
+  CAST(stations.base_c + (days.n % 3) - 1 AS DOUBLE) AS temp_c
+FROM (VALUES ('A1', 4.0), ('B2', 1.0), ('C3', 9.0)) AS stations(station_id, base_c)
+CROSS JOIN (VALUES (0), (1), (2), (3), (4), (5)) AS days(n)
 ```
 
 The comment at the top is the asset's documentation: what the table holds, and what each column
 means. The project's settings require a description for every asset, and Lakana refuses a deploy
 without one. The rest of the file is a single `SELECT` query.
 
-Next, create the folder `assets/silver` and the file `assets/silver/station_temperatures.sql`.
-It reads `bronze.readings` and averages the temperature of each station.
+The second asset, `assets/silver/station_temperatures.sql`, reads `bronze.readings` and sums it
+up for each station:
 
 <!-- source: docs/examples/getting-started/project/assets/silver/station_temperatures.sql -->
 ```sql
 /* lakana
-description: The average temperature of each station.
+description: The lowest, highest and average temperature of each station.
 columns:
   station_id: The station that took the readings.
+  readings: How many readings the station took.
+  min_temp_c: The lowest temperature in degrees Celsius.
+  max_temp_c: The highest temperature in degrees Celsius.
   avg_temp_c: The average temperature in degrees Celsius.
 */
-SELECT station_id, AVG(temp_c) AS avg_temp_c
+SELECT
+  station_id,
+  COUNT(*) AS readings,
+  MIN(temp_c) AS min_temp_c,
+  MAX(temp_c) AS max_temp_c,
+  AVG(temp_c) AS avg_temp_c
 FROM bronze.readings
 GROUP BY station_id
 ```
 
-Because this asset reads `bronze.readings`, Lakana knows it must build `bronze.readings` first.
-You never state the order yourself.
+The third, `assets/gold/station_ranking.sql`, reads the silver table and puts the stations in
+order, from the warmest to the coldest:
 
-## Add a check
+<!-- source: docs/examples/getting-started/project/assets/gold/station_ranking.sql -->
+```sql
+/* lakana
+description: The stations from the warmest to the coldest.
+columns:
+  station_id: The station.
+  avg_temp_c: The station's average temperature in degrees Celsius.
+  warmth_rank: 1 for the warmest station, 2 for the next, and so on.
+*/
+SELECT
+  station_id,
+  avg_temp_c,
+  RANK() OVER (ORDER BY avg_temp_c DESC) AS warmth_rank
+FROM silver.station_temperatures
+```
+
+Because each asset reads the table of the one before, Lakana knows the order in which to build
+them. You never state the order yourself.
+
+## The check
 
 A **check** is a file that says what must be true of a table. It is one `SELECT` that returns the
 rows that are wrong; a table with no wrong rows passes. Its path names the table it checks:
 `checks/silver/station_temperatures/plausible_range.sql` is a check of `silver.station_temperatures`.
-Create the folders and the file. It looks for a station whose average temperature is impossible,
-which means a faulty sensor:
+It looks for a station whose average temperature is impossible, which means a faulty sensor:
 
 <!-- source: docs/examples/getting-started/project/checks/silver/station_temperatures/plausible_range.sql -->
 ```sql
@@ -211,7 +240,7 @@ WHERE avg_temp_c < -90 OR avg_temp_c > 60
 ```
 
 Every run tests a table after it builds it. If this check returned a row, the run would fail and
-the table would be set back to what it was before. With your two stations it returns none. The
+the table would be set back to what it was before. With your three stations it returns none. The
 how-to guide [Check your data](../how-to/check-your-data.md) shows what a failing check looks like.
 
 ## Commit
@@ -233,7 +262,7 @@ Now turn the folder into a git repository and commit your files:
 ```bash
 git init
 git add -A
-git commit -m "First assets"
+git commit -m "Initial project"
 ```
 
 A deploy reads a commit, not the files in your folder, so a change that is not committed is not
@@ -263,6 +292,7 @@ Deployed analytics in dev at ca36c93fe2337b324df3ab8d03cac9b9d1ed1420
 ┃ change ┃ table                       ┃
 ┡━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
 │ added  │ bronze.readings             │
+│ added  │ gold.station_ranking        │
 │ added  │ silver.station_temperatures │
 └────────┴─────────────────────────────┘
 Checks:
@@ -270,7 +300,7 @@ Checks:
 Hint: run 'lakana run --env dev' to run what you just deployed.
 ```
 
-Both tables are listed as added, but no table exists yet. A deploy only records what to
+All three tables are listed as added, but no table exists yet. A deploy only records what to
 build. Under `Checks:` it lists the check it found, and the hint names the next step.
 
 ## Run
@@ -293,53 +323,74 @@ Run e6c654de-926d-4941-896d-909ead7cd45d succeeded
 ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━┳━━━━━━┳━━━━━━━┓
 ┃ asset                       ┃ status    ┃ attempt ┃ duration ┃ rows ┃ error ┃
 ┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━╇━━━━━━╇━━━━━━━┩
-│ bronze.readings             │ succeeded │ 1/3     │ 0.0s     │ 4    │       │
-│ silver.station_temperatures │ succeeded │ 1/3     │ 1.0s     │ 2    │       │
+│ bronze.readings             │ succeeded │ 1/3     │ 0.0s     │ 18   │       │
+│ gold.station_ranking        │ succeeded │ 1/3     │ 1.0s     │ 3    │       │
+│ silver.station_temperatures │ succeeded │ 1/3     │ 0.0s     │ 3    │       │
 └─────────────────────────────┴───────────┴─────────┴──────────┴──────┴───────┘
 
 silver.station_temperatures   passed   1 of 1 checks passed
   plausible_range             passed
 ```
 
-Both assets succeeded. `bronze.readings` has four rows, one for each reading, and
-`silver.station_temperatures` has two, one for each station. The last two lines are the check:
-after `silver.station_temperatures` was built, `plausible_range` ran against it and passed.
+All three assets succeeded. `bronze.readings` has eighteen rows, one for each reading, and the
+other two have three, one for each station. The last two lines are the check: after
+`silver.station_temperatures` was built, `plausible_range` ran against it and passed.
 
 ## Query
 
-Ask the silver table for the average temperature of each station:
+Ask the gold table for the stations, from the warmest to the coldest. The command is the last
+one that `lakana init` suggested:
 
 <!-- source: docs/examples/getting-started/run.sh#query -->
 ```bash
-lakana sql "SELECT station_id, avg_temp_c FROM silver.station_temperatures ORDER BY station_id"
+lakana sql "SELECT * FROM gold.station_ranking ORDER BY warmth_rank"
 ```
 
 You will see this result:
 
 <!-- output -->
 ```text
-┏━━━━━━━━━━━━┳━━━━━━━━━━━━┓
-┃ station_id ┃ avg_temp_c ┃
-┡━━━━━━━━━━━━╇━━━━━━━━━━━━┩
-│ A1         │ 5.0        │
-│ B2         │ 2.0        │
-└────────────┴────────────┘
-2 rows
+┏━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━━┓
+┃ station_id ┃ avg_temp_c ┃ warmth_rank ┃
+┡━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━━┩
+│ C3         │ 9.0        │ 1           │
+│ A1         │ 4.0        │ 2           │
+│ B2         │ 1.0        │ 3           │
+└────────────┴────────────┴─────────────┘
+3 rows
 ```
 
-Station A1 read 4 and 6 degrees, which average 5. Station B2 read 1 and 3, which average 2.
+Station C3 averaged 9 degrees, A1 averaged 4 and B2 averaged 1, so C3 is first.
 CI runs every command on this page on every change. It checks the query result above and the
 lines of the other outputs that stay the same: the tables of the deploy, and the status and row
 counts of the run. Identifiers, commits, versions and durations differ on every machine and are
 not checked.
 
-A column may carry the name of its table or an alias, as in any SQL: `station_temperatures.station_id`,
-`silver.station_temperatures.station_id` or `t.station_id` after `FROM silver.station_temperatures AS t`.
+A column may carry the name of its table or an alias, as in any SQL: `station_ranking.station_id`,
+`gold.station_ranking.station_id` or `r.station_id` after `FROM gold.station_ranking AS r`.
 
 ## Stop the instance
 
 Go to the first terminal and press Ctrl-C. The instance shuts down. Your tables stay where they
 are, and `lakana server start --local` brings the instance back with them.
+
+## Start over
+
+To go through this tutorial again, or to throw away what you built, stop the instance as above
+and reset it. The command names what it will delete and asks before it does:
+
+<!-- source: docs/examples/getting-started/run.sh#reset -->
+```bash
+lakana server reset --local
+```
+
+It deletes the instance's database and the tables' files, and with them every table, secret and
+token of this instance (the number of tables is in its question). It does not touch your
+project: the folder `analytics` and its git history stay. It refuses while the instance runs,
+and in any folder that is not a local instance's data directory. Afterwards,
+`lakana server start --local` is a first run again, and this page works from the
+"Create a project" step: delete the folder `analytics` first, or give the new project another
+name. In a script, pass `--yes` to skip the question.
 
 ## Where next
 

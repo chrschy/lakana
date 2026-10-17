@@ -122,6 +122,7 @@ LOCAL_COMMANDS: frozenset[str] = frozenset(
         "profile remove",
         "server start",
         "server status",
+        "server reset",
         "bundle init",
     }
 )

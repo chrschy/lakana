@@ -43,9 +43,8 @@ task_of() {
 
 # A project of two assets and three checks, as `lakana init` writes the folders.
 cd ~
-lakana init readings >/dev/null
+lakana init readings --no-sample >/dev/null
 cd readings
-rm -r assets/bronze/example.sql checks
 cp -R "$EXAMPLE_DIR/project/." .
 git config --global user.name "Your Name"
 git config --global user.email "you@example.com"
