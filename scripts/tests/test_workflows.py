@@ -1240,7 +1240,7 @@ def test_the_macos_job_runs_for_a_pull_request_only_when_packages_change() -> No
 
 
 def test_the_five_minute_script_installs_uv_by_hash_and_dependabot_keeps_it_current() -> None:
-    """The tool `uv` comes from a hashed requirements file; the product install stays unpinned on purpose."""
+    """The tool `uv` is hash-pinned; the product install stays unpinned on purpose."""
     script = (ROOT / "scripts" / "five_minute_test.sh").read_text()
     assert "--require-hashes -r" in script
     assert "requirements-uv.txt" in script
