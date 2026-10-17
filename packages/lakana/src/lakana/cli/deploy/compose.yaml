@@ -25,31 +25,40 @@ services:
       retries: 20
     restart: unless-stopped
 
+  # SeaweedFS runs as two containers so that user SQL in the worker, which has DuckDB's HTTP
+  # filesystem enabled, can reach nothing of it but the S3 gateway (docs/agent/security.md, #14).
+  # `seaweedfs-core` runs the master (9333), volume server (8080) and filer, whose HTTP APIs need
+  # no credentials, and joins only `seaweed-internal`, which no worker or server joins.
+  # `seaweedfs` is the S3 gateway alone: the one container on both networks, listening on 8333
+  # only. Its name is the endpoint everything else already uses.
+  seaweedfs-core:
+    image: chrislusf/seaweedfs:4.47
+    # -disableHttp also closes the filer's plain-HTTP file route, so the gateway, which reaches
+    # the filer over gRPC, is the only way to the data even from inside `seaweed-internal`.
+    command: server -filer -dir=/data -ip.bind=0.0.0.0 -disableHttp
+    networks: [seaweed-internal]
+    volumes: [seaweed:/data]
+    healthcheck:
+      # The master answers, and the filer's gRPC port (18888) accepts connections: the gateway
+      # and `bucket` both need the filer, which takes longer to replay on a restart with data.
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:9333/cluster/status >/dev/null && nc -z 127.0.0.1 18888"]
+      interval: 5s
+      retries: 30
+    restart: unless-stopped
+
   seaweedfs:
     image: chrislusf/seaweedfs:4.47
-    # -disableHttp closes the filer's unauthenticated plain-HTTP file read/write/
-    # delete route -- the practical exfiltration path for user SQL running in the
-    # worker (docs/agent/security.md, team-mode section) -- while leaving the S3
-    # gateway itself working, since it talks to the filer over gRPC, not HTTP.
-    # The master (9333) and volume (8080) HTTP listeners are not covered by this
-    # flag and remain reachable on the Compose network; see the known-gap note.
-    command: server -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json -dir=/data -ip.bind=0.0.0.0 -disableHttp
+    command: s3 -port=8333 -filer=seaweedfs-core:8888 -config=/etc/seaweedfs/s3.json
     configs:
       - source: s3-identity
         target: /etc/seaweedfs/s3.json
-    volumes: [seaweed:/data]
+    networks: [default, seaweed-internal]
+    depends_on:
+      seaweedfs-core: {condition: service_healthy}
     healthcheck:
-      # Checks the S3 listener (8333), not the master's own /cluster/status on
-      # 9333: `weed server` starts master, volume, filer and S3 as one process,
-      # and the S3 module only finishes initializing after it can reach the
-      # filer over gRPC. The master answers healthy well before that. `bucket`
-      # and `worker` both need the filer (bucket via `weed shell`'s S3 calls,
-      # worker via httpfs), so gating on the master alone let `bucket` start
-      # too early on a restart with an existing volume (filer replay takes
-      # longer with existing data) and fail with "connection refused" dialing
-      # the filer's gRPC port. A bare S3 GET is unauthenticated and always
-      # answers 403 once the listener is actually up, so grep for any
-      # non-"000" (connection-refused) HTTP code rather than requiring 2xx.
+      # A bare S3 GET is unauthenticated and always answers 403 once the listener is up, so
+      # grep for any non-"000" (connection-refused) HTTP code rather than requiring 2xx.
+      # `bucket` and `worker` need the filer behind the gateway, so gate on this, not the core.
       test:
         [
           "CMD-SHELL",
@@ -61,13 +70,14 @@ services:
 
   bucket:
     image: chrislusf/seaweedfs:4.47
+    networks: [seaweed-internal]
     depends_on:
       seaweedfs: {condition: service_healthy}
     entrypoint: ["/bin/sh", "-c"]
     command:
       - >-
-        echo 's3.bucket.list' | weed shell -master=seaweedfs:9333 | grep -qw lakana
-        || echo 's3.bucket.create -name lakana' | weed shell -master=seaweedfs:9333
+        echo 's3.bucket.list' | weed shell -master=seaweedfs-core:9333 | grep -qw lakana
+        || echo 's3.bucket.create -name lakana' | weed shell -master=seaweedfs-core:9333
     restart: "no"
 
   migrate:
@@ -179,6 +189,13 @@ services:
       server: {condition: service_healthy}
       bucket: {condition: service_completed_successfully}
     restart: "no"
+
+# `default` is the network everything else shares. `internal: true` gives `seaweed-internal` no
+# route out of the host either.
+networks:
+  default:
+  seaweed-internal:
+    internal: true
 
 configs:
   s3-identity:

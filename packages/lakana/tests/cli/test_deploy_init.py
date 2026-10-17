@@ -57,6 +57,7 @@ def test_init_writes_compose_and_env_and_a_team_profile(tmp_path: Path, released
     assert set(compose["services"]) == {
         "postgres",
         "seaweedfs",
+        "seaweedfs-core",
         "bucket",
         "migrate",
         "server",
@@ -67,6 +68,7 @@ def test_init_writes_compose_and_env_and_a_team_profile(tmp_path: Path, released
     }
     assert "ports" not in compose["services"]["postgres"]
     assert "ports" not in compose["services"]["seaweedfs"]
+    assert "ports" not in compose["services"]["seaweedfs-core"]
     env = _env(target / ".env")
     assert stat.S_IMODE((target / ".env").stat().st_mode) == 0o600
     assert env["LAKANA_IMAGE"] == "ghcr.io/chrschy/lakana:0.4.0"
@@ -262,6 +264,56 @@ def test_compose_services_wire_dependencies_and_healthchecks(
     assert s["worker"]["deploy"]["replicas"] == "${LAKANA_WORKERS}"
     assert "LAKANA_BOOTSTRAP_PAT_SECRET" in str(s["server"]["environment"])
     assert "LAKANA_BOOTSTRAP_PAT_SECRET" not in str(s["worker"].get("environment", {}))
+
+
+def _networks(service: dict) -> set[str]:
+    """Return the names of the networks a Compose service joins.
+
+    Parameters
+    ----------
+    service
+        One entry of the parsed `services:` mapping.
+
+    Returns
+    -------
+    set[str]
+        The service's networks; `default` for a service that names none.
+    """
+    return set(service.get("networks") or ["default"])
+
+
+def test_seaweedfs_internal_apis_are_unreachable_from_the_worker(
+    tmp_path: Path, released: None
+) -> None:
+    """The worker and server reach SeaweedFS only through the S3 gateway (#14).
+
+    `weed server` (master 9333, volume 8080, filer) sits alone on an `internal` network that only
+    SeaweedFS's own services share; `seaweedfs`, a separate `weed s3` container, is the only
+    SeaweedFS service on the network the worker and server use, and listens on 8333 only.
+    """
+    state = make_state(tmp_path, FakeApi())
+    invoke(state, "bundle", "init", str(tmp_path / "b"))
+    compose = yaml.safe_load((tmp_path / "b" / "compose.yaml").read_text())
+    services = compose["services"]
+    isolated = "seaweed-internal"
+    assert compose["networks"][isolated]["internal"] is True
+    on_internal = {name for name, svc in services.items() if isolated in _networks(svc)}
+    assert on_internal == {"seaweedfs-core", "seaweedfs", "bucket"}
+    assert _networks(services["seaweedfs-core"]) == {isolated}
+    assert _networks(services["bucket"]) == {isolated}
+    for name in ("server", "worker", "worker-interactive", "worker-pipeline", "setup"):
+        assert isolated not in _networks(services[name]), name
+    # Only the gateway bridges the two, and it runs the S3 server alone: nothing else listens.
+    assert _networks(services["seaweedfs"]) == {isolated, "default"}
+    gateway = services["seaweedfs"]["command"].split()
+    assert gateway[0] == "s3" and "-port=8333" in gateway
+    assert "-filer=seaweedfs-core:8888" in gateway
+    assert "server" not in gateway
+    assert "-s3" not in services["seaweedfs-core"]["command"].split()
+    # No worker or server setting names the internal host.
+    for name in ("server", "worker", "setup"):
+        assert "seaweedfs-core" not in str(services[name])
+    assert "ports" not in services["seaweedfs"]
 
 
 def test_healthcheck_disabled_on_non_http_services(tmp_path: Path, released: None) -> None:
