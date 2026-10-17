@@ -255,6 +255,18 @@ surface, each against a 300s budget (`scripts/five_minute_test.sh`'s own `BUDGET
 `compose_smoke_test.sh`'s `docker compose up -d --wait --wait-timeout 180`) — don't cite a
 specific measured time as a promise, since CI runner speed varies.
 
+## The SBOM
+
+Two jobs of `release.yml` ship the SBOM. `sbom` builds an SPDX software bill of materials of the
+tagged tree with `anchore/sbom-action` (read-only token) and keeps it as the workflow artifact
+`lakana-sbom.spdx.json`. `sbom-release` then downloads that artifact and attaches it to the
+**GitHub release** of the tag, so it is found on the release page; it runs
+`gh release upload "$TAG" … --clobber`, so a re-run replaces the file. `sbom-release` is the only job
+with `contents: write`: it has no checkout and no third-party action but the artifact download, so
+no code that builds anything holds the write token. The workflow's own `permissions` is `{}`; every
+job names what it needs, and `release-please` needs nothing from `GITHUB_TOKEN` because it uses
+`RELEASE_PLEASE_TOKEN`. `scripts/tests/test_workflows.py` pins this by effective permissions.
+
 ## Why untagged builds cannot publish
 
 `hatch-vcs` derives a version from the most recent git tag plus a local segment when the

@@ -4,6 +4,17 @@
 
 # Lakana
 
+<p align="center">
+  <a href="https://github.com/chrschy/lakana/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/chrschy/lakana/actions/workflows/ci.yml/badge.svg?branch=main"></a>
+  <a href="https://pypi.org/project/lakana/"><img alt="PyPI" src="https://img.shields.io/pypi/v/lakana"></a>
+  <a href="https://pypi.org/project/lakana/"><img alt="Python versions" src="https://img.shields.io/pypi/pyversions/lakana"></a>
+  <a href="LICENSE"><img alt="Licence: Apache-2.0" src="https://img.shields.io/badge/licence-Apache--2.0-blue"></a>
+  <a href="docs/agent/testing.md#the-coverage-ratchet"><img alt="Coverage 100 %" src="https://img.shields.io/badge/coverage-100%25-brightgreen"></a>
+  <a href="https://docs.astral.sh/ruff/"><img alt="Ruff" src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json"></a>
+  <a href="https://docs.astral.sh/uv/"><img alt="uv" src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json"></a>
+  <a href="https://scorecard.dev/viewer/?uri=github.com/chrschy/lakana"><img alt="OpenSSF Scorecard" src="https://api.scorecard.dev/projects/github.com/chrschy/lakana/badge"></a>
+</p>
+
 Lakana is an open-source data lakehouse for small and medium teams: governed and reproducible
 by default, simple enough to run on one machine, professional enough to run an organisation's
 data platform. It covers analytics, data science and ML in SQL and Python, with code in git and
