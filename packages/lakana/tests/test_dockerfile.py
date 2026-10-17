@@ -138,3 +138,15 @@ def test_final_stage_owns_the_worker_cache_directory_privately() -> None:
     assert re.search(r"chown -R lakana:lakana (/\S+ )*/home/lakana( /\S+)*(?= |$)", text), text
     assert "chmod 0700 /home/lakana/.cache/lakana-worker" in text
     assert "/home/lakana/.cache/lakana-worker" in text
+
+
+def test_the_image_prepares_the_directories_the_launcher_and_the_worker_mount() -> None:
+    """A named volume takes owner and mode from the image's directory on first use."""
+    text = _DOCKERFILE.read_text(encoding="utf-8")
+
+    assert "install -d -o 0 -g 10001 -m 0770 /run/lakana-launcher" in text
+    # Sticky as well as set-group-id: the worker's group can add files but never rename or
+    # delete the token or the socket, so no link can be swapped in under the launcher.
+    assert "chmod 3770 /run/lakana-launcher" in text
+    assert "install -d -o 0 -g 0 -m 0700 /var/lib/lakana-launcher" in text
+    assert "install -d -o 10001 -g 10001 -m 0700 /home/lakana/.cache/lakana-worker/attempts" in text

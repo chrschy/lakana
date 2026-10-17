@@ -27,11 +27,20 @@ ENV TMPDIR=/var/tmp/lakana \
     PYTHONUNBUFFERED=1 \
     LAKANA_HOST=0.0.0.0 \
     LAKANA_PORT=8000
+# Directories that named volumes inherit owner and mode from on first use: the worker's attempt
+# directories (shared with task containers through the launcher), the launcher's socket directory
+# (its group is the worker's; set-group-id keeps the socket and token in that group, sticky stops
+# the worker from renaming or deleting them), the launcher's own state and the egress proxy's key.
 RUN groupadd --system --gid 10001 lakana \
  && useradd --system --uid 10001 --gid lakana --no-create-home --home-dir /home/lakana --shell /usr/sbin/nologin lakana \
  && mkdir -p /var/tmp/lakana /home/lakana/.cache/lakana-worker \
  && chown -R lakana:lakana /home/lakana /var/tmp/lakana \
- && chmod 0700 /home/lakana/.cache/lakana-worker
+ && chmod 0700 /home/lakana/.cache/lakana-worker \
+ && install -d -o 10001 -g 10001 -m 0700 /home/lakana/.cache/lakana-worker/attempts \
+ && install -d -o 0 -g 10001 -m 0770 /run/lakana-launcher \
+ && chmod 3770 /run/lakana-launcher \
+ && install -d -o 0 -g 0 -m 0700 /var/lib/lakana-launcher \
+ && install -d -o 0 -g 10001 -m 2750 /run/lakana-egress
 # git and ssh fetch repositories for deploys; runtime packages only.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git openssh-client \
