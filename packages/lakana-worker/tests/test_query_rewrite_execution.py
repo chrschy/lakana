@@ -656,3 +656,49 @@ def test_a_read_of_two_thousand_files_and_a_thousand_columns_by_field_id(tmp_pat
     result = execute_query(rewritten.sql, rewritten.parameters, restrict_local_filesystem=False)
 
     assert result.to_pylist() == [{"n": 4000, "s": 6000, "k": 4000}]
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "SELECT * FROM gold.t WHERE CAST(secret AS INTEGER) = 1",
+        "SELECT id, CAST(secret AS INTEGER) AS n FROM gold.t",
+    ],
+)
+def test_a_users_cast_never_reaches_a_row_the_filter_hides(tmp_path: Path, query: str) -> None:
+    """A value in a hidden row is neither converted nor quoted in an error.
+
+    The row filter runs before the user's predicates and select list.
+
+    Parameters
+    ----------
+    tmp_path
+        Where the file goes.
+    query
+        A query that casts the hidden column in its predicate or select list.
+    """
+    path = tmp_path / "rows.parquet"
+    rows = 30_000
+    pq.write_table(
+        pa.table(
+            {
+                "id": list(range(rows)),
+                "dept": ["a" if i % 2 else "b" for i in range(rows)],
+                "secret": ["HIDDEN-not-a-number" if i % 2 else "1" for i in range(rows)],
+            }
+        ),
+        path,
+        row_group_size=1000,
+    )
+    source = TableSource(
+        urls=[str(path)],
+        file_format="parquet",
+        columns={"id": "long", "dept": "string", "secret": "string"},
+        row_filters=("dept = 'b'",),
+    )
+
+    rewritten = rewrite_query(query, {"gold.t": source})
+
+    rows_out = _fetch(rewritten)
+    assert len(rows_out) == rows // 2
+    assert "HIDDEN" not in repr(rows_out)

@@ -384,7 +384,8 @@ def failure(
     mapped
         Whether a read goes through a field-id map. DuckDB then converts a file's column to
         the mapped type while it reads, and a conversion error quotes the cell: under a row
-        filter the text names no column, so any conversion error is replaced by a fixed one.
+        filter the text names no column, so any conversion error is replaced by a fixed one
+        that also covers a cast of the query's own.
 
     Returns
     -------
@@ -407,7 +408,11 @@ def failure(
             f"which cannot be read as {cast['wanted']}."
         )
     elif mapped and text.startswith("Conversion Error"):
-        text = "a file of this table stores a column in a type the read cannot convert it to."
+        text = (
+            "a value could not be converted (the value is not shown, because it may come from "
+            "data you cannot see). Check the casts in the query; otherwise a file of this table "
+            "stores a column in a type the read cannot convert it to."
+        )
     message = f"Query failed: {text}"
     if _is_transient(exc):
         return ErrorDocument(TRANSIENT, message)

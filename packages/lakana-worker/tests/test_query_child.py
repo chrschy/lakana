@@ -1584,6 +1584,13 @@ def test_a_schema_map_duckdb_cannot_parse_fails_closed(
         assert "SECRET123" not in text
 
 
+_HIDDEN_CONVERSION = (
+    "Query failed: a value could not be converted (the value is not shown, because it may come "
+    "from data you cannot see). Check the casts in the query; otherwise a file of this table "
+    "stores a column in a type the read cannot convert it to."
+)
+
+
 def _field_id_file(directory: Path, name: str, value: str) -> Path:
     """Write a one-row Parquet file whose column ``ssn`` is text and has field id 1.
 
@@ -1634,10 +1641,27 @@ def test_a_cast_the_map_asks_for_names_no_cell_value(tmp_path: Path, select: str
     assert error.message in {
         'Query failed: a file of this table stores column "ssn" as VARCHAR, '
         "which cannot be read as INTEGER.",
-        "Query failed: a file of this table stores a column in a type the read cannot "
-        "convert it to.",
+        _HIDDEN_CONVERSION,
     }
     assert stream == b"" or not list(pa.ipc.open_stream(stream))
     for text in (error.message, stderr, repr(stream)):
         for secret in (str(path), "SECRET123", "123-45-6789", "6789"):
             assert secret not in text
+
+
+def test_a_cast_of_the_querys_own_on_a_mapped_read_names_the_next_step(tmp_path: Path) -> None:
+    """The user's own failing cast is worded without its value and points at the query."""
+    path = _field_id_file(tmp_path, "rows.parquet", "123-45-6789")
+    request = _request(
+        "SELECT CAST('abc' AS INT) AS n FROM read_parquet(getvariable('v_0_files'), "
+        "schema = getvariable('v_0_schema'))",
+        parameters={"v_0_files": [str(path)], "v_0_schema": ((1, "ssn", "VARCHAR"),)},
+        restrict_local_filesystem=False,
+    )
+
+    code, stream, stderr = _main(request)
+
+    assert code == EXIT_FAILED
+    assert decode_error(stderr.encode()) == ErrorDocument("invalid", _HIDDEN_CONVERSION)
+    assert "abc" not in stderr
+    assert stream == b"" or not list(pa.ipc.open_stream(stream))
