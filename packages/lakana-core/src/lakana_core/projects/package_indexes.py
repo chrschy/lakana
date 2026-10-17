@@ -17,7 +17,7 @@ import uuid
 from collections.abc import Mapping
 
 from sqlalchemy import or_, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, InvalidRequestError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.exc import StaleDataError
 
@@ -34,8 +34,10 @@ from lakana_core.identifiers import is_secret_name, shown, validate_path_compone
 from lakana_core.models import AuditEventType, Environment, PackageIndex
 from lakana_core.projects.package_sources import RegisteredIndex, normalize_index_url
 from lakana_core.secrets.uses import (
+    SecretBindingRefused,
     SecretUse,
     bind_named_secrets,
+    record_refusal,
     require_secret_management_for_url_change,
 )
 
@@ -241,6 +243,10 @@ class PackageIndexService:
         ------
         PermissionDenied
             Without `MANAGE_PACKAGE_INDEX`.
+        SecretBindingRefused
+            A `PermissionDenied` raised without `MANAGE_SECRET` in a secret's environment,
+            when `credential_secret` names one bound elsewhere or wanted by another entry or
+            its environment.
         ValidationError
             If the name, the URL or the secret name is invalid.
         AlreadyExistsError
@@ -270,9 +276,11 @@ class PackageIndexService:
                     p,
                     name=credential_secret,
                     use=SecretUse.package_index(row),
+                    registered=False,
                 )
-            except PermissionDenied:
+            except SecretBindingRefused as refusal:
                 self._session.rollback()
+                record_refusal(self._authz, p, refusal)
                 raise
         AuditService(self._session).record(
             p.id,
@@ -376,9 +384,10 @@ class PackageIndexService:
     def update(self, p: PrincipalRef, name: str, changes: Mapping[str, str | None]) -> PackageIndex:
         """Change an index's URL or its credential secret.
 
-        Everything is validated before the row changes, so a refusal needs no
-        rollback. The URL and the credential the row would have afterwards are
-        checked together (`normalize_index_url`), whichever of the two changes.
+        Everything is validated before the row changes. A refusal over a secret rolls back
+        the bindings made so far and is recorded as a denial. The URL and the credential the row
+        would have afterwards are checked together (`normalize_index_url`), whichever of the two
+        changes.
 
         Parameters
         ----------
@@ -399,6 +408,10 @@ class PackageIndexService:
         ------
         PermissionDenied
             Without `MANAGE_PACKAGE_INDEX`.
+        SecretBindingRefused
+            A `PermissionDenied` raised without `MANAGE_SECRET` in a secret's environment,
+            when the URL changes while a secret is bound to the index or when the credential
+            named is bound elsewhere or wanted by another entry or its environment.
         NotFoundError
             If no index has that name, including when a concurrent request
             deletes it before this commit.
@@ -432,12 +445,22 @@ class PackageIndexService:
             raise AlreadyExistsError(clash)
         use = SecretUse.package_index(row)
         try:
+            # Lock the row the secrets point at, so a concurrent bind and a URL change
+            # cannot both pass on what each read before the other committed.
+            try:
+                self._session.refresh(row, with_for_update=True)
+            except InvalidRequestError:
+                self._session.rollback()
+                raise NotFoundError(f"No package index named '{shown(name)}'.") from None
             if new_url != row.url:
                 require_secret_management_for_url_change(self._session, self._authz, p, use)
-            if new_secret is not None:
-                bind_named_secrets(self._session, self._authz, p, name=new_secret, use=use)
-        except PermissionDenied:
+            if new_secret is not None and new_secret != row.credential_secret:
+                bind_named_secrets(
+                    self._session, self._authz, p, name=new_secret, use=use, registered=True
+                )
+        except SecretBindingRefused as refusal:
             self._session.rollback()
+            record_refusal(self._authz, p, refusal)
             raise
         previous = {key: getattr(row, key) for key in changes}
         row.url = new_url

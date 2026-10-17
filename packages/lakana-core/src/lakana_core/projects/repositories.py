@@ -29,7 +29,6 @@ from lakana_core.errors import (
     AlreadyExistsError,
     ConflictError,
     NotFoundError,
-    PermissionDenied,
     ValidationError,
 )
 from lakana_core.identifiers import validate_path_component
@@ -42,8 +41,10 @@ from lakana_core.models import (
 )
 from lakana_core.projects.git_input import resolve_local_path, validate_ref, validate_repo_url
 from lakana_core.secrets.uses import (
+    SecretBindingRefused,
     SecretUse,
     bind_named_secrets,
+    record_refusal,
     require_secret_management_for_url_change,
 )
 
@@ -206,6 +207,10 @@ class RepositoryService:
         ------
         PermissionDenied
             Without `MANAGE_REPOSITORY`.
+        SecretBindingRefused
+            A `PermissionDenied` raised without `MANAGE_SECRET` in a secret's environment,
+            when `credential_secret` names one bound elsewhere or wanted by another entry or
+            its environment.
         ValidationError
             If a field or the kind is invalid.
         AlreadyExistsError
@@ -243,9 +248,11 @@ class RepositoryService:
                     p,
                     name=credential_secret,
                     use=SecretUse.repository(repo),
+                    registered=False,
                 )
-            except PermissionDenied:
+            except SecretBindingRefused as refusal:
                 self._session.rollback()
+                record_refusal(self._authz, p, refusal)
                 raise
         AuditService(self._session).record(
             p.id,
@@ -342,6 +349,10 @@ class RepositoryService:
         ------
         PermissionDenied
             Without `MANAGE_REPOSITORY`.
+        SecretBindingRefused
+            A `PermissionDenied` raised without `MANAGE_SECRET` in a secret's environment,
+            when the URL changes while a secret is bound to the repository or when the credential
+            named is bound elsewhere or wanted by another entry or its environment.
         NotFoundError
             If no repository has that name, including when a concurrent request deletes it
             before this commit.
@@ -358,21 +369,35 @@ class RepositoryService:
         if changes.get("url", repo.url) is None:
             raise ValidationError("url cannot be cleared.")
         use = SecretUse.repository(repo)
+        previous_url, previous_secret = repo.url, repo.credential_secret
         try:
-            if changes.get("url", repo.url) != repo.url:
-                require_secret_management_for_url_change(self._session, self._authz, p, use)
-            named = changes.get("credential_secret", repo.credential_secret)
-            if named is not None:
-                bind_named_secrets(self._session, self._authz, p, name=named, use=use)
-        except PermissionDenied:
-            self._session.rollback()
-            raise
-        try:
+            # Lock the row the secrets point at, so a concurrent bind and a URL change
+            # cannot both pass on what each read before the other committed.
+            self._session.refresh(repo, with_for_update=True)
             for field, value in changes.items():
                 setattr(repo, field, value)
             if repo.default_ref is not None:
                 repo.default_ref = validate_ref(repo.default_ref)
             _validate(repo, self._repo_roots)
+            if repo.url != previous_url:
+                require_secret_management_for_url_change(self._session, self._authz, p, use)
+            if repo.credential_secret is not None and repo.credential_secret != previous_secret:
+                bind_named_secrets(
+                    self._session,
+                    self._authz,
+                    p,
+                    name=repo.credential_secret,
+                    use=use,
+                    registered=True,
+                )
+        except SecretBindingRefused as refusal:
+            self._session.rollback()
+            record_refusal(self._authz, p, refusal)
+            raise
+        except StaleDataError:
+            # The secrets queries flush the change early, so a concurrent delete shows here.
+            self._session.rollback()
+            raise NotFoundError(f"No repository named {name!r}.") from None
         except ValidationError:
             self._session.rollback()
             raise

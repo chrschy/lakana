@@ -159,8 +159,6 @@ class SecretService:
             wrapped_data_key=encrypted.wrapped_data_key,
             format_version=encrypted.format_version,
             key_id=encrypted.key_id,
-            use_kind=use.kind if use is not None else None,
-            use_target_id=use.target_id if use is not None else None,
             created_by=p.id,
             created_at=datetime.now(UTC),
         )
@@ -170,6 +168,8 @@ class SecretService:
             securable=Securable.environment_scope(environment),
             detail={"name": name, "use": use.kind.value if use is not None else None},
         )
+        if use is not None:
+            record_binding(self._session, p, secret, Securable.environment_scope(environment), use)
         self._session.add(secret)
         try:
             self._session.commit()
