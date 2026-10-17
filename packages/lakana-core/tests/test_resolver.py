@@ -1,15 +1,21 @@
 """Tests for storage resolution."""
 
+import base64
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from lakana_core.auth import AllowAllAuthorization, PrincipalRef
 from lakana_core.errors import NotFoundError, ValidationError
 from lakana_core.identifiers import NamespacePath
-from lakana_core.models import Environment
+from lakana_core.models import Environment, Principal, PrincipalType, Secret, SecretUseKind
+from lakana_core.secrets.keys import EnvKeyProvider
+from lakana_core.secrets.service import SecretService
+from lakana_core.secrets.uses import SecretUse, SecretUseRefused
 from lakana_core.storage.resolver import (
     _FORBIDDEN_TABLE_PROPERTIES,
     _PATH_TABLE_PROPERTIES,
@@ -965,3 +971,71 @@ def test_confine_to_root_does_not_reserve_a_name_that_only_starts_like_it(
     for ok in ("artifacts-archive/t", "my-artifacts/t", "managed/artifacts/t"):
         location = f"{environment.storage_root}/{ok}"
         assert resolved.confine_to_root(location) == location
+
+
+def _storage_secret(session: Session, use: SecretUse | None) -> EnvKeyProvider:
+    """Create environment `dev` with the storage secret `s3`, bound to `use`.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    use
+        What the secret is bound to; `None` leaves it unbound.
+
+    Returns
+    -------
+    EnvKeyProvider
+        The key provider that encrypted it.
+    """
+    principal = Principal(id=uuid.uuid4(), type=PrincipalType.USER, name="admin")
+    env = Environment(
+        id=uuid.uuid4(), name="dev", storage_root="s3://bucket/dev", storage_secret_ref="s3"
+    )
+    session.add_all([principal, env])
+    session.commit()
+    keys = EnvKeyProvider(base64.b64encode(b"0" * 32).decode())
+    SecretService(session, AllowAllAuthorization(), keys).create(
+        PrincipalRef(id=principal.id, name=principal.name, type=principal.type),
+        environment="dev",
+        name="s3",
+        values={"access_key_id": "AKIA-NEVER-SHOWN"},
+    )
+    if use is not None:
+        # The target has no row here, as after its removal, so the binding is written directly.
+        secret = session.execute(select(Secret)).scalar_one()
+        secret.use_kind, secret.use_target_id = use.kind, use.target_id
+        session.commit()
+    return keys
+
+
+def test_a_storage_secret_bound_to_an_index_is_refused(session: Session) -> None:
+    """The environment's storage reads only an unbound or environment-bound secret."""
+    keys = _storage_secret(session, SecretUse(SecretUseKind.PACKAGE_INDEX, uuid.uuid4(), "corp"))
+
+    with pytest.raises(SecretUseRefused) as caught:
+        StorageResolver(session, keys).for_environment("dev")
+
+    assert "bound to a package index that was removed" in str(caught.value)
+    assert str(caught.value).endswith("lakana secret bind s3 --env dev --own-env")
+    assert "AKIA-NEVER-SHOWN" not in str(caught.value)
+
+
+def test_a_storage_secret_bound_to_a_repository_is_refused(session: Session) -> None:
+    """A repository's credential is not the environment's storage key."""
+    keys = _storage_secret(session, SecretUse(SecretUseKind.REPOSITORY, uuid.uuid4(), "r"))
+
+    with pytest.raises(SecretUseRefused, match="bound to a repository that was removed"):
+        StorageResolver(session, keys).for_environment("dev")
+
+
+@pytest.mark.parametrize("use", [None, SecretUse.environment()])
+def test_an_unbound_or_environment_bound_storage_secret_is_read(
+    session: Session, use: SecretUse | None
+) -> None:
+    """An unbound secret keeps serving storage; so does one bound to its environment."""
+    keys = _storage_secret(session, use)
+
+    resolved = StorageResolver(session, keys).for_environment("dev")
+
+    assert resolved.config.options["access_key_id"] == "AKIA-NEVER-SHOWN"

@@ -1182,7 +1182,11 @@ def test_a_private_package_deploys_builds_and_runs(stack: _Stack, wheelhouse: Pa
     with fixture.serving() as indexes:
         admin.package_indexes.create(name, indexes.registered.url(), credential_secret="team-index")
         admin.secrets.create(
-            env, "team-index", {"username": fixture.USERNAME, "password": fixture.PASSWORD}
+            env,
+            "team-index",
+            {"username": fixture.USERNAME, "password": fixture.PASSWORD},
+            kind="package_index",
+            target=name,
         )
         project = _deploy(
             stack,
@@ -1254,7 +1258,7 @@ def test_a_deploy_without_the_secret_stops_and_names_the_command(
     assert project.deploy.error_message == (
         f"uv.lock: the package index '{name}' needs the secret 'team-index' in environment "
         f"'{env}', which does not exist. Create it with `lakana secret create team-index --env "
-        f'{env} --values-stdin` (a JSON object with "username" and "password")'
+        f'{env} --index {name} --values-stdin` (a JSON object with "username" and "password")'
     )
 
 
@@ -1267,7 +1271,11 @@ def test_a_wrong_password_fails_for_good_and_a_rotated_secret_recovers(
     with fixture.serving() as indexes:
         admin.package_indexes.create(name, indexes.registered.url(), credential_secret="team-index")
         admin.secrets.create(
-            env, "team-index", {"username": fixture.USERNAME, "password": "wrong-pw"}
+            env,
+            "team-index",
+            {"username": fixture.USERNAME, "password": "wrong-pw"},
+            kind="package_index",
+            target=name,
         )
         project = _deploy(
             stack,
@@ -1331,7 +1339,11 @@ def test_a_package_without_a_wheel_fails_the_build_for_good(
     with fixture.serving() as indexes:
         admin.package_indexes.create(name, indexes.registered.url(), credential_secret="team-index")
         admin.secrets.create(
-            env, "team-index", {"username": fixture.USERNAME, "password": fixture.PASSWORD}
+            env,
+            "team-index",
+            {"username": fixture.USERNAME, "password": fixture.PASSWORD},
+            kind="package_index",
+            target=name,
         )
         project = _deploy(
             stack,
@@ -1368,7 +1380,11 @@ def test_a_project_that_names_another_host_gives_that_host_no_credential(
         admin.package_indexes.create("team", registered, credential_secret="team-index")
         try:
             admin.secrets.create(
-                env, "team-index", {"username": fixture.USERNAME, "password": fixture.PASSWORD}
+                env,
+                "team-index",
+                {"username": fixture.USERNAME, "password": fixture.PASSWORD},
+                kind="package_index",
+                target="team",
             )
             project = _deploy(
                 stack,

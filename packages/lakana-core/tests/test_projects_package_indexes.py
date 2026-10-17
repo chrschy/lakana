@@ -133,14 +133,15 @@ def test_create_stores_the_normalized_url_and_audits_names_only(
     assert _events(session, AuditEventType.PACKAGE_INDEX_CREATED) == [
         {"name": "team", "url": _URL, "credential_secret": "team-index"}
     ]
-    assert registered_indexes(session) == (RegisteredIndex("team", _URL, "team-index"),)
+    assert registered_indexes(session) == (RegisteredIndex("team", _URL, "team-index", row.id),)
 
 
 def test_an_index_needs_no_credential(
     session: Session, service: PackageIndexService, admin: PrincipalRef
 ) -> None:
-    assert service.create(admin, name="open", url=_URL).credential_secret is None
-    assert registered_indexes(session) == (RegisteredIndex("open", _URL, None),)
+    row = service.create(admin, name="open", url=_URL)
+    assert row.credential_secret is None
+    assert registered_indexes(session) == (RegisteredIndex("open", _URL, None, row.id),)
 
 
 def test_a_second_spelling_of_a_registered_url_is_refused_and_names_the_index(
@@ -282,8 +283,9 @@ def test_testpypi_is_registered_without_a_credential_and_refused_with_one(
         service.create(admin, name="testpypi", url=_TESTPYPI, credential_secret="team-index")
     assert str(caught.value) == _TESTPYPI_REFUSAL
     assert session.execute(select(PackageIndex)).first() is None
-    assert service.create(admin, name="testpypi", url=_TESTPYPI + "/").url == _TESTPYPI
-    assert registered_indexes(session) == (RegisteredIndex("testpypi", _TESTPYPI, None),)
+    row = service.create(admin, name="testpypi", url=_TESTPYPI + "/")
+    assert row.url == _TESTPYPI
+    assert registered_indexes(session) == (RegisteredIndex("testpypi", _TESTPYPI, None, row.id),)
 
 
 @pytest.mark.parametrize(

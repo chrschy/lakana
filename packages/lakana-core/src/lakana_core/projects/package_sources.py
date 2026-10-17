@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
+import uuid
 from dataclasses import dataclass, field
 from urllib.parse import SplitResult, urlsplit, urlunsplit
 
@@ -392,11 +393,15 @@ class RegisteredIndex:
     credential_secret
         The name of the secret holding its credential, resolved per
         environment; `None` for an index that asks for none.
+    id
+        The row's id, which a secret's binding names; `None` for an index built by hand,
+        which no secret serves.
     """
 
     name: str
     url: str
     credential_secret: str | None = None
+    id: uuid.UUID | None = None
 
 
 @dataclass(frozen=True)

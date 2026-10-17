@@ -246,7 +246,7 @@ The first failure of a deploy looks like this:
 
 <!-- output -->
 ```text
-uv.lock: the package index 'team' needs the secret 'team-index' in environment 'dev', which does not exist. Create it with `lakana secret create team-index --env dev --values-stdin` (a JSON object with "username" and "password")
+uv.lock: the package index 'team' needs the secret 'team-index' in environment 'dev', which does not exist. Create it with `lakana secret create team-index --env dev --index team --values-stdin` (a JSON object with "username" and "password")
 ```
 
 And a wrong password, in `lakana runs show`:

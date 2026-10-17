@@ -38,7 +38,7 @@ _OPTIONS = {SecretUseKind.PACKAGE_INDEX: "--index", SecretUseKind.REPOSITORY: "-
 _ENVIRONMENT_USE = "its environment (storage, webhooks and tasks)"
 
 
-def _text(name: str) -> str:
+def plain(name: str) -> str:
     """Make a name safe to print without changing a name a shell can carry.
 
     Parameters
@@ -163,7 +163,7 @@ class SecretUse:
         """
         if self.kind is SecretUseKind.ENVIRONMENT:
             return "--own-env"
-        return f"{_OPTIONS[self.kind]} {shlex.quote(_text(self.target_name or ''))}"
+        return f"{_OPTIONS[self.kind]} {shlex.quote(plain(self.target_name or ''))}"
 
     def wanted(self) -> str:
         """Name this use for a message.
@@ -249,7 +249,7 @@ def bind_command(environment: str, name: str, use: SecretUse) -> str:
         ``lakana secret bind <name> --env <environment> <option>``, quoted for a shell.
     """
     return (
-        f"lakana secret bind {shlex.quote(_text(name))} --env {shlex.quote(_text(environment))} "
+        f"lakana secret bind {shlex.quote(plain(name))} --env {shlex.quote(plain(environment))} "
         f"{use.option()}"
     )
 
@@ -394,7 +394,7 @@ def resolve_use(session: Session, kind: SecretUseKind, target: str | None) -> Se
     row = session.execute(select(model).where(model.name == target)).scalar_one_or_none()
     if row is None:
         raise NotFoundError(
-            f"No {noun} named '{_text(target)}'; `{listing}` shows the registered ones."
+            f"No {noun} named '{plain(target)}'; `{listing}` shows the registered ones."
         )
     return SecretUse(kind, row.id, row.name)
 
@@ -549,8 +549,8 @@ def bind_or_require_named_secrets(
     for secret, environment in rows:
         if _bound_to(secret, use):
             continue
-        env_name = _text(environment.name)
-        who = f"Secret '{_text(name)}' of environment '{env_name}'"
+        env_name = plain(environment.name)
+        who = f"Secret '{plain(name)}' of environment '{env_name}'"
         scope = Securable.environment_scope(environment.name)
         first = (
             "Ask" if registered else f"Register the {short} without a credential first, then ask"
@@ -630,12 +630,12 @@ def require_secret_management_for_url_change(
         scope = Securable.environment_scope(environment)
         if not authz.permits(p, Action.MANAGE_SECRET, scope):
             raise SecretBindingRefused(
-                f"Changing the URL of {use.wanted()} would send secret '{_text(secret_name)}' of "
-                f"environment '{_text(environment)}' to another host. That needs the right to "
-                f"manage secrets in '{_text(environment)}' (the ADMIN role). Ask someone who may "
-                f"manage secrets in '{_text(environment)}' to change it, or bind the secret "
-                f"elsewhere first: lakana secret bind {shlex.quote(_text(secret_name))} --env "
-                f"{shlex.quote(_text(environment))} (with --index NAME, --repository NAME or "
+                f"Changing the URL of {use.wanted()} would send secret '{plain(secret_name)}' of "
+                f"environment '{plain(environment)}' to another host. That needs the right to "
+                f"manage secrets in '{plain(environment)}' (the ADMIN role). Ask someone who may "
+                f"manage secrets in '{plain(environment)}' to change it, or bind the secret "
+                f"elsewhere first: lakana secret bind {shlex.quote(plain(secret_name))} --env "
+                f"{shlex.quote(plain(environment))} (with --index NAME, --repository NAME or "
                 "--own-env)",
                 scope,
                 "url_moves_bound_secret",

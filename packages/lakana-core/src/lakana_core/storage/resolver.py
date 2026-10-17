@@ -19,6 +19,7 @@ from lakana_core.identifiers import NamespacePath, validate_path_component
 from lakana_core.models import Environment, Secret
 from lakana_core.secrets.crypto import decrypt_secret_row
 from lakana_core.secrets.keys import KeyProvider
+from lakana_core.secrets.uses import SecretUse, require_use
 from lakana_core.storage.base import Storage
 from lakana_core.storage.fsspec_storage import build_file_io, build_storage
 
@@ -599,6 +600,8 @@ class StorageResolver:
             or because the row was altered, or moved from another secret
             (`decrypt_secret_row` names the secret and says what to do), or
             because it was written by a newer Lakana.
+        SecretUseRefused
+            If the secret is bound to a package index or a repository.
         """
         if self._key_provider is None:
             raise ValidationError(
@@ -618,6 +621,7 @@ class StorageResolver:
                 f"Environment {env.name!r} references secret {env.storage_secret_ref!r}, "
                 "which does not exist or has been revoked."
             )
+        require_use(self._session, secret, SecretUse.environment(), environment_name=env.name)
         return decrypt_secret_row(
             secret,
             self._key_provider,

@@ -65,7 +65,7 @@ def registered_indexes(session: Session) -> tuple[RegisteredIndex, ...]:
         Sorted by name.
     """
     rows = session.execute(select(PackageIndex).order_by(PackageIndex.name)).scalars()
-    return tuple(RegisteredIndex(row.name, row.url, row.credential_secret) for row in rows)
+    return tuple(RegisteredIndex(row.name, row.url, row.credential_secret, row.id) for row in rows)
 
 
 def _validate_name(name: str) -> None:

@@ -52,6 +52,7 @@ from lakana_core.models.notification import MAX_ATTEMPTS
 from lakana_core.notifications import payload
 from lakana_core.secrets.crypto import CURRENT_FORMAT, decrypt_secret_row
 from lakana_core.secrets.keys import KeyProvider
+from lakana_core.secrets.uses import SecretUse, SecretUseRefused, require_use
 from lakana_worker import egress
 from lakana_worker.egress import DeliveryResult, EgressRefused, check_destination, post
 
@@ -398,6 +399,11 @@ def _webhook(
         return _Unusable(OLD_FORMAT.format(name))
     if secret.format_version > CURRENT_FORMAT:
         return _Unusable(NEWER_FORMAT.format(name), retry=True)
+    try:
+        require_use(session, secret, SecretUse.environment(), environment_name=environment.name)
+    except SecretUseRefused as exc:
+        # The text names the secret, its use and the command; it never holds a value.
+        return _Unusable(str(exc))
     try:
         values = decrypt_secret_row(
             secret,
