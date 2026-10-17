@@ -1544,3 +1544,59 @@ def test_0033_on_postgres() -> None:
         migrate.upgrade(url, revision_0033)
         assert _alembic_version(engine) == revision_0033
         engine.dispose()
+
+
+def test_0034_on_postgres() -> None:
+    """0034 binds a secret one index names, leaves the rest unbound, and downgrades cleanly."""
+    revision_0033 = "e8b1f4c7d0a3"
+    revision_0034 = "f1c4a8e2b6d9"
+    index_id, bound_id, free_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    now = datetime.now(UTC)
+    with PostgresContainer("postgres:16", driver="pg8000") as pg:
+        url = pg.get_connection_url()
+        migrate.upgrade(url, revision_0033)
+        engine = sqlalchemy.create_engine(url)
+        with engine.begin() as conn:
+            conn.execute(sqlalchemy.text("SET LOCAL session_replication_role = replica"))
+            conn.execute(
+                sqlalchemy.text(
+                    "INSERT INTO package_indexes (id, name, url, credential_secret, created_at, "
+                    "updated_at) VALUES (:id, 'corp', 'https://corp/simple', 'pypi', :now, :now)"
+                ),
+                {"id": index_id, "now": now},
+            )
+            for secret_id, name in ((bound_id, "pypi"), (free_id, "s3")):
+                conn.execute(
+                    sqlalchemy.text(
+                        "INSERT INTO secrets (id, environment_id, name, ciphertext, nonce, "
+                        "wrapped_data_key, format_version, key_id, created_by, created_at) "
+                        "VALUES (:id, :env, :name, '\\x00', '\\x00', '\\x00', 2, 'env', :who, :now)"
+                    ),
+                    {
+                        "id": secret_id,
+                        "env": uuid.uuid4(),
+                        "name": name,
+                        "who": uuid.uuid4(),
+                        "now": now,
+                    },
+                )
+
+        migrate.upgrade(url, revision_0034)
+        assert _alembic_version(engine) == revision_0034
+        with engine.connect() as conn:
+            found = dict(
+                conn.execute(sqlalchemy.text("SELECT id, use_target_id FROM secrets")).all()
+            )
+        assert found == {bound_id: index_id, free_id: None}
+        with engine.connect() as conn:
+            kinds = dict(conn.execute(sqlalchemy.text("SELECT id, use_kind FROM secrets")).all())
+        assert kinds == {bound_id: "PACKAGE_INDEX", free_id: None}
+
+        migrate.downgrade(url, revision_0033)
+        assert _alembic_version(engine) == revision_0033
+        assert "use_kind" not in {
+            c["name"] for c in sqlalchemy.inspect(engine).get_columns("secrets")
+        }
+        migrate.upgrade(url, revision_0034)
+        assert _alembic_version(engine) == revision_0034
+        engine.dispose()

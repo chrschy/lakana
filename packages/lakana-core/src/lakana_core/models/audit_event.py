@@ -23,6 +23,7 @@ class AuditEventType(enum.StrEnum):
     SECRET_CREATED = "SECRET_CREATED"  # nosec B105 -- an AuditEventType label, not a credential
     SECRET_ROTATED = "SECRET_ROTATED"  # nosec B105 -- an AuditEventType label, not a credential
     SECRET_REVOKED = "SECRET_REVOKED"  # nosec B105 -- an AuditEventType label, not a credential
+    SECRET_BOUND = "SECRET_BOUND"  # nosec B105 -- an AuditEventType label, not a credential
     QUERY_COMPLETED = "QUERY_COMPLETED"
     QUERY_CANCELLED = "QUERY_CANCELLED"
     ROW_FILTER_CREATED = "ROW_FILTER_CREATED"

@@ -2612,3 +2612,93 @@ def test_0033_records_the_schema_a_policy_was_written_against(
             assert "schema_id" not in {c["name"] for c in inspect(engine).get_columns(table)}
     finally:
         engine.dispose()
+
+
+_REVISION_0034 = "f1c4a8e2b6d9"
+
+
+def test_0034_binds_each_secret_named_by_exactly_one_index_or_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revision `0034`: `secrets.use_kind` and `use_target_id`; only unambiguous names are bound.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    """
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, _REVISION_0033)
+    engine = create_engine(f"sqlite:///{db_path}")
+    index_id, repo_id = uuid.uuid4().hex, uuid.uuid4().hex
+    secrets = {name: uuid.uuid4().hex for name in ("pypi", "git", "shared", "s3")}
+    try:
+        with engine.begin() as connection:
+            connection.execute(sa.text("PRAGMA foreign_keys=OFF"))
+            connection.execute(
+                sa.text(
+                    "INSERT INTO package_indexes (id, name, url, credential_secret, created_at,"
+                    " updated_at) VALUES (:id, 'corp', 'https://corp/simple', 'pypi',"
+                    " '2026-10-17 00:00:00', '2026-10-17 00:00:00')"
+                ),
+                {"id": index_id},
+            )
+            for row_id, name, secret in (
+                (repo_id, "analytics", "git"),
+                (uuid.uuid4().hex, "one", "shared"),
+                (uuid.uuid4().hex, "two", "shared"),
+            ):
+                connection.execute(
+                    sa.text(
+                        "INSERT INTO repositories (id, name, kind, url, credential_secret,"
+                        " created_at, updated_at) VALUES (:id, :name, 'HTTPS', 'https://g/a.git',"
+                        " :secret, '2026-10-17 00:00:00', '2026-10-17 00:00:00')"
+                    ),
+                    {"id": row_id, "name": name, "secret": secret},
+                )
+            for name, secret_id in secrets.items():
+                connection.execute(
+                    sa.text(
+                        "INSERT INTO secrets (id, environment_id, name, ciphertext, nonce,"
+                        " wrapped_data_key, format_version, key_id, created_by, created_at)"
+                        " VALUES (:id, :env, :name, x'00', x'00', x'00', 2, 'env', :who,"
+                        " '2026-10-17 00:00:00')"
+                    ),
+                    {
+                        "id": secret_id,
+                        "env": uuid.uuid4().hex,
+                        "name": name,
+                        "who": uuid.uuid4().hex,
+                    },
+                )
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, _REVISION_0034)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        with engine.connect() as connection:
+            rows = {
+                name: (kind, target)
+                for name, kind, target in connection.execute(
+                    sa.text("SELECT name, use_kind, use_target_id FROM secrets")
+                )
+            }
+        assert rows["pypi"] == ("PACKAGE_INDEX", index_id)
+        assert rows["git"] == ("REPOSITORY", repo_id)
+        assert rows["shared"] == (None, None)  # two repositories name it: an administrator decides
+        assert rows["s3"] == (None, None)  # named by nothing: stays unbound
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, _REVISION_0033)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        columns = {c["name"] for c in inspect(engine).get_columns("secrets")}
+        assert not columns & {"use_kind", "use_target_id"}
+    finally:
+        engine.dispose()
