@@ -29,8 +29,10 @@ services:
   # filesystem enabled, can reach nothing of it but the S3 gateway (docs/agent/security.md, #14).
   # `seaweedfs-core` runs the master (9333), volume server (8080) and filer, whose HTTP APIs need
   # no credentials, and joins only `seaweed-internal`, which no worker or server joins.
-  # `seaweedfs` is the S3 gateway alone: the one container on both networks, listening on 8333
-  # only. Its name is the endpoint everything else already uses.
+  # `seaweedfs` is the S3 gateway alone: the one container on both networks. It listens on 8333
+  # and on its gRPC port 18333, which cannot be turned off and has no authentication (a residual,
+  # see docs/agent/security.md); its Iceberg and Lance ports are off. Its name is the endpoint
+  # everything else already uses.
   seaweedfs-core:
     image: chrislusf/seaweedfs:4.47
     # -disableHttp also closes the filer's plain-HTTP file route, so the gateway, which reaches
@@ -48,7 +50,8 @@ services:
 
   seaweedfs:
     image: chrislusf/seaweedfs:4.47
-    command: s3 -port=8333 -filer=seaweedfs-core:8888 -config=/etc/seaweedfs/s3.json
+    # -ip: the address the gateway advertises; it sits on two networks, so say the one the core reaches.
+    command: s3 -port=8333 -port.iceberg=0 -port.lance=0 -ip=seaweedfs -filer=seaweedfs-core:8888 -config=/etc/seaweedfs/s3.json
     configs:
       - source: s3-identity
         target: /etc/seaweedfs/s3.json

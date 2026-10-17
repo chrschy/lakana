@@ -102,10 +102,13 @@ gateway `seaweedfs`, on separate networks, so the worker cannot reach SeaweedFS'
 internal HTTP APIs (#14). The endpoint `http://seaweedfs:8333` and the S3 keys do not change. An
 existing deployment keeps its old file until you replace it:
 
-1. Pull the new image and take the new `compose.yaml`: `lakana bundle init` refuses an existing
-   directory, so run it into a fresh directory and copy only `compose.yaml` over the old one. Keep
-   your `.env`.
-2. `docker compose up -d --remove-orphans` in the bundle directory.
+1. Get the new `compose.yaml` the way [Upgrading](../how-to/deploy-with-compose.md#upgrading)
+   describes (`lakana --profile upgrade-check bundle init ...`, then
+   `lakana profile remove upgrade-check --yes`). Replace your `compose.yaml` with the new one and
+   carry over any lines you added, usually under `x-lakana-env`. Keep your `.env`.
+2. `docker compose down`. The volumes stay. This matters: the old `seaweedfs` is a full
+   `weed server` on the `seaweed` volume, and it must stop before `seaweedfs-core` starts on the same volume.
+3. `docker compose up -d --wait`.
 
 Your data stays. The volumes (`pgdata`, `seaweed`, `worker-cache`) keep their names and
 contents; `seaweedfs-core` mounts the same `seaweed` volume. Expect a minute of downtime while

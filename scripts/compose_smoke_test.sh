@@ -138,14 +138,15 @@ import socket
 import urllib.error
 import urllib.request
 
-# The internal host is not even resolvable; the gateway's host refuses every internal port.
+# The internal host is not even resolvable (assumes the host's DNS has no wildcard search
+# domain, which would resolve any name); the gateway's host refuses every internal port.
 try:
     socket.getaddrinfo("seaweedfs-core", 9333)
 except socket.gaierror:
     pass
 else:
     raise SystemExit("the worker resolves seaweedfs-core: the internal network is reachable")
-for port in (9333, 19333, 8080, 18080, 8888, 18888):
+for port in (9333, 19333, 8080, 18080, 8888, 18888, 8181, 9101):
     try:
         socket.create_connection(("seaweedfs", port), timeout=3).close()
     except OSError:

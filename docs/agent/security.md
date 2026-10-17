@@ -3439,13 +3439,14 @@ matter for an operator deciding where to run it:
   can reach would be a way around credential scoping. Chosen: `weed server` (master, volume,
   filer; `-disableHttp` too) runs as `seaweedfs-core` on `seaweed-internal` (`internal: true`),
   which only SeaweedFS's services share. `seaweedfs` is a separate `weed s3` container, the one
-  service on both that network and `default`, listening on 8333 only. `server`, every worker and
-  `setup` are on `default`, so S3 with the keys is all they can reach. One container cannot be
+  service on both that network and `default`, listening on 8333 plus gRPC 18333 (`-port.iceberg=0
+  -port.lance=0` turn its other HTTP ports off). `server`, every worker and `setup` are on
+  `default`, so S3 with the keys, and the residual 18333, are all they can reach. One container cannot be
   split by port, which is why the gateway is its own container and not `weed server -s3`.
   JWT signing was not chosen: network isolation needs no key distribution, and a signing key
   would have to stay out of the worker anyway. Asserted by
   `test_seaweedfs_internal_apis_are_unreachable_from_the_worker` (compose structure) and by a
-  check run inside the worker in `scripts/compose_smoke_test.sh` (CI). **Not protected:** the S3
+  check run inside the worker in `scripts/compose_smoke_test.sh` (CI). **Not protected:** the gateway's gRPC port 18333 (it includes IAM) cannot be turned off and has no authentication. It is reachable from the default network, so from code in the worker: user SQL cannot reach it, because DuckDB's HTTP filesystem cannot speak gRPC, but a Python task, which runs as trusted code in the worker today, could remove the storage identity and make storage unavailable until a restart. The planned container runner keeps task networks away from SeaweedFS. The isolation relies on Docker's own network isolation (the default); a daemon with `iptables: false`, Podman or rootless setups may not provide it. The S3
   keys, held by the worker as before, give full bucket access (per-environment scoping is the
   presigned-URL path above); anyone with Docker access to the host reaches everything. Any change
   that joins a worker or server to `seaweed-internal`, or publishes a port of `seaweedfs-core`,

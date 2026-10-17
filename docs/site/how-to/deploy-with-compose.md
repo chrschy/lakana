@@ -1220,11 +1220,10 @@ Details and limits (SSH is unaffected): [`projects.md`](projects.md#git-network-
   credentials. They run in `seaweedfs-core`, on the `seaweed-internal` network, which only
   SeaweedFS's own containers (`seaweedfs-core`, the `seaweedfs` S3 gateway and the one-shot
   `bucket`) join and which has no route out of the host. The server and every worker are not on it:
-  from a worker, `seaweedfs-core` does not resolve, and `seaweedfs` answers on port 8333 only, with
-  S3 that needs the keys. The filer also runs with `-disableHttp`. **Not protected:** a person
+  from a worker, `seaweedfs-core` does not resolve, and `seaweedfs` answers over HTTP on port 8333 only, with
+  S3 that needs the keys. The filer also runs with `-disableHttp`. **Not protected:** the gateway's gRPC port 18333 (it includes IAM) has no authentication and is reachable from the worker. User SQL cannot use it, because DuckDB's HTTP filesystem cannot speak gRPC, but a Python task, which runs as trusted code in the worker, could remove the storage identity and make storage unavailable until a restart. The isolation relies on Docker's own network isolation (the default); `iptables: false`, Podman or rootless setups may not provide it. A person
   with Docker access to the host can still reach SeaweedFS (`docker exec`), and the S3 keys in
-  `.env` give full access to the `lakana` bucket, as always. The gateway container is the single
-  point a query can reach; keep the image up to date.
+  `.env` give full access to the `lakana` bucket, as always. The pinned SeaweedFS version is updated with Lakana releases.
 
 ## See also
 

@@ -289,7 +289,8 @@ def test_seaweedfs_internal_apis_are_unreachable_from_the_worker(
 
     `weed server` (master 9333, volume 8080, filer) sits alone on an `internal` network that only
     SeaweedFS's own services share; `seaweedfs`, a separate `weed s3` container, is the only
-    SeaweedFS service on the network the worker and server use, and listens on 8333 only.
+    SeaweedFS service on the network the worker and server use, and listens on 8333 and its
+    gRPC port 18333 only (the Iceberg and Lance ports are off).
     """
     state = make_state(tmp_path, FakeApi())
     invoke(state, "bundle", "init", str(tmp_path / "b"))
@@ -303,11 +304,17 @@ def test_seaweedfs_internal_apis_are_unreachable_from_the_worker(
     assert _networks(services["bucket"]) == {isolated}
     for name in ("server", "worker", "worker-interactive", "worker-pipeline", "setup"):
         assert isolated not in _networks(services[name]), name
-    # Only the gateway bridges the two, and it runs the S3 server alone: nothing else listens.
+    # Only the gateway bridges the two, and it runs the S3 server alone, with its extra HTTP ports
+    # off; 18333 (gRPC) is the one residual port.
     assert _networks(services["seaweedfs"]) == {isolated, "default"}
     gateway = services["seaweedfs"]["command"].split()
     assert gateway[0] == "s3" and "-port=8333" in gateway
     assert "-filer=seaweedfs-core:8888" in gateway
+    assert "-port.iceberg=0" in gateway and "-port.lance=0" in gateway
+    assert "-ip=seaweedfs" in gateway
+    # `network_mode` would put a service on another's network without `networks:` showing it.
+    assert all("network_mode" not in svc for svc in services.values())
+    assert "expose" not in services["seaweedfs-core"]
     assert "server" not in gateway
     assert "-s3" not in services["seaweedfs-core"]["command"].split()
     # No worker or server setting names the internal host.

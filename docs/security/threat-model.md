@@ -433,8 +433,8 @@ otherwise would misrepresent what the platform does.
   `compose.yaml` runs them in `seaweedfs-core` (also `-disableHttp` on the filer), on an
   `internal: true` network only SeaweedFS's containers share; the S3 gateway `seaweedfs` is the
   one service on both that network and the one the server and workers use, and it listens on
-  8333 only. A worker can reach SeaweedFS only through S3 with the keys. A test asserts the
-  network layout and the CI smoke test checks it from inside the worker. **Residual:** the S3 keys
+  8333 and its gRPC port 18333 (its other HTTP ports are off). A worker's HTTP can reach SeaweedFS only through S3 with the keys. A test asserts the
+  network layout and the CI smoke test checks it from inside the worker. **Residual:** the gateway's gRPC port 18333 (it includes IAM) cannot be turned off and has no authentication. It is reachable from the default network, so from code in the worker: user SQL cannot reach it, because DuckDB's HTTP filesystem cannot speak gRPC, but a Python task, which runs as trusted code in the worker today, could remove the storage identity and make storage unavailable until a restart. The planned container runner keeps task networks away from SeaweedFS. The isolation relies on Docker's own network isolation (the default). The S3 keys
   in the worker's reach give full bucket access, and a host administrator (Docker access) is
   outside the model.
 - **Applying Iceberg row-level deletes.** A table written to by an engine other than Lakana's
