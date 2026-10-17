@@ -858,6 +858,7 @@ def test_secrets_create_with_a_use_sends_it_and_reads_it_back() -> None:
                 "key_id": "env:0123456789abcdef",
                 "use": "package_index",
                 "use_target": "corp",
+                "use_target_url": "https://corp.example.org/simple",
             },
         )
 
@@ -868,3 +869,4 @@ def test_secrets_create_with_a_use_sends_it_and_reads_it_back() -> None:
     assert json.loads(bodies[0])["use"] == {"kind": "package_index", "target": "corp"}
     assert "use" not in json.loads(bodies[1])
     assert (bound.use, bound.use_target) == ("package_index", "corp")
+    assert bound.use_target_url == "https://corp.example.org/simple"

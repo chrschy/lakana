@@ -29,6 +29,7 @@ from lakana_core.secrets.keys import KeyProvider
 from lakana_core.secrets.uses import (
     SecretUse,
     lock_entry,
+    own_secret_steps,
     record_binding,
     resolve_use,
     target_row,
@@ -161,11 +162,10 @@ class SecretService:
                 self._session, env, name
             ):
                 raise ValidationError(
-                    f"The name '{shown(name)}' is what environment '{shown(environment)}' uses "
-                    f"for storage or webhooks, so a secret of that name serves its environment "
-                    f"(storage or webhooks) and cannot be created for {use.wanted()}. Create it "
-                    "with --own-env, or give the index or repository a secret of its own under "
-                    "another name."
+                    f"Environment '{shown(environment)}' uses the name '{shown(name)}' for its "
+                    f"storage or a webhook, so a secret of that name cannot be created for "
+                    f"{use.wanted()}. Create it with --own-env, or give the index or repository "
+                    "a secret under another name."
                 )
         secret_id = uuid.uuid4()
         encrypted = encrypt_secret_values(
@@ -226,7 +226,8 @@ class SecretService:
         NotFoundError
             If no secret has that id.
         ValidationError
-            If the secret has been revoked.
+            If the secret has been revoked, or is the environment's storage secret and `use`
+            is an index or a repository.
         PermissionDenied
             If the acting principal may not manage secrets in the secret's environment.
         """
@@ -240,6 +241,12 @@ class SecretService:
         self._session.refresh(secret, with_for_update=True)
         if secret.revoked_at is not None:
             raise ValidationError(f"Secret {secret_id} has been revoked and cannot be bound.")
+        if use.kind is not SecretUseKind.ENVIRONMENT and env.storage_secret_ref == secret.name:
+            raise ValidationError(
+                f"Secret '{shown(secret.name)}' is the storage secret of environment "
+                f"'{shown(env.name)}', so binding it to {use.wanted()} would stop its storage. "
+                f"Give {use.wanted()} a secret of its own: {own_secret_steps(env.name, use)}."
+            )
         record_binding(self._session, p, secret, scope, use)
         self._session.commit()
         return secret
@@ -298,6 +305,25 @@ class SecretService:
             return None
         row = target_row(self._session, secret.use_kind, secret.use_target_id)
         return row.name if row is not None else None
+
+    def use_target_url(self, secret: Secret) -> str | None:
+        """Give the URL of the index or repository a secret is bound to.
+
+        Parameters
+        ----------
+        secret
+            The row.
+
+        Returns
+        -------
+        str or None
+            The URL, which is where the secret goes; `None` for an unbound secret, the
+            environment use, or a target that was removed.
+        """
+        if secret.use_kind is None:
+            return None
+        row = target_row(self._session, secret.use_kind, secret.use_target_id)
+        return row.url if row is not None else None
 
     def list_for_environment(self, p: PrincipalRef, environment: str) -> list[Secret]:
         """List an environment's active secrets.

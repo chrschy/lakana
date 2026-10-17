@@ -157,8 +157,10 @@ def test_an_index_use_passes_only_for_its_own_index(
 
     assert str(caught.value) == (
         "Secret 'corp-token' of environment 'prod' is bound to package index 'corp', not to "
-        "package index 'other', so Lakana does not use it there. An administrator who means it "
-        "changes its use: lakana secret bind corp-token --env prod --index other"
+        "package index 'other', so Lakana does not use it there. Give package index 'other' a "
+        "secret of its own: `lakana secret create NEW --env prod --index other --values-stdin`, "
+        "then `lakana index update other --credential-secret NEW`. Moving this secret instead "
+        "breaks package index 'corp': lakana secret bind corp-token --env prod --index other"
     )
 
 
@@ -311,8 +313,27 @@ def test_an_index_secret_refused_as_a_webhook_first_suggests_a_secret_of_its_own
 
     assert str(caught.value) == (
         "Secret 'corp-token' of environment 'prod' is bound to package index 'corp', not to its "
-        "environment (storage, webhooks and tasks), so Lakana does not use it there. Name a "
+        "environment (storage and webhooks), so Lakana does not use it there. Name a "
         "secret of its own instead; or, if this secret really belongs to the environment, an "
         "administrator binds it, and package index 'corp' then loses it: "
         "lakana secret bind corp-token --env prod --own-env"
+    )
+
+
+def test_a_repository_secret_bound_elsewhere_leads_with_a_secret_of_its_own(
+    session: Session, principal: PrincipalRef
+) -> None:
+    """Moving it would break the other repository, so it is the second suggestion."""
+    env = _environment(session)
+    first, second = _repository(session, "first"), _repository(session, "second")
+    secret = _secret(session, env, principal, "git-token", SecretUseKind.REPOSITORY, first.id)
+
+    with pytest.raises(SecretUseRefused) as caught:
+        require_use(session, secret, SecretUse.repository(second), environment_name="prod")
+
+    assert str(caught.value).endswith(
+        "Give repository 'second' a secret of its own: `lakana secret create NEW --env prod "
+        "--repository second --values-stdin`, then `lakana repo update second "
+        "--credential-secret NEW`. Moving this secret instead breaks repository 'first': "
+        "lakana secret bind git-token --env prod --repository second"
     )

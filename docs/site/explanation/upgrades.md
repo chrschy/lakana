@@ -116,8 +116,9 @@ SeaweedFS restarts.
 
 ### A secret is bound to one use
 
-Migration `0034` runs automatically (see below). A secret now has one use: a package index, a
-repository, or its own environment (its storage, its webhooks and its tasks), and Lakana
+Migration `0034` runs automatically (see step 3 of [What every upgrade
+asks](#what-every-upgrade-asks)). A secret now has one use: a package index, a
+repository, or its own environment (its storage and its webhooks), and Lakana
 refuses it for anything else. Only someone who may manage secrets (the `ADMIN` role) binds a
 secret. A person who may only register indexes or repositories can name a secret that is already
 bound to that same entry, and nothing else.
@@ -133,10 +134,20 @@ repository that names it is refused until someone who manages secrets binds it, 
 gives the command. A secret that is both a webhook secret and an index credential stays unbound:
 bind it to its use, or give each its own secret.
 
+**One secret per entry.** A secret serves one index or repository. Where several indexes or
+repositories shared one credential (one token named by several repositories, say), create one
+secret per entry (the same value is fine) and point each entry at its own:
+`lakana secret create NEW --env ENV --repository REPO --values-stdin`, then
+`lakana repo update REPO --credential-secret NEW` (`--index INDEX` and `lakana index update
+INDEX` for an index). Until then every entry but one is refused, and the message gives these
+two commands.
+
 A secret stays unbound when several entries name it, because then its use is unknown, or when
 its environment uses it, because binding it to an index would stop it serving storage or
 webhooks. After you upgrade, an administrator lists the secrets of each environment and binds
-what shows no use: credentials of an index or a repository with `--index` or `--repository`;
+what shows no use. Check the URLs in `lakana index list` and `lakana repo list` first, because
+binding approves the URL the entry has at that moment (the command prints it, and the audit log
+keeps it). Then bind credentials of an index or a repository with `--index` or `--repository`;
 storage and webhook secrets with `--own-env`, so that nobody's naming can claim them. A secret
 bound to an index stops serving storage and webhooks, so bind a secret to an index only when
 it is that index's credential.
@@ -144,6 +155,8 @@ it is that index's credential.
 <!-- not tested: needs an upgraded instance, and ENV, NAME, INDEX and REPO are placeholders -->
 ```bash
 lakana secret list --env ENV
+lakana index list
+lakana repo list
 lakana secret bind NAME --env ENV --index INDEX
 lakana secret bind NAME --env ENV --repository REPO
 lakana secret bind NAME --env ENV --own-env

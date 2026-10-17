@@ -475,6 +475,7 @@ def test_secret_bind_sends_exactly_one_use(tmp_path: Path) -> None:
         "key_id": "env",
         "use": "package_index",
         "use_target": "corp",
+        "use_target_url": "https://corp.example.org/simple",
     }
     api = FakeApi()
     api.on("PUT", "/api/v1/environments/dev/secrets/pypi/use", json=secret)
@@ -485,7 +486,10 @@ def test_secret_bind_sends_exactly_one_use(tmp_path: Path) -> None:
     )
 
     assert result.exit_code == 0, result.stderr
-    assert "Bound secret pypi in dev to package index corp" in result.stdout
+    assert (
+        "Bound secret pypi in dev to package index corp (https://corp.example.org/simple)"
+        in result.stdout
+    )
     (sent,) = [r for r in api.requests if r.method == "PUT"]
     assert json.loads(sent.content) == {"kind": "package_index", "target": "corp"}
     listing = invoke(make_state(tmp_path, api), "secret", "list", "--env", "dev")
@@ -521,6 +525,7 @@ def test_secret_create_with_a_use_sends_it(tmp_path: Path) -> None:
         "key_id": "env",
         "use": "package_index",
         "use_target": "corp",
+        "use_target_url": "https://corp.example.org/simple",
     }
     api = FakeApi()
     api.on("POST", "/api/v1/environments/dev/secrets", status=201, json=secret)
@@ -539,6 +544,10 @@ def test_secret_create_with_a_use_sends_it(tmp_path: Path) -> None:
     )
 
     assert result.exit_code == 0, result.stderr
+    assert (
+        "Created secret pypi in dev, bound to package index corp "
+        "(https://corp.example.org/simple)" in result.stdout
+    )
     assert json.loads(api.requests[-1].content)["use"] == {
         "kind": "package_index",
         "target": "corp",

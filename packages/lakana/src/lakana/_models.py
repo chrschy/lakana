@@ -773,6 +773,8 @@ class Secret:
         `None` for an unbound secret.
     use_target
         The bound index's or repository's name, when there is one.
+    use_target_url
+        Its URL, which is where the secret is sent, when there is one.
     """
 
     id: str
@@ -784,6 +786,7 @@ class Secret:
     key_id: str
     use: str | None = None
     use_target: str | None = None
+    use_target_url: str | None = None
 
 
 @dataclass(frozen=True)

@@ -30,7 +30,7 @@ router = APIRouter(
 )
 
 
-def _to_out(secret: Secret, environment_name: str, target: str | None) -> SecretOut:
+def _to_out(secret: Secret, environment_name: str, service: SecretService) -> SecretOut:
     """Build a response body from a Secret row.
 
     Parameters
@@ -40,8 +40,8 @@ def _to_out(secret: Secret, environment_name: str, target: str | None) -> Secret
     environment_name
         The environment this secret belongs to, since `Secret` itself
         only carries `environment_id`.
-    target
-        The bound index's or repository's name, from `SecretService.use_target_name`.
+    service
+        Reads the bound index's or repository's name and URL.
 
     Returns
     -------
@@ -58,7 +58,8 @@ def _to_out(secret: Secret, environment_name: str, target: str | None) -> Secret
         format_version=secret.format_version,
         key_id=secret.key_id,
         use=secret.use_kind.value if secret.use_kind is not None else None,
-        use_target=target,
+        use_target=service.use_target_name(secret),
+        use_target_url=service.use_target_url(secret),
     )
 
 
@@ -137,7 +138,7 @@ def create_secret(
     created = service.create(
         principal, environment=environment_name, name=body.name, values=body.values, use=use
     )
-    return _to_out(created, environment_name, service.use_target_name(created))
+    return _to_out(created, environment_name, service)
 
 
 @router.get("", response_model=list[SecretOut])
@@ -168,7 +169,7 @@ def list_secrets(
         Mapped to 404 by `install_exception_handlers`.
     """
     return [
-        _to_out(secret, environment_name, service.use_target_name(secret))
+        _to_out(secret, environment_name, service)
         for secret in service.list_for_environment(principal, environment_name)
     ]
 
@@ -213,7 +214,7 @@ def rotate_secret(
     """
     existing = _find_by_name(service.list_for_environment(principal, environment_name), secret_name)
     rotated = service.rotate(principal, existing.id, values=body.values)
-    return _to_out(rotated, environment_name, service.use_target_name(rotated))
+    return _to_out(rotated, environment_name, service)
 
 
 @router.put("/{secret_name}/use", response_model=SecretOut)
@@ -256,7 +257,7 @@ def bind_secret(
     existing = _find_by_name(service.list_for_environment(principal, environment_name), secret_name)
     use = service.use_from_names(principal, environment_name, SecretUseKind(body.kind), body.target)
     bound = service.bind(principal, existing.id, use)
-    return _to_out(bound, environment_name, service.use_target_name(bound))
+    return _to_out(bound, environment_name, service)
 
 
 @router.delete("/{secret_name}", status_code=204)

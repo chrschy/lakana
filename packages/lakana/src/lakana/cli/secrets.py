@@ -30,7 +30,7 @@ _REPOSITORY = Annotated[
     str | None, typer.Option("--repository", help="Bind it to this repository.")
 ]
 _OWN_ENV = Annotated[
-    bool, typer.Option("--own-env", help="Bind it to its environment: storage, webhooks and tasks.")
+    bool, typer.Option("--own-env", help="Bind it to its environment: storage and webhooks.")
 ]
 
 
@@ -109,6 +109,30 @@ def read_values(value: list[str] | None, values_stdin: bool) -> dict[str, str]:
     return data
 
 
+def _use_text(kind: str, target: str | None, url: str | None) -> str:
+    """Say what a secret was bound to, with the URL the secret now goes to.
+
+    Parameters
+    ----------
+    kind
+        ``package_index``, ``repository`` or ``environment``.
+    target
+        The index's or repository's name.
+    url
+        Its URL as the server holds it; the person who binds sees where the secret goes.
+
+    Returns
+    -------
+    str
+        For example ``package index corp (https://pkgs.example.org/simple)``.
+    """
+    noun = {"package_index": "package index", "repository": "repository"}.get(kind)
+    if noun is None:
+        return "its environment"
+    where = f" ({_output.inline(url)})" if url else ""
+    return f"{noun} {_output.inline(target or '')}{where}"
+
+
 @secret_app.command("create")
 def create(
     ctx: typer.Context,
@@ -150,9 +174,10 @@ def create(
     environment = resolve_environment(state, env)
     kind, target = use if use is not None else (None, None)
     secret = state.client().secrets.create(environment, name, values, kind=kind, target=target)
-    _output.done(
-        state, f"Created secret {_output.inline(name)} in {_output.inline(environment)}", secret
-    )
+    made = f"Created secret {_output.inline(name)} in {_output.inline(environment)}"
+    if kind is not None:
+        made += f", bound to {_use_text(kind, target, secret.use_target_url)}"
+    _output.done(state, made, secret)
 
 
 @secret_app.command("list")
@@ -262,8 +287,7 @@ def bind(
     state = state_of(ctx)
     environment = resolve_environment(state, env)
     secret = state.client().secrets.bind(environment, name, kind, target)
-    noun = {"package_index": "package index", "repository": "repository"}.get(kind)
-    what = f"{noun} {_output.inline(target or '')}" if noun else "its environment"
+    what = _use_text(kind, target, secret.use_target_url)
     _output.done(
         state,
         f"Bound secret {_output.inline(name)} in {_output.inline(environment)} to {what}",

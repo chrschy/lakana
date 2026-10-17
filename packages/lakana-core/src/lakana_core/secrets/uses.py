@@ -13,6 +13,7 @@ from __future__ import annotations
 import shlex
 import uuid
 from dataclasses import dataclass
+from typing import TypeVar
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -35,7 +36,8 @@ from lakana_core.models import (
 
 _NOUNS = {SecretUseKind.PACKAGE_INDEX: "package index", SecretUseKind.REPOSITORY: "repository"}
 _OPTIONS = {SecretUseKind.PACKAGE_INDEX: "--index", SecretUseKind.REPOSITORY: "--repository"}
-_ENVIRONMENT_USE = "its environment (storage, webhooks and tasks)"
+_ENVIRONMENT_USE = "its environment (storage and webhooks)"
+_GROUPS = {SecretUseKind.PACKAGE_INDEX: "index", SecretUseKind.REPOSITORY: "repo"}
 
 
 def plain(name: str) -> str:
@@ -254,6 +256,29 @@ def bind_command(environment: str, name: str, use: SecretUse) -> str:
     )
 
 
+def own_secret_steps(environment: str, use: SecretUse) -> str:
+    """Write the two commands that give an index or repository a secret of its own.
+
+    Parameters
+    ----------
+    environment
+        The environment the secret lives in.
+    use
+        The index or repository, with its name.
+
+    Returns
+    -------
+    str
+        ``lakana secret create NEW ... --values-stdin``, then the ``update`` that names it, each
+        in backticks, quoted for a shell.
+    """
+    name = shlex.quote(plain(use.target_name or ""))
+    return (
+        f"`lakana secret create NEW --env {shlex.quote(plain(environment))} {use.option()} "
+        f"--values-stdin`, then `lakana {_GROUPS[use.kind]} update {name} --credential-secret NEW`"
+    )
+
+
 def _bound_to(secret: Secret, use: SecretUse) -> bool:
     """Say whether a secret is bound to exactly this use.
 
@@ -327,7 +352,8 @@ def require_use(session: Session, secret: Secret, use: SecretUse, *, environment
         )
     raise SecretUseRefused(
         f"{who} is bound to {current}, not to {use.wanted()}, so Lakana does not use it there. "
-        f"An administrator who means it changes its use: {command}"
+        f"Give {use.wanted()} a secret of its own: {own_secret_steps(environment_name, use)}. "
+        f"Moving this secret instead breaks {current}: {command}"
     )
 
 
@@ -349,6 +375,7 @@ def record_binding(
     use
         The use to bind it to.
     """
+    target = target_row(session, use.kind, use.target_id)
     AuditService(session).record(
         p.id,
         AuditEventType.SECRET_BOUND,
@@ -357,6 +384,7 @@ def record_binding(
             "name": secret.name,
             "use": use.kind.value,
             "target": use.target_name,
+            "url": target.url if target is not None else None,
             "previous": secret.use_kind.value if secret.use_kind is not None else None,
         },
     )
@@ -476,6 +504,34 @@ def used_by_its_environment(session: Session, environment: Environment, name: st
 _SHORT = {SecretUseKind.PACKAGE_INDEX: "index", SecretUseKind.REPOSITORY: "repository"}
 
 
+_Row = TypeVar("_Row", PackageIndex, Repository)
+
+
+def lock_row(session: Session, model: type[_Row], row_id: uuid.UUID) -> _Row | None:
+    """Lock an index's or repository's row and read it afresh, until the transaction ends.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    model
+        `PackageIndex` or `Repository`.
+    row_id
+        The row's id.
+
+    Returns
+    -------
+    PackageIndex | Repository | None
+        The row as committed now, or `None` when it was removed.
+    """
+    return session.execute(
+        select(model)
+        .where(model.id == row_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+
+
 def lock_entry(session: Session, use: SecretUse) -> None:
     """Lock the index or repository row a binding points at, until the transaction ends.
 
@@ -497,10 +553,10 @@ def lock_entry(session: Session, use: SecretUse) -> None:
     """
     if use.target_id is None:
         return
-    model = PackageIndex if use.kind is SecretUseKind.PACKAGE_INDEX else Repository
-    found = session.execute(
-        select(model.id).where(model.id == use.target_id).with_for_update()
-    ).first()
+    if use.kind is SecretUseKind.PACKAGE_INDEX:
+        found = lock_row(session, PackageIndex, use.target_id)
+    else:
+        found = lock_row(session, Repository, use.target_id)
     if found is None:
         raise NotFoundError(f"The {_NOUNS[use.kind]} was removed by someone else; look again.")
 
@@ -564,15 +620,22 @@ def bind_or_require_named_secrets(
             "Ask" if registered else f"Register the {short} without a credential first, then ask"
         )
         command = bind_command(environment.name, name, use)
+        steps = own_secret_steps(environment.name, use)
         current = secret.use_kind
         if current is SecretUseKind.ENVIRONMENT or (
             current is None and used_by_its_environment(session, environment, name)
         ):
+            # Storage stops working without its secret, so only a webhook's secret is offered
+            # as a deliberate move.
+            move = (
+                ""
+                if environment.storage_secret_ref == name
+                else f", or to move this one on purpose (the environment then loses it): {command}"
+            )
             raise SecretBindingRefused(
                 f"{who} serves its environment (storage or webhooks), so naming it for "
                 f"{use.wanted()} will not move it. {first} someone who may manage secrets in "
-                f"'{env_name}' to give the {short} a secret of its own and bind that, or to move "
-                f"this one on purpose: {command}",
+                f"'{env_name}' to give the {short} a secret of its own: {steps}{move}",
                 scope,
                 "secret_used_by_environment",
             )
@@ -588,12 +651,18 @@ def bind_or_require_named_secrets(
                 "secret_bound_elsewhere",
             )
         this = "this" if registered else "the"
-        raise SecretBindingRefused(
-            f"{who} {cause}. {first} someone who may manage secrets in '{env_name}' to bind it to "
-            f"{this} {short}: {command}",
-            scope,
-            reason,
-        )
+        if current is None:
+            advice = (
+                f"{first} someone who may manage secrets in '{env_name}' to bind it to "
+                f"{this} {short}: {command}"
+            )
+        else:
+            advice = (
+                f"{first} someone who may manage secrets in '{env_name}' to give {this} {short} "
+                f"a secret of its own: {steps}. Moving this secret instead breaks {described}: "
+                f"{command}"
+            )
+        raise SecretBindingRefused(f"{who} {cause}. {advice}", scope, reason)
 
 
 def require_secret_management_for_url_change(
@@ -641,9 +710,9 @@ def require_secret_management_for_url_change(
                 f"Changing the URL of {use.wanted()} would send secret '{plain(secret_name)}' of "
                 f"environment '{plain(environment)}' to another host. That needs the right to "
                 f"manage secrets in '{plain(environment)}' (the ADMIN role). Ask someone who may "
-                f"manage secrets in '{plain(environment)}' to change it, or bind the secret "
-                f"elsewhere first: lakana secret bind {shlex.quote(plain(secret_name))} --env "
-                f"{shlex.quote(plain(environment))} (with --index NAME, --repository NAME or "
+                f"manage secrets in '{plain(environment)}' to change the URL, or to bind the "
+                f"secret elsewhere first: lakana secret bind {shlex.quote(plain(secret_name))} "
+                f"--env {shlex.quote(plain(environment))} (with --index NAME, --repository NAME or "
                 "--own-env)",
                 scope,
                 "url_moves_bound_secret",

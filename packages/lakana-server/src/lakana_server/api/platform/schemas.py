@@ -1225,6 +1225,8 @@ class SecretOut(BaseModel):
         `None` for an unbound secret.
     use_target
         The index's or repository's name; `None` otherwise, also when that entry was removed.
+    use_target_url
+        Its URL, which is where the secret is sent; `None` when `use_target` is.
     """
 
     id: uuid.UUID
@@ -1236,6 +1238,7 @@ class SecretOut(BaseModel):
     key_id: str
     use: str | None = None
     use_target: str | None = None
+    use_target_url: str | None = None
 
 
 class AuditEventOut(BaseModel):

@@ -25,7 +25,7 @@ def _secret_from_json(data: dict[str, Any]) -> Secret:
         value or ciphertext field. A server that predates the stored-format
         fields sends neither `format_version` nor `key_id`; they read as `1`
         and `env`, which is how such a server stores every secret, and neither `use` nor
-        `use_target`, which read as `None`.
+        `use_target` or `use_target_url`, which read as `None`.
 
     Returns
     -------
@@ -42,6 +42,7 @@ def _secret_from_json(data: dict[str, Any]) -> Secret:
         key_id=data.get("key_id", "env"),
         use=data.get("use"),
         use_target=data.get("use_target"),
+        use_target_url=data.get("use_target_url"),
     )
 
 

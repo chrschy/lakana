@@ -22,9 +22,20 @@ the signature are in the same guide.
 ## Bind a secret to its use
 
 A secret has one use: the credential of one package index, of one repository, or its
-environment's own work (storage, webhooks and tasks). Lakana refuses it for anything else, so
+environment's own work (storage and webhooks). Lakana refuses it for anything else, so
 someone who may register package indexes cannot send another secret to a host of their choice.
-Only someone who may manage the environment's secrets (the `ADMIN` role) binds a secret.
+Under the current runner, someone who also holds `DEPLOY` and `RUN` reads what the worker reads
+anyway, so binding protects against an index manager redirecting a secret, not against code that
+runs in the worker. Only someone who may manage the environment's secrets (the `ADMIN` role)
+binds a secret. `lakana secret bind` and `lakana secret create --index` print the name and the
+URL of the index or repository: that URL is where the secret goes, so read it before you bind.
+
+A secret serves one entry. Where several indexes or repositories shared one credential, create
+one secret per entry (the same value is fine) and point each entry at its own:
+`lakana secret create NEW --env ENV --repository REPO --values-stdin`, then
+`lakana repo update REPO --credential-secret NEW` (`--index INDEX` and `lakana index update
+INDEX` for an index). The refusal for a secret bound to another entry leads with these two
+commands; moving the secret instead breaks the entry it served.
 
 The one-step way is to create the secret with its use. Register the index first, then create the
 secret bound to it (`--repository NAME` and `--own-env` work the same way):

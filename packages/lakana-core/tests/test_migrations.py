@@ -2885,3 +2885,100 @@ def test_0034_leaves_every_ambiguous_or_environment_used_secret_unbound(
     assert found[env_two, "repo-own"] == ("REPOSITORY", repo_ids["own"])
     assert found[env_three, "repo-own"] == unbound  # a repository names it, storage uses it
     assert found[env_one, "token"] == unbound  # 'Token' is not 'token'
+
+
+@pytest.mark.parametrize(
+    "odd",
+    [
+        [],
+        "text",
+        {"jobs": []},
+        {"jobs": {"a": {"notify": None}}},
+        {"jobs": {"a": "a string, not a job"}},
+        {"jobs": {"a": {"notify": {"format": "json"}}}},
+        {"jobs": {"a": {"notify": {"webhook": 5}}}},
+    ],
+    ids=["list", "string", "jobs-list", "notify-null", "job-string", "no-webhook", "webhook-int"],
+)
+def test_0034_reads_an_unusual_manifest_without_failing_or_inventing_a_webhook(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, odd: object
+) -> None:
+    """Revision `0034` walks stored manifests defensively and a good one still counts.
+
+    The unusual manifest names no webhook, so the secret an index names stays bound; a normal
+    manifest stored beside it still makes its webhook secret unbound.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    odd
+        The unusual manifest.
+    """
+    db_path = tmp_path / "odd.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, _REVISION_0033)
+    when = "2026-10-17 00:00:00"
+    env_id, repo_id, who = (uuid.uuid4().hex for _ in range(3))
+    index_ids = {"plain": uuid.uuid4().hex, "hooked": uuid.uuid4().hex}
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        with engine.begin() as connection:
+            connection.execute(sa.text("PRAGMA foreign_keys=OFF"))
+            connection.execute(
+                sa.text(
+                    "INSERT INTO environments (id, name, storage_root, storage_options,"
+                    " is_protected, properties, created_at, updated_at)"
+                    " VALUES (:id, 'one', 'file:///x', '{}', 0, '{}', :t, :t)"
+                ),
+                {"id": env_id, "t": when},
+            )
+            for name, index_id in index_ids.items():
+                connection.execute(
+                    sa.text(
+                        "INSERT INTO package_indexes (id, name, url, credential_secret,"
+                        " created_at, updated_at) VALUES (:id, :name, :url, :name, :t, :t)"
+                    ),
+                    {"id": index_id, "name": name, "url": f"https://{name}/simple", "t": when},
+                )
+                connection.execute(
+                    sa.text(
+                        "INSERT INTO secrets (id, environment_id, name, ciphertext, nonce,"
+                        " wrapped_data_key, format_version, key_id, created_by, created_at)"
+                        " VALUES (:id, :env, :name, x'00', x'00', x'00', 2, 'env', :who, :t)"
+                    ),
+                    {"id": uuid.uuid4().hex, "env": env_id, "name": name, "who": who, "t": when},
+                )
+            good = {"jobs": {"nightly": {"notify": {"webhook": "hooked"}}}}
+            for sha, manifest in (("a" * 40, odd), ("b" * 40, good)):
+                connection.execute(
+                    sa.text(
+                        "INSERT INTO job_versions (id, repository_id, environment_id, commit_sha,"
+                        " manifest_json, code_uri, code_sha256, created_at) VALUES (:id, :repo,"
+                        " :env, :sha, :manifest, 'file:///c', :sha256, :t)"
+                    ),
+                    {
+                        "id": uuid.uuid4().hex,
+                        "repo": repo_id,
+                        "env": env_id,
+                        "sha": sha,
+                        "manifest": json.dumps(manifest),
+                        "sha256": "0" * 64,
+                        "t": when,
+                    },
+                )
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, _REVISION_0034)
+
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        with engine.connect() as connection:
+            found = dict(connection.execute(sa.text("SELECT name, use_kind FROM secrets")).all())
+    finally:
+        engine.dispose()
+    assert found == {"plain": "PACKAGE_INDEX", "hooked": None}

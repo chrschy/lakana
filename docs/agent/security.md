@@ -1870,7 +1870,11 @@ carries any of the three, and a grant below instance scope never satisfied these
   environment with a bound run principal, and `MANAGE_REPOSITORY` with both, reach the same
   data access. `MANAGE_PACKAGE_INDEX` can be granted as a single action; its holder cannot
   redirect a secret to a host of their choice, because a secret is bound to one use and only
-  `MANAGE_SECRET` binds it (see "Package index credentials (M5c2c)"). Under `LocalProcessRunner` a holder who also has `DEPLOY` and `RUN` still reads what the worker reads (one trust domain): binding stops an index manager from redirecting a secret, not code that runs in the worker, and becomes a boundary against such code only with the container runner. The rule is not retroactive: what a
+  `MANAGE_SECRET` binds it (see "Package index credentials (M5c2c)"). Under `LocalProcessRunner` a
+  holder who also has `DEPLOY` and `RUN` still reads what the worker reads (one trust domain):
+  binding stops an index manager from redirecting a secret, not code that runs in the worker, and
+  becomes a boundary against such code only with the container runner. The rule is not retroactive:
+  what a
   holder of one of the three created earlier (grants, memberships, tokens) stays.
 
 **Mint hygiene and TTL cap.** `TaskTokenService.mint` rejects a malformed asset-scope
@@ -2170,7 +2174,10 @@ From the threat model:
   repository, and cannot change the URL of an entry that has a bound secret without
   `MANAGE_SECRET` in the secret's environment. They never bind a secret. A refusal is recorded
   as `AUTHORIZATION_DENIED` with its reason. The residual is below, under "Package index
-  credentials (M5c2c)". Under `LocalProcessRunner` a holder who also has `DEPLOY` and `RUN` still reads what the worker reads (one trust domain): binding stops an index manager from redirecting a secret, not code that runs in the worker, and becomes a boundary against such code only with the container runner. See "The three actions that need the `ADMIN` role".
+  credentials (M5c2c)". Under `LocalProcessRunner` a holder who also has `DEPLOY` and `RUN` still
+  reads what the worker reads (one trust domain): binding stops an index manager from redirecting a
+  secret, not code that runs in the worker, and becomes a boundary against such code only with the
+  container runner. See "The three actions that need the `ADMIN` role".
 - **Infrastructure compromise.**
 - **An external Iceberg REST client holding its own storage credentials.** Lakana's Iceberg
   REST endpoints vend no storage credentials of their own —
@@ -2458,7 +2465,7 @@ that uses it. User reference: `docs/site/reference/package-indexes.md`; how-to:
 `docs/site/how-to/private-package-index.md`.
 
 - **A secret has one use, and only `MANAGE_SECRET` binds it.** A secret is bound to a named
-  package index, a named repository, or its own environment (storage, webhooks, tasks); the
+  package index, a named repository, or its own environment (storage and webhooks); the
   use is `secrets.use_kind` and `secrets.use_target_id`. The four places that decrypt a secret
   for an index, a repository, storage or a webhook check the use first and refuse another one,
   with the command that moves it. `MANAGE_PACKAGE_INDEX` and `MANAGE_REPOSITORY` are not
@@ -2477,8 +2484,17 @@ that uses it. User reference: `docs/site/reference/package-indexes.md`; how-to:
   binds a secret that exactly one entry names and leaves the rest unbound. Residuals: an unbound
   secret keeps serving its environment's storage and webhooks; a webhook in a `lakana.yaml`
   that was never deployed is invisible to the migration (and never runs). `MANAGE_REPOSITORY`
-  follows the same rules for a repository's `token`. Without `DEPLOY` a holder of
-  `MANAGE_PACKAGE_INDEX` can only stop projects (`index update --url`, `index remove`). Trust domain: under `LocalProcessRunner` a holder who also has `DEPLOY` and `RUN` still reads what the worker reads (one trust domain): binding stops an index manager from redirecting a secret, not code that runs in the worker, and becomes a boundary against such code only with the container runner.
+  follows the same rules for a repository's `token`. A bind records the target's URL in the
+  `SECRET_BOUND` detail and prints it, because binding approves the URL the entry has then;
+  the environment's storage secret cannot be bound to an index or a repository
+  (`SecretService.bind`). Residual, from before binding: anyone holding instance-scoped
+  `MANAGE_ENVIRONMENT` can change `storage_options`, including `s3.endpoint`, without
+  `MANAGE_SECRET`, and the storage secret then goes to that endpoint. Without `DEPLOY` a holder of
+  `MANAGE_PACKAGE_INDEX` can only stop projects (`index update --url`, `index remove`). Trust
+  domain: under `LocalProcessRunner` a holder who also has `DEPLOY` and `RUN` still reads what the
+  worker reads (one trust domain): binding stops an index manager from redirecting a secret, not
+  code that runs in the worker, and becomes a boundary against such code only with the container
+  runner.
 
 - **The invariant, which the tests pin:** a credential is offered only to the host (and port) of
   the registered index's URL, whatever the project's files say; it is never in the project's
@@ -3050,7 +3066,8 @@ exit criterion is being re-run after the M3f fixes above — see
 ## Webhook egress (M5d-c)
 
 `lakana_worker.egress` is the only code that sends a webhook. A webhook URL is hostile input:
-anyone with the deploy right can name a secret of the environment as one if it is unbound or bound to the environment. `test_egress.py`
+anyone with the deploy right can name a secret of the environment as one if it is unbound or bound
+to the environment. `test_egress.py`
 pins each line.
 
 - **Check, then pin.** `check_destination` requires `https` and port 443, resolves the name
@@ -3098,7 +3115,8 @@ pins each line.
   answer. A secret that is missing, revoked, undecryptable or without a `url` that starts with
   `http://` or `https://` fails the delivery with a reason that names the secret, never its
   value. An unexpected exception from the send is logged by its type only. Anyone with the
-  deploy right can name a secret that is unbound or bound to the environment as a webhook. That reveals no value, but
+  deploy right can name a secret that is unbound or bound to the environment as a webhook. That
+  reveals no value, but
   the stored reason does tell them whether that secret holds an `http(s)` `url`, whether that
   host is private or refused, and the status code it answers; the worker also POSTs run metadata
   (names, no data) to that URL. The model accepts this. `test_notify.py` seeds a URL and a signing

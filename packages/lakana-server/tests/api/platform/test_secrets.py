@@ -304,6 +304,7 @@ def test_a_secret_is_bound_through_the_api_and_shows_its_use(
     )
     assert created.status_code == 201
     assert (created.json()["use"], created.json()["use_target"]) == (None, None)
+    assert created.json()["use_target_url"] is None
     client.post(
         "/api/v1/package-indexes",
         headers=AUTH_HEADER,
@@ -318,6 +319,7 @@ def test_a_secret_is_bound_through_the_api_and_shows_its_use(
 
     assert bound.status_code == 200, bound.text
     assert (bound.json()["use"], bound.json()["use_target"]) == ("package_index", "corp")
+    assert bound.json()["use_target_url"] == "https://corp.example.org/simple"
     listed = client.get("/api/v1/environments/dev/secrets", headers=AUTH_HEADER).json()
     assert [(s["name"], s["use"], s["use_target"]) for s in listed] == [
         ("pypi", "package_index", "corp")
@@ -524,6 +526,7 @@ def test_a_secret_is_created_with_its_use(client: TestClient, storage_root: str)
 
     assert created.status_code == 201, created.text
     assert (created.json()["use"], created.json()["use_target"]) == ("package_index", "corp")
+    assert created.json()["use_target_url"] == "https://corp.example.org/simple"
     listed = client.get("/api/v1/environments/dev/secrets", headers=AUTH_HEADER).json()
     assert [(s["use"], s["use_target"]) for s in listed] == [("package_index", "corp")]
     assert len(_events(client, AuditEventType.SECRET_BOUND)) == 1

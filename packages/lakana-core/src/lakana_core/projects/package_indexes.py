@@ -1,6 +1,7 @@
 """Register, list, update and delete package indexes.
 
-Only `MANAGE_PACKAGE_INDEX` registers an index or binds a credential to one.
+Only `MANAGE_PACKAGE_INDEX` registers an index and names its credential (binding a secret
+needs `MANAGE_SECRET`, as the paragraph below says).
 The `ADMIN` role carries the action, and it can be granted on its own. A
 project's lock may only name a registered index's URL (a wheel's own URL in
 the lock may still point at another host, which receives no credential).
@@ -38,6 +39,7 @@ from lakana_core.secrets.uses import (
     SecretBindingRefused,
     SecretUse,
     bind_or_require_named_secrets,
+    lock_row,
     record_refusal,
     require_secret_management_for_url_change,
 )
@@ -173,12 +175,7 @@ class PackageIndexService:
         NotFoundError
             If another request deleted it since it was found.
         """
-        locked = self._session.execute(
-            select(PackageIndex)
-            .where(PackageIndex.id == row.id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        ).scalar_one_or_none()
+        locked = lock_row(self._session, PackageIndex, row.id)
         if locked is None:
             self._session.rollback()
             raise NotFoundError(f"No package index named '{shown(row.name)}'.")

@@ -202,6 +202,7 @@ def test_bind_needs_manage_secret_checks_the_target_and_audits(
         "name": "both",
         "use": "package_index",
         "target": "corp",
+        "url": index.url,
         "previous": None,
     }
     with pytest.raises(NotFoundError, match="No package index named 'nope'"):
@@ -216,7 +217,7 @@ def test_bind_needs_manage_secret_checks_the_target_and_audits(
 _URL_REFUSAL = (
     "Changing the URL of {use} would send secret '{secret}' of environment 'prod' to another "
     "host. That needs the right to manage secrets in 'prod' (the ADMIN role). Ask someone who "
-    "may manage secrets in 'prod' to change it, or bind the secret elsewhere first: "
+    "may manage secrets in 'prod' to change the URL, or to bind the secret elsewhere first: "
     "lakana secret bind {secret} --env prod (with --index NAME, --repository NAME or --own-env)"
 )
 
@@ -438,8 +439,10 @@ def test_a_secret_bound_elsewhere_is_refused_to_a_manager_and_an_administrator(
             indexes.update(world[who], "b", {"credential_secret": "pypi"})
         assert str(caught.value) == (
             "Secret 'pypi' of environment 'prod' is bound to package index 'a', not to package "
-            "index 'b'. Ask someone who may manage secrets in 'prod' to bind it to this index: "
-            "lakana secret bind pypi --env prod --index b"
+            "index 'b'. Ask someone who may manage secrets in 'prod' to give this index a secret "
+            "of its own: `lakana secret create NEW --env prod --index b --values-stdin`, then "
+            "`lakana index update b --credential-secret NEW`. Moving this secret instead breaks "
+            "package index 'a': lakana secret bind pypi --env prod --index b"
         )
     assert _uses(session, "pypi") == {"prod": (SecretUseKind.PACKAGE_INDEX, first.id)}
     assert [reason for _, reason in _denials(session)] == ["secret_bound_elsewhere"] * 2
@@ -590,11 +593,16 @@ def test_a_secret_the_environment_uses_is_never_rebound_by_naming_it(
     with pytest.raises(PermissionDenied) as caught:
         service.update(world[who], "corp", {"credential_secret": "hook"})
 
+    own = (
+        "give the index a secret of its own: `lakana secret create NEW --env prod --index corp "
+        "--values-stdin`, then `lakana index update corp --credential-secret NEW`"
+    )
+    moving = ", or to move this one on purpose (the environment then loses it): "
+    on_purpose = moving + "lakana secret bind hook --env prod --index corp"
     assert str(caught.value) == (
         "Secret 'hook' of environment 'prod' serves its environment (storage or webhooks), so "
         "naming it for package index 'corp' will not move it. Ask someone who may manage secrets "
-        "in 'prod' to give the index a secret of its own and bind that, or to move this one "
-        "on purpose: lakana secret bind hook --env prod --index corp"
+        f"in 'prod' to {own}" + ("" if known_through == "storage" else on_purpose)
     )
     assert _uses(session, "hook") == {"prod": (None, None)}
     assert _denials(session) == [(world[who].id, "secret_used_by_environment")]
@@ -909,9 +917,66 @@ def test_a_secret_the_environment_uses_is_not_created_with_an_index_or_repositor
     with pytest.raises(ValidationError) as caught:
         _secret(session, "prod", "s3", use)
 
-    assert "serves its environment (storage or webhooks)" in str(caught.value)
-    assert "--own-env" in str(caught.value)
-    assert "of its own" in str(caught.value)
+    assert str(caught.value).startswith(
+        "Environment 'prod' uses the name 's3' for its storage or a webhook, so a secret of "
+        "that name cannot be created for "
+    )
+    assert str(caught.value).endswith(
+        ". Create it with --own-env, or give the index or repository a secret under another name."
+    )
     assert _uses(session, "s3") == {}
     own = _secret(session, "prod", "s3", SecretUse.environment())
     assert own.use_kind is SecretUseKind.ENVIRONMENT
+
+
+@pytest.mark.parametrize("use_of", ["index", "repository"])
+def test_the_storage_secret_cannot_be_bound_to_an_index_or_a_repository(
+    session: Session, world: dict[str, PrincipalRef], use_of: str
+) -> None:
+    """Binding it would stop the environment's storage; webhooks stay a deliberate move."""
+    secret = _secret(session, "prod", "s3")
+    prod = session.execute(select(Environment).where(Environment.name == "prod")).scalar_one()
+    prod.storage_secret_ref = "s3"
+    if use_of == "index":
+        entry = _indexes(session).create(
+            world["admin"], name="corp", url="https://corp.example.org/simple"
+        )
+        use = SecretUse.package_index(entry)
+    else:
+        repository = Repository(
+            id=uuid.uuid4(), name="repo", kind=RepositoryKind.HTTPS, url="https://git.example.org/r"
+        )
+        session.add(repository)
+        session.commit()
+        use = SecretUse.repository(repository)
+    session.commit()
+    service = SecretService(session, AllowAllAuthorization(), _KEYS)
+
+    with pytest.raises(ValidationError) as caught:
+        service.bind(world["admin"], secret.id, use)
+
+    assert str(caught.value).startswith(
+        "Secret 's3' is the storage secret of environment 'prod', so binding it to "
+    )
+    assert "would stop its storage" in str(caught.value)
+    assert "a secret of its own" in str(caught.value)
+    assert _uses(session, "s3") == {"prod": (None, None)}
+    service.bind(world["admin"], secret.id, SecretUse.environment())
+    assert _uses(session, "s3") == {"prod": (SecretUseKind.ENVIRONMENT, None)}
+
+
+def test_a_webhook_secret_can_still_be_moved_on_purpose(
+    session: Session, world: dict[str, PrincipalRef]
+) -> None:
+    """Only storage is protected from `bind`; a webhook secret is a deliberate move."""
+    secret = _secret(session, "prod", "hook", SecretUse.environment())
+    entry = _indexes(session).create(
+        world["admin"], name="corp", url="https://corp.example.org/simple"
+    )
+    _webhook_manifest(session, world, "hook")
+
+    SecretService(session, AllowAllAuthorization(), _KEYS).bind(
+        world["admin"], secret.id, SecretUse.package_index(entry)
+    )
+
+    assert _uses(session, "hook") == {"prod": (SecretUseKind.PACKAGE_INDEX, entry.id)}

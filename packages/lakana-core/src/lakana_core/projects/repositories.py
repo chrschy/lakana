@@ -1,6 +1,7 @@
 """Register, list, update and delete git repositories.
 
-Only `MANAGE_REPOSITORY` sets a URL or binds a credential; deployers name a
+Only `MANAGE_REPOSITORY` sets a URL and names a credential (binding a secret needs
+`MANAGE_SECRET`, as the paragraph below says); deployers name a
 repository and nothing else, so the worker fetches only from hosts an admin
 chose. That grant is the SSRF trust boundary (private addresses are allowed:
 self-hosted GitLab is usually internal).
@@ -44,6 +45,7 @@ from lakana_core.secrets.uses import (
     SecretBindingRefused,
     SecretUse,
     bind_or_require_named_secrets,
+    lock_row,
     record_refusal,
     require_secret_management_for_url_change,
 )
@@ -301,12 +303,7 @@ class RepositoryService:
         NotFoundError
             If another request deleted it since it was found.
         """
-        locked = self._session.execute(
-            select(Repository)
-            .where(Repository.id == repo.id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        ).scalar_one_or_none()
+        locked = lock_row(self._session, Repository, repo.id)
         if locked is None:
             self._session.rollback()
             raise NotFoundError(f"No repository named {repo.name!r}.")
