@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
 from lakana_core.errors import ValidationError
@@ -17,16 +17,14 @@ _STATEMENTS = (
     "MERGE INTO bronze.t USING bronze.s ON t.a = s.a WHEN MATCHED THEN DELETE",
     "CREATE TABLE x AS SELECT 1",
     "DROP TABLE x",
+    "SELECT a INTO bronze.t2 FROM bronze.t",
     "ATTACH ':memory:' AS x",
     "COPY bronze.t TO 'x.csv'",
     "SET VARIABLE v_0_files = ['x']",
+    "CHECKPOINT",
+    "VACUUM",
 )
-"""Statements that are not a read; some parse inside a CTE only, some not at all.
-
-`CHECKPOINT` and `VACUUM` are left out on purpose: inside a derived table sqlglot reads
-`(CHECKPOINT)` as a reference to a table of that name, which is a read the catalog refuses
-later; their CTE-body case has its own test.
-"""
+"""Statements that are not a read; some parse inside a CTE only, some not at all."""
 
 _WRAPPERS = (
     "WITH w{n} AS ({inner}) SELECT * FROM w{n}",
@@ -81,6 +79,9 @@ def test_no_nesting_of_reads_lets_a_statement_through(
     flips
         The letter case drawn for the statement.
     """
+    # Inside a derived table sqlglot reads `(CHECKPOINT)` and `(VACUUM)` as a table reference,
+    # which is a read the catalog refuses later; they are statements only as a CTE body.
+    assume(statement not in {"CHECKPOINT", "VACUUM"} or wrappers[0].startswith("WITH"))
     sql = _flip_case(statement, flips)
     for depth, wrapper in enumerate(wrappers):
         sql = wrapper.format(inner=sql, n=depth)

@@ -1159,6 +1159,7 @@ _NOT_A_READ = [
     pytest.param("DESCRIBE bronze.t", "DESCRIBE", id="describe"),
     pytest.param("SHOW TABLES", "SHOW", id="show"),
     pytest.param("SUMMARIZE SELECT 1", "SUMMARIZE", id="summarize"),
+    pytest.param("SELECT 1 AS a INTO bronze.t2", "INTO", id="select-into"),
 ]
 """Statements that are not a read, each with the keyword its refusal names."""
 
@@ -1318,3 +1319,17 @@ def test_a_views_stored_sql_cannot_read_a_variable_either() -> None:
 
     with pytest.raises(ValidationError, match="getvariable may not be called directly"):
         expand_views("SELECT * FROM gold.v", lambda dotted: view if dotted == "gold.v" else None)
+
+
+def test_select_into_is_refused_at_the_top_level() -> None:
+    """The rewrite would turn `SELECT ... INTO` into `CREATE TABLE ... AS`, so it is refused."""
+    with pytest.raises(ValidationError, match="`INTO` is not allowed"):
+        check_blacklist("SELECT x.a INTO main.u FROM bronze.t AS x")
+
+
+def test_a_statement_with_its_own_with_clause_is_named_by_its_keyword() -> None:
+    """The message names `DELETE`, not the `WITH` the statement starts with."""
+    sql = "WITH m AS (WITH x AS (SELECT 1 AS a) DELETE FROM bronze.t RETURNING *) SELECT * FROM m"
+
+    with pytest.raises(ValidationError, match="`DELETE` is not allowed"):
+        check_blacklist(sql)

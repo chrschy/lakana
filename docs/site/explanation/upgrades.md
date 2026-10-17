@@ -114,6 +114,11 @@ read is refused also when the statement sits inside a CTE or a subquery:
 subquery.`` DuckDB 1.5 rejects these shapes itself; the next major DuckDB release runs them, so
 Lakana refuses them first. A query may not call `getvariable` either.
 
+`DESCRIBE`, `SUMMARIZE`, `SHOW` and `SELECT ... INTO` are refused in a query too, also inside a subquery or a CTE
+(`SELECT * FROM (SUMMARIZE t)` no longer works). They were never allowed as the whole statement
+either, so there is no way to run them; compute the numbers with an aggregate query
+(`SELECT count(*), min(x), max(x) FROM t`) and read the column list from the result.
+
 ## Notes for 0.12.0
 
 This release changed a lot: who may hand out access, which package sources a project may

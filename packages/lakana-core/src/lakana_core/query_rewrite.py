@@ -298,10 +298,12 @@ _NOT_A_READ: tuple[type[exp.Expr], ...] = (
     exp.Uncache,
     exp.Refresh,
     exp.LoadData,
+    exp.Into,
 )
 """sqlglot's classes of statements that are not a read, refused at any depth of a query.
 
-`exp.DML` covers `INSERT`, `UPDATE`, `DELETE`, `MERGE` and `COPY`. `exp.Command` is what
+`exp.DML` covers `INSERT`, `UPDATE`, `DELETE`, `MERGE` and `COPY`. `exp.Into` is `SELECT ... INTO`,
+which the rewrite would render as `CREATE TABLE ... AS`. `exp.Command` is what
 sqlglot falls back to for a statement it has no class for (`VACUUM`, `RESET`). Checked
 against sqlglot 30.22: a `SELECT`, a set operation, `VALUES`, `PIVOT`, a DuckDB `FROM`-first
 query and a parenthesised join contain none of these classes.
@@ -633,9 +635,13 @@ def _leading_keyword(node: exp.Expr, dialect: str) -> str:
     Returns
     -------
     str
-        The first word in capitals, at most `_KEYWORD_CHARS` characters: `DELETE`, `INSERT`,
-        `BEGIN`, or for an `exp.Command` the command's own keyword (`VACUUM`).
+        The keyword in capitals, at most `_KEYWORD_CHARS` characters: for DML and `INTO` the
+        statement's own keyword (`DELETE`, `INSERT`, `INTO`), for an `exp.Command` its own
+        keyword (`VACUUM`), otherwise the first word (`BEGIN`).
     """
+    if isinstance(node, (exp.DML, exp.Into)):
+        # Its rendering can start with the statement's own `WITH` clause or a literal.
+        return node.key.upper()[:_KEYWORD_CHARS]
     text = str(node.this) if isinstance(node, exp.Command) else node.sql(dialect=dialect)
     words = text.split(None, 1)
     return (words[0] if words else node.key).upper()[:_KEYWORD_CHARS]
@@ -1531,15 +1537,18 @@ def rewrite_query(
 def check_blacklist(sql: str, dialect: str = "duckdb") -> None:
     """Reject SQL that is not a plain read, or that reads files directly.
 
-    The structural rule carries the weight here: a submitted query must parse
-    to a single `exp.Query` (a `SELECT`, a `WITH ... SELECT`, a `UNION`).
-    That rejects the whole *class* of non-query statements in one check —
+    Two structural rules carry the weight here, together: a submitted query
+    must parse to a single `exp.Query` (a `SELECT`, a `WITH ... SELECT`, a
+    `UNION`), and `_reject_statements_inside` then refuses a statement that is
+    not a read anywhere inside it. The first rejects the whole *class* of
+    non-query statements at the top level in one check —
     `LOAD`, `CREATE SECRET`, `SET`, `PRAGMA`, `DESCRIBE`, `EXPLAIN`,
     `ATTACH`, `COPY`, `INSTALL` — and, because sqlglot's duckdb dialect
     parses `;`-separated text to a single `exp.Block`, multi-statement
-    payloads too. The named checks that follow exist only to give a precise
-    error message for the statements a user is most likely to try; they are
-    not what makes the check sound.
+    payloads too; the second covers the ones that sit inside a CTE or subquery.
+    The named checks exist only to give a precise error message for the
+    statements a user is most likely to try; they are not what makes the check
+    sound.
 
     A second structural rule stands beside it: no submitted query may contain
     a `WITH RECURSIVE` clause anywhere. That is a deliberate non-support
