@@ -11,6 +11,7 @@ mode's API and worker processes can share one database file.
 
 import logging
 import os
+import ssl
 import uuid
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
@@ -511,6 +512,30 @@ def test_an_ordinary_statement_error_does_not_invalidate_the_connection(tmp_path
             with pytest.raises(OperationalError):
                 connection.execute(text("SELECT * FROM missing_table"))
             assert not connection.invalidated
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [ssl.SSLCertVerificationError("bad certificate"), PermissionError(), FileNotFoundError()],
+)
+def test_a_local_or_trust_error_is_not_taken_for_a_dead_connection(
+    tmp_path: Path, error: OSError
+) -> None:
+    """A refused certificate or a missing file does not say the peer went away."""
+    engine = create_engine(DatabaseConfig(url=f"sqlite:///{tmp_path}/lakana.db"))
+    try:
+
+        def fail(*_args: object) -> None:
+            raise error
+
+        with engine.connect() as connection:
+            event.listen(engine, "before_cursor_execute", fail)
+            with pytest.raises(type(error)):
+                connection.execute(text("SELECT 1"))
+            assert not connection.invalidated
+            event.remove(engine, "before_cursor_execute", fail)
     finally:
         engine.dispose()
 

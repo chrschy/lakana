@@ -293,9 +293,11 @@ def test_a_maintenance_run_past_its_deadline_stops_between_steps_and_the_next_ru
     assert run.error_cause == QueryErrorCause.TIMEOUT.value
     assert run.error_message is not None
     assert "LAKANA_RUN__MAINTENANCE_TIMEOUT" in run.error_message
-    assert "again" in run.error_message
+    assert "lakana table maintain dev gold.daily" in run.error_message
     assert run.maintenance is not None
     assert len(run.maintenance["report"]["snapshots_expired"]) == 2
+    assert run.maintenance["report"]["stopped"] is True
+    assert "next run" in run.maintenance["report"]["note"]
     assert stray.exists()
     loaded = catalog.load_table(principal, ref)
     assert len(loaded.metadata.snapshots) == 1

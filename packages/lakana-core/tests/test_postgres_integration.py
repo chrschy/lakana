@@ -300,3 +300,67 @@ def test_a_pooled_connection_the_server_ended_is_replaced_without_an_error() -> 
                 assert connection.execute(text("SELECT pg_backend_pid()")).scalar_one() != pid
         finally:
             engine.dispose()
+
+
+class _ResettingSocket:
+    """A driver socket whose reads fail the way a connection the peer reset does."""
+
+    def __init__(self, inner: object) -> None:
+        """Wrap a socket file.
+
+        Parameters
+        ----------
+        inner
+            The driver's socket file, which keeps writing normally.
+        """
+        self._inner = inner
+
+    def read(self, size: int) -> bytes:
+        """Fail like a reset connection.
+
+        Parameters
+        ----------
+        size
+            Ignored.
+
+        Raises
+        ------
+        ConnectionResetError
+            Always: pg8000 reads the first bytes of an answer outside its error handling.
+        """
+        raise ConnectionResetError("Connection reset by peer")
+
+    def __getattr__(self, name: str) -> object:
+        """Pass everything else on to the wrapped socket file.
+
+        Parameters
+        ----------
+        name
+            The attribute.
+
+        Returns
+        -------
+        object
+            The wrapped socket file's attribute.
+        """
+        return getattr(self._inner, name)
+
+
+def test_a_pooled_connection_that_the_driver_reports_reset_is_replaced_without_an_error() -> None:
+    """The real driver's raw `ConnectionResetError` on the first read must not reach a request.
+
+    Without the engine's classification the next checkout raises it from the pre-ping.
+    """
+    with PostgresContainer("postgres:16-alpine", driver="pg8000") as pg:
+        engine = create_engine(DatabaseConfig(url=pg.get_connection_url()))
+        try:
+            with engine.connect() as connection:
+                pid = connection.execute(text("SELECT pg_backend_pid()")).scalar_one()
+                raw = connection.connection.dbapi_connection
+                assert raw is not None
+            raw._sock = _ResettingSocket(raw._sock)
+            with engine.connect() as connection:
+                assert connection.execute(text("SELECT 1")).scalar_one() == 1
+                assert connection.execute(text("SELECT pg_backend_pid()")).scalar_one() != pid
+        finally:
+            engine.dispose()

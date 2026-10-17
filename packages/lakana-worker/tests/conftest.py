@@ -5,6 +5,7 @@ import os
 import signal
 import tempfile
 import threading
+import time
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
@@ -16,7 +17,7 @@ from task_run_helpers import _CODE, _CODE_PATH, World, _entry
 import lakana_worker.task_lease as task_lease_module
 from lakana_core.auth import AllowAllAuthorization, PrincipalRef
 from lakana_core.catalog.service import CatalogService
-from lakana_core.config import DatabaseConfig, StorageConfig
+from lakana_core.config import DEFAULT_MAINTENANCE_TIMEOUT, DatabaseConfig, StorageConfig
 from lakana_core.db import create_engine
 from lakana_core.models import (
     Base,
@@ -29,6 +30,7 @@ from lakana_core.models import (
 )
 from lakana_core.storage.resolver import StorageResolver
 from lakana_worker import executor as executor_module
+from lakana_worker import pipeline as pipeline_module
 from lakana_worker.query_process import REGISTRY, QueryChild
 from lakana_worker.runners import TASKS
 
@@ -117,6 +119,8 @@ def _no_drain_leaks() -> Iterator[None]:
     yield
     executor_module._DRAINING = None
     executor_module._WORKER_STALE = None
+    pipeline_module._MAINTENANCE_TIMEOUT = DEFAULT_MAINTENANCE_TIMEOUT
+    pipeline_module._clock = time.monotonic
 
 
 @pytest.fixture(autouse=True)

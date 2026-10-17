@@ -4784,10 +4784,14 @@ class CatalogService:
             )
         metadata, metadata_location = loaded.metadata, loaded.metadata_location
         if should_stop is not None and should_stop():
-            self._record_maintenance(
-                p, securable, MaintenanceReport(dry_run=dry_run), keep_days, keep_last, stopped=True
+            untouched = MaintenanceReport(
+                dry_run=dry_run, note="Stopped before anything was changed."
             )
-            raise MaintenanceStopped(MaintenanceReport(dry_run=dry_run))
+            if not dry_run:
+                self._record_maintenance(
+                    p, securable, untouched, keep_days, keep_last, stopped=True
+                )
+            raise MaintenanceStopped(untouched)
         old_tags = old_failed_tags(metadata, now_ms=int(now.timestamp() * 1000))
         expired = select_expired_snapshots(
             metadata,
@@ -4828,7 +4832,7 @@ class CatalogService:
         # run cleans up, so this is the cheapest point to honour a stop.
         stopped = should_stop is not None and should_stop()
         if stopped:
-            note = "Stopped before orphan removal."
+            note = "Stopped before orphan removal; the next run removes the orphans."
         elif self._write_in_flight(table_id):
             note = "A write into this table is running; orphan removal was skipped."
         else:
@@ -4861,6 +4865,11 @@ class CatalogService:
                 deleted = orphans
             else:
                 deleted, stopped = self._delete_quietly(resolved, orphans, should_stop)
+                if stopped:
+                    note = (
+                        f"Stopped after {len(deleted)} of {len(orphans)} orphaned files; "
+                        "the next run removes the rest."
+                    )
         report = MaintenanceReport(
             dry_run=dry_run,
             snapshots_expired=tuple(expired),

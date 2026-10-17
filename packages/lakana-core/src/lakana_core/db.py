@@ -19,6 +19,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import sqlite3
+import ssl
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -172,6 +173,10 @@ def _keepalive_listener(lease_seconds: int) -> Callable[[DBAPIConnection, object
     return _set_keepalives
 
 
+_NOT_A_DISCONNECT = (ssl.SSLCertVerificationError, PermissionError, FileNotFoundError)
+"""`OSError` subclasses that name a local or trust problem, not a connection the peer ended."""
+
+
 def _ping_that_survives_a_reset(engine: Engine) -> None:
     """Make the pre-ping and statement errors treat a raw `OSError` as a dead connection.
 
@@ -198,7 +203,9 @@ def _ping_that_survives_a_reset(engine: Engine) -> None:
 
     @event.listens_for(engine, "handle_error")
     def _classify(context: ExceptionContext) -> None:
-        if isinstance(context.original_exception, OSError):
+        error = context.original_exception
+        # A refused certificate or a missing file says nothing about the peer going away.
+        if isinstance(error, OSError) and not isinstance(error, _NOT_A_DISCONNECT):
             context.is_disconnect = True
 
 

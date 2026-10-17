@@ -1887,12 +1887,15 @@ def _run_maintenance(
             should_stop=lambda: _clock() >= deadline,
         )
     except MaintenanceStopped as stopped:
-        run.maintenance = {"request": request, "report": stopped.report.to_json()}
+        run.maintenance = {
+            "request": request,
+            "report": {**stopped.report.to_json(), "stopped": True},
+        }
         raise QueryTimeout(
             f"Maintenance ran past its time limit ({_MAINTENANCE_TIMEOUT:g} s) and stopped at "
-            "a safe point; the table is consistent. Run maintenance on this table again to "
-            "continue where it stopped, or ask the operator to raise "
-            "LAKANA_RUN__MAINTENANCE_TIMEOUT."
+            f"a safe point; the table is consistent. Run `lakana table maintain "
+            f"{environment_name} {run.target_name}` again to continue where it stopped, or "
+            "ask the operator to raise LAKANA_RUN__MAINTENANCE_TIMEOUT."
         ) from stopped
     run.maintenance = {"request": request, "report": report.to_json()}
 

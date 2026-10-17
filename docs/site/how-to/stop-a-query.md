@@ -311,7 +311,7 @@ retried by itself.
   and deploys](projects.md).
 - **A maintenance run that has started.** A queued one is cancelled; one that has started cannot be
   stopped while its worker is alive (once its worker is gone, a cancel ends it at once); it ends by
-  itself after at most `LAKANA_RUN__MAINTENANCE_TIMEOUT`, 30 minutes by default, as described under
+  itself at the first safe point after `LAKANA_RUN__MAINTENANCE_TIMEOUT`, 30 minutes by default, as described under
   [A maintenance run past its time limit](#a-maintenance-run-past-its-time-limit). The refusal says `Query run ID is a maintenance run that has already started. It cannot be
   stopped and ends by itself; follow it with: lakana query status ID --env dev`.
 - **The input query of a Python task.** A query that a Python task sends to load its inputs is an

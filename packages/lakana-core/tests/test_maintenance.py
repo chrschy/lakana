@@ -1478,6 +1478,23 @@ def test_a_stop_before_anything_ran_changes_nothing_and_a_later_run_completes(
     assert not stray.exists()
 
 
+def test_a_stopped_dry_run_writes_no_audit_row(
+    session: Session, principal: PrincipalRef, catalog: CatalogService
+) -> None:
+    """A dry run records nothing, stopped or not."""
+    with pytest.raises(MaintenanceStopped):
+        catalog.maintain(
+            principal, _ref("gold.daily"), dry_run=True, now=_later(30), should_stop=_stops_after(0)
+        )
+
+    assert (
+        session.execute(
+            select(AuditEvent).where(AuditEvent.event_type == AuditEventType.TABLE_MAINTAINED)
+        ).first()
+        is None
+    )
+
+
 def test_a_stop_after_the_expiry_skips_the_orphans_and_the_next_run_deletes_them(
     session: Session, principal: PrincipalRef, catalog: CatalogService
 ) -> None:
@@ -1518,6 +1535,8 @@ def test_a_stop_between_files_keeps_what_was_deleted_and_the_next_run_finishes(
         catalog.maintain(principal, ref, now=_later(30), should_stop=_stops_after(4))
 
     assert stopped.value.report.files_deleted == 2
+    assert stopped.value.report.note is not None
+    assert "the next run removes the rest" in stopped.value.report.note
     assert sum(stray.exists() for stray in strays) == 2
     report = catalog.maintain(principal, ref, now=_later(30))
     assert not any(stray.exists() for stray in strays)
