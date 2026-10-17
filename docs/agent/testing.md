@@ -81,7 +81,7 @@ systemd-run --user --scope -q -p MemoryMax=6G -p MemorySwapMax=0 timeout 900 \
 - **A worker's environment is not the serial one.** On Python 3.14 a `pytest -n` worker has
   `LINES=24` in `os.environ` and a serial run does not; rich then sizes a console differently.
   A test that depends on a console's size gives rich both width and height.
-- **Memory, Python 3.11 (and 3.13, which is no longer the default):** only the controller runs the watchdog (see "Memory
+- **Memory, Python 3.11 (and 3.13):** only the controller runs the watchdog (see "Memory
   limit"); it counts the workers. At `-n 4` the peak is about 4.8 GB, so keep `MemoryMax=6G`
   and no more than four workers.
 - **Memory, Python 3.14: at most two workers, and `core = "ctrace"` stays.** On 3.14
@@ -423,8 +423,10 @@ win. Run one test job at a time; the limit is sized for one.
 Every run ends with a line such as `test memory: peak 2985 MB resident (pytest and child
 processes), limit 6144 MB`. Measured peaks (2026-10-10): the whole suite run serially, 1.6 GB on
 Python 3.13 and 3.11 (4.8 GB at `-n 4`) and 1.9 GB on 3.14 (4.2 GB at `-n 2`, the most that
-fits comfortably; see "Running the unit suite in parallel"); the integration files that start a
-server, 0.2 and 0.7 GB. If a
+fits comfortably; see "Running the unit suite in parallel"). Measured 2026-10-17 on
+`packages/lakana-core/tests` alone, serial, no coverage, Linux x86_64: 797 MB on 3.14 against
+592 MB on 3.13; the 3 GB against 1 GB of issue #72 does not show without coverage (with it, see
+the `sysmon` bullet above). The integration files that start a server peak at 0.2 and 0.7 GB. If a
 peak approaches the limit, raise the limit before the suite starts to fail. A warning line
 follows if the watchdog's thread stopped.
 

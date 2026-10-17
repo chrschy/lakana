@@ -472,3 +472,22 @@ def test_following_the_pyproject_instructions_gives_a_valid_file(tmp_path: Path)
     parsed = tomllib.loads("\n".join(kept))
     assert parsed["project"]["dependencies"] == [f"lakana[assets]=={__version__}"]
     assert "uv" not in parsed.get("tool", {})
+
+
+def test_ci_templates_run_the_python_of_the_repository_default(tmp_path: Path) -> None:
+    """Both CI files name the Python that `.python-version` names, so the two cannot drift."""
+    default = (Path(__file__).parents[4] / ".python-version").read_text().strip()
+    assert re.fullmatch(r"3\.\d+", default), default
+    target = tmp_path / "analytics"
+    invoke(make_state(tmp_path, FakeApi()), "init", str(target))
+    github = yaml.safe_load((target / ".github" / "workflows" / "lakana-deploy.yml").read_text())
+    versions = [
+        step["with"]["python-version"]
+        for job in github["jobs"].values()
+        for step in job["steps"]
+        if "setup-python" in step.get("uses", "")
+    ]
+    assert versions == [default, default]
+    gitlab = yaml.safe_load((target / ".gitlab-ci.yml").read_text())
+    for job in ("lakana-dry-run", "lakana-deploy"):
+        assert gitlab[job]["image"] == f"python:{default}-slim"

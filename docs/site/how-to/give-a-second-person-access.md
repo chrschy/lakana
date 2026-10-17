@@ -189,8 +189,8 @@ Revoked token 634fb88f45cabc42
 `$KEY_ID` is the `key_id` that `token list` showed. `--yes` skips the question that the command
 asks on a terminal; without a terminal the command refuses to run without it.
 
-**One grant** (the person stays but may do less): revoke it. Their tokens keep working, but
-authenticate a person who may do nothing until a new grant exists.
+**One grant** (the person stays but may do less): revoke it. Their tokens still work, but they
+identify a person who may do nothing until a new grant exists.
 
 <!-- source: docs/examples/give-access/run.sh#revoke-grant -->
 ```bash
@@ -205,6 +205,8 @@ Revoked grant c913f5e7-8bf0-4b21-9630-46de66a0082d
 `$GRANT_ID` is the `id` that `grant list` showed.
 
 **The whole person** (they leave): deactivate the principal. Every token of theirs stops working.
+The principal and its grants stay on record, and `grant list` still shows them; revoke the grants
+too if you want the list to show only people who have access.
 
 <!-- source: docs/examples/give-access/run.sh#deactivate -->
 ```bash

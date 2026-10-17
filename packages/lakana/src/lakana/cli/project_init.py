@@ -122,7 +122,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.13"
+          python-version: "3.14"
       - name: Install lakana
         run: |
           pip install --index-url "${{LAKANA_INDEX_URL:-https://pypi.org/simple}}" \
@@ -145,7 +145,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.13"
+          python-version: "3.14"
       - name: Install lakana
         run: |
           pip install --index-url "${{LAKANA_INDEX_URL:-https://pypi.org/simple}}" \
@@ -167,7 +167,7 @@ stages: [deploy]
 
 lakana-dry-run:
   stage: deploy
-  image: python:3.13-slim
+  image: python:3.14-slim
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
   variables:
@@ -178,7 +178,7 @@ lakana-dry-run:
 
 lakana-deploy:
   stage: deploy
-  image: python:3.13-slim
+  image: python:3.14-slim
   resource_group: lakana-deploy-prod
   rules:
     - if: $CI_COMMIT_BRANCH == "main"

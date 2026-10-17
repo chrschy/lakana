@@ -184,7 +184,7 @@ uv lock
 ```
 
 It prints a few lines, ending with the number of packages, and creates the file `uv.lock`. The path
-on the first line is your own, and the number of packages changes with the packages on the public
+and the Python version on the first line are your own, and the number of packages changes with the packages on the public
 index:
 
 <!-- output -->
