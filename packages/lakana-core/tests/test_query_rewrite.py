@@ -1438,3 +1438,41 @@ def test_a_field_id_map_that_misses_a_declared_column_is_refused() -> None:
 
     with pytest.raises(ValidationError, match="has no field id for its column 'name'"):
         rewrite_query("SELECT * FROM gold.t", {"gold.t": source})
+
+
+@pytest.mark.parametrize(
+    ("fields", "message"),
+    [
+        pytest.param(
+            (*_FIELDS, ReadField(3, "extra", "BIGINT")),
+            "names the column 'extra', which the table does not declare",
+            id="a name the table does not declare",
+        ),
+        pytest.param(
+            (ReadField(1, "id", "BIGINT"), ReadField(1, "name", "VARCHAR")),
+            "field id 1 twice",
+            id="a field id twice",
+        ),
+        pytest.param(
+            (
+                ReadField(1, "id", "BIGINT"),
+                ReadField(2, "id", "VARCHAR"),
+                ReadField(3, "name", "X"),
+            ),
+            "column 'id' twice",
+            id="a name twice",
+        ),
+    ],
+)
+def test_a_field_id_map_that_is_not_the_declared_columns_is_refused(
+    fields: tuple[ReadField, ...], message: str
+) -> None:
+    source = TableSource(
+        urls=["a.parquet"],
+        file_format="parquet",
+        columns={"id": "long", "name": "string"},
+        field_ids=fields,
+    )
+
+    with pytest.raises(ValidationError, match=message):
+        rewrite_query("SELECT * FROM gold.t", {"gold.t": source})

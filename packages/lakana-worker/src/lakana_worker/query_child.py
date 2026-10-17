@@ -128,6 +128,12 @@ is written into the statement, double-quoted, and must be an identifier."""
 _Statement = str
 
 
+_READ_CAST = re.compile(
+    r'failed to cast column "(?P<column>[^"]*)" from type (?P<stored>.+?) to (?P<wanted>.+?): :'
+)
+"""DuckDB's report of a column a file stores in a type the read cannot convert to."""
+
+
 def strip_duckdb_context(message: str) -> str:
     """Remove DuckDB's `LINE n:`/caret echo of the query text from an error message.
 
@@ -355,6 +361,7 @@ def failure(
     statement: _Statement | None,
     asked: threading.Event,
     files: Sequence[str] = (),
+    mapped: bool = False,
 ) -> ErrorDocument:
     """Classify a DuckDB failure and word it for the user.
 
@@ -374,6 +381,10 @@ def failure(
         The file URLs of the reads, as variables carried them. DuckDB quotes a file by its
         name when it cannot read or convert it, and a URL can hold a signature, so each is
         replaced by ``<file>`` in the message.
+    mapped
+        Whether a read goes through a field-id map. DuckDB then converts a file's column to
+        the mapped type while it reads, and a conversion error quotes the cell: under a row
+        filter the text names no column, so any conversion error is replaced by a fixed one.
 
     Returns
     -------
@@ -385,8 +396,18 @@ def failure(
     if _is_interrupt(exc):
         return ErrorDocument(INVALID, _LOST_CAUSE)
     text = strip_duckdb_context(str(exc))
-    for url in sorted(set(files), key=len, reverse=True):
+    for url in sorted({url for url in files if url}, key=len, reverse=True):
         text = text.replace(url, "<file>")
+    cast = _READ_CAST.search(text)
+    if cast is not None:
+        # DuckDB appends the cell it could not convert, which can be a masked value or one of a
+        # row a filter hides; only the column and the two types are safe to say.
+        text = (
+            f'a file of this table stores column "{cast["column"]}" as {cast["stored"]}, '
+            f"which cannot be read as {cast['wanted']}."
+        )
+    elif mapped and text.startswith("Conversion Error"):
+        text = "a file of this table stores a column in a type the read cannot convert it to."
     message = f"Query failed: {text}"
     if _is_transient(exc):
         return ErrorDocument(TRANSIENT, message)
@@ -451,6 +472,7 @@ def _stream(
     statement: _Statement | None,
     asked: threading.Event,
     files: Sequence[str] = (),
+    mapped: bool = False,
 ) -> ErrorDocument | None:
     """Write a result to the sink as an Arrow IPC stream, end marker included.
 
@@ -472,6 +494,8 @@ def _stream(
         Set once the child was asked to stop; checked before each batch.
     files
         The file URLs of the reads, for `failure` to keep out of a message.
+    mapped
+        Whether a read goes through a field-id map, as for `failure`.
 
     Returns
     -------
@@ -489,7 +513,7 @@ def _stream(
             except StopIteration:
                 break
             except (duckdb.Error, OSError) as exc:
-                return failure(connection, exc, statement, asked, files)
+                return failure(connection, exc, statement, asked, files, mapped)
             writer.write_batch(batch)
         writer.close()
         sink.flush()
@@ -614,6 +638,7 @@ def serve(
     """
     try:
         connection = session.open()
+        mapped = any(isinstance(value, tuple) for value in request.parameters.values())
         statement: _Statement | None = None
         files = [
             url for value in request.parameters.values() if isinstance(value, list) for url in value
@@ -639,8 +664,8 @@ def serve(
                     return ErrorDocument(INVALID, NO_RESULT_MESSAGE)
                 reader = result.to_arrow_reader(request.batch_rows)
         except (duckdb.Error, OSError) as exc:
-            return failure(connection, exc, statement, asked, files)
-        return _stream(connection, reader, sink, statement, asked, files)
+            return failure(connection, exc, statement, asked, files, mapped)
+        return _stream(connection, reader, sink, statement, asked, files, mapped)
     except BaseException as exc:  # the statement's thread must hand back a document
         _report_unexpected(exc)
         return ErrorDocument(

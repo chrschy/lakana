@@ -1032,16 +1032,32 @@ def _reader_select_sql(source: TableSource, index: int, dialect: str) -> str:
         here would be inconsistent with quoted-identifier semantics
         everywhere else in this codebase. Or if `source.field_ids` is given for files that
         are not Parquet, or lacks a key of `source.columns`: such a column would not be
-        read at all.
+        read at all. Or if its map names a column outside `source.columns`, which a
+        ``SELECT *`` would show, or repeats a field id or a name.
     """
     arguments = f"getvariable('{_files_variable(index)}')"
     if source.field_ids:
-        known = {read.name for read in source.field_ids}
+        known = [read.name for read in source.field_ids]
         missing = [name for name in source.columns if name not in known]
         if missing:
             raise ValidationError(
                 f"The read by field id has no field id for its column {missing[0]!r}."
             )
+        extra = [name for name in known if source.columns and name not in source.columns]
+        if extra:
+            raise ValidationError(
+                f"The read by field id names the column {extra[0]!r}, which the table does "
+                "not declare."
+            )
+        for label, values in (
+            ("field id", [read.field_id for read in source.field_ids]),
+            ("column", known),
+        ):
+            repeated = [value for value, count in Counter(values).items() if count > 1]
+            if repeated:
+                raise ValidationError(
+                    f"The read by field id has the {label} {repeated[0]!r} twice."
+                )
         if source.file_format != "parquet":
             raise ValidationError("A read by field id needs Parquet files.")
         arguments += f", schema = getvariable('{_schema_variable(index)}')"

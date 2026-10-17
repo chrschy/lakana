@@ -1558,16 +1558,13 @@ def test_a_field_id_map_is_set_as_a_duckdb_map() -> None:
     [
         pytest.param(((1, "id", "NOT A TYPE"),), id="a type DuckDB cannot parse"),
         pytest.param(((1, "id", "STRUCT(a"),), id="a type that is cut off"),
-        pytest.param(((1, "id", "INTEGER"),), id="a value the mapped type cannot hold"),
     ],
 )
-def test_a_schema_map_duckdb_rejects_fails_closed(
+def test_a_schema_map_duckdb_cannot_parse_fails_closed(
     tmp_path: Path, fields: tuple[tuple[int, str, str], ...]
 ) -> None:
     """DuckDB's refusal of the map ends the query as an ordinary failure naming no file."""
-    path = tmp_path / "X-Amz-Signature=SECRET123.parquet"
-    field = pa.field("id", pa.string(), metadata={b"PARQUET:field_id": b"1"})
-    pq.write_table(pa.table({"id": ["abc"]}, schema=pa.schema([field])), path)
+    path = _field_id_file(tmp_path, "X-Amz-Signature=SECRET123.parquet", "abc")
     request = _request(
         "SELECT * FROM read_parquet(getvariable('v_0_files'), schema = getvariable('v_0_schema'))",
         parameters={"v_0_files": [str(path)], "v_0_schema": fields},
@@ -1579,9 +1576,68 @@ def test_a_schema_map_duckdb_rejects_fails_closed(
     error = decode_error(stderr.encode())
     assert code == EXIT_FAILED
     assert error is not None
-    assert error.kind in {"invalid", "internal"}
+    assert error.kind == "invalid"
     assert error.message.startswith("Query failed: ")
     assert stream == b"" or not list(pa.ipc.open_stream(stream))
     for text in (error.message, stderr, repr(stream)):
         assert str(path) not in text
         assert "SECRET123" not in text
+
+
+def _field_id_file(directory: Path, name: str, value: str) -> Path:
+    """Write a one-row Parquet file whose column ``ssn`` is text and has field id 1.
+
+    Parameters
+    ----------
+    directory
+        Where the file goes.
+    name
+        The file's name.
+    value
+        The cell value.
+
+    Returns
+    -------
+    Path
+        The file.
+    """
+    path = directory / name
+    field = pa.field("ssn", pa.string(), metadata={b"PARQUET:field_id": b"1"})
+    pq.write_table(pa.table({"ssn": [value]}, schema=pa.schema([field])), path)
+    return path
+
+
+@pytest.mark.parametrize(
+    "select",
+    [
+        pytest.param("SELECT * FROM {reader}", id="a plain read"),
+        pytest.param('SELECT "ssn" % 10 AS "ssn" FROM {reader}', id="a partial mask"),
+        pytest.param('SELECT "ssn" FROM {reader} WHERE ("ssn" > 0)', id="a row filter"),
+    ],
+)
+def test_a_cast_the_map_asks_for_names_no_cell_value(tmp_path: Path, select: str) -> None:
+    """A file that stores text where the map says INTEGER fails without quoting the cell."""
+    path = _field_id_file(tmp_path, "X-Amz-Signature=SECRET123.parquet", "123-45-6789")
+    reader = "read_parquet(getvariable('v_0_files'), schema = getvariable('v_0_schema'))"
+    request = _request(
+        select.format(reader=reader),
+        parameters={"v_0_files": [str(path), ""], "v_0_schema": ((1, "ssn", "INTEGER"),)},
+        restrict_local_filesystem=False,
+    )
+
+    code, stream, stderr = _main(request)
+
+    error = decode_error(stderr.encode())
+    assert code == EXIT_FAILED
+    assert error is not None
+    assert error.kind == "invalid"
+    assert error.message in {
+        'Query failed: a file of this table stores column "ssn" as VARCHAR, '
+        "which cannot be read as INTEGER.",
+        "Query failed: a file of this table stores a column in a type the read cannot "
+        "convert it to.",
+    }
+    assert stream == b"" or not list(pa.ipc.open_stream(stream))
+    for text in (error.message, stderr, repr(stream)):
+        for secret in (str(path), "SECRET123", "123-45-6789", "6789"):
+            assert secret not in text
