@@ -256,3 +256,32 @@ def test_the_command_quotes_names_a_shell_would_split() -> None:
     assert bind_command("dev", "s3", SecretUse.environment()) == (
         "lakana secret bind s3 --env dev --own-env"
     )
+
+
+def test_a_use_without_its_target_is_refused() -> None:
+    """An index or repository use with no id or name could only print an empty target."""
+    with pytest.raises(ValueError, match="needs the target's id and name"):
+        SecretUse(SecretUseKind.PACKAGE_INDEX, None, "corp")
+    with pytest.raises(ValueError, match="needs the target's id and name"):
+        SecretUse(SecretUseKind.REPOSITORY, uuid.uuid4(), None)
+
+
+def test_a_secret_is_not_checked_under_another_environment_name(
+    session: Session, principal: PrincipalRef
+) -> None:
+    """The environment named in the message must be the secret's own."""
+    env = _environment(session, "prod")
+    secret = _secret(session, env, principal, "s3")
+
+    with pytest.raises(ValueError, match="does not belong to environment 'dev'"):
+        require_use(session, secret, SecretUse.environment(), environment_name="dev")
+
+
+def test_the_command_escapes_a_control_character_in_a_name() -> None:
+    """A newline or escape in a name reaches the message as text, not as a control code."""
+    use = SecretUse(SecretUseKind.REPOSITORY, uuid.uuid4(), "r\x1b[0m")
+
+    command = bind_command("dev", "a\nb", use)
+
+    assert "\n" not in command
+    assert "\x1b" not in command

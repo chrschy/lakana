@@ -2702,3 +2702,131 @@ def test_0034_binds_each_secret_named_by_exactly_one_index_or_repository(
         assert not columns & {"use_kind", "use_target_id"}
     finally:
         engine.dispose()
+
+
+def test_0034_leaves_every_ambiguous_or_environment_used_secret_unbound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revision `0034` leaves ambiguous and environment-used secrets unbound.
+
+    Only a secret that exactly one index or repository names, and that its own environment
+    does not use, is bound; everything else stays unbound.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    """
+    db_path = tmp_path / "ambiguous.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, _REVISION_0033)
+    when = "2026-10-17 00:00:00"
+    env_one, env_two, who = (uuid.uuid4().hex for _ in range(3))
+    index_ids = {
+        name: uuid.uuid4().hex for name in ("corp", "dup1", "dup2", "mixed", "own", "case", "hook")
+    }
+    repo_ids = {name: uuid.uuid4().hex for name in ("mixed",)}
+    # index name -> the secret name its credential_secret holds
+    index_secret = {
+        "corp": "pypi",  # exactly one index: bound, in both environments
+        "dup1": "two-indexes",
+        "dup2": "two-indexes",
+        "mixed": "index-and-repo",
+        "own": "storage-or-hook",  # bound in env_two only
+        "hook": "hook-secret",  # bound in env_two only
+        "case": "Token",  # a case variant of the secret 'token' does not match
+    }
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        with engine.begin() as connection:
+            connection.execute(sa.text("PRAGMA foreign_keys=OFF"))
+            for env_id, name, ref in ((env_one, "one", "storage-or-hook"), (env_two, "two", None)):
+                connection.execute(
+                    sa.text(
+                        "INSERT INTO environments (id, name, storage_root, storage_options,"
+                        " is_protected, properties, storage_secret_ref, created_at, updated_at)"
+                        " VALUES (:id, :name, 'file:///x', '{}', 0, '{}', :ref, :t, :t)"
+                    ),
+                    {"id": env_id, "name": name, "ref": ref, "t": when},
+                )
+            for name, index_id in index_ids.items():
+                connection.execute(
+                    sa.text(
+                        "INSERT INTO package_indexes (id, name, url, credential_secret,"
+                        " created_at, updated_at) VALUES (:id, :name, :url, :secret, :t, :t)"
+                    ),
+                    {
+                        "id": index_id,
+                        "name": name,
+                        "url": f"https://{name}/simple",
+                        "secret": index_secret[name],
+                        "t": when,
+                    },
+                )
+            connection.execute(
+                sa.text(
+                    "INSERT INTO repositories (id, name, kind, url, credential_secret,"
+                    " created_at, updated_at) VALUES (:id, 'mixed', 'HTTPS', 'https://g/a.git',"
+                    " 'index-and-repo', :t, :t)"
+                ),
+                {"id": repo_ids["mixed"], "t": when},
+            )
+            # a webhook that has delivered in env_one names a second secret there
+            connection.execute(
+                sa.text(
+                    "INSERT INTO notification_deliveries (id, environment_id, repository_id, job,"
+                    " event, format, secret_name, state, attempts, created_at)"
+                    " VALUES (:id, :env, :repo, 'nightly', 'test', 'json', 'hook-secret',"
+                    " 'PENDING', 0, :t)"
+                ),
+                {"id": uuid.uuid4().hex, "env": env_one, "repo": repo_ids["mixed"], "t": when},
+            )
+            secrets = [
+                (env_one, "pypi"),
+                (env_two, "pypi"),
+                (env_one, "two-indexes"),
+                (env_one, "index-and-repo"),
+                (env_one, "storage-or-hook"),
+                (env_two, "storage-or-hook"),
+                (env_one, "hook-secret"),
+                (env_two, "hook-secret"),
+                (env_one, "token"),
+            ]
+            for env_id, name in secrets:
+                connection.execute(
+                    sa.text(
+                        "INSERT INTO secrets (id, environment_id, name, ciphertext, nonce,"
+                        " wrapped_data_key, format_version, key_id, created_by, created_at)"
+                        " VALUES (:id, :env, :name, x'00', x'00', x'00', 2, 'env', :who, :t)"
+                    ),
+                    {"id": uuid.uuid4().hex, "env": env_id, "name": name, "who": who, "t": when},
+                )
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, _REVISION_0034)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        with engine.connect() as connection:
+            found = {
+                (env_id, name): (kind, target)
+                for env_id, name, kind, target in connection.execute(
+                    sa.text("SELECT environment_id, name, use_kind, use_target_id FROM secrets")
+                )
+            }
+    finally:
+        engine.dispose()
+
+    unbound = (None, None)
+    assert found[env_one, "pypi"] == ("PACKAGE_INDEX", index_ids["corp"])
+    assert found[env_two, "pypi"] == ("PACKAGE_INDEX", index_ids["corp"])  # per environment
+    assert found[env_one, "two-indexes"] == unbound
+    assert found[env_one, "index-and-repo"] == unbound
+    assert found[env_one, "storage-or-hook"] == unbound  # env_one's storage uses it
+    assert found[env_two, "storage-or-hook"] == ("PACKAGE_INDEX", index_ids["own"])
+    assert found[env_one, "hook-secret"] == unbound  # env_one's webhook delivered with it
+    assert found[env_two, "hook-secret"] == ("PACKAGE_INDEX", index_ids["hook"])
+    assert found[env_one, "token"] == unbound  # 'Token' is not 'token'

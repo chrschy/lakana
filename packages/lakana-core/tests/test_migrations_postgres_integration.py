@@ -1600,3 +1600,115 @@ def test_0034_on_postgres() -> None:
         migrate.upgrade(url, revision_0034)
         assert _alembic_version(engine) == revision_0034
         engine.dispose()
+
+
+def test_0034_ambiguous_and_environment_used_secrets_on_postgres() -> None:
+    """0034 leaves ambiguous and environment-used secrets unbound, per environment."""
+    revision_0033 = "e8b1f4c7d0a3"
+    revision_0034 = "f1c4a8e2b6d9"
+    env_one, env_two, who, repo_id = (uuid.uuid4() for _ in range(4))
+    index_ids = {n: uuid.uuid4() for n in ("corp", "dup1", "dup2", "mixed", "own", "case")}
+    index_secret = {
+        "corp": "pypi",
+        "dup1": "two-indexes",
+        "dup2": "two-indexes",
+        "mixed": "index-and-repo",
+        "own": "storage-or-hook",
+        "case": "Token",
+    }
+    with PostgresContainer("postgres:16", driver="pg8000") as pg:
+        url = pg.get_connection_url()
+        migrate.upgrade(url, revision_0033)
+        engine = sqlalchemy.create_engine(url)
+        with engine.begin() as conn:
+            conn.execute(sqlalchemy.text("SET LOCAL session_replication_role = replica"))
+            for env_id, name, ref in ((env_one, "one", "storage-or-hook"), (env_two, "two", None)):
+                conn.execute(
+                    sqlalchemy.text(
+                        "INSERT INTO environments (id, name, storage_root, storage_options, "
+                        "is_protected, properties, storage_secret_ref, created_at, updated_at) "
+                        "VALUES (:id, :name, 'file:///x', '{}', false, '{}', :ref, now(), now())"
+                    ),
+                    {"id": env_id, "name": name, "ref": ref},
+                )
+            for name, index_id in index_ids.items():
+                conn.execute(
+                    sqlalchemy.text(
+                        "INSERT INTO package_indexes (id, name, url, credential_secret, "
+                        "created_at, updated_at) VALUES (:id, :name, :url, :s, now(), now())"
+                    ),
+                    {
+                        "id": index_id,
+                        "name": name,
+                        "url": f"https://{name}/simple",
+                        "s": index_secret[name],
+                    },
+                )
+            conn.execute(
+                sqlalchemy.text(
+                    "INSERT INTO repositories (id, name, kind, url, credential_secret, "
+                    "created_at, updated_at) VALUES (:id, 'mixed', 'HTTPS', 'https://g/a.git', "
+                    "'index-and-repo', now(), now())"
+                ),
+                {"id": repo_id},
+            )
+            conn.execute(
+                sqlalchemy.text(
+                    "INSERT INTO package_indexes (id, name, url, credential_secret, created_at, "
+                    "updated_at) VALUES (:id, 'hook', 'https://hook/simple', 'hook-secret', "
+                    "now(), now())"
+                ),
+                {"id": index_ids.setdefault("hook", uuid.uuid4())},
+            )
+            conn.execute(
+                sqlalchemy.text(
+                    "INSERT INTO notification_deliveries (id, environment_id, repository_id, "
+                    "job, event, format, secret_name, state, attempts, created_at) VALUES "
+                    "(:id, :env, :repo, 'nightly', 'test', 'json', 'hook-secret', 'PENDING', 0, "
+                    "now())"
+                ),
+                {"id": uuid.uuid4(), "env": env_one, "repo": repo_id},
+            )
+            for env_id, name in (
+                (env_one, "pypi"),
+                (env_two, "pypi"),
+                (env_one, "two-indexes"),
+                (env_one, "index-and-repo"),
+                (env_one, "storage-or-hook"),
+                (env_two, "storage-or-hook"),
+                (env_one, "hook-secret"),
+                (env_two, "hook-secret"),
+                (env_one, "token"),
+            ):
+                conn.execute(
+                    sqlalchemy.text(
+                        "INSERT INTO secrets (id, environment_id, name, ciphertext, nonce, "
+                        "wrapped_data_key, format_version, key_id, created_by, created_at) "
+                        "VALUES (:id, :env, :name, '\\x00', '\\x00', '\\x00', 2, 'env', :who, "
+                        "now())"
+                    ),
+                    {"id": uuid.uuid4(), "env": env_id, "name": name, "who": who},
+                )
+
+        migrate.upgrade(url, revision_0034)
+        with engine.connect() as conn:
+            found = {
+                (e, n): (k, t)
+                for e, n, k, t in conn.execute(
+                    sqlalchemy.text(
+                        "SELECT environment_id, name, use_kind, use_target_id FROM secrets"
+                    )
+                ).all()
+            }
+        engine.dispose()
+
+    unbound = (None, None)
+    assert found[env_one, "pypi"] == ("PACKAGE_INDEX", index_ids["corp"])
+    assert found[env_two, "pypi"] == ("PACKAGE_INDEX", index_ids["corp"])
+    assert found[env_one, "two-indexes"] == unbound
+    assert found[env_one, "index-and-repo"] == unbound
+    assert found[env_one, "storage-or-hook"] == unbound
+    assert found[env_two, "storage-or-hook"] == ("PACKAGE_INDEX", index_ids["own"])
+    assert found[env_one, "hook-secret"] == unbound
+    assert found[env_two, "hook-secret"] == ("PACKAGE_INDEX", index_ids["hook"])
+    assert found[env_one, "token"] == unbound

@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from lakana_core.errors import ValidationError
 from lakana_core.identifiers import shown
-from lakana_core.models import PackageIndex, Repository, Secret, SecretUseKind
+from lakana_core.models import Environment, PackageIndex, Repository, Secret, SecretUseKind
 
 _NOUNS = {SecretUseKind.PACKAGE_INDEX: "package index", SecretUseKind.REPOSITORY: "repository"}
 _OPTIONS = {SecretUseKind.PACKAGE_INDEX: "--index", SecretUseKind.REPOSITORY: "--repository"}
@@ -46,6 +46,20 @@ class SecretUse:
     kind: SecretUseKind
     target_id: uuid.UUID | None = None
     target_name: str | None = None
+
+    def __post_init__(self) -> None:
+        """Refuse an index or repository use that names no target.
+
+        Raises
+        ------
+        ValueError
+            If the kind is not the environment and `target_id` or `target_name` is missing, so
+            that no message or command ever names an empty target.
+        """
+        if self.kind is not SecretUseKind.ENVIRONMENT and (
+            self.target_id is None or self.target_name is None
+        ):
+            raise ValueError(f"A {self.kind.value} use needs the target's id and name.")
 
     @classmethod
     def package_index(cls, row: PackageIndex) -> SecretUse:
@@ -100,7 +114,7 @@ class SecretUse:
         """
         if self.kind is SecretUseKind.ENVIRONMENT:
             return "--own-env"
-        return f"{_OPTIONS[self.kind]} {shlex.quote(self.target_name or '')}"
+        return f"{_OPTIONS[self.kind]} {shlex.quote(shown(self.target_name or ''))}"
 
     def wanted(self) -> str:
         """Name this use for a message.
@@ -185,7 +199,10 @@ def bind_command(environment: str, name: str, use: SecretUse) -> str:
     str
         ``lakana secret bind <name> --env <environment> <option>``, quoted for a shell.
     """
-    return f"lakana secret bind {shlex.quote(name)} --env {shlex.quote(environment)} {use.option()}"
+    return (
+        f"lakana secret bind {shlex.quote(shown(name))} --env {shlex.quote(shown(environment))} "
+        f"{use.option()}"
+    )
 
 
 def require_use(session: Session, secret: Secret, use: SecretUse, *, environment_name: str) -> None:
@@ -203,14 +220,23 @@ def require_use(session: Session, secret: Secret, use: SecretUse, *, environment
     use
         What the caller wants it for.
     environment_name
-        The secret's environment, for the message.
+        The secret's environment, for the message; it must be the one the secret belongs to.
 
     Raises
     ------
+    ValueError
+        If `environment_name` is not the name of the secret's own environment: the caller
+        loaded the secret from one environment and named another, which is a bug.
     SecretUseRefused
         If the secret is unbound and `use` is an index or a repository, or bound to anything
         else; the message names the current use and the `lakana secret bind` command.
     """
+    owner = session.get(Environment, secret.environment_id)
+    if owner is None or owner.name != environment_name:
+        raise ValueError(
+            f"Secret '{shown(secret.name)}' does not belong to environment "
+            f"'{shown(environment_name)}'."
+        )
     if use.kind is SecretUseKind.ENVIRONMENT:
         if secret.use_kind in (None, SecretUseKind.ENVIRONMENT):
             return
