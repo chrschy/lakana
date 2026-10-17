@@ -148,10 +148,10 @@ every missing output of it means "run everything".
 | Event | Runs |
 |---|---|
 | Pull request, **draft** | `lint`, `docs`, `docs-examples`, `test (3.14)` (with coverage and the ratchet) |
-| Pull request, **ready for review** (also the moment it leaves draft) | everything: the above plus `test (3.11)`, `integration`, `five-minute`, `compose-smoke` |
+| Pull request, **ready for review** (also the moment it leaves draft) | everything: the above plus `test (3.11)`, `test (macos)` (only if the pull request touches `packages/`), `integration`, `five-minute`, `compose-smoke` |
 | Dependabot's pull requests | everything (they are never drafts) |
 | Documentation-only pull request | see the section above; a draft also lacks `test (3.11)` |
-| Push to `main`: the squash merge of an up-to-date pull request whose last run was complete | `lint`, `docs` (the rest was just tested on the same tree) |
+| Push to `main`: the squash merge of an up-to-date pull request whose last run was complete | `lint`, `docs` (the rest was just tested on the same tree), `test (macos)` |
 | Push to `main`: anything else (a direct push, a draft's last run, a re-run that failed, any doubt) | everything |
 
 - **Drafts.** A draft skips `integration`, `five-minute`, `compose-smoke` and the 3.11 leg of
@@ -189,6 +189,21 @@ every missing output of it means "run everything".
   `packages/*/src/` as well as for the bundle, packaging and script files in the filter of its
   "Did the bundle change?" step. `test` has a 30-minute timeout.
 - **Coverage** is measured on 3.14 only (see the coverage ratchet below).
+- **`test (macos)`** (job `test-macos`) is the macOS check: Lakana's local mode supports macOS
+  (Python 3.13 and later), and this job runs what a macOS user runs, on GitHub's `macos-latest`
+  (Apple Silicon, 3 cores, 7 GB) with Python 3.14. It runs the unit suite with
+  `-m "not integration" -n 2`, without coverage (the ratchet stays on the Linux 3.14 job), and
+  `scripts/run_docs_examples.sh getting-started`, which ends with `lakana server reset --local`.
+  Docker-based tests (`integration`, `five-minute`, `compose-smoke`) do not run: macOS runners
+  have no Docker. `scripts/pytest_memory_limit.py` needs `/proc`, so on macOS it does nothing and
+  the limit's 6 GB default (below the runner's 7 GB) is not enforced; two workers fit. The example
+  runner needs GNU `timeout` and `setsid` and bash 4, so the job installs Homebrew's `bash` and
+  `coreutils` and puts a small Python `setsid` in front of the path. The job always runs on
+  GitHub's runner, never the `CI_RUNNER` switch (see "CI runners"); a pull request runs it only if
+  it changes `packages/`, `uv.lock`, `docs/examples/` or the files the job runs, and it skips a
+  draft and a documentation-only change like the other heavy jobs. It is **not a required check
+  yet**; the maintainer makes it one after a week of green runs (#148). A failure that only macOS
+  shows is fixed or filed as an issue.
 
 ### Scorecard, Semgrep and the release workflow
 
@@ -390,7 +405,8 @@ maintainer who wants to run CI on a runner of their own.
 - **What moves:** every job of `ci.yml`, `security.yml`, `conventional.yml`, `mutation.yml` and
   `security-deep.yml`, and the `release-please` job of `release.yml`, which only opens and merges
   the release pull request.
-- **What never moves:** every job that builds or publishes a release. What users install is
+- **What never moves:** `test (macos)` (macOS runs only on GitHub's own runners) and every job
+  that builds or publishes a release. What users install is
   built on GitHub's runners, not on someone's machine.
 - **A pull request from a fork always uses GitHub's runner.** The `runs-on` expression honours
   `CI_RUNNER` only for a push, a schedule, a manual run, or a pull request whose head branch is in

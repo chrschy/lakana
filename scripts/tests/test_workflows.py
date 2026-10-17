@@ -165,6 +165,7 @@ RUNNER = (
     " || github.event.pull_request.head.repo.full_name == github.repository)"
     " && vars.CI_RUNNER) || 'ubuntu-latest' }}"
 )
+MACOS_JOB = "test-macos"
 SWITCHABLE = ("ci.yml", "security.yml", "conventional.yml", "mutation.yml", "security-deep.yml")
 
 
@@ -176,6 +177,8 @@ def test_every_ci_job_can_run_on_the_configured_runner(workflow: str) -> None:
     dependency versions nobody has looked at yet.
     """
     for name, job in _jobs(workflow).items():
+        if (workflow, name) == ("ci.yml", MACOS_JOB):
+            continue  # GitHub offers macOS only on its own runners: see the test below
         assert job["runs-on"] == RUNNER, f"{workflow}: job `{name}` must use `runs-on: {RUNNER}`"
 
 
@@ -650,6 +653,7 @@ WHAT_RUNS = {
     "ready or later push": {
         "lint",
         "test",
+        "test-macos",
         "docs",
         "docs-examples",
         "integration",
@@ -658,10 +662,11 @@ WHAT_RUNS = {
     },
     "documentation only, draft": {"test", "docs"},
     "documentation only, ready": {"test", "docs"},
-    "main, tested": {"lint", "docs"},
+    "main, tested": {"lint", "docs", "test-macos"},
     "main, not proven": {
         "lint",
         "test",
+        "test-macos",
         "docs",
         "docs-examples",
         "integration",
@@ -1156,3 +1161,56 @@ def test_every_published_artefact_gets_a_build_provenance_attestation() -> None:
             assert perms.get("attestations") != "write", name
             if name not in {"publish-core", "publish-runtime", "publish-sdk"}:
                 assert perms.get("id-token") != "write", name
+
+
+def test_the_macos_job_runs_the_unit_suite_and_the_getting_started_example() -> None:
+    """`test (macos)`: GitHub's runner, Python 3.14, no integration tests, no coverage, 2 workers.
+
+    macOS users run local mode, so the job runs what they use: the unit suite, and the tutorial's
+    example (which ends with ``lakana server reset --local``). It is pinned to GitHub's runner,
+    never the ``CI_RUNNER`` switch, and it is not a required check.
+    """
+    job = _jobs("ci.yml")[MACOS_JOB]
+    assert job["name"] == "test (macos)"
+    assert job["runs-on"] == "macos-latest"
+    assert "CI_RUNNER" not in str(job)
+    assert job["timeout-minutes"] <= 45
+    commands = [c for step in job["steps"] for c in _commands(step)]
+    pytest_command = next(c for c in commands if "pytest" in c)
+    assert '-m "not integration"' in pytest_command
+    assert "-n 2" in pytest_command
+    assert "--cov" not in pytest_command
+    setup = next(s for s in job["steps"] if "setup-uv" in str(s.get("uses")))
+    assert setup["with"]["python-version"] == "3.14"
+    assert any("run_docs_examples.sh getting-started" in c for c in commands)
+    assert (
+        (ROOT / "docs/examples/getting-started/run.sh")
+        .read_text()
+        .count("lakana server reset --local")
+    )
+    assert (
+        next(s for s in job["steps"] if "checkout" in str(s.get("uses")))["with"]["fetch-depth"]
+        == 0
+    )
+    assert unlocked_environment_commands(job) == []
+
+
+def test_the_macos_job_waits_for_a_pull_request_to_be_ready_and_skips_documentation() -> None:
+    """Like the other heavy jobs it skips a draft and a documentation-only change."""
+    terms = _terms(_jobs("ci.yml")[MACOS_JOB]["if"])
+    assert "needs.changes.outputs.docs_only != 'true'" in terms
+    assert "needs.changes.outputs.draft != 'true'" in terms
+    assert not any("already_tested" in term for term in terms)  # `main` always runs it
+
+
+def test_the_macos_job_runs_for_a_pull_request_only_when_packages_change() -> None:
+    """The scope step lets a push through and a pull request only if it touches `packages/`."""
+    job = _jobs("ci.yml")[MACOS_JOB]
+    scope = next(s for s in job["steps"] if s.get("id") == "scope")
+    assert "packages/" in scope["run"]
+    guarded = [
+        s for s in job["steps"] if s.get("id") != "scope" and "checkout" not in str(s.get("uses"))
+    ]
+    assert guarded
+    for step in guarded:
+        assert step["if"] == "steps.scope.outputs.run == 'true'", step
