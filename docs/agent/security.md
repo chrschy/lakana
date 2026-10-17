@@ -3433,23 +3433,24 @@ matter for an operator deciding where to run it:
   lease, `FAILED` with the cause `worker_lost`; a write that had already committed ends
   `SUCCEEDED`. Nothing stays `RUNNING` for ever. A venv build in progress is not interrupted
   (#48).
-- **Known gap (#14): SeaweedFS's internal HTTP APIs are only partly closed.**
-  The worker runs user SQL with DuckDB's `httpfs` and external access enabled, so in team
-  mode ("cloud" `s3` storage) the AST blacklist is the only thing between that SQL and
-  SeaweedFS's own internal HTTP surface — and the blacklist is explicitly defence in depth,
-  not the primary control (see "Bypassing policy by reading files directly" in
-  `docs/security/threat-model.md`). `compose.yaml` runs `weed server` with `-disableHttp`,
-  which closes the filer's unauthenticated plain-HTTP file read/write/delete route (the path
-  a missed blacklist entry, e.g. an unmatched `read_parquet`/`FROM 'http://…'` call, would
-  use to read or write any environment's raw bytes) while leaving the S3 gateway itself
-  working, since it reaches the filer over gRPC, not HTTP. The master (port 9333) and volume
-  server (port 8080) HTTP listeners are **not** covered by `-disableHttp` and remain
-  reachable, unauthenticated, from any container on the Compose network — the absence of
-  host ports for `seaweedfs` (above) stops the host's own network from reaching them, but
-  not another container's. The structural fix is SeaweedFS's own JWT signing
-  (`jwt.filer_signing.key` in `security.toml`) for the filer and volume servers, or running
-  SeaweedFS on a network isolated from the worker; both are deferred to a follow-up issue
-  rather than designed here.
+- **SeaweedFS's internal HTTP APIs are unreachable from the worker (#14), by network isolation.**
+  The worker runs user SQL with DuckDB's `httpfs` and external access enabled, and SeaweedFS's
+  master (9333), volume (8080) and filer HTTP APIs need no credentials, so anything the worker
+  can reach would be a way around credential scoping. Chosen: `weed server` (master, volume,
+  filer; `-disableHttp` too) runs as `seaweedfs-core` on `seaweed-internal` (`internal: true`),
+  which only SeaweedFS's services share. `seaweedfs` is a separate `weed s3` container, the one
+  service on both that network and `default`, listening on 8333 plus gRPC 18333 (`-port.iceberg=0
+  -port.lance=0` turn its other HTTP ports off). `server`, every worker and `setup` are on
+  `default`, so S3 with the keys, and the residual 18333, are all they can reach. One container cannot be
+  split by port, which is why the gateway is its own container and not `weed server -s3`.
+  JWT signing was not chosen: network isolation needs no key distribution, and a signing key
+  would have to stay out of the worker anyway. Asserted by
+  `test_seaweedfs_internal_apis_are_unreachable_from_the_worker` (compose structure) and by a
+  check run inside the worker in `scripts/compose_smoke_test.sh` (CI). **Not protected:** the gateway's gRPC port 18333 (it includes IAM) cannot be turned off and has no authentication. It is reachable from the default network, so from code in the worker: user SQL cannot reach it, because DuckDB's HTTP filesystem cannot speak gRPC, but a Python task, which runs as trusted code in the worker today, could remove the storage identity and make storage unavailable until a restart. The planned container runner keeps task networks away from SeaweedFS. The isolation relies on Docker's own network isolation (the default); a daemon with `iptables: false`, Podman or rootless setups may not provide it. The S3
+  keys, held by the worker as before, give full bucket access (per-environment scoping is the
+  presigned-URL path above); anyone with Docker access to the host reaches everything. Any change
+  that joins a worker or server to `seaweed-internal`, or publishes a port of `seaweedfs-core`,
+  reopens #14 and fails that test.
 
 ## Mutation testing
 

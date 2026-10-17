@@ -111,7 +111,8 @@ x-lakana-env: &lakana-env
 | Service | Image | Role | Starts after |
 |---|---|---|---|
 | `postgres` | `postgres:16` | Catalog metadata. | — |
-| `seaweedfs` | `chrislusf/seaweedfs:4.47` | S3-compatible object storage. | — |
+| `seaweedfs-core` | `chrislusf/seaweedfs:4.47` | SeaweedFS's master, volume server and filer, holding the `seaweed` volume. Only on the internal `seaweed-internal` network (see "Known gaps"). | — |
+| `seaweedfs` | `chrislusf/seaweedfs:4.47` | The S3 gateway, the only way to the object storage: `http://seaweedfs:8333`. | `seaweedfs-core` healthy |
 | `bucket` | `chrislusf/seaweedfs:4.47` | One-shot: creates the `lakana` bucket if it doesn't already exist. | `seaweedfs` healthy |
 | `migrate` | `${LAKANA_IMAGE}` | One-shot: applies Alembic migrations (`lakana-server migrate`) and exits. | `postgres` healthy |
 | `server` | `${LAKANA_IMAGE}` | The FastAPI control plane and Iceberg REST catalog; publishes `${LAKANA_BIND}:${LAKANA_PORT}:8000`. | `migrate` completed |
@@ -1219,15 +1220,15 @@ Details and limits (SSH is unaffected): [`projects.md`](projects.md#git-network-
   had already committed ends `SUCCEEDED`), tasks released or reclaimed. Nothing stays `RUNNING`
   for ever; see [A worker that is lost](stop-a-query.md#a-worker-that-is-lost) and
   [When a worker is lost](why-is-it-waiting.md#when-a-worker-is-lost).
-- **SeaweedFS's internal HTTP APIs are only partly closed (#14).** `seaweedfs`
-  runs with `-disableHttp`, which closes the filer's unauthenticated plain-HTTP file
-  read/write/delete route — the practical path from user SQL in the worker to every
-  environment's raw bytes — while the S3 gateway keeps working (it talks to the filer over
-  gRPC, not HTTP). The master (port 9333) and volume server (port 8080) HTTP listeners are
-  not covered by this flag and stay reachable, unauthenticated, from any container on the
-  Compose network. See `docs/agent/security.md` (team mode) and
-  `docs/security/threat-model.md` for the full gap and the structural fix (SeaweedFS JWT
-  signing or network isolation).
+- **SeaweedFS's internal HTTP APIs are closed to the worker (#14); what is and is not protected.**
+  SeaweedFS's master (9333), volume server (8080) and filer have HTTP APIs that need no
+  credentials. They run in `seaweedfs-core`, on the `seaweed-internal` network, which only
+  SeaweedFS's own containers (`seaweedfs-core`, the `seaweedfs` S3 gateway and the one-shot
+  `bucket`) join and which has no route out of the host. The server and every worker are not on it:
+  from a worker, `seaweedfs-core` does not resolve, and `seaweedfs` answers over HTTP on port 8333 only, with
+  S3 that needs the keys. The filer also runs with `-disableHttp`. **Not protected:** the gateway's gRPC port 18333 (it includes IAM) has no authentication and is reachable from the worker. User SQL cannot use it, because DuckDB's HTTP filesystem cannot speak gRPC, but a Python task, which runs as trusted code in the worker, could remove the storage identity and make storage unavailable until a restart. The isolation relies on Docker's own network isolation (the default); `iptables: false`, Podman or rootless setups may not provide it. A person
+  with Docker access to the host can still reach SeaweedFS (`docker exec`), and the S3 keys in
+  `.env` give full access to the `lakana` bucket, as always. The pinned SeaweedFS version is updated with Lakana releases.
 
 ## See also
 
