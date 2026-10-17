@@ -1442,10 +1442,13 @@ found through a query run of their own that is bound to the check result
   has a column of that name** (compared without regard to case); otherwise the database's
   message stands. If no column is
   left, the query fails with `NO_COLUMN_LEFT`. Both have the cause `invalid_query`.
-- **Files that lack a column (`pipeline._schema_mismatch_failure`), any read.** A read under
-  a row filter, a column mask or a checked snapshot selects **every declared column** in the one
-  CTE over the files, so after a schema-changing append every reader under any policy of the
-  table fails, whichever column the policy names (the files of one glob differ, or the column is
+- **Files that lack a column (`pipeline._schema_mismatch_failure`), raw-zone reads.** An
+  Iceberg read projects every file onto the schema it uses through DuckDB's field-id map
+  (`v_<n>_schema`, `catalog.field_ids.read_fields`), so its files never lack a column and a
+  binder error's candidates are the read's own columns. A raw-zone table's files are read by
+  name, and a read under a row filter or a column mask selects **every declared column** in the
+  one CTE over the files, so after one of them lacks a column every reader under any policy of
+  the table fails, whichever column the policy names (the files of one glob differ, or the column is
   "not found" in the one file the read binds against). Both database texts list a file's
   columns, which may include one the caller may not see, so neither reaches the caller: the
   glob wording is replaced by a text naming the table(s) that declare the column, and the "not
@@ -1455,8 +1458,9 @@ found through a query run of their own that is bound to the check result
   cut (`_without_candidates`), plus a hint naming the projected tables that declare the column and
   saying their older files lack it. A "not found" for a table read with a plain `*` keeps the
   database's text. It only
-  rewrites the message of a read that already failed. The real fix, reading by Iceberg field id,
-  is a separate issue, and when it lands this message goes.
+  rewrites the message of a read that already failed. A field inside a nested column is read by
+  name; `refuse_changed_nested_fields` refuses a read whose nested fields moved since a live
+  file was written, by the schemas of the snapshot's ancestry, and names no file.
 - **A failed read of a check's snapshot looks again (`pipeline._snapshot_gone_after_failure`).**
   Maintenance may remove the snapshot between resolution and read. After a failure that
   is not a worker stop, the run asks `_resolve_sources` again with the caller's own rights
@@ -2088,6 +2092,35 @@ prepared parameter`). A placeholder once bound to the rewriter's own URL list an
 URLs as data. `executor.execute_query`/`stream_query`/`describe_query` refuse a positional
 sequence outright (`TypeError`): only a name-to-value mapping is accepted.
 
+**A foreign commit cannot add a data file without field ids.** `commit_table` calls
+`field_ids.check_added_files_have_field_ids` once, with every `AddSnapshotUpdate` of the commit,
+after each manifest list is known to lie under the table's location and before anything is
+applied. It opens only manifests the parent snapshot (or an earlier snapshot of the same commit)
+does not have and that lie under the table's location, whatever content the manifest list claims
+for them, as a read walks every manifest. It takes their `ADDED` data entries, so inherited
+files, including legacy ones, are never read. It reads each footer once, eight at a time, only
+for a file under the table's location (a file elsewhere is never opened, and a read refuses the
+table for it). The trailer is read first and a footer above 16 MiB is refused. The check is
+bounded: at most 2,000 added files per commit, and 60 seconds for all reads together
+(`MAX_CHECKED_FILES`, `CHECK_DEADLINE_SECONDS`, `MAX_FOOTER_BYTES`); a commit over either bound
+is refused whole (the deadline also covers the manifest reads, and a commit past the cap stops being
+read at that manifest). Reads already running when the deadline passes are abandoned and end at the
+storage client's own timeout. A snapshot's parent is looked up only among the table's snapshots
+before the commit and the earlier snapshots of the same commit; a parent that is the snapshot
+itself, comes later or is unknown counts as none, so the snapshot is checked in full. A file whose
+footer does not parse is refused as unreadable (422), never as storage failure. A non-Parquet entry
+is reported first; otherwise the first offending file in manifest order is named with the
+table. A reader's error text never reaches the caller (the log has the exception's class and
+the table). A storage failure answers `StorageUnavailableError`
+(503, retry), not a client fault. `append` and `write_batches` pass `own_data_files=True`:
+pyiceberg wrote those files with field ids. Limits by design: a client can mark an entry
+`EXISTING` in a new manifest and skip the check (the file then reads as NULL, which a policy
+does not leak), field ids that match no column read as NULL, and a commit-time check cannot see
+an object overwritten in storage afterwards, so it guards correctness and is no boundary
+against a writer who holds storage credentials. Files committed before the check existed are
+not checked; a file without field ids reads as NULL in every column. The check runs inside the
+request while its database session is open; releasing it before the reads is not done.
+
 **A submitted query holds no statement but a read, at any depth.** `check_blacklist` requires
 the statement as a whole to be an `exp.Query`, and `_reject_statements_inside` then walks the
 whole tree: a node of a statement class (`exp.DML`, which covers `INSERT`, `UPDATE`, `DELETE`,
@@ -2195,6 +2228,31 @@ work.
   guessing which of two independently-authored expressions should win. Policies apply to
   every role including `admin` — there is no bypass *of the rewriter itself* — and layer on
   top of `READ_TABLE` authorization, never replacing it.
+- **A policy binds to column names, so a rename or a replaced column fails the read closed.** The
+  table is read by field id, and a rename through the Iceberg REST catalog can move a name onto
+  another column (`ssn` to `ssn_old`, `email` to `ssn`): a mask on `ssn` would cover the email
+  column and `ssn_old` would show the real values. A column dropped and added again, also by a
+  type change through `evolve_schema` (a non-promotion gets a new field id under the same name),
+  is replaced the same way. Each row filter and column mask records the id of the table's current
+  schema when it is created (`schema_id`; null for a raw table, a view and an artifact, for a
+  filter that reads no column, and for a policy of a release before the column existed). For a
+  read of an Iceberg table, `_resolve_sources` collects, from the reader's applied policies, every
+  column a mask covers or its expression reads and every column a filter reads, and calls
+  `policy.renames.renamed_policy_column` with the table's metadata. Two schemas are compared at a time, never
+  the ones between: the policy's schema and the CURRENT one (a policy with no recorded id, made by
+  an earlier release, is judged against every schema the table has had, since it may have been
+  written at any point of the history, and a name touched since any of them counts),
+  because schema ids are chosen by clients and a set-back makes the current schema an older one: a
+  name whose owning field id differs, or a field id that changed its name with the old or the new
+  name among the policy's, refuses the read before the query runs (`PolicyColumnRenamedError`,
+  cause `invalid_query`, text `POLICY_COLUMN_RENAMED`, which names the first such column and no
+  data). A recorded id the metadata does not have makes every column of the policy suspect. It
+  applies to a read at a checked snapshot too, before the comparison above. A refused read shows
+  nothing and never runs without the policy. The repair order is rename, create the policy for the
+  new name, revoke the old one: the old policy is touched until it is revoked, so reads stay
+  refused, and revoking it first would leave a window without any policy (two masks on one column
+  collapse to `NULL`, filters are ANDed). Binding policies to field ids is not done yet. Pins:
+  `test_pipeline_schema_evolution.py` (the `rename` and set-back tests), `test_policy_renames.py`.
 - **Grants, row filters, and column masks bind to ids, never names.** A rename or a
   drop-and-recreate under the same name cannot evade either. An `EXTERNAL` table goes
   through this same rewriter and its own row filters/column masks apply to it, confined to

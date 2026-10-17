@@ -120,6 +120,52 @@ and `SHOW` were never allowed as the whole statement; `SELECT ... INTO` is now r
 too. To get the numbers, use an aggregate query (`SELECT count(*), min(x), max(x) FROM t`) and
 read the column list from the result.
 
+### Iceberg tables are read by field id
+
+Migration `0033` runs automatically (see below). Lakana reads the data files of an Iceberg table by the field id of each column, as
+the Iceberg specification requires. After a schema change, an added column reads as NULL in older
+rows, a renamed column keeps its data, a column dropped and added again under its name is a new
+column (a type change through `evolve_schema` is one too: its older rows read as NULL), and a
+widened column reads in its new type. Queries, row filters and column masks that
+failed after such a change (``The data files of `TABLE` do not all have the column ...``) now
+run; that message remains only for raw-zone (external) tables. A field inside a struct, list or
+map column is read by name: after one was renamed, or dropped and added again, reads of the
+table are refused with ``'TABLE' cannot be read: the field ...`` until its rows are written
+again. A table with a column of a type Lakana cannot read yet (nanosecond timestamps, `unknown`, the
+geospatial types of format version 3) is refused as a whole: ``'TABLE' has the column 'x' of type
+..., which Lakana cannot read yet.`` Store the column as another type. A filter on a float column
+widened to double still needs a range
+([Show some people only some rows](../how-to/filter-rows.md#columns-of-a-table-made-outside-lakana)).
+
+Row filters and column masks are bound to a column name, while a table is read by field id, so a
+rename could leave a policy on another column. From this release a read is refused, and nothing is
+shown, when a column was renamed or replaced (dropped and added again, also by a type change
+through `evolve_schema`) since the policy was created, and the old or the new name is one the
+policy uses:
+`` `TABLE` has a row filter or column mask that uses column `COLUMN`, and a column was renamed or replaced since the policy was created ...``
+Each policy now records the table schema it was created against. A policy of an earlier release
+records none and is judged against every schema the table has had, so after the upgrade a table whose
+policy column was renamed or replaced at any time is refused until an administrator creates the
+policy again for the column it is meant for and revokes the old one. Before you upgrade, list the
+row filters and column masks (the `list` subcommand of `lakana row-filter` and of
+`lakana column-mask`) and look for tables whose columns were renamed or retyped since the policy
+was made. The order after a rename is: rename, create the policy for the new name, revoke the old
+one. Reads are refused until the old one is revoked, and nothing shows in clear at any step
+([Mask a column](../how-to/mask-a-column.md#after-a-rename),
+[Show some people only some rows](../how-to/filter-rows.md#after-a-rename)). Migration `0033` adds
+a column `schema_id` to the tables of row filters and column masks.
+
+From this release on, a commit through the Iceberg REST catalog that adds a data file without
+field ids, for example one registered with pyiceberg's `add_files`, is refused and nothing is
+applied ([the refusal](../reference/checks.md#when-a-commit-through-the-iceberg-rest-catalog-is-refused)).
+Write the files with a client that sets field ids: pyiceberg's `append` and `overwrite` do, and
+Lakana's own writes always do. A commit may add at most 2,000 data files, and the check has 60
+seconds; split a larger load into several commits. Files that other Iceberg clients committed
+before this release are not checked. If such a file lacks field ids, every column of it reads
+as NULL, with no error. Ask the owner of the table to write its rows again, with Lakana
+(`replace`) or with a client that writes field ids. Field ids that match no column of the table
+read as NULL as well.
+
 ## Notes for 0.12.0
 
 This release changed a lot: who may hand out access, which package sources a project may

@@ -19,6 +19,7 @@ from pathlib import Path
 
 import duckdb
 import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from lakana_worker import query_child
@@ -1535,3 +1536,133 @@ def test_other_errors_are_not_taken_for_a_lost_cause() -> None:
         threading.Event(),
     )
     assert error.message == "Query failed: Conversion Error: boom"
+
+
+def test_a_field_id_map_is_set_as_a_duckdb_map() -> None:
+    """The map has the shape `read_parquet(schema = ...)` takes on DuckDB 1.5."""
+    sql = (
+        "SELECT map_keys(getvariable('v_0_schema')) AS k, "
+        "getvariable('v_0_schema')[2].type AS t, "
+        "getvariable('v_0_schema')[2].default_value IS NULL AS d"
+    )
+    request = _request(sql, parameters={"v_0_schema": ((1, "id", "BIGINT"), (2, "n", "VARCHAR"))})
+
+    code, stream, _stderr = _main(request)
+
+    assert code == EXIT_OK
+    assert _table(stream).to_pylist() == [{"k": [1, 2], "t": "VARCHAR", "d": True}]
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        pytest.param(((1, "id", "NOT A TYPE"),), id="a type DuckDB cannot parse"),
+        pytest.param(((1, "id", "STRUCT(a"),), id="a type that is cut off"),
+    ],
+)
+def test_a_schema_map_duckdb_cannot_parse_fails_closed(
+    tmp_path: Path, fields: tuple[tuple[int, str, str], ...]
+) -> None:
+    """DuckDB's refusal of the map ends the query as an ordinary failure naming no file."""
+    path = _field_id_file(tmp_path, "X-Amz-Signature=SECRET123.parquet", "abc")
+    request = _request(
+        "SELECT * FROM read_parquet(getvariable('v_0_files'), schema = getvariable('v_0_schema'))",
+        parameters={"v_0_files": [str(path)], "v_0_schema": fields},
+        restrict_local_filesystem=False,
+    )
+
+    code, stream, stderr = _main(request)
+
+    error = decode_error(stderr.encode())
+    assert code == EXIT_FAILED
+    assert error is not None
+    assert error.kind == "invalid"
+    assert error.message.startswith("Query failed: ")
+    assert stream == b"" or not list(pa.ipc.open_stream(stream))
+    for text in (error.message, stderr, repr(stream)):
+        assert str(path) not in text
+        assert "SECRET123" not in text
+
+
+_HIDDEN_CONVERSION = (
+    "Query failed: a value could not be converted (the value is not shown, because it may come "
+    "from data you cannot see). Check the casts in the query; otherwise a file of this table "
+    "stores a column in a type the read cannot convert it to."
+)
+
+
+def _field_id_file(directory: Path, name: str, value: str) -> Path:
+    """Write a one-row Parquet file whose column ``ssn`` is text and has field id 1.
+
+    Parameters
+    ----------
+    directory
+        Where the file goes.
+    name
+        The file's name.
+    value
+        The cell value.
+
+    Returns
+    -------
+    Path
+        The file.
+    """
+    path = directory / name
+    field = pa.field("ssn", pa.string(), metadata={b"PARQUET:field_id": b"1"})
+    pq.write_table(pa.table({"ssn": [value]}, schema=pa.schema([field])), path)
+    return path
+
+
+@pytest.mark.parametrize(
+    "select",
+    [
+        pytest.param("SELECT * FROM {reader}", id="a plain read"),
+        pytest.param('SELECT "ssn" % 10 AS "ssn" FROM {reader}', id="a partial mask"),
+        pytest.param('SELECT "ssn" FROM {reader} WHERE ("ssn" > 0)', id="a row filter"),
+    ],
+)
+def test_a_cast_the_map_asks_for_names_no_cell_value(tmp_path: Path, select: str) -> None:
+    """A file that stores text where the map says INTEGER fails without quoting the cell."""
+    path = _field_id_file(tmp_path, "X-Amz-Signature=SECRET123.parquet", "123-45-6789")
+    reader = "read_parquet(getvariable('v_0_files'), schema = getvariable('v_0_schema'))"
+    request = _request(
+        select.format(reader=reader),
+        parameters={"v_0_files": [str(path), ""], "v_0_schema": ((1, "ssn", "INTEGER"),)},
+        restrict_local_filesystem=False,
+    )
+
+    code, stream, stderr = _main(request)
+
+    error = decode_error(stderr.encode())
+    assert code == EXIT_FAILED
+    assert error is not None
+    assert error.kind == "invalid"
+    assert error.message in {
+        'Query failed: a file of a table this query reads stores column "ssn" as VARCHAR, '
+        "which cannot be read as INTEGER. Ask the owner of that table to write its rows again, "
+        "so that every file stores the column in one type.",
+        _HIDDEN_CONVERSION,
+    }
+    assert stream == b"" or not list(pa.ipc.open_stream(stream))
+    for text in (error.message, stderr, repr(stream)):
+        for secret in (str(path), "SECRET123", "123-45-6789", "6789"):
+            assert secret not in text
+
+
+def test_a_cast_of_the_querys_own_on_a_mapped_read_names_the_next_step(tmp_path: Path) -> None:
+    """The user's own failing cast is worded without its value and points at the query."""
+    path = _field_id_file(tmp_path, "rows.parquet", "123-45-6789")
+    request = _request(
+        "SELECT CAST('abc' AS INT) AS n FROM read_parquet(getvariable('v_0_files'), "
+        "schema = getvariable('v_0_schema'))",
+        parameters={"v_0_files": [str(path)], "v_0_schema": ((1, "ssn", "VARCHAR"),)},
+        restrict_local_filesystem=False,
+    )
+
+    code, stream, stderr = _main(request)
+
+    assert code == EXIT_FAILED
+    assert decode_error(stderr.encode()) == ErrorDocument("invalid", _HIDDEN_CONVERSION)
+    assert "abc" not in stderr
+    assert stream == b"" or not list(pa.ipc.open_stream(stream))

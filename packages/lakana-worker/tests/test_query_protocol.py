@@ -290,3 +290,21 @@ def test_decode_request_refuses_every_shape_with_its_own_error_and_never_a_trace
         decode_request(raw)
     assert str(caught.value).startswith(message)
     assert len(str(caught.value)) < 200
+
+
+def test_a_field_id_map_survives_the_round_trip() -> None:
+    fields = ((1, "id", "BIGINT"), (2, "full name", 'STRUCT("a" INTEGER)'))
+    request = _request(parameters={"v_0_schema": fields})
+
+    decoded = decode_request(encode_request(request))
+
+    assert decoded.parameters == {"v_0_schema": fields}
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [[[1, "id"]], [[True, "id", "BIGINT"]], [["1", "id", "BIGINT"]], [[1, "id", 5]]],
+)
+def test_a_malformed_field_id_map_is_refused(raw: object) -> None:
+    with pytest.raises(ValueError, match="parameter 'p' has an unreadable value"):
+        decode_request(_document(parameters={"p": {"field_ids": raw}}))

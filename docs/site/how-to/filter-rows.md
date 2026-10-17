@@ -114,36 +114,87 @@ or a column whose type was widened. A filter names top-level columns only:
 - **A float column that was widened to double.** Rows written before the widening hold 32-bit
   values and rows written after hold 64-bit ones, so `1.1` is not the same number in both. What
   an equality with a decimal literal (`price = 1.1`) or its negation (`price <> 1.1`,
-  `NOT (price = 1.1)`) matches depends on the order of the table's data files and on how the
-  filter is written, so a filter meant to hide such rows can show some. Always write a range
+  `NOT (price = 1.1)`) matches depends on how the filter is
+  written, so a filter meant to hide such rows can show some. Always write a range
   (`price > 1.09 AND price < 1.11`) in a filter. A query can also use a rounded value
   (`round(price, 2) = 1.1`). Both match the rows of old and new files alike, in either order.
-  Schema changes are tracked in [#104](https://github.com/chrschy/lakana/issues/104).
 
-## When a table gains a column
+## When a table's schema changes
 
-After an append that adds a column, the files written before it do not have it. A read under a
-row filter or a column mask on the table selects every column, so **every reader under any filter
-or mask of that table fails**, whichever column the filter names, until the files agree. Nothing
-is shown unfiltered. What the reader sees depends on whether their own query names the new column:
+Lakana reads an Iceberg table's data files by the field id of each column, as the Iceberg
+specification requires, so a filter keeps working after the schema changes:
 
-- A query that does not name it (`SELECT id FROM gold.customers`) gets ``The data files of
-  `gold.customers` do not all have the column `tier` (it was added after some or all of them were
-  written). A read under a row filter or column mask selects every column of the table, so it
-  fails on them whichever column the policy names. Ask the owner of the table to write it again,
-  so that every file has the column.``
-- A query that names it (`SELECT tier FROM gold.customers`, or `WHERE tier = 'vip'`) gets the
-  database's own line, without its list of candidate columns, and a hint: ``Query failed: Binder Error: Referenced column "tier" not found in FROM clause! `gold.orders` declares the column `tier`; if the query reads it from there, older data files of the table lack it (it was added after some or all of them were written). Ask the owner of the table to write it again, so that every file has the column.``
-  The hint is the same whatever order the files are in. If your query has a mistake of its own (a
-  subquery that leaves `tier` out), fix the query; the hint says only that the table's older files
-  lack the column too.
+- **An added column** reads as NULL in the rows written before it was added. A filter on it
+  (`tier = 'gold'`) passes none of those rows; `tier IS NULL` passes all of them.
+- **A renamed column** keeps its data under the new name, in old and new files alike. The filter
+  itself does not follow the rename: see the next section.
+- **A column dropped and added again** under the same name is a new column. The rows written
+  before read as NULL, never as the old column's values. A write with `evolve_schema` that
+  changes a column's type (other than widening it) does the same.
+- **A widened column** (`int` to `long`, `float` to `double`) reads in its new type. A float
+  column needs a range in a filter, as said above.
 
-The owner writes the table's data again (a `replace`), which gives every file all the columns, and
-the reads run again. Readers under no filter or mask are not affected by these messages.
+A field inside a struct, list or map column is read by name. After such a field was renamed, or
+dropped and added again, every read of the table fails with ``'gold.customers' cannot be read:
+the field `town` of its column `address` was renamed, ...`` until its owner writes all of its rows
+again (an overwrite). Nothing is shown in the meantime.
+
+A raw-zone (external) table has no field ids: its files are read by column name. When some of its
+files lack a column it declares, a read under a row filter of that table fails with
+``The data files of `TABLE` do not all have the column `COLUMN` ...``, and nothing is shown
+unfiltered. A column mask whose expression reads the column fails too, with a message that
+depends on the order of the files; a constant mask works. Write the files again so that every
+file has the column.
+
+A column of a type Lakana cannot read yet (nanosecond timestamps, `unknown`, and the geospatial
+types of Iceberg format version 3) makes every read of the table fail with ``'gold.events' has the
+column 'x' of type timestamp_ns, which Lakana cannot read yet. Ask the owner of the table to store
+the column as another type.`` The whole table is refused, also by a query that does not name the
+column, so that nothing is hidden without a word. The owner stores the column as a type Lakana
+reads (a microsecond timestamp, for example) and writes the table's rows again.
 
 ## Filters and dropped columns
 
-A filter does not follow a column that is dropped or renamed afterwards. From then on a query of
-the filtered person that reads the table fails instead of showing rows, so nothing is shown
-unfiltered. Revoke the filter and create it again for the new column name. A filter stored by an
-earlier release keeps working as it did, even if it would be refused today.
+A filter is bound to a column **name**, not to the column itself. When the column is dropped
+and nothing takes its name, a query of the filtered person that reads the table fails instead of
+showing rows. Revoke the filter and create it again for the column it is meant for. A rename is
+different: see the next section.
+
+### After a rename
+
+A rename can change what a filter covers: a column renamed *onto* the filtered name would be
+tested in the old column's place. The filter would test the other column's values and could pass
+rows it was meant to hide, and the renamed column would no longer be filtered. Lakana does not let
+that happen. Each filter records which version of the table's schema it was created against. When
+a column was renamed since, or replaced by a new column of the same name (dropped and added
+again), and the old or the new name is one the filter reads, a read of the table by the filtered
+person is refused, and nothing is shown:
+
+<!-- output -->
+```text
+`gold.customers` has a row filter or column mask that uses column `region`, and a column was renamed or replaced since the policy was created, so the policy may now cover a different column. Nothing is shown. An administrator must review the table's row filters and column masks, create each one that uses a renamed or replaced column again for the column it is meant for, and then revoke the old one.
+```
+
+A column is also replaced when a write with `evolve_schema` changes its type (not a widening, such
+as `int` to `long`): the column gets a new field id, reads of the table are refused until the
+filter is created again, and the rows written before read as NULL in that column.
+
+A rename therefore goes in this order:
+
+1. Rename the column. From then on, reads of the table by the filtered person are refused. That is
+   the point: no rows are passed or hidden by a filter that is out of date.
+2. Create a filter for the column it is meant for. Lakana only accepts a filter on a column the
+   table has now, so it cannot be created before the rename. Reads are still refused, because the
+   old filter is still out of date, and filters are ANDed, so the new one only narrows.
+3. Revoke the old filter. List the filters and masks of the table with the `list` subcommand of
+   `lakana row-filter` and of `lakana column-mask`.
+4. Reads work again, with the filter on the right column.
+
+Do not revoke the old filter first: until the new one exists, the person reads every row.
+
+A filter created after the rename records the new version of the schema, so it is not refused. A
+filter that an earlier release created has no recorded version: it is judged against every schema
+the table has had, so a rename from any time before also refuses the read until it is created again.
+
+A filter stored by an earlier release is judged by the same rule, even if its text would not be
+accepted by `create` today.

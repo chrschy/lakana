@@ -1022,12 +1022,15 @@ class FakeColumnCatalog:
         The columns every table has; `COMMON_MASK_COLUMNS` unless given.
     error
         Raised by `describe_table` instead, when set.
+    schema_id
+        The id of the current schema every table reports.
     calls
         Each `describe_table` call, as (principal, reference).
     """
 
     names: list[str] = field(default_factory=lambda: list(COMMON_MASK_COLUMNS))
     error: Exception | None = None
+    schema_id: int | None = None
     calls: list[tuple[PrincipalRef, TableRef]] = field(default_factory=list)
 
     def describe_table(self, p: PrincipalRef, ref: TableRef) -> TableDescription:
@@ -1059,6 +1062,7 @@ class FakeColumnCatalog:
             kind="TABLE",
             metadata_location=None,
             columns=[ColumnSpec(name=n, type="string", nullable=True) for n in self.names],
+            schema_id=self.schema_id,
         )
 
 

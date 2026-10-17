@@ -21,7 +21,7 @@ from lakana_core.models import AuditEventType, Group, Principal, RowFilter
 from lakana_core.policy.columns import (
     ColumnSource,
     list_columns,
-    read_column_names,
+    read_table_description,
     validate_for_table,
 )
 from lakana_core.policy.expressions import columns_of
@@ -29,8 +29,8 @@ from lakana_core.policy.expressions import columns_of
 
 def _check_columns_exist(
     catalog: ColumnSource, p: PrincipalRef, ref: TableRef, environment: str, expression: str
-) -> None:
-    """Refuse a row filter that reads a column the table does not have.
+) -> int | None:
+    """Refuse a row filter that reads a column the table does not have; give its schema id.
 
     The comparison ignores letter case, as the database does when the filter runs, so a
     filter accepted here is a filter the query path can apply. A filter that reads no column
@@ -49,6 +49,13 @@ def _check_columns_exist(
     expression
         The filter, already validated: every column in it is a bare name.
 
+    Returns
+    -------
+    int or None
+        The id of the table's current schema as read for this check, so that the filter records
+        the schema whose columns were checked; `None` for a filter that reads no column and for
+        a table without field ids.
+
     Raises
     ------
     ValidationError
@@ -58,8 +65,9 @@ def _check_columns_exist(
     """
     wanted = columns_of(expression)
     if not wanted:
-        return
-    names = read_column_names(catalog, p, ref, policy="row filter")
+        return None
+    description = read_table_description(catalog, p, ref, policy="row filter")
+    names = [spec.name for spec in description.columns]
     have = {name.lower() for name in names}
     for column in sorted(wanted, key=str.lower):
         if column.lower() in have:
@@ -72,6 +80,7 @@ def _check_columns_exist(
         if names:
             message += " Check the spelling."
         raise ValidationError(message)
+    return description.schema_id
 
 
 class RowFilterService:
@@ -244,7 +253,7 @@ class RowFilterService:
         ref = TableRef(
             environment=environment, namespace=NamespacePath.parse(namespace), name=table
         )
-        _check_columns_exist(self._catalog, p, ref, environment, expression)
+        schema_id = _check_columns_exist(self._catalog, p, ref, environment, expression)
         row = RowFilter(
             id=uuid.uuid4(),
             principal_id=principal_id,
@@ -255,6 +264,7 @@ class RowFilterService:
             environment_id=environment_id,
             table_id=table_id,
             expression=expression,
+            schema_id=schema_id,
             created_by=p.id,
             created_at=datetime.now(UTC),
         )

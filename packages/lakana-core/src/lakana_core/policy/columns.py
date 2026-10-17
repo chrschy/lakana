@@ -40,6 +40,56 @@ class ColumnSource(Protocol):
         ...
 
 
+def read_table_description(
+    catalog: ColumnSource, p: PrincipalRef, ref: TableRef, *, policy: str
+) -> TableDescription:
+    """Describe a table as the caller may, for the policy that is being created.
+
+    Parameters
+    ----------
+    catalog
+        Where to read the table's current columns from.
+    p
+        The acting principal, already authorized to manage policies.
+    ref
+        The table the policy is for.
+    policy
+        What is being created, for the next step in a message: `"mask"` or `"row filter"`.
+
+    Returns
+    -------
+    TableDescription
+        The table, with its columns and, for a managed table, its current schema id.
+
+    Raises
+    ------
+    PermissionDenied
+        If `p` lacks READ_TABLE on the table, which reading its columns needs.
+    ConflictError
+        If the table has no schema yet, or its columns could not be read.
+    """
+    dotted = f"{ref.namespace}.{ref.name}"
+    try:
+        return catalog.describe_table(p, ref)
+    except PermissionDenied as exc:
+        raise PermissionDenied(
+            f"You need READ_TABLE on {dotted!r} so that the column can be checked."
+        ) from exc
+    except NotFoundError as exc:
+        raise ConflictError(
+            f"Table {dotted!r} has no schema recorded yet, so its columns cannot be checked. "
+            "Create the table with its columns first "
+            "(lakana table create NAMESPACE.TABLE --column NAME:TYPE), "
+            f"then create the {policy}, then grant READ_TABLE or write data."
+        ) from exc
+    except (LakanaError, OSError) as exc:
+        logger.error("Could not read the columns of table %r: %s", dotted, exc, exc_info=True)
+        raise ConflictError(
+            f"The columns of table {dotted!r} could not be read; the server's log has the "
+            f"cause. Create the {policy} again when the table is readable."
+        ) from exc
+
+
 def read_column_names(
     catalog: ColumnSource, p: PrincipalRef, ref: TableRef, *, policy: str
 ) -> list[str]:
@@ -68,26 +118,7 @@ def read_column_names(
     ConflictError
         If the table has no schema yet, or its columns could not be read.
     """
-    dotted = f"{ref.namespace}.{ref.name}"
-    try:
-        return [spec.name for spec in catalog.describe_table(p, ref).columns]
-    except PermissionDenied as exc:
-        raise PermissionDenied(
-            f"You need READ_TABLE on {dotted!r} so that the column can be checked."
-        ) from exc
-    except NotFoundError as exc:
-        raise ConflictError(
-            f"Table {dotted!r} has no schema recorded yet, so its columns cannot be checked. "
-            "Create the table with its columns first "
-            "(lakana table create NAMESPACE.TABLE --column NAME:TYPE), "
-            f"then create the {policy}, then grant READ_TABLE or write data."
-        ) from exc
-    except (LakanaError, OSError) as exc:
-        logger.error("Could not read the columns of table %r: %s", dotted, exc, exc_info=True)
-        raise ConflictError(
-            f"The columns of table {dotted!r} could not be read; the server's log has the "
-            f"cause. Create the {policy} again when the table is readable."
-        ) from exc
+    return [spec.name for spec in read_table_description(catalog, p, ref, policy=policy).columns]
 
 
 def list_columns(names: list[str]) -> str:

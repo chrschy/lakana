@@ -17,6 +17,7 @@ import pytest
 
 from lakana_core.errors import ValidationError
 from lakana_core.query_rewrite import (
+    ReadField,
     RewrittenQuery,
     TableSource,
     ViewDefinition,
@@ -25,6 +26,7 @@ from lakana_core.query_rewrite import (
     rewrite_query,
 )
 from lakana_worker import query_child
+from lakana_worker.executor import execute_query
 
 
 def _fetch(rewritten: RewrittenQuery) -> list[tuple[object, ...]]:
@@ -488,3 +490,215 @@ def test_a_full_view_name_in_a_nested_scope_stays_as_written(tmp_path: Path) -> 
 
     with pytest.raises(duckdb.BinderException):
         duckdb.connect().execute(expanded.sql)
+
+
+def _fid(name: str, arrow_type: pa.DataType, field_id: int) -> pa.Field:
+    """Build an Arrow field that carries an Iceberg field id.
+
+    Parameters
+    ----------
+    name
+        The column's name in the file.
+    arrow_type
+        Its type in the file.
+    field_id
+        Its Iceberg field id.
+
+    Returns
+    -------
+    pa.Field
+        The field, with ``PARQUET:field_id`` metadata.
+    """
+    return pa.field(name, arrow_type, metadata={b"PARQUET:field_id": str(field_id).encode()})
+
+
+def _evolved_files(tmp_path: Path) -> tuple[str, str]:
+    """Write a file before and a file after five schema changes, as an Iceberg writer does.
+
+    Between them: `id` int to long, `name` renamed `full_name`, `price` float to double,
+    `old_col` dropped and added again (another field id, another type), `added` added.
+
+    Parameters
+    ----------
+    tmp_path
+        Where the files go.
+
+    Returns
+    -------
+    tuple of str
+        The older file and the newer one.
+    """
+    old, new = tmp_path / "old.parquet", tmp_path / "new.parquet"
+    pq.write_table(
+        pa.table(
+            {
+                "id": pa.array([1, 2], pa.int32()),
+                "name": ["a", "b"],
+                "price": pa.array([1.5, 2.5], pa.float32()),
+                "old_col": ["x-old", "y-old"],
+            },
+            schema=pa.schema(
+                [
+                    _fid("id", pa.int32(), 1),
+                    _fid("name", pa.string(), 2),
+                    _fid("price", pa.float32(), 3),
+                    _fid("old_col", pa.string(), 4),
+                ]
+            ),
+        ),
+        old,
+    )
+    pq.write_table(
+        pa.table(
+            {
+                "id": pa.array([3, 99], pa.int64()),
+                "full_name": ["c", "d"],
+                "price": pa.array([3.5, 4.5], pa.float64()),
+                "old_col": pa.array([50, 60], pa.int32()),
+                "added": ["n1", "n2"],
+            },
+            schema=pa.schema(
+                [
+                    _fid("id", pa.int64(), 1),
+                    _fid("full_name", pa.string(), 2),
+                    _fid("price", pa.float64(), 3),
+                    _fid("old_col", pa.int32(), 5),
+                    _fid("added", pa.string(), 6),
+                ]
+            ),
+        ),
+        new,
+    )
+    return str(old), str(new)
+
+
+_EVOLVED_FIELDS = (
+    ReadField(1, "id", "BIGINT"),
+    ReadField(2, "full_name", "VARCHAR"),
+    ReadField(3, "price", "DOUBLE"),
+    ReadField(5, "old_col", "INTEGER"),
+    ReadField(6, "added", "VARCHAR"),
+)
+_EVOLVED_COLUMNS = {
+    "id": "long",
+    "full_name": "string",
+    "price": "double",
+    "old_col": "int",
+    "added": "string",
+}
+_EVOLVED_ROWS = [
+    (1, "a", 1.5, None, None),
+    (2, "b", 2.5, None, None),
+    (3, "c", 3.5, 50, "n1"),
+    (99, "d", 4.5, 60, "n2"),
+]
+"""The table as its current schema says: renamed data under the new name, the dropped column's
+old values gone, the added columns NULL in the older file."""
+
+
+@pytest.mark.parametrize("policy", ["none", "row_filter", "column_mask"])
+@pytest.mark.parametrize("newest_first", [False, True])
+def test_a_read_by_field_id_gives_the_same_rows_in_either_file_order(
+    tmp_path: Path, newest_first: bool, policy: str
+) -> None:
+    """Without the map the two files fail with "schema mismatch in glob" in either order.
+
+    Parameters
+    ----------
+    tmp_path
+        Where the files go.
+    newest_first
+        The order the catalog lists the files in.
+    policy
+        No policy, a row filter on the re-added column, or a mask on the renamed one.
+    """
+    old, new = _evolved_files(tmp_path)
+    source = TableSource(
+        urls=[new, old] if newest_first else [old, new],
+        file_format="parquet",
+        columns=_EVOLVED_COLUMNS,
+        row_filters=("old_col IS NULL OR old_col > 55",) if policy == "row_filter" else (),
+        column_masks={"full_name": "NULL"} if policy == "column_mask" else {},
+        field_ids=_EVOLVED_FIELDS,
+    )
+
+    rows = sorted(
+        _fetch(rewrite_query("SELECT * FROM gold.t", {"gold.t": source})), key=lambda r: r[0]
+    )
+
+    expected = _EVOLVED_ROWS
+    if policy == "row_filter":
+        expected = [row for row in expected if row[3] is None or row[3] > 55]
+    if policy == "column_mask":
+        expected = [(row[0], None, *row[2:]) for row in expected]
+    assert rows == expected
+
+
+def test_a_read_of_two_thousand_files_and_a_thousand_columns_by_field_id(tmp_path: Path) -> None:
+    """The file list and the map grow with the table and still go through the query process."""
+    fields = [_fid(f"c{i}", pa.int64(), i) for i in range(1, 1001)]
+    path = tmp_path / "wide.parquet"
+    pq.write_table(
+        pa.table({f.name: pa.array([1, 2], pa.int64()) for f in fields}, schema=pa.schema(fields)),
+        path,
+    )
+    source = TableSource(
+        urls=[str(path)] * 2000,
+        file_format="parquet",
+        columns={f"c{i}": "long" for i in range(1, 1001)},
+        field_ids=tuple(ReadField(i, f"c{i}", "BIGINT") for i in range(1, 1001)),
+    )
+    rewritten = rewrite_query(
+        "SELECT count(*) AS n, sum(c500) AS s, count(c1000) AS k FROM gold.wide",
+        {"gold.wide": source},
+    )
+
+    result = execute_query(rewritten.sql, rewritten.parameters, restrict_local_filesystem=False)
+
+    assert result.to_pylist() == [{"n": 4000, "s": 6000, "k": 4000}]
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "SELECT * FROM gold.t WHERE CAST(secret AS INTEGER) = 1",
+        "SELECT id, CAST(secret AS INTEGER) AS n FROM gold.t",
+    ],
+)
+def test_a_users_cast_never_reaches_a_row_the_filter_hides(tmp_path: Path, query: str) -> None:
+    """A value in a hidden row is neither converted nor quoted in an error.
+
+    The row filter runs before the user's predicates and select list.
+
+    Parameters
+    ----------
+    tmp_path
+        Where the file goes.
+    query
+        A query that casts the hidden column in its predicate or select list.
+    """
+    path = tmp_path / "rows.parquet"
+    rows = 30_000
+    pq.write_table(
+        pa.table(
+            {
+                "id": list(range(rows)),
+                "dept": ["a" if i % 2 else "b" for i in range(rows)],
+                "secret": ["HIDDEN-not-a-number" if i % 2 else "1" for i in range(rows)],
+            }
+        ),
+        path,
+        row_group_size=1000,
+    )
+    source = TableSource(
+        urls=[str(path)],
+        file_format="parquet",
+        columns={"id": "long", "dept": "string", "secret": "string"},
+        row_filters=("dept = 'b'",),
+    )
+
+    rewritten = rewrite_query(query, {"gold.t": source})
+
+    rows_out = _fetch(rewritten)
+    assert len(rows_out) == rows // 2
+    assert "HIDDEN" not in repr(rows_out)

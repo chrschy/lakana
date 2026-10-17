@@ -88,7 +88,9 @@ it: `DELETE` is not allowed, also not inside a CTE or subquery.`` A query may no
 
 Unknown keys are errors. YAML anchors, aliases, `<<` merge keys and duplicate keys are refused
 (the error names the file and line); `evolve_schema` and `column_docs` must be real booleans, not
-quoted strings or numbers. Each block is at most 64 KiB, and it ends at the first `*/`, even
+quoted strings or numbers. `evolve_schema` that changes a column's type (other than widening it)
+makes the column a new one: the rows written before read as NULL in it, and the row filters and
+column masks that use it must be created again, as reads under them are refused until then. Each block is at most 64 KiB, and it ends at the first `*/`, even
 inside a string or scalar (when the leftover text then fails to parse, the error says so).
 `table` is written with `replace` (`create` the first time), `view` as a view, `incremental` with
 `append` on `incremental_key`. An incremental asset needs no table made beforehand: its first run

@@ -103,6 +103,7 @@ def _add_filter(
     environment: str = "dev",
     namespace: str = "gold",
     revoked_at: datetime | None = None,
+    schema_id: int | None = None,
 ) -> None:
     """Insert a RowFilter row directly.
 
@@ -125,6 +126,8 @@ def _add_filter(
         if it has more than one part.
     revoked_at
         When set, the filter is inserted already revoked.
+    schema_id
+        The schema id recorded with the filter.
     """
     environment_id, table_id = ensure_table(session, environment, namespace, table)
     session.add(
@@ -141,6 +144,7 @@ def _add_filter(
             created_by=_add_creator(session),
             created_at=datetime.now(UTC),
             revoked_at=revoked_at,
+            schema_id=schema_id,
         )
     )
     session.commit()
@@ -158,6 +162,7 @@ def _add_mask(
     namespace: str = "gold",
     revoked_at: datetime | None = None,
     created_at: datetime | None = None,
+    schema_id: int | None = None,
 ) -> None:
     """Insert a ColumnMask row directly.
 
@@ -184,6 +189,8 @@ def _add_mask(
         When set, the mask is inserted already revoked.
     created_at
         Timestamp to record for this mask; defaults to now.
+    schema_id
+        The schema id recorded with the mask.
     """
     environment_id, table_id = ensure_table(session, environment, namespace, table)
     session.add(
@@ -201,6 +208,7 @@ def _add_mask(
             created_by=_add_creator(session),
             created_at=created_at or datetime.now(UTC),
             revoked_at=revoked_at,
+            schema_id=schema_id,
         )
     )
     session.commit()
@@ -237,6 +245,33 @@ def test_an_explicit_table_id_overrides_the_refs_name(session: Session) -> None:
     resolved = PolicyResolver(session).resolve(alice, _ref("b"), table_id=a_id)
 
     assert resolved.column_masks == {"ssn": "NULL"}
+
+
+def test_every_policy_carries_its_columns_and_its_recorded_schema(session: Session) -> None:
+    """The columns a policy uses and the schema it was written against reach the reader."""
+    alice = _add_principal(session, "alice")
+    _add_filter(session, principal_id=alice.id, expression="region = 'EU' AND TRUE", schema_id=3)
+    _add_mask(session, principal_id=alice.id, column="ssn", expression="md5(name)")
+    _add_mask(session, principal_id=alice.id, column="email", expression="NULL", schema_id=5)
+    _add_filter(session, principal_id=alice.id, expression="has_group('staff')", schema_id=4)
+
+    resolved = PolicyResolver(session).resolve(alice, _ref())
+
+    assert sorted((sorted(policy.columns), policy.schema_id) for policy in resolved.policies) == [
+        ([], 4),
+        (["email"], 5),
+        (["name", "ssn"], None),
+        (["region"], 3),
+    ]
+
+
+def test_a_policy_of_another_principal_is_not_carried(session: Session) -> None:
+    """Only the policies that apply to the reader can make a read stale."""
+    alice = _add_principal(session, "alice")
+    bob = _add_principal(session, "bob")
+    _add_mask(session, principal_id=bob.id, column="ssn", expression="NULL")
+
+    assert PolicyResolver(session).resolve(alice, _ref()).policies == []
 
 
 def test_a_direct_row_filter_is_resolved_and_substituted(session: Session) -> None:

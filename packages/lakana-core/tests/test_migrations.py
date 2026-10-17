@@ -2545,3 +2545,70 @@ def test_0032_adds_the_unknown_mark_of_a_kept_table(
         assert "kept_unknown" not in {c["name"] for c in inspect(engine).get_columns("tables")}
     finally:
         engine.dispose()
+
+
+_REVISION_0033 = "e8b1f4c7d0a3"
+
+
+def test_0033_records_the_schema_a_policy_was_written_against(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revision `0033`: a nullable `schema_id` on row filters and column masks; old rows keep none.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    """
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, _REVISION_0032)
+    engine = create_engine(f"sqlite:///{db_path}")
+    filter_id, mask_id = uuid.uuid4().hex, uuid.uuid4().hex
+    try:
+        for table in ("row_filters", "column_masks"):
+            assert "schema_id" not in {c["name"] for c in inspect(engine).get_columns(table)}
+        with engine.begin() as connection:
+            connection.execute(sa.text("PRAGMA foreign_keys=OFF"))
+            common = (
+                ' (id, principal_id, environment, namespace, "table", expression, created_by,'
+                " created_at{extra}) VALUES (:id, :who, 'dev', 'gold', 'x', 'TRUE', :who,"
+                " '2026-10-17 00:00:00'{values})"
+            )
+            connection.execute(
+                sa.text("INSERT INTO row_filters" + common.format(extra="", values="")),
+                {"id": filter_id, "who": uuid.uuid4().hex},
+            )
+            connection.execute(
+                sa.text(
+                    "INSERT INTO column_masks" + common.format(extra=', "column"', values=", 'ssn'")
+                ),
+                {"id": mask_id, "who": uuid.uuid4().hex},
+            )
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, _REVISION_0033)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        for table, row_id in (("row_filters", filter_id), ("column_masks", mask_id)):
+            found = {c["name"]: c for c in inspect(engine).get_columns(table)}
+            assert found["schema_id"]["nullable"] is True
+            with engine.connect() as connection:
+                row = connection.execute(
+                    sa.text(f"SELECT schema_id FROM {table} WHERE id = :id"), {"id": row_id}
+                ).one()
+            assert row[0] is None  # a policy of an earlier release names no schema
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, _REVISION_0032)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        for table in ("row_filters", "column_masks"):
+            assert "schema_id" not in {c["name"] for c in inspect(engine).get_columns(table)}
+    finally:
+        engine.dispose()

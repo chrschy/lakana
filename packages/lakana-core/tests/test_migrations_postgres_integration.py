@@ -1487,3 +1487,60 @@ def test_0032_on_postgres() -> None:
         migrate.upgrade(url, revision_0032)
         assert _alembic_version(engine) == revision_0032
         engine.dispose()
+
+
+def test_0033_on_postgres() -> None:
+    """0033 adds a nullable `schema_id` to row filters and column masks; old rows keep none.
+
+    A filter row is there when the upgrade runs: the column is an integer, null for that row.
+    The downgrade drops the columns and keeps the row, and the upgrade runs again.
+    """
+    revision_0032 = "d7a0e3b6c9f2"
+    revision_0033 = "e8b1f4c7d0a3"
+    filter_id = uuid.uuid4()
+    now = datetime.now(UTC)
+    with PostgresContainer("postgres:16", driver="pg8000") as pg:
+        url = pg.get_connection_url()
+        migrate.upgrade(url, revision_0032)
+        engine = sqlalchemy.create_engine(url)
+        with engine.begin() as conn:
+            conn.execute(sqlalchemy.text("SET LOCAL session_replication_role = replica"))
+            conn.execute(
+                sqlalchemy.text(
+                    "INSERT INTO row_filters (id, principal_id, environment, namespace, "
+                    '"table", expression, created_by, created_at) VALUES '
+                    "(:id, :who, 'dev', 'gold', 'x', 'TRUE', :who, :now)"
+                ),
+                {"id": filter_id, "who": uuid.uuid4(), "now": now},
+            )
+
+        migrate.upgrade(url, revision_0033)
+        assert _alembic_version(engine) == revision_0033
+        for table in ("row_filters", "column_masks"):
+            column = next(
+                c for c in sqlalchemy.inspect(engine).get_columns(table) if c["name"] == "schema_id"
+            )
+            assert type(column["type"]).__name__ == "INTEGER"
+            assert column["nullable"] is True
+        with engine.connect() as conn:
+            recorded = conn.execute(
+                sqlalchemy.text("SELECT schema_id FROM row_filters WHERE id = :id"),
+                {"id": filter_id},
+            ).scalar()
+        assert recorded is None
+
+        migrate.downgrade(url, revision_0032)
+        assert _alembic_version(engine) == revision_0032
+        for table in ("row_filters", "column_masks"):
+            assert "schema_id" not in {
+                c["name"] for c in sqlalchemy.inspect(engine).get_columns(table)
+            }
+        with engine.connect() as conn:
+            kept = conn.execute(
+                sqlalchemy.text("SELECT count(*) FROM row_filters WHERE id = :id"),
+                {"id": filter_id},
+            ).scalar()
+        assert kept == 1
+        migrate.upgrade(url, revision_0033)
+        assert _alembic_version(engine) == revision_0033
+        engine.dispose()

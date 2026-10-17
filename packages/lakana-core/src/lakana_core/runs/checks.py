@@ -1898,9 +1898,9 @@ when that leaves none there is nothing to list, whatever the check's SQL names.
 
 POLICY_NEEDS_A_COLUMN = (
     "A row filter or column mask of yours on `{table}` uses the column `{column}`, which is "
-    "not the same column in the checked snapshot and in the table now (it was added or dropped "
-    "since, or another column took its name), so the rows this check found cannot be shown "
-    "under it. The number of rows the check found remains: "
+    "not the same column in the checked snapshot and in the table now (it was added, dropped "
+    "or renamed since, or another column took its name), so the rows this check found cannot "
+    "be shown under it. The number of rows the check found remains: "
     "`lakana check list --run {run} --env {environment}`."
 )
 """Why the rows of a check are not shown to a reader whose policy cannot be applied to them.

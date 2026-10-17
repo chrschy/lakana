@@ -273,6 +273,7 @@ def test_a_writer_landing_between_the_precheck_and_the_commit_is_a_conflict(
         *,
         requirements: Sequence[TableRequirement],
         updates: Sequence[TableUpdate],
+        own_data_files: bool = False,
     ) -> LoadedTable:
         if not fired:
             fired.append(True)
@@ -283,7 +284,9 @@ def test_a_writer_landing_between_the_precheck_and_the_commit_is_a_conflict(
                 schema=_ids([5]).schema,
                 batches=_ids([5]).to_batches(),
             )
-        return real_commit(p, ref, requirements=requirements, updates=updates)
+        return real_commit(
+            p, ref, requirements=requirements, updates=updates, own_data_files=own_data_files
+        )
 
     monkeypatch.setattr(catalog, "commit_table", racing)
     with pytest.raises(ConflictError) as raised:
@@ -322,6 +325,7 @@ def test_a_writer_landing_in_the_commit_of_an_empty_table_is_a_conflict(
         *,
         requirements: Sequence[TableRequirement],
         updates: Sequence[TableUpdate],
+        own_data_files: bool = False,
     ) -> LoadedTable:
         if not fired:
             fired.append(True)
@@ -332,7 +336,9 @@ def test_a_writer_landing_in_the_commit_of_an_empty_table_is_a_conflict(
                 schema=_ids([5]).schema,
                 batches=_ids([5]).to_batches(),
             )
-        return real_commit(p, ref, requirements=requirements, updates=updates)
+        return real_commit(
+            p, ref, requirements=requirements, updates=updates, own_data_files=own_data_files
+        )
 
     monkeypatch.setattr(catalog, "commit_table", racing)
     with pytest.raises(ConflictError) as raised:

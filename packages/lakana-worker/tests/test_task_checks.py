@@ -659,9 +659,12 @@ def test_the_error_of_a_check_holds_no_value_of_the_table(world: World) -> None:
     task = _task(world, "silver.people")
     (result,) = _results(world, task.id)
     (count,) = _counts(world, task.id)
-    # The count's own query run keeps what the query path stores for any query.
-    assert count.error_message is not None and "Alice Smith" in count.error_message
-    assert result.error == f"Conversion Error: the check's query failed. {_SEE_YOURSELF}"
+    # The read of a table is mapped by field id, so the query child already words a failed
+    # conversion without the value; the count's run and the result both say so.
+    assert count.error_message is not None
+    assert count.error_message.startswith("Query failed: a value could not be converted")
+    assert "Alice Smith" not in count.error_message
+    assert result.error == (f"the check's query failed: the query is not valid. {_SEE_YOURSELF}")
     assert task.status is TaskStatus.FAILED and task.error_message is not None
     (attempt,) = _attempts(world, task.id)
     shown_to_run_readers = [

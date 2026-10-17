@@ -668,6 +668,18 @@ def test_create_accepts_columns_the_table_has_in_any_letter_case(session: Sessio
     assert [(p.id, ref.name) for p, ref in catalog.calls] == [(admin.id, "customers")]
 
 
+@pytest.mark.parametrize(
+    ("current", "expression", "recorded"),
+    [(7, "region = 'EU'", 7), (7, "TRUE", None), (None, "region = 'EU'", None)],
+)
+def test_create_records_the_schema_the_filter_was_written_against(
+    session: Session, current: int | None, expression: str, recorded: int | None
+) -> None:
+    """The current schema id is stored with a filter that reads a column, and none otherwise."""
+    service, admin = _ready(session, FakeColumnCatalog(schema_id=current))
+    assert service.create(admin, **_filter_args(expression)).schema_id == recorded
+
+
 def test_create_refuses_a_column_the_table_does_not_have(session: Session) -> None:
     """The refusal names the column, the table and the columns the table has."""
     service, admin = _ready(session, FakeColumnCatalog(names=["id", "region"]))

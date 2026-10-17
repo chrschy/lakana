@@ -14,7 +14,8 @@ from lakana_core.auth import PrincipalRef
 from lakana_core.errors import ValidationError
 from lakana_core.identifiers import TableRef
 from lakana_core.models import ColumnMask, Group, GroupMembership, RowFilter
-from lakana_core.policy.expressions import HAS_GROUP
+from lakana_core.policy.expressions import HAS_GROUP, columns_of
+from lakana_core.policy.renames import PolicyColumns
 from lakana_core.sql_syntax import SQL_SYNTAX_ERRORS
 
 UNREADABLE_POLICY_MESSAGE = (
@@ -38,10 +39,15 @@ class ResolvedPolicy:
     column_masks
         Column name to its applicable, already-substituted mask expression.
         A column with no entry has no mask.
+    policies
+        One entry per applicable filter and mask, with the columns it uses and the schema
+        it was written against. Unlike `column_masks`, two masks on a column that collapse to
+        `NULL` are still two entries, so the check for a rename sees both.
     """
 
     row_filters: list[str] = field(default_factory=list)
     column_masks: dict[str, str] = field(default_factory=dict)
+    policies: list[PolicyColumns] = field(default_factory=list)
 
 
 def _substitute_context_functions(
@@ -251,4 +257,11 @@ class PolicyResolver:
             )
             for column, rows in by_column.items()
         }
-        return ResolvedPolicy(row_filters=row_filters, column_masks=column_masks)
+        policies = [
+            PolicyColumns(frozenset(columns_of(row.expression)), row.schema_id)
+            for row in filter_rows
+        ] + [
+            PolicyColumns(frozenset({row.column, *columns_of(row.expression)}), row.schema_id)
+            for row in mask_rows
+        ]
+        return ResolvedPolicy(row_filters=row_filters, column_masks=column_masks, policies=policies)

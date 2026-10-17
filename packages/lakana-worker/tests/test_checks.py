@@ -766,8 +766,13 @@ def test_a_value_the_query_engine_quotes_stays_out_of_the_checks_error(
     )
 
     assert counted.error_cause == "invalid_query"
-    assert counted.error_message is not None and "Alice Smith" in counted.error_message
-    worded = error_text(counted.error_cause, counted.error_message, runner.name)
+    # A table is read by field id, and the query child words a failed conversion without the
+    # value; `error_text` still cuts a raw engine message, as another read path can store it.
+    assert counted.error_message is not None
+    assert counted.error_message.startswith("Query failed: a value could not be converted")
+    assert "Alice Smith" not in counted.error_message
+    raw = "Query failed: Conversion Error: Could not convert string 'Alice Smith' to INT32"
+    worded = error_text(counted.error_cause, raw, runner.name)
     assert worded == (
         "Conversion Error: the check's query failed. Run the check's SQL yourself to see the "
         "full message."

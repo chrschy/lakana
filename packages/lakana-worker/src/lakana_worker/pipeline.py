@@ -21,9 +21,10 @@ through with their own message verbatim, since that message is built entirely fr
 table name the submitter's own query already named (and, for the last two, a check's
 name and a run id) and never carries a storage location. The refusals of a read at a check
 (`CheckedSnapshotGoneError`, `CheckResultGoneError`, `NoCheckedSnapshotError`) pass
-through on the same grounds; see `_resolve_sources_opaquely`. Every other stage's message has the
-run's own resolved locations redacted out of it before it is stored. A decrypted
-secret's plaintext values are treated the same way: added to the same
+through on the same grounds, and so does the refusal of a read after a rename touched a
+policy's column (`PolicyColumnRenamedError`); see `_resolve_sources_opaquely`. Every other
+stage's message has the run's own resolved locations redacted out of it before it is
+stored. A decrypted secret's plaintext values are treated the same way: added to the same
 redaction list as soon as they are resolved, which `run_one` does first —
 before view expansion, `rewrite_query`, `execute_query`, the write step or
 a maintenance run, since any of those can fail and echo one back. Only
@@ -78,6 +79,7 @@ from lakana_core.auth import (
 )
 from lakana_core.catalog.datafiles import list_data_files
 from lakana_core.catalog.external_location import check_claim_free, parse_external_location
+from lakana_core.catalog.field_ids import read_fields, refuse_changed_nested_fields
 from lakana_core.catalog.maintenance import (
     DEFAULT_KEEP_DAYS,
     DEFAULT_KEEP_LAST,
@@ -119,9 +121,11 @@ from lakana_core.models import (
     WriteMode,
 )
 from lakana_core.policy.expressions import columns_of
+from lakana_core.policy.renames import policy_column_renamed_message, renamed_policy_column
 from lakana_core.policy.resolver import PolicyResolver
 from lakana_core.query_rewrite import (
     ExpandedQuery,
+    ReadField,
     RewrittenQuery,
     TableSource,
     ViewDefinition,
@@ -171,6 +175,7 @@ from lakana_worker.executor import (
 from lakana_worker.memory import MACHINE_MEMORY_ADVICE
 
 if TYPE_CHECKING:
+    from pyiceberg.table.metadata import TableMetadata
     from pyiceberg.types import NestedField
 
 logger = logging.getLogger(__name__)
@@ -333,6 +338,16 @@ class _RowsNotListed(ValidationError):
     names it, the result's run and the environment; `_resolve_sources_opaquely` passes it
     through. A `ValidationError`, so the run's cause is `invalid_query`, as for a check whose
     SQL names a column that is not shown.
+    """
+
+
+class PolicyColumnRenamedError(ValidationError):
+    """A read is refused because a rename may have moved a row filter or column mask.
+
+    Raised by `_resolve_sources` for an Iceberg table when a column that a policy of the reader
+    uses changed its name, or changed owner, since the policy was created. Nothing is read. The
+    text is built from the table's dotted name as the query names it and a column of the
+    reader's own policy, so `_resolve_sources_opaquely` passes it through.
     """
 
 
@@ -508,6 +523,9 @@ def _resolve_sources(
         built again, so the name now leads to another table that never had that snapshot);
         or if the name the result stores for its table leads to no table any more (it was
         renamed or dropped).
+    PolicyColumnRenamedError
+        For an Iceberg table: if a column that a row filter or column mask of the reader uses
+        was renamed, or given to another field id, since the policy was created.
     _RowsNotListed
         For the table read at a check: if the table has none of the snapshot's columns any
         more, or if a row filter or an applied column mask of the reader reads a column that
@@ -567,10 +585,14 @@ def _resolve_sources(
     sources: dict[str, TableSource] = {}
     for dotted in dotted_refs:
         declared_columns_only = False
+        field_ids: tuple[ReadField, ...] = ()
         # For the one table read at a check: the result, and the names (lower-cased, as the
         # database compares them) of the columns that are the same column, by field id, in
         # the checked snapshot and in the table now.
         at_check: tuple[CheckResult, frozenset[str]] | None = None
+        # The metadata of an Iceberg table, whose schemas show what a rename moved; `None` for a
+        # raw table, whose files are read by name and whose policies bind by name.
+        iceberg_metadata: TableMetadata | None = None
         *namespace_parts, name = dotted.split(".")
         ref = TableRef(
             environment=environment_name,
@@ -650,6 +672,7 @@ def _resolve_sources(
                 # The checked snapshot's own schema: a rollback sets the table's schema
                 # back, so the current one can lack a column the snapshot's files have.
                 fields = loaded_at.columns
+            iceberg_metadata = metadata
             table_location = metadata.location
             # Fail closed: a
             # table whose own location is not the id-suffixed leaf
@@ -753,6 +776,12 @@ def _resolve_sources(
                     for column in not_shown
                 }
                 declared_columns_only = True
+            # The read projects every file onto the schema it uses, by field id, so a column
+            # renamed, re-added or widened since a file was written reads as that schema says.
+            read = [column for column in fields if column.name in columns]
+            field_ids = read_fields(dotted, read)
+            if snapshot_id is not None:
+                refuse_changed_nested_fields(dotted, metadata, snapshot_id, read)
             if pins is not None:
                 pins[ref] = SnapshotPin(row.id, snapshot_id)
         urls = [
@@ -763,6 +792,14 @@ def _resolve_sources(
         ]
         resolved_policy = policy_resolver.resolve(principal, ref, table_id=row.id)
         column_masks = resolved_policy.column_masks
+        if iceberg_metadata is not None:
+            # A policy binds to a column name and the files are read by field id, so a rename
+            # since the policy was written can leave it on another column, with no error. That
+            # holds for a read at a checked snapshot as well. Nothing is read, and a policy is
+            # never left out.
+            renamed = renamed_policy_column(iceberg_metadata, resolved_policy.policies)
+            if renamed is not None:
+                raise PolicyColumnRenamedError(policy_column_renamed_message(renamed, dotted))
         if at_check is not None:
             # Policies are written for the table as it is now; this source is an older
             # snapshot of it, reduced to the columns the table still has.
@@ -787,11 +824,14 @@ def _resolve_sources(
             # policy is never left out. Said here, before the query runs: in the database a
             # missing column would be a "column not found" that suggests columns the reader
             # is not shown, and a column that is merely another one would not fail at all.
+            # A column that has the same field id but is not shown (its type changed) is not
+            # mapped by the read, so a policy on it is told the same way, not as a column of the
+            # reader's own SQL.
             not_the_same = sorted(
                 column
                 for expression in (*resolved_policy.row_filters, *column_masks.values())
                 for column in columns_of(expression)
-                if column.lower() not in same_columns
+                if column.lower() not in same_columns or column.lower() not in shown_names
             )
             if not_the_same:
                 raise _RowsNotListed(
@@ -806,6 +846,7 @@ def _resolve_sources(
             row_filters=resolved_policy.row_filters,
             column_masks=column_masks,
             declared_columns_only=declared_columns_only,
+            field_ids=field_ids,
         )
     if checked is not None and not read_at_check:
         # Every table the query names was resolved (and its read authorized), and none is
@@ -919,6 +960,8 @@ def _resolve_sources_opaquely(
         If `_resolve_sources` raised it — passed through verbatim.
     _RowsNotListed
         If `_resolve_sources` raised it — passed through verbatim.
+    PolicyColumnRenamedError
+        If `_resolve_sources` raised it — passed through verbatim.
     _ResolutionFailed
         If `_resolve_sources` raised anything else. The original exception
         is the `__cause__`; only its class name survives into the message.
@@ -943,6 +986,7 @@ def _resolve_sources_opaquely(
         CheckResultGoneError,
         NoCheckedSnapshotError,
         _RowsNotListed,
+        PolicyColumnRenamedError,
     ):
         raise
     except Exception as exc:
@@ -1080,7 +1124,8 @@ class _Prepared:
     tables
         Each table the query reads, by dotted name, with the lower-cased names of the columns
         the read declares for it: what a failure that names only a column is traced to a
-        table by.
+        table by (raw-zone tables only: an Iceberg table is read by field id, and its files
+        never lack a column).
     projected
         The tables among them that are read through an explicit column list, because a row
         filter, a column mask or a read at a checked snapshot applies to them.
@@ -1316,11 +1361,13 @@ def _resolve_and_rewrite(
         tables={
             name: frozenset(column.lower() for column in source.columns)
             for name, source in sources.items()
+            if not source.field_ids
         },
         projected=frozenset(
             name
             for name, source in sources.items()
-            if source.row_filters or source.column_masks or source.declared_columns_only
+            if not source.field_ids
+            and (source.row_filters or source.column_masks or source.declared_columns_only)
         ),
         named=named_columns(expanded.sql),
     )
@@ -1410,7 +1457,10 @@ def _schema_mismatch_failure(
     projected: frozenset[str],
     named: frozenset[str],
 ) -> ValidationError | None:
-    """Explain a read that failed because the files of a table lack a column it declares.
+    """Explain a read that failed because the files of a raw-zone table lack a column it declares.
+
+    An Iceberg table is read by field id and never meets this; `_resolve_and_rewrite` leaves it
+    out of `tables`.
 
     A column added to a table is not in the files written before. The database reads the files
     of one read together and fails at the first that lacks a column the read names, in either of
