@@ -17,12 +17,32 @@ import pytest
 
 from lakana_core.errors import ValidationError
 from lakana_core.query_rewrite import (
+    RewrittenQuery,
     TableSource,
     ViewDefinition,
     check_blacklist,
     expand_views,
     rewrite_query,
 )
+from lakana_worker import query_child
+
+
+def _fetch(rewritten: RewrittenQuery) -> list[tuple[object, ...]]:
+    """Run a rewritten query on a fresh connection the way the query process does.
+
+    Parameters
+    ----------
+    rewritten
+        The rewrite.
+
+    Returns
+    -------
+    list of tuple
+        The rows.
+    """
+    connection = duckdb.connect()
+    query_child.set_variables(connection, rewritten.parameters)
+    return connection.execute(rewritten.sql).fetchall()
 
 
 def _parquet(*urls: str) -> TableSource:
@@ -87,7 +107,7 @@ def test_a_column_mask_survives_execution_against_real_duckdb(tmp_path: Path) ->
     )
 
     rewritten = rewrite_query("SELECT * FROM gold.customers", {"gold.customers": source})
-    rows = duckdb.connect().execute(rewritten.sql, rewritten.parameters).fetchall()
+    rows = _fetch(rewritten)
 
     assert rows == [(1, None), (2, None)]
     assert "111-22-3333" not in str(rows)
@@ -116,7 +136,7 @@ def test_a_row_filter_and_column_mask_both_take_effect_together(tmp_path: Path) 
     )
 
     rewritten = rewrite_query("SELECT * FROM gold.customers", {"gold.customers": source})
-    rows = duckdb.connect().execute(rewritten.sql, rewritten.parameters).fetchall()
+    rows = _fetch(rewritten)
 
     assert sorted(rows) == [(1, "EU", None), (3, "EU", None)]
 
@@ -135,7 +155,7 @@ def test_rewrite_keeps_two_sanitize_colliding_tables_apart_through_duckdb(
         sources={"a.b_c": _parquet(str(first)), "a_b.c": _parquet(str(second))},
     )
 
-    rows = duckdb.connect().execute(rewritten.sql, rewritten.parameters).fetchall()
+    rows = _fetch(rewritten)
     assert sorted(rows) == [(1,), (2,)]
 
 
@@ -177,7 +197,7 @@ def _run(sql: str, sources: dict[str, TableSource]) -> list[tuple[object, ...]]:
         The fetched rows, sorted.
     """
     rewritten = rewrite_query(sql, sources)
-    rows = duckdb.connect().execute(rewritten.sql, rewritten.parameters).fetchall()
+    rows = _fetch(rewritten)
     return sorted(rows, key=repr)
 
 

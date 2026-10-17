@@ -167,7 +167,8 @@ def test_a_read_writes_a_complete_stream_and_exits_0() -> None:
     assert _table(stream).to_pydict() == {"answer": [42]}
 
 
-def test_every_bound_type_arrives_as_itself() -> None:
+def test_the_statement_reads_every_value_as_a_variable() -> None:
+    """Each value the platform sends arrives as a DuckDB variable of its own type."""
     moment = dt.datetime(2026, 10, 8, 12, 30, tzinfo=dt.UTC)
     parameters = {
         "urls": ["a", "b"],
@@ -178,8 +179,10 @@ def test_every_bound_type_arrives_as_itself() -> None:
         "aware": moment,
     }
     sql = (
-        "SELECT len($urls) AS urls, $n + 1 AS n, $d * 2 AS d, $day + 1 AS day, "
-        "$naive < $naive + INTERVAL 1 HOUR AS naive, epoch($aware) AS aware"
+        "SELECT len(getvariable('urls')) AS urls, getvariable('n') + 1 AS n, "
+        "getvariable('d') * 2 AS d, getvariable('day') + 1 AS day, "
+        "getvariable('naive') < getvariable('naive') + INTERVAL 1 HOUR AS naive, "
+        "epoch(getvariable('aware')) AS aware"
     )
     code, stream, _stderr = _main(_request(sql, parameters=parameters, mode=WRITE))
     assert code == EXIT_OK
@@ -193,6 +196,58 @@ def test_every_bound_type_arrives_as_itself() -> None:
             "aware": moment.timestamp(),
         }
     ]
+
+
+def test_a_variable_read_streams_more_rows_than_its_memory_limit_could_hold(
+    tmp_path: Path,
+) -> None:
+    """About 57 MB of rows through a 32 MB limit: the result streams, batch by batch."""
+    path = tmp_path / "rows.parquet"
+    duckdb.sql(
+        "COPY (SELECT i, repeat('x', 50) || i::VARCHAR AS s FROM range(1000000) AS t(i)) "
+        f"TO '{path}' (FORMAT parquet)"
+    )
+    request = _request(
+        "SELECT * FROM read_parquet(getvariable('v_0_files'))",
+        parameters={"v_0_files": [str(path)]},
+        restrict_local_filesystem=False,
+        memory_limit="32MB",
+        threads=1,
+    )
+
+    code, stream, stderr = _main(request)
+
+    assert (code, stderr) == (EXIT_OK, "")
+    batches = list(pa.ipc.open_stream(stream))
+    assert len(batches) > 1
+    assert sum(batch.num_rows for batch in batches) == 1_000_000
+
+
+def test_a_failing_statement_never_echoes_a_value_it_was_given(tmp_path: Path) -> None:
+    """The URL is a variable's value, never SQL text, so DuckDB's error cannot quote it."""
+    path = tmp_path / "X-Amz-Signature=SECRET123.parquet"
+    duckdb.sql(f"COPY (SELECT 1 AS id) TO '{path}' (FORMAT parquet)")
+    request = _request(
+        "SELECT nope FROM read_parquet(getvariable('v_0_files'))",
+        parameters={"v_0_files": [str(path)]},
+        restrict_local_filesystem=False,
+    )
+
+    code, _stream, stderr = _main(request)
+
+    error = decode_error(stderr.encode())
+    assert code == EXIT_FAILED
+    assert error is not None
+    assert 'Referenced column "nope" not found' in error.message
+    assert "SECRET123" not in stderr
+
+
+def test_a_variable_name_that_is_not_an_identifier_is_never_written_into_sql() -> None:
+    """Names are written into `SET VARIABLE`, where DuckDB takes no bound name."""
+    connection = duckdb.connect(":memory:")
+    with pytest.raises(ValueError, match="not an identifier"):
+        query_child.set_variables(connection, {'x" = 1; SELECT 1; --': ["a"]})
+    assert connection.execute("SELECT count(*) FROM duckdb_variables()").fetchone() == (0,)
 
 
 def test_a_write_and_a_describe_run_in_utc_and_a_read_in_the_session_zone() -> None:

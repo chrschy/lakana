@@ -608,11 +608,10 @@ def _child(
 def _named(parameters: Mapping[str, object] | None) -> dict[str, object] | None:
     """Refuse anything but a name-to-value mapping as query parameters.
 
-    Every value the platform binds — each URL list and an
-    incremental write's watermark — binds under a named, per-run random
-    parameter. A positional sequence is what once let a user placeholder
-    reach a URL list, so it is refused here rather than handed to DuckDB,
-    whatever a caller's static types said.
+    Every value the platform passes — each URL list and an incremental write's
+    watermark — is set as a named DuckDB variable. A positional sequence is what
+    once let a user placeholder reach a URL list, so it is refused here rather than
+    handed to DuckDB, whatever a caller's static types said.
 
     Parameters
     ----------

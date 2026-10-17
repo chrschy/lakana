@@ -102,7 +102,7 @@ def _assert_no_policy_text(message: str, source: TableSource) -> None:
     source
         The source whose filter, mask and URL must not appear.
     """
-    for secret in ("id > 1", "'***'", "c.parquet", "__lakana_urls_", source.urls[0]):
+    for secret in ("id > 1", "'***'", "c.parquet", source.urls[0]):
         assert secret not in message
 
 

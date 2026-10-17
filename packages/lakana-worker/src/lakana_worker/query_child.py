@@ -27,6 +27,12 @@ Why each configuration statement is there, and why their order matters:
   `_is_refused_spill` tells them apart by planning the statement again.
 * The resource limits come last; none touches the file system when set.
 
+**Values are variables, not parameters.** Every value the statement reads (a file list, a
+field-id map, a watermark) is set with ``SET VARIABLE "<name>" = ?`` before the statement, and
+the statement runs with no parameters through ``connection.sql(sql).to_arrow_reader(n)``. With
+parameters, ``sql()`` holds the whole result in memory before the first batch, and DuckDB 2
+removed the Arrow export from ``execute()`` results.
+
 **Being asked to stop.** The statement runs in a second thread. The main thread stays in Python,
 so the handler of ``SIGTERM`` runs at once; it sets a flag, and the main thread then calls
 `connection.interrupt()` ten times a second until the statement's thread ends. DuckDB clears the
@@ -58,7 +64,7 @@ import signal
 import sys
 import threading
 import traceback
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import BinaryIO, NoReturn, TextIO
 
 import duckdb
@@ -80,6 +86,7 @@ from lakana_worker.query_protocol import (
     READ,
     TRANSIENT,
     ErrorDocument,
+    ParameterValue,
     Request,
     decode_request,
     encode_error,
@@ -114,6 +121,9 @@ interruption in place of the statement's own error (about 1 failure in 2,000 at 
 DuckDB 1.5.5). Nothing here interrupted the connection, so the cause is lost."""
 _SINK_CLOSED = "The worker stopped reading the result."
 _PR_SET_PDEATHSIG = 1
+_VARIABLE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
+"""A name the child sets a variable under. DuckDB binds no name in `SET VARIABLE`, so the name
+is written into the statement, double-quoted, and must be an identifier."""
 
 _Statement = tuple[str, dict[str, object] | None]
 
@@ -520,6 +530,39 @@ def _report_unexpected(exc: BaseException) -> None:
         sys.stderr.write(f"Traceback (most recent call last):\n{frames}{type(exc).__qualname__}\n")
 
 
+def set_variables(
+    connection: duckdb.DuckDBPyConnection, variables: Mapping[str, ParameterValue]
+) -> None:
+    """Set each value the statement reads as a DuckDB variable of that name.
+
+    The value is bound, never written into SQL text, so no URL can appear in a statement
+    DuckDB quotes back in an error. The statement then runs with no parameters, through the
+    call whose result streams and keeps an Arrow export in DuckDB 2.
+
+    Parameters
+    ----------
+    connection
+        The configured connection.
+    variables
+        Name to value, as the request carries them.
+
+    Raises
+    ------
+    ValueError
+        If a name is not an identifier. The platform generates every name, so this is a
+        defect of the platform, never a user's mistake.
+    """
+    for name, value in variables.items():
+        if _VARIABLE_NAME.fullmatch(name) is None:
+            raise ValueError(f"query variable {ascii(name)[:60]} is not an identifier")
+        # B608: `name` is an identifier, checked above; the value is bound.
+        statement = f'SET VARIABLE "{name}" = '  # nosec B608
+        if isinstance(value, list):
+            connection.execute(statement + "?::VARCHAR[]", [value])
+        else:
+            connection.execute(statement + "?", [value])
+
+
 def serve(
     request: Request, sink: BinaryIO, session: Session, asked: threading.Event
 ) -> ErrorDocument | None:
@@ -559,10 +602,13 @@ def serve(
                 configure(connection, request)
                 if asked.is_set():
                     return ErrorDocument(INTERRUPTED, _ASKED)
-                parameters: dict[str, object] | None = dict(request.parameters) or None
+                set_variables(connection, request.parameters)
                 if request.mode != DESCRIBE:
-                    statement = (request.sql, parameters)
-                result = connection.execute(request.sql, parameters)
+                    statement = (request.sql, None)
+                # `sql` and not `execute`: its relation streams through `to_arrow_reader`, and it
+                # is the call whose result keeps an Arrow export in DuckDB 2. Nothing is bound to
+                # the statement; what it reads was set as variables above.
+                result = connection.sql(request.sql)
                 if result is None:
                     return ErrorDocument(INVALID, NO_RESULT_MESSAGE)
                 reader = result.to_arrow_reader(request.batch_rows)

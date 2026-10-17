@@ -1982,7 +1982,7 @@ own process opens no DuckDB connection and imports no `duckdb`.
 - **What it is given** is its request, written to its standard input: `mode`, `sql`,
   `parameters`, `restrict_local_filesystem`, `memory_limit`, `threads`, `temp_directory`,
   `max_temp_directory_size`, `batch_rows`, `extension_directory` and `parent_pid`: the rewritten SQL
-  with its presigned URLs and bound values, the limits DuckDB applies, and two process facts. No
+  and the values it reads as variables (the presigned URLs among them), the limits DuckDB applies, and two process facts. No
   database URL, no storage credential, no token, no secret.
   `test_the_document_has_exactly_the_fields_the_child_is_given` pins the list.
   The request is at most 64 MiB (`MAX_REQUEST_BYTES`; one presigned URL per data file, about
@@ -2070,19 +2070,23 @@ any table function except the generators in `_ALLOWED_TABLE_FUNCTIONS` (`range`,
 so a function DuckDB adds later is refused by default.
 `extract_table_refs` never reports a function call as a table.
 
-**User SQL may not contain a query parameter or placeholder (`?`, `$1`, `$name`).** The
-rewriter binds each table's resolved file list — on S3, presigned URLs of the raw files —
-as a query parameter; a user placeholder bound to it and returned the URLs as data,
-bypassing every row filter and column mask. `query_rewrite._reject_placeholders` refuses any
-`exp.Placeholder`/`exp.Parameter` node, in `check_blacklist` and again inside every parse
-`rewrite_query`/`extract_table_refs` make; separately, the rewriter binds each list under a
-named parameter with a fresh random token per rewrite (`$__lakana_urls_<token>_<n>`), never
-positionally, so a positional placeholder that ever slipped through cannot bind at all. The
-same holds everywhere SQL is parsed, including a view's stored SQL when `expand_views` expands
-it. An incremental write's watermark binds the same way, under `$__lakana_watermark_<token>`
-(`catalog.watermark.wrap_incremental`), and `executor.execute_query`/`stream_query`/
-`describe_query` refuse a positional sequence outright (`TypeError`): only a name-to-value
-mapping binds.
+**User SQL cannot reach the values the platform sets, and may not contain a placeholder
+(`?`, `$1`, `$name`).** The rewriter reads each table's resolved file list — on S3, presigned
+URLs of the raw files — through `getvariable('v_<n>_files')`; the query child sets each value
+before the statement (`set_variables`: ``SET VARIABLE "v_0_files" = ?::VARCHAR[]``, the value
+bound) and runs the statement with no parameters (`connection.sql(sql).to_arrow_reader(n)`,
+the call that streams and that keeps an Arrow export in DuckDB 2; `sql()` with parameters holds
+the whole result before the first batch). An incremental write's watermark is set the same way,
+as `v_watermark` (`catalog.watermark.wrap_incremental`). The names are predictable on purpose:
+`getvariable` and `duckdb_variables` are blacklisted and a `SET`/`RESET VARIABLE` is refused as
+a statement that is not a read, so no user SQL reads or sets a variable, and the child writes a
+name into `SET VARIABLE` only when it is an identifier. `query_rewrite._reject_placeholders`
+still refuses any `exp.Placeholder`/`exp.Parameter` node, in `check_blacklist` and again inside
+every parse `rewrite_query`/`extract_table_refs` make, including a view's stored SQL: nothing is
+bound to the statement, so a placeholder has no use, and DuckDB refuses one (`Unexpected
+prepared parameter`). A placeholder once bound to the rewriter's own URL list and returned the
+URLs as data. `executor.execute_query`/`stream_query`/`describe_query` refuse a positional
+sequence outright (`TypeError`): only a name-to-value mapping is accepted.
 
 **A submitted query holds no statement but a read, at any depth.** `check_blacklist` requires
 the statement as a whole to be an `exp.Query`, and `_reject_statements_inside` then walks the

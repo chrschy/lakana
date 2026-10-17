@@ -4,19 +4,14 @@ The watermark is `max(<key>)` over a target's current snapshot, read from
 the Iceberg manifests' per-file upper bounds rather than by scanning rows
 : exact for every allowed key type, and it never reads the
 target's data. It is stored on the run as a type-tagged string and bound to
-the wrapped query as a DuckDB parameter, never rendered into SQL text.
-
-That parameter is *named*, `$__lakana_watermark_<token>`, with a fresh 128-bit
-`secrets` token per wrap — the same scheme the rewriter uses for its URL
-lists. DuckDB refuses to mix named and positional parameters, so a
-positional `?` would not bind at all beside them, and a name no one can
-predict is one no SQL text can address.
+the wrapped query as the DuckDB variable `v_watermark`, which the wrapped
+query reads with `getvariable`; it is never rendered into SQL text, and no
+user SQL can read or set a variable.
 """
 
 from __future__ import annotations
 
 import datetime as dt
-import secrets
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -45,11 +40,8 @@ WatermarkValue = int | Decimal | dt.date | dt.datetime
 INCREMENTAL_KEY_TYPES = ("int", "long", "decimal", "date", "timestamp", "timestamptz")
 """The key types an incremental append accepts."""
 
-_WATERMARK_PARAMETER_PREFIX = "__lakana_watermark_"
-"""Leading text of the parameter name a watermark binds under."""
-
-_WATERMARK_TOKEN_BYTES = 16
-"""Random bytes in a watermark parameter's token (32 hex characters)."""
+WATERMARK_VARIABLE = "v_watermark"
+"""The variable the query process sets the watermark to before it runs the wrapped query."""
 
 _EPOCH_DATE = dt.date(1970, 1, 1)
 _EPOCH = dt.datetime(1970, 1, 1)
@@ -267,8 +259,7 @@ class IncrementalQuery:
     sql
         The wrapped SQL.
     parameter
-        The name (without the `$`) the watermark must be bound under,
-        ``__lakana_watermark_<32 hex characters>``.
+        The variable the watermark must be set as, `WATERMARK_VARIABLE`.
     """
 
     sql: str
@@ -278,11 +269,9 @@ class IncrementalQuery:
 def wrap_incremental(sql: str, key: str) -> IncrementalQuery:
     """Wrap a rewritten query so it returns only rows past the watermark.
 
-    The watermark is bound under a named parameter this generates, beside
-    the rewriter's own named URL-list parameters:
-    never positionally, and never under a name the query could guess.
-    `sql` is the rewriter's sqlglot-regenerated output, never raw user text,
-    and user SQL may hold no placeholder of its own.
+    The watermark is read from a variable the query process sets, beside the rewriter's own
+    file-list variables; it is never written into the SQL. `sql` is the rewriter's
+    sqlglot-regenerated output, never raw user text.
 
     Parameters
     ----------
@@ -294,12 +283,14 @@ def wrap_incremental(sql: str, key: str) -> IncrementalQuery:
     Returns
     -------
     IncrementalQuery
-        ``SELECT * FROM (<sql>) AS __lakana_incremental WHERE "<key>" > $<name>``
-        and the parameter name to bind the watermark's value to.
+        ``SELECT * FROM (<sql>) AS __lakana_incremental WHERE "<key>" > getvariable('v_watermark')``
+        and the variable to set.
     """
     column = exp.to_identifier(key, quoted=True).sql(dialect="duckdb")
-    parameter = f"{_WATERMARK_PARAMETER_PREFIX}{secrets.token_hex(_WATERMARK_TOKEN_BYTES)}"
-    # B608: `sql` is regenerated rewriter output, `column` a quoted identifier
-    # and `parameter` a generated name; the watermark binds, never as text.
-    wrapped = f"SELECT * FROM ({sql}) AS __lakana_incremental WHERE {column} > ${parameter}"  # nosec B608
-    return IncrementalQuery(sql=wrapped, parameter=parameter)
+    # B608: `sql` is regenerated rewriter output, `column` a quoted identifier and the
+    # variable name a constant; the watermark is the variable's value, never text.
+    wrapped = (
+        f"SELECT * FROM ({sql}) AS __lakana_incremental "  # nosec B608
+        f"WHERE {column} > getvariable('{WATERMARK_VARIABLE}')"
+    )
+    return IncrementalQuery(sql=wrapped, parameter=WATERMARK_VARIABLE)

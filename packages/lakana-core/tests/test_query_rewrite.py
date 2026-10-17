@@ -18,8 +18,8 @@ from lakana_core.query_rewrite import (
     rewrite_query,
 )
 
-_READER_CALL = re.compile(r"READ_PARQUET\(\$__lakana_urls_[0-9a-f]{32}_\d+\)")
-"""A generated reader call, bound to one of the rewriter's named URL parameters."""
+_READER_CALL = re.compile(r"READ_PARQUET\(GETVARIABLE\('v_\d+_files'\)\)")
+"""A generated reader call, reading one of the variables the query process sets."""
 
 
 def _parquet(*urls: str) -> TableSource:
@@ -267,24 +267,20 @@ def test_rewrite_replaces_a_reference_with_a_scoped_read() -> None:
     assert "bronze.weather" not in rewritten.sql.replace(_cte_alias("bronze.weather"), "")
 
 
-def test_rewrite_never_puts_a_resolved_url_in_the_sql(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_rewrite_never_puts_a_resolved_url_in_the_sql() -> None:
     """The resolved URL is bound, never rendered — the whole injection defence.
 
     A storage object key is attacker-controlled text (a raw-zone landing
     area accepts arbitrary writes by design), so a key containing a single
     quote would close an interpolated string literal and run the rest of the
     key as SQL inside another principal's authorized query.
-
-    The parameter token is pinned to digits the payload also contains, so
-    the assertions can only match the payload, never the random token.
     """
-    monkeypatch.setattr(query_rewrite.secrets, "token_hex", lambda _: "42" * 16)
     evil = "a.parquet']) UNION ALL SELECT 42 AS id FROM (SELECT ['"
 
     rewritten = rewrite_query("SELECT id FROM raw.events", sources={"raw.events": _parquet(evil)})
 
     assert evil not in rewritten.sql
-    assert "'" not in rewritten.sql
+    assert rewritten.sql.count("'") == 2  # only the quotes of the variable's name
     assert "UNION" not in rewritten.sql
     assert list(rewritten.parameters.values()) == [[evil]]
 
@@ -917,8 +913,8 @@ def test_a_masked_column_survives_a_join_through_a_nested_cte() -> None:
     assert "WHERE region = 'EU'" in rewritten.sql
 
 
-def test_a_policy_leaves_the_bound_parameters_unaffected() -> None:
-    """A policy changes the generated CTE's body, never the parameter list bound to it."""
+def test_a_policy_leaves_the_variables_unaffected() -> None:
+    """A policy changes the generated CTE's body, never the variables set for it."""
     source = TableSource(
         urls=["s3://bucket/a.parquet"],
         file_format="parquet",
@@ -930,7 +926,7 @@ def test_a_policy_leaves_the_bound_parameters_unaffected() -> None:
     rewritten = rewrite_query("SELECT * FROM gold.customers", {"gold.customers": source})
 
     assert list(rewritten.parameters.values()) == [["s3://bucket/a.parquet"]]
-    assert rewritten.sql.count("$") == 1
+    assert rewritten.sql.count("GETVARIABLE") == 1
     assert "?" not in rewritten.sql
 
 
@@ -1359,3 +1355,32 @@ def test_a_statement_with_its_own_with_clause_is_named_by_its_keyword() -> None:
 
     with pytest.raises(ValidationError, match="`DELETE` is not allowed"):
         check_blacklist(sql)
+
+
+def test_rewrite_reads_each_file_list_through_a_variable_of_its_own() -> None:
+    """Two reads, two variables, numbered in the order the CTEs are generated; no placeholder."""
+    rewritten = rewrite_query(
+        "SELECT a.id FROM bronze.a AS a JOIN gold.b AS b ON a.id = b.id",
+        sources={"bronze.a": _parquet("a.parquet"), "gold.b": _parquet("b.parquet")},
+    )
+
+    assert "READ_PARQUET(GETVARIABLE('v_0_files'))" in rewritten.sql
+    assert "READ_PARQUET(GETVARIABLE('v_1_files'))" in rewritten.sql
+    assert rewritten.parameters == {"v_0_files": ["a.parquet"], "v_1_files": ["b.parquet"]}
+    assert "$" not in rewritten.sql
+    assert "?" not in rewritten.sql
+
+
+def test_a_table_without_files_takes_no_variable_number() -> None:
+    """An empty relation reads nothing, so the next read is still `v_1_files`."""
+    rewritten = rewrite_query(
+        "SELECT a.id FROM bronze.a AS a, gold.empty AS e, gold.c AS c",
+        sources={
+            "bronze.a": _parquet("a.parquet"),
+            "gold.empty": TableSource(urls=[], file_format="parquet", columns={"id": "long"}),
+            "gold.c": TableSource(urls=["c.csv"], file_format="csv"),
+        },
+    )
+
+    assert rewritten.parameters == {"v_0_files": ["a.parquet"], "v_1_files": ["c.csv"]}
+    assert "READ_CSV(GETVARIABLE('v_1_files'))" in rewritten.sql
