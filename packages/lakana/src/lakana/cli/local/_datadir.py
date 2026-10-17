@@ -322,15 +322,17 @@ def _read_master_key(path: Path) -> str:
             info = os.fstat(handle.fileno())
             if os.name != "nt" and info.st_uid != os.getuid():
                 raise CliError(
-                    f"{path} is not owned by the current user; delete the data directory "
-                    f"to rotate the key"
+                    f"{path} is not owned by the current user; stop Lakana and run "
+                    f"'lakana server reset --local' to rotate the key"
                 )
             if os.name != "nt" and stat.S_IMODE(info.st_mode) & 0o077:
                 raise CliError(f"{path} is accessible by other users; run: chmod 600 {path}")
             text = handle.read().strip()
     except UnicodeDecodeError as exc:
         raise CliError(
-            f"{path} is not a valid master key; delete the data directory to rotate it", 3
+            f"{path} is not a valid master key; stop Lakana and run "
+            "'lakana server reset --local' to rotate it",
+            3,
         ) from exc
     except OSError as exc:
         raise CliError(f"Can't read {path}: {exc}", 3) from exc
@@ -338,11 +340,15 @@ def _read_master_key(path: Path) -> str:
         key_bytes = base64.b64decode(text, validate=True)
     except (binascii.Error, ValueError) as exc:
         raise CliError(
-            f"{path} is not a valid master key; delete the data directory to rotate it", 3
+            f"{path} is not a valid master key; stop Lakana and run "
+            "'lakana server reset --local' to rotate it",
+            3,
         ) from exc
     if len(key_bytes) != _MASTER_KEY_BYTES:
         raise CliError(
-            f"{path} is not a valid master key; delete the data directory to rotate it", 3
+            f"{path} is not a valid master key; stop Lakana and run "
+            "'lakana server reset --local' to rotate it",
+            3,
         )
     return text
 

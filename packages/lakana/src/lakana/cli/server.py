@@ -563,7 +563,8 @@ def _later_run_profile_check(state: CliState, data_dir: DataDir, url: str) -> No
     token = None if local_profile is None else local_profile.get("token")
     if local_profile is None or token is None:
         sys.stderr.write(
-            f"No 'local' profile found; to start fresh, stop Lakana and delete {data_dir.root}\n"
+            "No 'local' profile found; to start fresh, stop Lakana and run "
+            f"'lakana server reset --local --data-dir {data_dir.root}'\n"
         )
         return
     old_url = local_profile.get("url")
@@ -622,8 +623,8 @@ def _ensure_dev_environment(state: CliState, data_dir: DataDir, url: str, token:
     except LakanaError as exc:
         sys.stderr.write(
             f"Couldn't check environment 'dev' with profile 'local' ({type(exc).__name__}); "
-            f"if the profile's token is stale, stop Lakana and delete {data_dir.root} "
-            "to start fresh\n"
+            "if the profile's token is stale, stop Lakana and run "
+            f"'lakana server reset --local --data-dir {data_dir.root}' to start fresh\n"
         )
 
 
@@ -935,7 +936,8 @@ def _refuse_remote_target(state: CliState) -> None:
         raise CliError(
             f"{url} is a remote instance; 'lakana server reset' resets only the instance on "
             "this machine",
-            hint="to start a team instance over, use the Compose bundle: see "
+            hint="to reset this machine's instance, unset LAKANA_URL and leave out --url and "
+            "--profile. To start a team instance over, use the Compose bundle: see "
             "'Starting over' in docs/site/how-to/deploy-with-compose.md",
         )
 

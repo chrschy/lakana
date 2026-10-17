@@ -7,7 +7,9 @@ deletion.
 
 from __future__ import annotations
 
+import contextlib
 import os
+import pwd
 import shutil
 import sqlite3
 from dataclasses import dataclass
@@ -18,16 +20,20 @@ from lakana.cli._state import CliError
 from lakana.cli.local._datadir import MARKER_NAME, MARKER_TEXT, resolve_data_dir
 
 _OWNED = (
-    "lakana.db",
-    "lakana.db-wal",
-    "lakana.db-shm",
-    "lakana.db-journal",
     "lake",
     "master.key",
     "server.pid",
     "worker.pid",
+    "lakana.db-wal",
+    "lakana.db-shm",
+    "lakana.db-journal",
+    "lakana.db",
 )
-"""The names, directly under the data directory, that a reset deletes. Nothing else."""
+"""The names, directly under the data directory, that a reset deletes. Nothing else.
+
+The database is last: a reset that fails part-way leaves a directory that still has its
+database, so the next start is not a first run on top of old data, and a second reset finishes.
+"""
 
 _START_HINT = (
     "an instance that this version of lakana never started has no marker: run "
@@ -112,7 +118,9 @@ class ResetPlan:
         return [
             f"This deletes the data of the local Lakana instance in {self.root}:",
             *(f"  {path}" for path in self.targets),
-            f"  {count} in the catalog, with all their data, and every secret, token and run.",
+            f"  {count} in the catalog, and every secret, token and run.",
+            "The tables' files under lake/ go with them. Files of an environment whose storage "
+            "is outside lake/ stay where they are.",
             "Your project files are not touched.",
         ]
 
@@ -149,11 +157,14 @@ def refuse_unsafe_root(path: Path, home: Path) -> Path | None:
         )
     root = given.resolve()
     if not root.is_dir():
-        raise CliError(f"{given} is not a directory")
+        raise CliError(
+            f"{given} is not a directory",
+            hint="pass the local instance's data directory with --data-dir "
+            "(see 'lakana server status')",
+        )
     if root.parent == root:
         raise CliError(f"{root} is a filesystem root; refusing to reset it")
-    home_real = home.resolve()
-    if root == home_real or root in home_real.parents:
+    if _is_or_holds_home(root, home):
         raise CliError(
             f"{root} is your home directory or holds it; refusing to reset it",
             hint="the local instance's data directory is a folder of its own: "
@@ -166,6 +177,84 @@ def refuse_unsafe_root(path: Path, home: Path) -> Path | None:
             hint=_START_HINT,
         )
     return root
+
+
+def _is_or_holds_home(root: Path, home: Path) -> bool:
+    """Report whether `root` is a home directory or one of the directories that hold it.
+
+    Compared by device and inode, so a second path to the same directory (a bind mount, a
+    link in a parent) counts. Both `$HOME` and the home in the password database are checked.
+
+    Parameters
+    ----------
+    root
+        The resolved data directory.
+    home
+        The user's home directory as `Path.home()` reports it.
+
+    Returns
+    -------
+    bool
+        `True` if `root` is any of them.
+    """
+    homes = [home]
+    with contextlib.suppress(KeyError, OSError):
+        homes.append(Path(pwd.getpwuid(os.getuid()).pw_dir))
+    for candidate in homes:
+        try:
+            chain = [candidate.resolve(), *candidate.resolve().parents]
+        except OSError:
+            continue
+        for directory in chain:
+            try:
+                if os.path.samefile(root, directory):
+                    return True
+            except OSError:
+                continue
+    return False
+
+
+def _device_of(path: Path) -> int:
+    """Return the device a path lives on, without following a symlink.
+
+    Parameters
+    ----------
+    path
+        The path.
+
+    Returns
+    -------
+    int
+        `st_dev` of the path itself.
+    """
+    return os.lstat(path).st_dev
+
+
+def _find_other_device(root: Path, targets: list[Path]) -> Path | None:
+    """Find a target, or anything below `lake/`, that lives on another device than `root`.
+
+    Parameters
+    ----------
+    root
+        The resolved data directory.
+    targets
+        The owned paths that exist.
+
+    Returns
+    -------
+    Path or None
+        The first mount point found, or `None`. Symlinks are never followed.
+    """
+    device = _device_of(root)
+    pending = list(targets)
+    while pending:
+        path = pending.pop()
+        if _device_of(path) != device:
+            return path
+        if path.is_dir() and not path.is_symlink():
+            with os.scandir(path) as entries:
+                pending.extend(Path(entry.path) for entry in entries)
+    return None
 
 
 def plan_reset(root: Path) -> ResetPlan:
@@ -194,10 +283,17 @@ def plan_reset(root: Path) -> ResetPlan:
             continue
         if path.is_symlink() or path.resolve().parent != root:
             raise CliError(
-                f"{path} is a symlink; refusing to delete through it",
+                f"{path} is a symlink or is not inside {root}; refusing to delete through it",
                 hint=f"remove the link yourself if you want it gone; nothing in {root} was deleted",
             )
         targets.append(path)
+    mount = _find_other_device(root, targets)
+    if mount is not None:
+        raise CliError(
+            f"{mount} is on another device than {root} (a mount point); "
+            "refusing to delete across it. Nothing was deleted",
+            hint=f"unmount {mount} or remove it yourself, then run the reset again",
+        )
     return ResetPlan(root, tuple(targets), _count_tables(root / "lakana.db"))
 
 
@@ -215,20 +311,26 @@ def delete_targets(plan: ResetPlan) -> None:
     Raises
     ------
     CliError
-        If a path became a symlink since the plan was made (exit 2), or a deletion fails
+        If a path was replaced or moved since the plan was made (exit 2), or a deletion fails
         (exit 3, naming the path and what is left).
     """
-    for path in plan.targets:
+    for position, path in enumerate(plan.targets):
         if path.is_symlink() or (os.path.lexists(path) and path.resolve().parent != plan.root):
-            raise CliError(f"{path} became a symlink; refusing to delete through it")
+            raise CliError(
+                f"{path} is not inside {plan.root} any more (it was replaced by a link or "
+                "moved); refusing to delete through it",
+                hint="check what changed in the data directory, then run the reset again",
+            )
         try:
             if path.is_dir():
                 shutil.rmtree(path)
             else:
                 path.unlink(missing_ok=True)
         except OSError as exc:
+            left = ", ".join(str(p) for p in plan.targets[position:] if os.path.lexists(p))
             raise CliError(
-                f"Can't delete {path}: {exc}",
+                f"Can't delete {path}: {exc}. Still there: {left}",
                 3,
-                hint="fix the cause and run the reset again; it deletes what is left",
+                hint="fix the cause and run the reset again; it deletes what is left. The "
+                "database goes last, so the instance is not reset until that run succeeds",
             ) from exc

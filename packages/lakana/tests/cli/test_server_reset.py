@@ -6,12 +6,14 @@ import os
 import shutil
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from conftest import FakeApi, invoke, make_state, write_profile_file
 
 from lakana.cli import server
 from lakana.cli._filelock import try_locked
+from lakana.cli._state import CliError
 from lakana.cli.local import _reset as reset_module
 from lakana.cli.local._datadir import MARKER_NAME, DataDir, prepare_data_dir
 from lakana.cli.local._pidfile import write_pidfile
@@ -347,3 +349,137 @@ def test_reset_holds_the_lock_while_it_deletes(
     monkeypatch.setattr(reset_module, "delete_targets", spy)
     assert _reset(tmp_path, root.root, "--yes").exit_code == 0
     assert seen == [False]
+
+
+def test_a_mount_point_below_the_lake_is_refused_before_anything_goes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A directory on another device inside `lake/` stops the reset; the database is kept."""
+    root = _instance(tmp_path)
+    (root.lake / "dev" / "mnt").mkdir()
+    real = reset_module._device_of
+
+    def fake(path: Path) -> int:
+        return 4242 if path.name == "mnt" else real(path)
+
+    monkeypatch.setattr(reset_module, "_device_of", fake)
+    result = _reset(tmp_path, root.root, "--yes")
+    assert result.exit_code == 2
+    assert "mnt" in result.output and "mount" in result.output and "unmount" in result.output
+    assert _untouched(root)
+
+
+def test_a_lake_on_another_device_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`lake/` itself on another device is refused the same way."""
+    root = _instance(tmp_path)
+    real = reset_module._device_of
+    monkeypatch.setattr(reset_module, "_device_of", lambda p: 4242 if p.name == "lake" else real(p))
+    result = _reset(tmp_path, root.root, "--yes")
+    assert result.exit_code == 2
+    assert "mount" in result.output
+    assert _untouched(root)
+
+
+def test_the_database_goes_last_so_a_failed_reset_is_never_a_first_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the lake can't be deleted, `lakana.db` is still there; the message names what remains."""
+    root = _instance(tmp_path)
+
+    def broken(path: object, *args: object, **kwargs: object) -> None:
+        raise OSError("device busy")
+
+    monkeypatch.setattr(reset_module.shutil, "rmtree", broken)
+    result = _reset(tmp_path, root.root, "--yes")
+    assert result.exit_code == 3
+    assert root.db_path.exists()
+    text = " ".join(result.output.split())
+    assert "device busy" in text and "lakana.db" in text and "again" in text
+
+
+def test_a_target_swapped_for_a_symlink_after_the_plan_is_refused(tmp_path: Path) -> None:
+    """The re-check just before each deletion catches a swap made after the plan."""
+    root = _instance(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "precious.txt").write_text("keep")
+    plan = reset_module.plan_reset(root.root.resolve())
+    shutil.rmtree(root.lake)
+    root.lake.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(CliError, match="not inside") as caught:
+        reset_module.delete_targets(plan)
+    assert caught.value.exit_code == 2
+    assert (outside / "precious.txt").read_text() == "keep"
+    assert root.db_path.exists()
+
+
+def test_the_home_directory_is_found_by_identity_and_by_the_password_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second path to home (same device and inode) or the passwd home is refused too."""
+    home = tmp_path / "people" / "me"
+    home.mkdir(parents=True)
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    monkeypatch.setenv("HOME", str(other))
+    monkeypatch.setattr(reset_module.pwd, "getpwuid", lambda uid: SimpleNamespace(pw_dir=str(home)))
+    (home / MARKER_NAME).write_text("lakana local instance\n")
+    result = _reset(tmp_path, home, "--yes")
+    assert result.exit_code == 2 and "home directory" in result.output
+
+    bind = tmp_path / "bind"
+    bind.mkdir()
+    (bind / MARKER_NAME).write_text("lakana local instance\n")
+    monkeypatch.setattr(
+        reset_module.pwd, "getpwuid", lambda uid: SimpleNamespace(pw_dir=str(other))
+    )
+    real = os.path.samefile
+    monkeypatch.setattr(
+        reset_module.os.path,
+        "samefile",
+        lambda a, b: True if Path(a).name == "bind" and Path(b) == other else real(a, b),
+    )
+    result = _reset(tmp_path, bind, "--yes")
+    assert result.exit_code == 2 and "home directory" in result.output
+
+
+def test_a_broken_profile_file_does_not_block_a_reset_when_no_profile_is_chosen(
+    tmp_path: Path,
+) -> None:
+    """The profile file is read only when a profile is chosen."""
+    root = _instance(tmp_path)
+    write_profile_file(tmp_path / "lakana" / "config.toml", "this is not toml [[[")
+    result = _reset(tmp_path, root.root, "--yes")
+    assert result.exit_code == 0, result.output
+
+
+def test_refusals_name_the_next_step(tmp_path: Path) -> None:
+    """The remote refusal says what to unset; a file as data dir says what to pass."""
+    root = _instance(tmp_path)
+    state = make_state(tmp_path, FakeApi())
+    remote = invoke(
+        state,
+        "--url",
+        "https://lakana.example.org",
+        "server",
+        "reset",
+        "--local",
+        "--data-dir",
+        str(root.root),
+        "--yes",
+    )
+    text = " ".join(remote.output.split())
+    assert "LAKANA_URL" in text and "--profile" in text
+    (tmp_path / "file").write_text("x")
+    not_dir = _reset(tmp_path, tmp_path / "file", "--yes")
+    assert "--data-dir" in " ".join(not_dir.output.split())
+
+
+def test_the_question_says_what_stays(tmp_path: Path) -> None:
+    """Files of an environment whose storage is outside `lake/` are not deleted, and it says so."""
+    root = _instance(tmp_path)
+    result = _reset(tmp_path, root.root, interactive=True, input="n\n")
+    text = " ".join(result.output.split())
+    assert "outside" in text and "lake/" in text

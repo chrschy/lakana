@@ -155,4 +155,6 @@ def test_init_output_deploys_unchanged(
     monkeypatch.chdir(project)
     _ok(invoke_cli(state, "repo", "add", "demo", "--kind", "local", "--url", "."))
     result = _ok(invoke_cli(state, "deploy", "--env", "dev"))
-    assert "bronze.example" in result.stdout
+    for table in ("bronze.readings", "silver.station_temperatures", "gold.station_ranking"):
+        assert table in result.stdout
+    assert "silver.station_temperatures: plausible_range" in result.stdout

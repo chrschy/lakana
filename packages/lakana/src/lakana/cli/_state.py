@@ -149,9 +149,11 @@ def selected_url(state: CliState, *, include_default: bool = False) -> str | Non
     url = state.url or os.environ.get("LAKANA_URL")
     if url:
         return url
-    data = _profiles.load(state.profile_path())
     name = state.profile or os.environ.get("LAKANA_PROFILE")
-    if name is None and include_default:
+    if name is None and not include_default:
+        return None
+    data = _profiles.load(state.profile_path())
+    if name is None:
         name = data.get("default_profile")
     if name is None:
         return None
