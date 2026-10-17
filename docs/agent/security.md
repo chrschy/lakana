@@ -2232,8 +2232,9 @@ work.
   is read by field id, and a rename through the Iceberg REST catalog can move a name onto
   another column (`ssn` to `ssn_old`, `email` to `ssn`): a mask on `ssn` would cover the email
   column and `ssn_old` would show the real values. Each row filter and column mask records the
-  id of the table's current schema when it is created (`schema_id`; null for a raw table, a view and an artifact, for a filter that reads no column,
-  and for a policy of a release before the column existed). For a read of an Iceberg table, `_resolve_sources`
+  id of the table's current schema when it is created (`schema_id`; null for a raw table, a view
+  and an artifact, for a filter that reads no column, and for a policy of a release before the
+  column existed). For a read of an Iceberg table, `_resolve_sources`
   collects, from the reader's applied policies, every column a mask covers or its expression
   reads and every column a filter reads, and calls `policy.renames.renamed_policy_column` with the
   table's metadata: from each policy's own schema (the table's oldest one when it has none) to the

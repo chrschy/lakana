@@ -173,8 +173,8 @@ masked person is refused, and nothing is shown:
 ```
 
 To make the table readable again, an administrator lists the masks and row filters of the table
-(the `list` subcommand of `lakana column-mask` and of `lakana row-filter`), revokes each one that names a renamed
-column, and creates it again for the column it is meant for. A mask created after the rename
+(the `list` subcommand of `lakana column-mask` and of `lakana row-filter`), revokes each one
+that uses a renamed column, and creates it again for the column it is meant for. A mask created after the rename
 records the new version of the schema, so it is not refused. A mask that an earlier release
 created has no recorded version: it is judged from the oldest schema of the table, so a rename
 from any time before also refuses the read until the mask is created again.

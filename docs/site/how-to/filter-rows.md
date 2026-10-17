@@ -174,8 +174,8 @@ table by the filtered person is refused, and nothing is shown:
 
 To make the table readable again, an administrator lists the row filters and column masks of the
 table (the `list` subcommand of `lakana row-filter` and of `lakana column-mask`), revokes each
-one that names a renamed column, and creates it again for the column it is meant for. A filter created after the rename
-records the new version of the schema, so it is not refused. A filter that an earlier release
+one that uses a renamed column, and creates it again for the column it is meant for. A filter
+created after the rename records the new version of the schema, so it is not refused. A filter that an earlier release
 created has no recorded version: it is judged from the oldest schema of the table, so a rename from
 any time before also refuses the read until the filter is created again.
 
