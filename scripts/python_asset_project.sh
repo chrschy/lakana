@@ -5,7 +5,7 @@
 # points uv at it alone (`no-index`), and locks with `uv lock --offline`: neither the lock nor
 # the worker's venv build asks a package index, and the wheels travel with the committed code.
 #
-#   bash scripts/python_asset_project.sh PROJECT WHEELHOUSE PYTHON [artifact]   # PYTHON: e.g. 3.13
+#   bash scripts/python_asset_project.sh PROJECT WHEELHOUSE PYTHON [artifact]   # PYTHON: e.g. 3.14
 #
 # WHEELHOUSE holds the lakana wheel and its locked dependencies (scripts/build_wheelhouse.sh
 # builds one; the five-minute test downloads one). PYTHON is the interpreter the worker runs.

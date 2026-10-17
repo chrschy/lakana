@@ -38,9 +38,8 @@ dependencies = ["lakana[assets]==<version>", "scikit-learn>=1.5,<2"]
 
 The rest of the file stays as it is. `joblib` comes with scikit-learn. scikit-learn and the
 packages it needs (`numpy`, `scipy` and `joblib`, about 60 MB in all) come from the public package
-index, like every package except `lakana`, so the folder `wheelhouse` of your project does not
-change: it still holds only the `lakana` wheel (see
-[Projects and deploys](projects.md), "Python assets", step 4). Lock the packages. `uv lock` needs a
+index, like `lakana` itself (see [Projects and deploys](projects.md), "Python assets", step 4).
+Lock the packages. `uv lock` needs a
 network connection to the public package index, and so does the worker's first build of the
 project's environment:
 

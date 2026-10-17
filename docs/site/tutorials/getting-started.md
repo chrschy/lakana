@@ -347,6 +347,8 @@ are, and `lakana server start --local` brings the instance back with them.
   it does to a table.
 - [Projects and deploys](../how-to/projects.md) covers asset front-matter, `lakana.yaml`, Python
   assets, dry-run deploys, rollback, and selecting what to run.
+- [Give a second person access](../how-to/give-a-second-person-access.md) issues a token to a
+  colleague who may query one environment.
 - [Deploying with Compose (team mode)](../how-to/deploy-with-compose.md) moves from your machine to an
   instance a small team shares.
 - [Scope and philosophy](../explanation/scope.md) says what Lakana is for, and what it is not for.

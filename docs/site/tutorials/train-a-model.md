@@ -146,33 +146,16 @@ A Python asset runs in its own Python environment. Lakana builds it from the pro
 `uv.lock`. The environment needs `lakana[assets]`, which brings what a Python asset needs, among
 it `polars`. The model asset also needs `scikit-learn`, which comes with the numerical packages it uses (`numpy`, `scipy` and `joblib`).
 
-`lakana` is on PyPI as a pre-beta, but this tutorial takes it from a folder, so that the project
-uses exactly the version that you built and it works for a build that is not published. You put
-the `lakana` package, as one file, into a folder of your project, and tell `uv` that `lakana`
-comes from that folder and from nowhere else. Every other package comes from the public
-package index, so both `uv lock` and the first run of your project need a network connection to
-it. Without one, `uv lock` fails, and so does the worker when it builds your project for the first
-time. Behind a proxy, set `HTTPS_PROXY` in the terminal before you run `uv lock`, and
-`LAKANA_RUN__HTTPS_PROXY` for the worker.
-
-First build the file. Run this in the checkout of Lakana, the folder where you ran `uv sync`. The
-second command removes a `.gitignore` that `uv build` writes into the folder; with it, `git`
-would ignore the wheel:
-
-<!-- not tested: builds a wheel of the checkout; the example gets the wheel from its runner -->
-```bash
-uv build --package lakana --wheel --out-dir ~/forecasts/wheelhouse
-rm ~/forecasts/wheelhouse/.gitignore
-```
-
-The folder `wheelhouse` now holds one file, `lakana-<version>-py3-none-any.whl`, of about 230 KB.
-It is part of your project: you commit it with the rest in the next step.
+`lakana` comes from PyPI, like every other package, so both `uv lock` and the first run of your
+project need a network connection to the public package index. Without one, `uv lock` fails, and
+so does the worker when it builds your project for the first time. Behind a proxy, set
+`HTTPS_PROXY` in the terminal before you run `uv lock`, and `LAKANA_RUN__HTTPS_PROXY` for the
+worker.
 
 Now go back to the project. Open `pyproject.toml`, which `lakana init` wrote. Delete the line
 `dependencies = []`. In the comment block below it, delete the `# ` at the start of the
-`dependencies` line and of the two tables that follow, down to the line `lakana = { index =
-"lakana" }`. Those lines already say that `lakana` comes from the folder `wheelhouse`. The comment
-lines above them can stay. The file then reads (the comments are left out here):
+`dependencies` line. The comment lines above it can stay. The file then reads (the comments are
+left out here):
 
 <!-- source: docs/examples/train-and-predict/project/pyproject.toml -->
 ```toml
@@ -182,27 +165,15 @@ version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = ["lakana[assets]==<version>", "scikit-learn>=1.5,<2"]
 
-[[tool.uv.index]]
-name = "lakana"
-url = "wheelhouse"
-format = "flat"
-explicit = true
-
-[tool.uv.sources]
-lakana = { index = "lakana" }
-
 [dependency-groups]
 dev = ["pytest>=8"]
 ```
 
-The second entry of `dependencies`, `scikit-learn`, is the library that fits the line. Check one thing in it: the number after `==` in `dependencies` must be the version of the file you
-built. It is in the file's name: the text between `lakana-` and `-py3-none-any.whl`. If `lakana
-init` wrote another number, write the version of the file. Here the number is shown as
-`<version>`.
-
-The table `[[tool.uv.index]]` says that `wheelhouse` is a folder of files (`format = "flat"`), and
-`explicit = true` and the line `lakana = { index = "lakana" }` say that only `lakana` comes from
-it. The `dev` group stays; it is for your own tests and is not installed for a task.
+The second entry of `dependencies`, `scikit-learn`, is the library that fits the line. The
+number after `==` after `lakana[assets]` is the version of your instance; `lakana init` wrote the
+version of the CLI that ran it, and the two are the same when you installed both together. Here
+the number is shown as `<version>`. The `dev` group stays; it is for your own tests and is not
+installed for a task.
 
 Create the lock file. Run this in the terminal where you ran `source .venv/bin/activate`, in
 `~/forecasts`:
@@ -213,27 +184,17 @@ uv lock
 ```
 
 It prints a few lines, ending with the number of packages, and creates the file `uv.lock`. The path
-on the first line is your own, and the number of packages changes with the packages on the public
+and the Python version on the first line are your own, and the number of packages changes with the packages on the public
 index:
 
 <!-- output -->
 ```text
-Using CPython 3.13.15 interpreter at: /home/you/lakana/.venv/bin/python3
+Using CPython 3.14.4 interpreter at: /home/you/lakana/.venv/bin/python3
 Resolved 34 packages in 327ms
 ```
 
-`uv.lock` names `lakana` with the folder as its source, and every other package with the public
-index. One line of `uv.lock` holds the full path of your folder `wheelhouse` on your own computer
-(it usually contains your user name), and you commit that line with the file. On another computer
-`uv lock` rewrites the line, and `uv lock --check` reports that the lock is out of date: a colleague
-should not commit that change. Deploys and workers are not affected, because Lakana uses the lock
-as it is. This ends when you take `lakana` from PyPI (see the note below).
-
-!!! note "A version that is on PyPI"
-    For a version of `lakana` published on PyPI you need no folder. Delete the two `uv` tables
-    (`[[tool.uv.index]]` and `[tool.uv.sources]`) from `pyproject.toml` and the folder
-    `wheelhouse`, keep `dependencies = ["lakana[assets]==<version>", "scikit-learn>=1.5,<2"]` with the version of your
-    instance, and run `uv lock` again.
+`uv.lock` names every package, `lakana` among them, with the public index as its source. You
+commit it with the rest.
 
 ## Commit, deploy and run
 
@@ -614,7 +575,7 @@ Go to the terminal where the instance runs and press Ctrl-C. The instance shuts 
 and your model stay where they are, and `lakana server start --local` brings the instance back with
 them.
 
-On your machine remain the folder `~/forecasts` (with `wheelhouse`, which holds the `lakana` wheel),
+On your machine remain the folder `~/forecasts`,
 the folder `~/spend-model` with the copy of the model that you downloaded, and the model itself in
 Lakana. Delete the two folders when you no longer need them.
 

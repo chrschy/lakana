@@ -176,10 +176,11 @@ def test_default_directory_is_the_current_one(
 def test_generated_project_pins_the_cli_s_own_version(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Every install pins the CLI's version from an index the owner chose, never a bare install.
+    """Every install pins the CLI's version and names its one index, never a bare install.
 
     A bare or merely pinned `pip install lakana` takes the package from whichever index pip
-    knows; the job that holds the prod token installs from `LAKANA_INDEX_URL` only.
+    knows; the job that holds the prod token installs from `LAKANA_INDEX_URL` when it is set
+    and from PyPI when it is not.
     """
     monkeypatch.setattr("lakana.cli.project_init.__version__", "1.2.3")
     target = tmp_path / "analytics"
@@ -194,18 +195,19 @@ def test_generated_project_pins_the_cli_s_own_version(
         for line in pyproject.splitlines()
         if "lakana" in line and not line.lstrip().startswith("#") and "name =" not in line
     ]
-    guard = ': "${LAKANA_INDEX_URL:?set LAKANA_INDEX_URL to the index that hosts lakana}"'
-    install = 'pip install --index-url "$LAKANA_INDEX_URL" "lakana==1.2.3"'
+    install = (
+        'pip install --index-url "${LAKANA_INDEX_URL:-https://pypi.org/simple}" "lakana==1.2.3"'
+    )
     github_text = (target / ".github" / "workflows" / "lakana-deploy.yml").read_text()
     github = yaml.safe_load(github_text)
     for job in github["jobs"].values():
         assert job["env"]["LAKANA_INDEX_URL"] == "${{ vars.LAKANA_INDEX_URL }}"
         [step] = [s for s in job["steps"] if "pip install" in s.get("run", "")]
-        assert step["run"].splitlines() == [guard, install]
+        assert step["run"].splitlines() == [install]
     gitlab_text = (target / ".gitlab-ci.yml").read_text()
     gitlab = yaml.safe_load(gitlab_text)
     for job in ("lakana-dry-run", "lakana-deploy"):
-        assert gitlab[job]["script"][:2] == [guard, install]
+        assert gitlab[job]["script"][0] == install
     for text in (github_text, gitlab_text):
         assert "extra-index-url" not in text
         assert text.count("pip install") == 2
@@ -216,23 +218,24 @@ def test_generated_project_pins_the_cli_s_own_version(
         assert "https://pypi.org/simple" in text
 
 
-def test_the_index_guard_fails_fast_when_unset(tmp_path: Path) -> None:
-    """The rendered guard line stops the job with a clear message when no index is set."""
+def test_the_install_line_uses_pypi_unless_an_index_is_set(tmp_path: Path) -> None:
+    """The install line asks PyPI when the variable is unset or empty, else the override."""
     target = tmp_path / "analytics"
     invoke(make_state(tmp_path, FakeApi()), "init", str(target))
     [job] = [yaml.safe_load((target / ".gitlab-ci.yml").read_text())["lakana-deploy"]]
+    line = job["script"][0].replace("pip install", "echo")
     env = {k: v for k, v in os.environ.items() if k != "LAKANA_INDEX_URL"}
-    unset = subprocess.run(
-        ["sh", "-c", job["script"][0]], env=env, capture_output=True, text=True, check=False
-    )
-    assert unset.returncode != 0
-    assert "set LAKANA_INDEX_URL to the index that hosts lakana" in unset.stderr
-    present = subprocess.run(
-        ["sh", "-c", job["script"][0]],
-        env={**env, "LAKANA_INDEX_URL": "https://index.example/simple/"},
-        check=False,
-    )
-    assert present.returncode == 0
+
+    def index_used(environment: dict[str, str]) -> str:
+        out = subprocess.run(
+            ["sh", "-c", line], env=environment, capture_output=True, text=True, check=True
+        ).stdout.split()
+        return out[out.index("--index-url") + 1]
+
+    assert index_used(env) == "https://pypi.org/simple"
+    assert index_used({**env, "LAKANA_INDEX_URL": ""}) == "https://pypi.org/simple"
+    override = {**env, "LAKANA_INDEX_URL": "https://index.example/simple/"}
+    assert index_used(override) == "https://index.example/simple/"
 
 
 def test_gitlab_prod_token_has_its_own_variable_name(tmp_path: Path) -> None:
@@ -402,7 +405,7 @@ def test_init_notes_after_the_steps_when_the_cli_is_a_dev_or_local_build(
     assert text.index("lakana run --env dev") < text.index("Note:")
     assert f"lakana {version} is a development build" in note
     assert "ignore this until you use CI" in note.lower() or "Ignore this" in note
-    assert "can't be installed from the index" in note
+    assert "can't be installed from PyPI" in note
     assert f"lakana=={version}" in (target / ".gitlab-ci.yml").read_text()
 
 
@@ -434,51 +437,57 @@ def test_ci_templates_pin_every_action_to_a_full_commit_sha(tmp_path: Path) -> N
 
 
 def test_pyproject_explains_python_assets_without_depending_on_pypi(tmp_path: Path) -> None:
-    """`lakana[assets]` is commented out, from a project folder, pinned to the CLI."""
+    """`lakana[assets]` is commented out, pinned to the CLI, and comes from PyPI with no folder."""
     target = tmp_path / "analytics"
     invoke(make_state(tmp_path, FakeApi()), "init", str(target))
     text = (target / "pyproject.toml").read_text()
     assert f'# dependencies = ["lakana[assets]=={__version__}"]' in text
-    assert "# [[tool.uv.index]]" in text
-    assert "# explicit = true" in text
-    assert '# lakana = { index = "lakana" }' in text
-    # The index is a folder of the project that holds the lakana wheel and nothing else.
-    assert '# url = "wheelhouse"' in text
-    assert '# format = "flat"' in text
-    assert "the folder `wheelhouse`" in text
-    # lakana is on PyPI as a pre-beta: the comments say so and offer the folder-free path.
-    assert "is on PyPI" in text
+    # lakana comes from the public index: no folder of wheels, no uv index or source tables.
+    assert "wheelhouse" not in text
+    assert "tool.uv" not in text
+    assert "pre-beta" not in text
     assert "public beta" not in text
-    assert "not on the public package index" not in text
     assert "unclaimed" not in text
     assert "public package index" in text
-    assert "Train a model and score with it" in text
     # One path: no address of a package index of the reader's own, and no "v1.0.0".
     assert "<your index>" not in text
     assert "your own index" not in text
     assert "v1.0.0" not in text
     # A first-time user is told every step, in order.
     assert "1. Delete `dependencies = []`" in text
-    assert "uncomment the dependency" in text
-    assert "uv lock" in text
-    assert "Commit pyproject.toml, uv.lock and wheelhouse" in text
+    assert "uncomment the dependency line" in text
+    assert "2. Run `uv lock`" in text
+    assert "3. Commit pyproject.toml and uv.lock" in text
     assert tomllib.loads(text)["project"]["dependencies"] == []
 
 
 def test_following_the_pyproject_instructions_gives_a_valid_file(tmp_path: Path) -> None:
-    """Uncommenting the template block as its steps say gives a parseable project."""
+    """Uncommenting the template line as its steps say gives a parseable project."""
     target = tmp_path / "analytics"
     invoke(make_state(tmp_path, FakeApi()), "init", str(target))
     lines = (target / "pyproject.toml").read_text().splitlines()
     start = next(i for i, ln in enumerate(lines) if ln.startswith("# dependencies = "))
-    end = next(i for i, ln in enumerate(lines) if ln.startswith("[dependency-groups]"))
-    uncommented = [ln.removeprefix("# ").removeprefix("#") for ln in lines[start:end]]
-    kept = [ln for ln in lines[:start] if ln != "dependencies = []"]
-    parsed = tomllib.loads("\n".join([*kept, *uncommented, *lines[end:]]))
+    kept = [ln for ln in lines if ln != "dependencies = []"]
+    kept[kept.index(lines[start])] = lines[start].removeprefix("# ")
+    parsed = tomllib.loads("\n".join(kept))
     assert parsed["project"]["dependencies"] == [f"lakana[assets]=={__version__}"]
-    [index] = parsed["tool"]["uv"]["index"]
-    assert index["name"] == "lakana"
-    assert index["explicit"] is True
-    assert index["url"] == "wheelhouse"
-    assert index["format"] == "flat"
-    assert parsed["tool"]["uv"]["sources"] == {"lakana": {"index": "lakana"}}
+    assert "uv" not in parsed.get("tool", {})
+
+
+def test_ci_templates_run_the_python_of_the_repository_default(tmp_path: Path) -> None:
+    """Both CI files name the Python that `.python-version` names, so the two cannot drift."""
+    default = (Path(__file__).parents[4] / ".python-version").read_text().strip()
+    assert re.fullmatch(r"3\.\d+", default), default
+    target = tmp_path / "analytics"
+    invoke(make_state(tmp_path, FakeApi()), "init", str(target))
+    github = yaml.safe_load((target / ".github" / "workflows" / "lakana-deploy.yml").read_text())
+    versions = [
+        step["with"]["python-version"]
+        for job in github["jobs"].values()
+        for step in job["steps"]
+        if "setup-python" in step.get("uses", "")
+    ]
+    assert versions == [default, default]
+    gitlab = yaml.safe_load((target / ".gitlab-ci.yml").read_text())
+    for job in ("lakana-dry-run", "lakana-deploy"):
+        assert gitlab[job]["image"] == f"python:{default}-slim"

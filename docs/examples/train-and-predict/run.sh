@@ -4,10 +4,12 @@ set -euo pipefail
 # regions; the lines between regions are the checks. Run by scripts/run_docs_examples.sh, which
 # starts the local instance (start.sh) and sets EXAMPLE_DIR and WORK.
 #
-# A Python asset's packages are installed by the worker with uv. From a checkout, lakana is
-# not on the public package index, so the project carries its own wheel in the folder
-# `wheelhouse` (the one package that folder holds); everything else comes from the public index,
-# so the example needs a network connection. The runner is given a folder that holds the wheel:
+# A Python asset's packages are installed by the worker with uv. The page tells a reader to take
+# lakana from the public package index. This runner runs the checkout, whose version is not on
+# the index, and a deploy refuses a pin that differs from the instance's version. So the runner
+# alone gives the project the wheel of the checkout in a folder `wheelhouse` and a uv index that
+# only lakana may use; everything else comes from the public index, so the example needs a
+# network connection. The runner is given a folder that holds the wheel:
 #   uv build --package lakana --wheel --out-dir DIR && export LAKANA_TEST_WHEELHOUSE=DIR
 : "${LAKANA_TEST_WHEELHOUSE:?set LAKANA_TEST_WHEELHOUSE to a folder that holds the lakana wheel (uv build --package lakana --wheel --out-dir DIR)}"
 cd "$WORK"
@@ -47,10 +49,10 @@ test ! -e checks
 # The tutorial shows each of these files by its own path; here they are copied in.
 cp -R "$EXAMPLE_DIR/project/." .
 
-# The page tells the reader to build the wheel of lakana into the folder `wheelhouse` of the
-# project and to edit the project's pyproject.toml. Here the wheel is the one the runner was
-# given, and the file is the project's own, with the one value the page tells a reader to keep
-# as `lakana init` wrote it: the version of lakana (it is in the name of the wheel).
+# The page tells the reader to edit the project's pyproject.toml. Here the file is the project's
+# own, with the one value the page tells a reader to keep as `lakana init` wrote it (the version
+# of lakana, taken from the name of the wheel the runner was given), and with the wheel's folder
+# added as the only source of lakana (the deviation this runner needs, see the top).
 mkdir wheelhouse
 cp "$LAKANA_TEST_WHEELHOUSE"/lakana-[0-9]*.whl wheelhouse/
 test "$(find wheelhouse -type f | wc -l)" -eq 1
@@ -59,7 +61,18 @@ import glob
 version = glob.glob("wheelhouse/lakana-[0-9]*.whl")[0].split("/")[-1].split("-")[1]
 text = open("pyproject.toml").read()
 assert "==<version>" in text
-open("pyproject.toml", "w").write(text.replace("==<version>", "==" + version))
+text = text.replace("==<version>", "==" + version)
+text += """
+[[tool.uv.index]]
+name = "lakana"
+url = "wheelhouse"
+format = "flat"
+explicit = true
+
+[tool.uv.sources]
+lakana = { index = "lakana" }
+"""
+open("pyproject.toml", "w").write(text)
 PY
 
 # `uv` uses the Python that runs this script: the runner's private HOME hides the Pythons that uv

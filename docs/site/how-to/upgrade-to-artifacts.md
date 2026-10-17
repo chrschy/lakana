@@ -77,9 +77,9 @@ data once someone has stored an artifact.
    is on the new release. For each project that has a `.py` file under `assets/`:
    1. In `pyproject.toml`, change the pin of `lakana[assets]` to the new release. You get the
       number from `lakana --version`, which prints the instance's version too. Where `lakana`
-      comes from (a package index, or the folder `wheelhouse` of your project) is unchanged; if it
-      is the folder, put the new wheel there and remove the old one (see
-      [Dependencies](../tutorials/train-a-model.md#dependencies) in the tutorial).
+      comes from (the public package index, or a folder `wheelhouse` of your project for a build
+      that is not published) is unchanged; if it is the folder, put the new wheel there and remove
+      the old one (see "Python assets", step 4, in [Projects and deploys](projects.md)).
    2. Run the lock:
 
       <!-- source: docs/examples/train-and-predict/run.sh#lock -->
