@@ -233,12 +233,15 @@ jobs:
     needs: release-please
     if: needs.release-please.outputs.released == 'true'
     runs-on: ubuntu-latest
+    # `contents: write` lets the upload step below attach the file to the release; no other
+    # job of this workflow has it.
     permissions:
-      contents: read
+      contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
           fetch-depth: 0
+          persist-credentials: false
           ref: ${{ needs.release-please.outputs.tag }}
       - name: Generate SBOM
         uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c  # v0.24.3
@@ -246,3 +249,10 @@ jobs:
           path: .
           format: spdx-json
           artifact-name: lakana-sbom.spdx.json
+          output-file: lakana-sbom.spdx.json
+          upload-release-assets: false
+      - name: Attach the SBOM to the GitHub release
+        run: gh release upload "$TAG" lakana-sbom.spdx.json --clobber --repo "$GITHUB_REPOSITORY"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.release-please.outputs.tag }}
