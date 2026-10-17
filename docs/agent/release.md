@@ -261,9 +261,10 @@ Two jobs of `release.yml` ship the SBOM. `sbom` builds an SPDX software bill of 
 tagged tree with `anchore/sbom-action` (read-only token) and keeps it as the workflow artifact
 `lakana-sbom.spdx.json`. `sbom-release` then downloads that artifact and attaches it to the
 **GitHub release** of the tag, so it is found on the release page; it runs
-`gh release upload "$TAG" … --clobber`, so a re-run replaces the file. `sbom-release` and `provenance-release` (below) are the only jobs
-with `contents: write`: it has no checkout and no third-party action but the artifact download, so
-no code that builds anything holds the write token. The workflow's own `permissions` is `{}`; every
+`gh release upload "$TAG" … --clobber`, so a re-run replaces the file. `sbom-release` and
+`provenance-release` (below) are the only jobs with `contents: write`: neither has a checkout or a
+third-party action other than the artifact download, so no code that builds anything holds the
+write token. The workflow's own `permissions` is `{}`; every
 job names what it needs, and `release-please` needs nothing from `GITHUB_TOKEN` because it uses
 `RELEASE_PLEASE_TOKEN`. `scripts/tests/test_workflows.py` pins this by effective permissions.
 
@@ -274,7 +275,7 @@ Every release is signed with GitHub's build provenance attestations (Sigstore, k
 this repository's `release.yml` from the tagged commit.
 
 - **`attest-dist`** needs `build`, downloads the shared `dist` artifact and attests every wheel and
-  sdist (`subject-path: dist/*`). It has `id-token: write` and `attestations: write` and nothing
+  sdist (`subject-path` lists `dist/*.whl` and `dist/*.tar.gz`). It has `id-token: write` and `attestations: write` and nothing
   else but `contents: read`. It also keeps the bundle as the workflow artifact `provenance`.
 - **`provenance-release`** (like `sbom-release`: no checkout, only the artifact download and
   `gh release upload`, the only other job with `contents: write`) attaches the bundle to the
