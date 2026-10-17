@@ -12,6 +12,7 @@ import contextlib
 import gzip
 import hashlib
 import logging
+import shlex
 import shutil
 import sys
 import tempfile
@@ -69,6 +70,7 @@ from lakana_core.projects.project_config import normalize_source, parse_project_
 from lakana_core.projects.run_policy import RunCaps, run_policy_issues
 from lakana_core.secrets.crypto import decrypt_secret_row
 from lakana_core.secrets.keys import KeyProvider
+from lakana_core.secrets.uses import SecretUse, plain, require_use
 from lakana_core.storage.base import Storage
 from lakana_core.storage.resolver import StorageResolver
 from lakana_worker.deploy_sweep import CHECKOUT_PREFIX, hold_checkout
@@ -227,6 +229,8 @@ def resolve_credential(
         kind needs.
     NotFoundError
         If the secret does not exist (or is revoked) in this environment.
+    SecretUseRefused
+        If the secret is not bound to this repository.
     LakanaError
         If decryption fails.
     """
@@ -246,7 +250,16 @@ def resolve_credential(
         )
     ).scalar_one_or_none()
     if secret is None:
-        raise NotFoundError(f"secret {name!r} does not exist in environment {environment.name!r}")
+        raise NotFoundError(
+            f"secret {name!r} does not exist in environment {environment.name!r}. Create it "
+            f"with `lakana secret create {shlex.quote(plain(name))} --env "
+            f"{shlex.quote(plain(environment.name))} --repository "
+            f"{shlex.quote(plain(repository.name))} "
+            "--values-stdin`"
+        )
+    require_use(
+        session, secret, SecretUse.repository(repository), environment_name=environment.name
+    )
     values = decrypt_secret_row(
         secret,
         key_provider,

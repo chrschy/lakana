@@ -1,12 +1,15 @@
 """Register, list, update and delete package indexes.
 
-Only `MANAGE_PACKAGE_INDEX` registers an index or binds a credential to one.
+Only `MANAGE_PACKAGE_INDEX` registers an index and names its credential (binding a secret
+needs `MANAGE_SECRET`, as the paragraph below says).
 The `ADMIN` role carries the action, and it can be granted on its own. A
 project's lock may only name a registered index's URL (a wheel's own URL in
 the lock may still point at another host, which receives no credential).
-The holder of the action chooses where a credential may go: it binds the
-name of any secret of an environment to a URL of its choice, and a build of
-a project that names the index sends that secret's `password` to that host.
+A manager of indexes never binds a secret (`bind_or_require_named_secrets`): the secret they
+name must already be bound to the index. Binding is for someone who may manage secrets, with
+`lakana secret bind` or by naming an unbound secret. The URL of an index with a bound secret
+changes only for a principal who has that right.
+A build sends a secret's `password` only to the index it is bound to.
 """
 
 from __future__ import annotations
@@ -32,6 +35,14 @@ from lakana_core.errors import (
 from lakana_core.identifiers import is_secret_name, shown, validate_path_component
 from lakana_core.models import AuditEventType, Environment, PackageIndex
 from lakana_core.projects.package_sources import RegisteredIndex, normalize_index_url
+from lakana_core.secrets.uses import (
+    SecretBindingRefused,
+    SecretUse,
+    bind_or_require_named_secrets,
+    lock_row,
+    record_refusal,
+    require_secret_management_for_url_change,
+)
 
 UPDATABLE_FIELDS = frozenset({"url", "credential_secret"})
 """What `PATCH /package-indexes/{name}` may change. The name is fixed."""
@@ -56,7 +67,7 @@ def registered_indexes(session: Session) -> tuple[RegisteredIndex, ...]:
         Sorted by name.
     """
     rows = session.execute(select(PackageIndex).order_by(PackageIndex.name)).scalars()
-    return tuple(RegisteredIndex(row.name, row.url, row.credential_secret) for row in rows)
+    return tuple(RegisteredIndex(row.name, row.url, row.credential_secret, row.id) for row in rows)
 
 
 def _validate_name(name: str) -> None:
@@ -142,6 +153,33 @@ class PackageIndexService:
         if row is None:
             raise NotFoundError(f"No package index named '{shown(name)}'.")
         return row
+
+    def _lock(self, row: PackageIndex) -> PackageIndex:
+        """Lock an index's row and read it afresh, before anything about it is decided.
+
+        A bind, a naming and a URL change of one index take this lock first, so they run one
+        after the other, and the one that waits sees what the other committed.
+
+        Parameters
+        ----------
+        row
+            The index found by name.
+
+        Returns
+        -------
+        PackageIndex
+            The row as committed now.
+
+        Raises
+        ------
+        NotFoundError
+            If another request deleted it since it was found.
+        """
+        locked = lock_row(self._session, PackageIndex, row.id)
+        if locked is None:
+            self._session.rollback()
+            raise NotFoundError(f"No package index named '{shown(row.name)}'.")
+        return locked
 
     def _clash(self, name: str, url: str, *, except_id: uuid.UUID | None = None) -> str | None:
         """Find a registered index that has this name or this URL.
@@ -235,6 +273,9 @@ class PackageIndexService:
         ------
         PermissionDenied
             Without `MANAGE_PACKAGE_INDEX`.
+        SecretBindingRefused
+            A `PermissionDenied`: `credential_secret` names a secret that is not bound to this
+            index (unbound, bound elsewhere, or used by its environment).
         ValidationError
             If the name, the URL or the secret name is invalid.
         AlreadyExistsError
@@ -256,6 +297,20 @@ class PackageIndexService:
             credential_secret=credential_secret,
             created_by=p.id,
         )
+        if credential_secret is not None:
+            try:
+                bind_or_require_named_secrets(
+                    self._session,
+                    self._authz,
+                    p,
+                    name=credential_secret,
+                    use=SecretUse.package_index(row),
+                    registered=False,
+                )
+            except SecretBindingRefused as refusal:
+                self._session.rollback()
+                record_refusal(self._authz, p, refusal)
+                raise
         AuditService(self._session).record(
             p.id,
             AuditEventType.PACKAGE_INDEX_CREATED,
@@ -358,9 +413,10 @@ class PackageIndexService:
     def update(self, p: PrincipalRef, name: str, changes: Mapping[str, str | None]) -> PackageIndex:
         """Change an index's URL or its credential secret.
 
-        Everything is validated before the row changes, so a refusal needs no
-        rollback. The URL and the credential the row would have afterwards are
-        checked together (`normalize_index_url`), whichever of the two changes.
+        The row is locked first. Everything is validated before it changes. A refusal over a
+        secret is rolled back and recorded as a denial. The URL and the credential the row
+        would have afterwards are checked together (`normalize_index_url`), whichever of the two
+        changes.
 
         Parameters
         ----------
@@ -381,6 +437,10 @@ class PackageIndexService:
         ------
         PermissionDenied
             Without `MANAGE_PACKAGE_INDEX`.
+        SecretBindingRefused
+            A `PermissionDenied`: the URL changes while a secret is bound to the index and `p`
+            may not manage secrets in its environment, or the new `credential_secret` names a
+            secret that is not bound to this index.
         NotFoundError
             If no index has that name, including when a concurrent request
             deletes it before this commit.
@@ -403,15 +463,29 @@ class PackageIndexService:
             raise ValidationError(
                 f"{', '.join(sorted(shown(key) for key in fixed))} cannot be changed."
             )
+        if "url" in changes and changes["url"] is None:
+            raise ValidationError("url cannot be cleared.")
+        row = self._lock(row)
         new_secret = changes.get("credential_secret", row.credential_secret)
         new_url = changes.get("url", row.url)
-        if new_url is None:
-            raise ValidationError("url cannot be cleared.")
+        assert new_url is not None  # nosec B101 -- the stored URL is never null; a null change was refused
         new_url = normalize_index_url(new_url, credential=new_secret is not None)
         _validate_secret_name(new_secret)
         clash = self._clash(name, new_url, except_id=row.id)
         if clash is not None:
             raise AlreadyExistsError(clash)
+        use = SecretUse.package_index(row, new_url)
+        try:
+            if new_url != row.url:
+                require_secret_management_for_url_change(self._session, self._authz, p, use)
+            if new_secret is not None and new_secret != row.credential_secret:
+                bind_or_require_named_secrets(
+                    self._session, self._authz, p, name=new_secret, use=use, registered=True
+                )
+        except SecretBindingRefused as refusal:
+            self._session.rollback()
+            record_refusal(self._authz, p, refusal)
+            raise
         previous = {key: getattr(row, key) for key in changes}
         row.url = new_url
         row.credential_secret = new_secret

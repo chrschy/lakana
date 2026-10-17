@@ -1,12 +1,27 @@
 """The secret model."""
 
+import enum
 import uuid
 from datetime import datetime
 
+from sqlalchemy import Enum as SAEnum
 from sqlalchemy import ForeignKey, Integer, LargeBinary, String, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column
 
 from lakana_core.models.base import Base, UTCDateTime
+
+
+class SecretUseKind(enum.StrEnum):
+    """What a secret may be used for.
+
+    The database stores the member *names*; the lower-case values are the REST API's spelling.
+    A secret with no use is unbound: the worker uses it for its environment's storage and
+    webhooks, and for nothing else until an administrator binds it.
+    """
+
+    PACKAGE_INDEX = "package_index"
+    REPOSITORY = "repository"
+    ENVIRONMENT = "environment"
 
 
 class Secret(Base):
@@ -30,6 +45,11 @@ class Secret(Base):
 
     `name` is unique per `environment_id`, not globally — two different
     environments may each have a secret of the same name.
+
+    `use_kind` and `use_target_id` say what the secret is for: a package index or a
+    repository (by id), or its environment (storage, webhooks, tasks). A binding to an
+    index or repository that is later deleted keeps pointing at the gone id, so it never
+    becomes unbound by itself (`lakana_core.secrets.uses`).
 
     Soft-deleted on revoke (`revoked_by`/`revoked_at`), matching every
     other model's convention: the encrypted blob is harmless at rest
@@ -56,3 +76,7 @@ class Secret(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime)
     revoked_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("principals.id"), nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    use_kind: Mapped[SecretUseKind | None] = mapped_column(
+        SAEnum(SecretUseKind, native_enum=False, length=16), nullable=True
+    )
+    use_target_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)

@@ -1,4 +1,4 @@
-"""Secret creation, listing, rotation, and revocation.
+"""Secret creation, listing, rotation, binding, and revocation.
 
 Every method here authorizes `Action.MANAGE_SECRET` before doing anything
 else it can (`create`/`list_for_environment`, which already know the
@@ -22,9 +22,19 @@ from sqlalchemy.orm import Session
 from lakana_core.audit.service import AuditService
 from lakana_core.auth import Action, AuthorizationService, PrincipalRef, Securable
 from lakana_core.errors import AlreadyExistsError, NotFoundError, ValidationError
-from lakana_core.models import AuditEventType, Environment, Secret
+from lakana_core.identifiers import shown
+from lakana_core.models import AuditEventType, Environment, Secret, SecretUseKind
 from lakana_core.secrets.crypto import SecretBinding, encrypt_secret_values
 from lakana_core.secrets.keys import KeyProvider
+from lakana_core.secrets.uses import (
+    SecretUse,
+    lock_entry,
+    own_secret_steps,
+    record_binding,
+    resolve_use,
+    target_row,
+    used_by_its_environment,
+)
 
 
 class SecretService:
@@ -98,7 +108,13 @@ class SecretService:
         return secret
 
     def create(
-        self, p: PrincipalRef, *, environment: str, name: str, values: dict[str, str]
+        self,
+        p: PrincipalRef,
+        *,
+        environment: str,
+        name: str,
+        values: dict[str, str],
+        use: SecretUse | None = None,
     ) -> Secret:
         """Create a secret.
 
@@ -112,6 +128,9 @@ class SecretService:
             The secret's name, unique within `environment`.
         values
             The plaintext key-value bag to encrypt and store.
+        use
+            What the secret is for; `None` leaves it unbound until `bind`. Naming it from an
+            index or repository binds it only for someone who may manage secrets.
 
         Returns
         -------
@@ -131,9 +150,23 @@ class SecretService:
         PermissionDenied
             If the acting principal may not manage secrets in this
             environment.
+        ValidationError
+            If `use` is an index or repository and the environment itself uses a secret of
+            this name, for storage or webhooks.
         """
         self._authz.authorize(p, Action.MANAGE_SECRET, Securable.environment_scope(environment))
         env = self._get_environment(environment)
+        if use is not None:
+            use = lock_entry(self._session, use)
+            if use.kind is not SecretUseKind.ENVIRONMENT and used_by_its_environment(
+                self._session, env, name
+            ):
+                raise ValidationError(
+                    f"Environment '{shown(environment)}' uses the name '{shown(name)}' for its "
+                    f"storage or a webhook, so a secret of that name cannot be created for "
+                    f"{use.wanted()}. Create it with --own-env, or give the index or repository "
+                    "a secret under another name."
+                )
         secret_id = uuid.uuid4()
         encrypted = encrypt_secret_values(
             values, self._key_provider, SecretBinding(secret_id, env.id, name)
@@ -154,8 +187,10 @@ class SecretService:
             p.id,
             AuditEventType.SECRET_CREATED,
             securable=Securable.environment_scope(environment),
-            detail={"name": name},
+            detail={"name": name, "use": use.kind.value if use is not None else None},
         )
+        if use is not None:
+            record_binding(self._session, p, secret, Securable.environment_scope(environment), use)
         self._session.add(secret)
         try:
             self._session.commit()
@@ -168,6 +203,127 @@ class SecretService:
                 f"A secret named {name!r} already exists in environment {environment!r}."
             ) from exc
         return secret
+
+    def bind(self, p: PrincipalRef, secret_id: uuid.UUID, use: SecretUse) -> Secret:
+        """Bind a secret to a use, whatever it was bound to before.
+
+        Parameters
+        ----------
+        p
+            The acting principal.
+        secret_id
+            The secret's id.
+        use
+            The use (`resolve_use` builds it from names).
+
+        Returns
+        -------
+        Secret
+            The updated row.
+
+        Raises
+        ------
+        NotFoundError
+            If no secret has that id.
+        ValidationError
+            If the secret has been revoked, or is the environment's storage secret and `use`
+            is an index or a repository.
+        PermissionDenied
+            If the acting principal may not manage secrets in the secret's environment.
+        """
+        secret = self._get_secret(secret_id)
+        env = self._session.get(Environment, secret.environment_id)
+        assert env is not None  # nosec B101 -- environment_id is a non-nullable FK with ON DELETE CASCADE
+        scope = Securable.environment_scope(env.name)
+        self._authz.authorize(p, Action.MANAGE_SECRET, scope)
+        # The entry first and the secret second, the order every naming and URL change takes too.
+        use = lock_entry(self._session, use)
+        self._session.refresh(secret, with_for_update=True)
+        if secret.revoked_at is not None:
+            raise ValidationError(f"Secret {secret_id} has been revoked and cannot be bound.")
+        if use.kind is not SecretUseKind.ENVIRONMENT and env.storage_secret_ref == secret.name:
+            raise ValidationError(
+                f"Secret '{shown(secret.name)}' is the storage secret of environment "
+                f"'{shown(env.name)}', so binding it to {use.wanted()} would stop its storage. "
+                f"Give {use.wanted()} a secret of its own: {own_secret_steps(env.name, use)}."
+            )
+        record_binding(self._session, p, secret, scope, use)
+        self._session.commit()
+        return secret
+
+    def use_from_names(
+        self, p: PrincipalRef, environment: str, kind: SecretUseKind, target: str | None
+    ) -> SecretUse:
+        """Turn a use as a caller names it into a `SecretUse`, after checking the right.
+
+        The right is checked first, so a caller who may not manage secrets learns nothing
+        about which indexes or repositories exist.
+
+        Parameters
+        ----------
+        p
+            The acting principal.
+        environment
+            The environment the secret is scoped to.
+        kind
+            The kind of use.
+        target
+            The index's or repository's name; `None` for the environment.
+
+        Returns
+        -------
+        SecretUse
+            The use, with the target's id.
+
+        Raises
+        ------
+        PermissionDenied
+            If `p` may not manage secrets in `environment`.
+        NotFoundError
+            If no index or repository has that name.
+        ValidationError
+            If the environment use is given a name, or an index or repository use none.
+        """
+        self._authz.authorize(p, Action.MANAGE_SECRET, Securable.environment_scope(environment))
+        return resolve_use(self._session, kind, target)
+
+    def use_target_name(self, secret: Secret) -> str | None:
+        """Name the index or repository a secret is bound to, for a listing.
+
+        Parameters
+        ----------
+        secret
+            The row.
+
+        Returns
+        -------
+        str or None
+            The name; `None` for an unbound secret, the environment use, or a target that was
+            removed.
+        """
+        if secret.use_kind is None:
+            return None
+        row = target_row(self._session, secret.use_kind, secret.use_target_id)
+        return row.name if row is not None else None
+
+    def use_target_url(self, secret: Secret) -> str | None:
+        """Give the URL of the index or repository a secret is bound to.
+
+        Parameters
+        ----------
+        secret
+            The row.
+
+        Returns
+        -------
+        str or None
+            The URL, which is where the secret goes; `None` for an unbound secret, the
+            environment use, or a target that was removed.
+        """
+        if secret.use_kind is None:
+            return None
+        row = target_row(self._session, secret.use_kind, secret.use_target_id)
+        return row.url if row is not None else None
 
     def list_for_environment(self, p: PrincipalRef, environment: str) -> list[Secret]:
         """List an environment's active secrets.

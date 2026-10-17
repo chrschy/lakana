@@ -461,3 +461,168 @@ def test_audit_list_rejects_a_bad_timestamp_and_cursor_with_all(tmp_path: Path) 
 
     assert invoke(state, "audit", "list", "--since", "yesterday").exit_code == 2
     assert invoke(state, "audit", "list", "--all", "--cursor", "c1").exit_code == 2
+
+
+def test_secret_bind_sends_exactly_one_use(tmp_path: Path) -> None:
+    """`lakana secret bind` takes exactly one of the three use options."""
+    secret = {
+        "id": "s1",
+        "name": "pypi",
+        "environment": "dev",
+        "created_by": "a1",
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "format_version": 2,
+        "key_id": "env",
+        "use": "package_index",
+        "use_target": "corp",
+        "use_target_url": "https://corp.example.org/simple",
+    }
+    api = FakeApi()
+    api.on("PUT", "/api/v1/environments/dev/secrets/pypi/use", json=secret)
+    api.on("GET", "/api/v1/environments/dev/secrets", json=[secret])
+
+    result = invoke(
+        make_state(tmp_path, api), "secret", "bind", "pypi", "--env", "dev", "--index", "corp"
+    )
+
+    assert result.exit_code == 0, result.stderr
+    assert (
+        "Bound secret pypi in dev to package index corp (https://corp.example.org/simple)"
+        in result.stdout
+    )
+    (sent,) = [r for r in api.requests if r.method == "PUT"]
+    assert json.loads(sent.content) == {"kind": "package_index", "target": "corp"}
+    listing = invoke(make_state(tmp_path, api), "secret", "list", "--env", "dev")
+    assert "package_index" in listing.stdout
+    assert "corp" in listing.stdout
+    both = invoke(
+        make_state(tmp_path, api),
+        "secret",
+        "bind",
+        "pypi",
+        "--env",
+        "dev",
+        "--index",
+        "corp",
+        "--own-env",
+    )
+    assert both.exit_code == 2
+    assert "Pass only one of --index, --repository or --own-env" in both.output
+    neither = invoke(make_state(tmp_path, api), "secret", "bind", "pypi", "--env", "dev")
+    assert neither.exit_code == 2
+    assert "Pass exactly one of --index, --repository or --own-env" in neither.output
+
+
+def test_secret_create_with_a_use_sends_it(tmp_path: Path) -> None:
+    """`--index`, `--repository` and `--own-env` put the use into the create request."""
+    secret = {
+        "id": "s1",
+        "name": "pypi",
+        "environment": "dev",
+        "created_by": "a1",
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "format_version": 2,
+        "key_id": "env",
+        "use": "package_index",
+        "use_target": "corp",
+        "use_target_url": "https://corp.example.org/simple",
+    }
+    api = FakeApi()
+    api.on("POST", "/api/v1/environments/dev/secrets", status=201, json=secret)
+
+    result = invoke(
+        make_state(tmp_path, api),
+        "secret",
+        "create",
+        "pypi",
+        "--env",
+        "dev",
+        "--value",
+        "password=pw",
+        "--index",
+        "corp",
+    )
+
+    assert result.exit_code == 0, result.stderr
+    assert (
+        "Created secret pypi in dev, bound to package index corp "
+        "(https://corp.example.org/simple)" in result.stdout
+    )
+    assert json.loads(api.requests[-1].content)["use"] == {
+        "kind": "package_index",
+        "target": "corp",
+    }
+    own = invoke(
+        make_state(tmp_path, api),
+        "secret",
+        "create",
+        "pypi",
+        "--env",
+        "dev",
+        "--value",
+        "password=pw",
+        "--own-env",
+    )
+    assert own.exit_code == 0, own.stderr
+    assert json.loads(api.requests[-1].content)["use"] == {"kind": "environment", "target": None}
+    plain = invoke(
+        make_state(tmp_path, api),
+        "secret",
+        "create",
+        "pypi",
+        "--env",
+        "dev",
+        "--value",
+        "password=pw",
+    )
+    assert "use" not in json.loads(api.requests[-1].content)
+    assert plain.exit_code == 0, plain.stderr
+
+
+def test_secret_create_refuses_two_uses(tmp_path: Path) -> None:
+    """At most one use option is accepted, and nothing is sent."""
+    api = FakeApi()
+    result = invoke(
+        make_state(tmp_path, api),
+        "secret",
+        "create",
+        "pypi",
+        "--env",
+        "dev",
+        "--value",
+        "password=pw",
+        "--index",
+        "corp",
+        "--repository",
+        "repo",
+    )
+
+    assert result.exit_code == 2
+    assert "Pass only one of --index, --repository or --own-env" in result.output
+    assert api.requests == []
+
+
+def test_secret_bind_prints_a_long_url_whole(tmp_path: Path) -> None:
+    """The URL a secret goes to is never cut, however long."""
+    url = "https://corp.example.org/" + "a" * 300 + "/simple"
+    secret = {
+        "id": "s1",
+        "name": "pypi",
+        "environment": "dev",
+        "created_by": "a1",
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "format_version": 2,
+        "key_id": "env",
+        "use": "package_index",
+        "use_target": "corp",
+        "use_target_url": url,
+    }
+    api = FakeApi()
+    api.on("PUT", "/api/v1/environments/dev/secrets/pypi/use", json=secret)
+
+    result = invoke(
+        make_state(tmp_path, api), "secret", "bind", "pypi", "--env", "dev", "--index", "corp"
+    )
+
+    assert result.exit_code == 0, result.stderr
+    assert url in result.stdout

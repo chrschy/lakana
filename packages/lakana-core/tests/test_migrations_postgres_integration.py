@@ -1544,3 +1544,218 @@ def test_0033_on_postgres() -> None:
         migrate.upgrade(url, revision_0033)
         assert _alembic_version(engine) == revision_0033
         engine.dispose()
+
+
+def test_0034_on_postgres() -> None:
+    """0034 binds a secret one index names, leaves the rest unbound, and downgrades cleanly."""
+    revision_0033 = "e8b1f4c7d0a3"
+    revision_0034 = "f1c4a8e2b6d9"
+    index_id, bound_id, free_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    now = datetime.now(UTC)
+    with PostgresContainer("postgres:16", driver="pg8000") as pg:
+        url = pg.get_connection_url()
+        migrate.upgrade(url, revision_0033)
+        engine = sqlalchemy.create_engine(url)
+        with engine.begin() as conn:
+            conn.execute(sqlalchemy.text("SET LOCAL session_replication_role = replica"))
+            conn.execute(
+                sqlalchemy.text(
+                    "INSERT INTO package_indexes (id, name, url, credential_secret, created_at, "
+                    "updated_at) VALUES (:id, 'corp', 'https://corp/simple', 'pypi', :now, :now)"
+                ),
+                {"id": index_id, "now": now},
+            )
+            for secret_id, name in ((bound_id, "pypi"), (free_id, "s3")):
+                conn.execute(
+                    sqlalchemy.text(
+                        "INSERT INTO secrets (id, environment_id, name, ciphertext, nonce, "
+                        "wrapped_data_key, format_version, key_id, created_by, created_at) "
+                        "VALUES (:id, :env, :name, '\\x00', '\\x00', '\\x00', 2, 'env', :who, :now)"
+                    ),
+                    {
+                        "id": secret_id,
+                        "env": uuid.uuid4(),
+                        "name": name,
+                        "who": uuid.uuid4(),
+                        "now": now,
+                    },
+                )
+
+        migrate.upgrade(url, revision_0034)
+        assert _alembic_version(engine) == revision_0034
+        with engine.connect() as conn:
+            found = dict(
+                conn.execute(sqlalchemy.text("SELECT id, use_target_id FROM secrets")).all()
+            )
+        assert found == {bound_id: index_id, free_id: None}
+        with engine.connect() as conn:
+            kinds = dict(conn.execute(sqlalchemy.text("SELECT id, use_kind FROM secrets")).all())
+        assert kinds == {bound_id: "PACKAGE_INDEX", free_id: None}
+
+        migrate.downgrade(url, revision_0033)
+        assert _alembic_version(engine) == revision_0033
+        assert "use_kind" not in {
+            c["name"] for c in sqlalchemy.inspect(engine).get_columns("secrets")
+        }
+        migrate.upgrade(url, revision_0034)
+        assert _alembic_version(engine) == revision_0034
+        engine.dispose()
+
+
+def test_0034_ambiguous_and_environment_used_secrets_on_postgres() -> None:
+    """0034 leaves ambiguous and environment-used secrets unbound, per environment."""
+    revision_0033 = "e8b1f4c7d0a3"
+    revision_0034 = "f1c4a8e2b6d9"
+    env_one, env_two, who, repo_id = (uuid.uuid4() for _ in range(4))
+    index_ids = {
+        n: uuid.uuid4() for n in ("corp", "dup1", "dup2", "mixed", "own", "case", "mh", "oh")
+    }
+    index_secret = {
+        "corp": "pypi",
+        "dup1": "two-indexes",
+        "dup2": "two-indexes",
+        "mixed": "index-and-repo",
+        "own": "storage-or-hook",
+        "mh": "manifest-hook",
+        "oh": "old-hook",
+        "case": "Token",
+    }
+    with PostgresContainer("postgres:16", driver="pg8000") as pg:
+        url = pg.get_connection_url()
+        migrate.upgrade(url, revision_0033)
+        engine = sqlalchemy.create_engine(url)
+        with engine.begin() as conn:
+            conn.execute(sqlalchemy.text("SET LOCAL session_replication_role = replica"))
+            # the migration rewrites a secret row twice in one transaction, and PostgreSQL then
+            # checks its foreign keys again, so the creator must exist
+            conn.execute(
+                sqlalchemy.text(
+                    "INSERT INTO principals (id, type, name, is_active, created_at, updated_at) "
+                    "VALUES (:id, 'USER', 'admin', true, now(), now())"
+                ),
+                {"id": who},
+            )
+            for env_id, name, ref in ((env_one, "one", "storage-or-hook"), (env_two, "two", None)):
+                conn.execute(
+                    sqlalchemy.text(
+                        "INSERT INTO environments (id, name, storage_root, storage_options, "
+                        "is_protected, properties, storage_secret_ref, created_at, updated_at) "
+                        "VALUES (:id, :name, 'file:///x', '{}', false, '{}', :ref, now(), now())"
+                    ),
+                    {"id": env_id, "name": name, "ref": ref},
+                )
+            for name, index_id in index_ids.items():
+                conn.execute(
+                    sqlalchemy.text(
+                        "INSERT INTO package_indexes (id, name, url, credential_secret, "
+                        "created_at, updated_at) VALUES (:id, :name, :url, :s, now(), now())"
+                    ),
+                    {
+                        "id": index_id,
+                        "name": name,
+                        "url": f"https://{name}/simple",
+                        "s": index_secret[name],
+                    },
+                )
+            conn.execute(
+                sqlalchemy.text(
+                    "INSERT INTO repositories (id, name, kind, url, credential_secret, "
+                    "created_at, updated_at) VALUES (:id, 'mixed', 'HTTPS', 'https://g/a.git', "
+                    "'index-and-repo', now(), now())"
+                ),
+                {"id": repo_id},
+            )
+            conn.execute(
+                sqlalchemy.text(
+                    "INSERT INTO package_indexes (id, name, url, credential_secret, created_at, "
+                    "updated_at) VALUES (:id, 'hook', 'https://hook/simple', 'hook-secret', "
+                    "now(), now())"
+                ),
+                {"id": index_ids.setdefault("hook", uuid.uuid4())},
+            )
+            conn.execute(
+                sqlalchemy.text(
+                    "INSERT INTO notification_deliveries (id, environment_id, repository_id, "
+                    "job, event, format, secret_name, state, attempts, created_at) VALUES "
+                    "(:id, :env, :repo, 'nightly', 'test', 'json', 'hook-secret', 'PENDING', 0, "
+                    "now())"
+                ),
+                {"id": uuid.uuid4(), "env": env_one, "repo": repo_id},
+            )
+            for sha, manifest in (
+                ("a" * 40, {"jobs": {"nightly": {"notify": {"webhook": "old-hook"}}}}),
+                (
+                    "b" * 40,
+                    {
+                        "jobs": {
+                            "nightly": {"notify": {"webhook": "manifest-hook", "format": "json"}}
+                        }
+                    },
+                ),
+            ):
+                conn.execute(
+                    sqlalchemy.text(
+                        "INSERT INTO job_versions (id, repository_id, environment_id, commit_sha, "
+                        "manifest_json, code_uri, code_sha256, created_at) VALUES (:id, :repo, "
+                        ":env, :sha, CAST(:manifest AS json), 'file:///c', :sha256, now())"
+                    ),
+                    {
+                        "id": uuid.uuid4(),
+                        "repo": repo_id,
+                        "env": env_one,
+                        "sha": sha,
+                        "manifest": json.dumps(manifest),
+                        "sha256": "0" * 64,
+                    },
+                )
+            for env_id, name in (
+                (env_one, "manifest-hook"),
+                (env_two, "manifest-hook"),
+                (env_one, "old-hook"),
+                (env_two, "old-hook"),
+                (env_one, "pypi"),
+                (env_two, "pypi"),
+                (env_one, "two-indexes"),
+                (env_one, "index-and-repo"),
+                (env_one, "storage-or-hook"),
+                (env_two, "storage-or-hook"),
+                (env_one, "hook-secret"),
+                (env_two, "hook-secret"),
+                (env_one, "token"),
+            ):
+                conn.execute(
+                    sqlalchemy.text(
+                        "INSERT INTO secrets (id, environment_id, name, ciphertext, nonce, "
+                        "wrapped_data_key, format_version, key_id, created_by, created_at) "
+                        "VALUES (:id, :env, :name, '\\x00', '\\x00', '\\x00', 2, 'env', :who, "
+                        "now())"
+                    ),
+                    {"id": uuid.uuid4(), "env": env_id, "name": name, "who": who},
+                )
+
+        migrate.upgrade(url, revision_0034)
+        with engine.connect() as conn:
+            found = {
+                (e, n): (k, t)
+                for e, n, k, t in conn.execute(
+                    sqlalchemy.text(
+                        "SELECT environment_id, name, use_kind, use_target_id FROM secrets"
+                    )
+                ).all()
+            }
+        engine.dispose()
+
+    unbound = (None, None)
+    assert found[env_one, "pypi"] == ("PACKAGE_INDEX", index_ids["corp"])
+    assert found[env_two, "pypi"] == ("PACKAGE_INDEX", index_ids["corp"])
+    assert found[env_one, "two-indexes"] == unbound
+    assert found[env_one, "index-and-repo"] == unbound
+    assert found[env_one, "storage-or-hook"] == unbound
+    assert found[env_two, "storage-or-hook"] == ("PACKAGE_INDEX", index_ids["own"])
+    assert found[env_one, "hook-secret"] == unbound
+    assert found[env_two, "hook-secret"] == ("PACKAGE_INDEX", index_ids["hook"])
+    assert found[env_one, "manifest-hook"] == unbound
+    assert found[env_two, "manifest-hook"] == ("PACKAGE_INDEX", index_ids["mh"])
+    assert found[env_one, "old-hook"] == unbound
+    assert found[env_two, "old-hook"] == ("PACKAGE_INDEX", index_ids["oh"])
+    assert found[env_one, "token"] == unbound

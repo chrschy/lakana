@@ -74,6 +74,7 @@ COMMANDS: dict[str, tuple[str, ...]] = {
     "secret list": ("secrets.list",),
     "secret rotate": ("secrets.rotate",),
     "secret revoke": ("secrets.revoke",),
+    "secret bind": ("secrets.bind",),
     "repo add": ("repositories.create",),
     "repo list": ("repositories.list",),
     "repo show": ("repositories.get",),

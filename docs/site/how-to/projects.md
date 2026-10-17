@@ -587,6 +587,8 @@ there is one, the line, as `path:line: message`. Fix the cause and deploy again.
 | `positional-only parameters are not supported`, `*args is not supported; …`, `**kwargs is not supported; …`, `a parameter must not have a default` | The signature has a shape the harness cannot fill. | Declare every input as a plain parameter. |
 | `an asset function must not be async` | `async def`. | Use `def`. |
 | `input 'x': …` | The input is not a valid table name. | Use `namespace.table`. |
+| `Secret 'x' of environment 'e' is not bound to a use yet` (or `is bound to …, not to repository 'r'`) | The repository names a credential secret that nobody bound to it, or that serves something else. Lakana sends a secret only to the use it is bound to. | Someone who manages secrets runs the command the message ends with: `lakana secret bind x --env e --repository r`. To stop sharing one secret between repositories, create one per repository: `lakana secret create NEW --env e --repository r --values-stdin`, then `lakana repo update r --credential-secret NEW`. |
+| `secret 'x' does not exist in environment 'e'. Create it with …` | The repository names a credential secret that the environment lacks. | Run the command the message shows; it ends in a bound secret. |
 | `table 'x' not found` | An input is not produced by this repository and does not exist in the environment, or the deploying principal may not read it. When two repositories share an artifact, this is also what the consumer's deploy says if it comes **before** the producer's first deploy. | Deploy the repository that produces it first, or fix the name. See "Two repositories, one artifact" below. |
 | `` `models.x` is an artifact; only a Python asset can read it. `` | A SQL asset names an artifact in `FROM`. | Read it in a Python asset. |
 | `` `x.y` already exists in dev as a table; drop it first, or choose another name. `` (or `a view`, `an external table`) | An artifact asset has the name of a table, view or external table. | Choose another file name, or drop the table with the `table delete` subcommand. |
@@ -821,11 +823,19 @@ can run Python assets, and why not. Its cache directory is `$XDG_CACHE_HOME/laka
 
 <!-- not tested: moved as is; sorted in the second pull request -->
 ```bash
-lakana repo add analytics --kind https --url https://github.com/acme/analytics.git \
-    --credential-secret github-token --default-ref main
 lakana secret create github-token --env prod --value token=ghp_…   # per environment
 lakana secret create github-token --env dev  --value token=ghp_…
+lakana repo add analytics --kind https --url https://github.com/acme/analytics.git \
+    --credential-secret github-token --default-ref main
 ```
+
+Create the secrets first. An administrator who registers the repository binds each unbound secret of that
+name to it, in every environment that has one; if they may not manage secrets in one of them, the
+command is refused and binds nothing. Someone who may only register repositories
+(`MANAGE_REPOSITORY`) can name a secret only if it is already bound to that repository; see
+[Manage secrets](manage-secrets.md#bind-a-secret-to-its-use). A new URL for a repository with a
+bound secret needs `MANAGE_SECRET` in that secret's environment too, because the URL is where the
+secret goes.
 
 - `https`: the secret's `token` is sent as the password with username `oauth2`, or with
   `--credential-username` (GitLab deploy tokens have their own).

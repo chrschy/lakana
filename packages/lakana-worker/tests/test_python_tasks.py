@@ -105,6 +105,8 @@ from lakana_core.models import (
     RepositoryKind,
     RollbackOutcome,
     Run,
+    Secret,
+    SecretUseKind,
     Table,
     TableType,
     TaskRun,
@@ -142,6 +144,7 @@ from lakana_core.runs.tasks import (
 )
 from lakana_core.secrets.keys import EnvKeyProvider
 from lakana_core.secrets.service import SecretService
+from lakana_core.secrets.uses import SecretUse
 from lakana_core.storage.resolver import StorageResolver
 from lakana_worker.attempt_sweep import AttemptSweeper
 from lakana_worker.deploy_sweep import DeploySweeper
@@ -4193,6 +4196,9 @@ def test_a_lock_that_is_incompatible_is_still_reported_with_its_own_advice(py: P
 _INDEX_KEY = EnvKeyProvider(base64.b64encode(b"0" * 32).decode())
 
 
+_TEAM_INDEX_ID = uuid.UUID("00000000-0000-0000-0000-00000000a001")
+
+
 def _register_team_index(py: PyWorld, *, password: str | None) -> None:
     """Register the index `team` and, with a password, its secret in the run's environment.
 
@@ -4206,7 +4212,7 @@ def _register_team_index(py: PyWorld, *, password: str | None) -> None:
     with py.world.session() as session:
         session.add(
             PackageIndex(
-                id=uuid.uuid4(),
+                id=_TEAM_INDEX_ID,
                 name="team",
                 url="https://pkgs.example.org/simple",
                 credential_secret="team-index",
@@ -4221,6 +4227,7 @@ def _register_team_index(py: PyWorld, *, password: str | None) -> None:
                 environment="dev",
                 name="team-index",
                 values={"username": "ci", "password": password},
+                use=SecretUse(SecretUseKind.PACKAGE_INDEX, _TEAM_INDEX_ID, "team"),
             )
 
 
@@ -4338,6 +4345,27 @@ def test_a_testpypi_row_with_a_secret_is_told_to_clear_the_secret(py: PyWorld) -
     )
 
 
+def test_an_unbound_index_secret_fails_the_build_for_good_with_the_bind_command(
+    py: PyWorld,
+) -> None:
+    """The secret exists and holds a password, but no one bound it to the index."""
+    _register_team_index(py, password="the-password")
+    with py.world.session() as session:
+        secret = session.execute(select(Secret).where(Secret.name == "team-index")).scalar_one()
+        secret.use_kind, secret.use_target_id = None, None
+        session.commit()
+    py.deploy(_lock() + _TEAM_PACKAGE)
+    task, message = _fails(py, _with_key(py.engine(_forged, acquire_venv=_building)))
+    assert (task.status, task.attempt) == (TaskStatus.FAILED, 1)
+    assert message == (
+        "environment build failed: Secret 'team-index' of environment 'dev' is not bound to a "
+        "use yet, so Lakana does not send it to package index 'team'. An administrator binds "
+        "it: lakana secret bind team-index --env dev --index team"
+    )
+    assert "the-password" not in message
+    assert py.tokens() == [] and py.runner.tasks == []
+
+
 def test_a_removed_secret_fails_the_next_build_for_good(py: PyWorld) -> None:
     """The same message as at deploy, and no retry."""
     _register_team_index(py, password=None)
@@ -4347,7 +4375,8 @@ def test_a_removed_secret_fails_the_next_build_for_good(py: PyWorld) -> None:
     assert message == (
         "environment build failed: the package index 'team' needs the secret 'team-index' in "
         "environment 'dev', which does not exist. Create it with `lakana secret create "
-        'team-index --env dev --values-stdin` (a JSON object with "username" and "password")'
+        'team-index --env dev --index team --values-stdin` (a JSON object with "username" '
+        'and "password")'
     )
     assert py.tokens() == [] and py.runner.tasks == []
     assert list((py.root / "work").iterdir()) == []
@@ -4517,7 +4546,11 @@ def test_the_resolver_refuses_when_the_environment_is_gone(py: PyWorld) -> None:
             session,
             py.engine(_forged),
             "no-such-environment",
-            (RegisteredIndex("team", "https://pkgs.example.org/simple", "team-index"),),
+            (
+                RegisteredIndex(
+                    "team", "https://pkgs.example.org/simple", "team-index", _TEAM_INDEX_ID
+                ),
+            ),
         )
         assert resolver is not None
         with pytest.raises(VenvBuildRefused, match="the environment no longer exists"):

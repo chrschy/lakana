@@ -24,7 +24,8 @@ def _secret_from_json(data: dict[str, Any]) -> Secret:
         The decoded `SecretOut` JSON body. Structurally cannot carry a
         value or ciphertext field. A server that predates the stored-format
         fields sends neither `format_version` nor `key_id`; they read as `1`
-        and `env`, which is how such a server stores every secret.
+        and `env`, which is how such a server stores every secret, and neither `use` nor
+        `use_target` or `use_target_url`, which read as `None`.
 
     Returns
     -------
@@ -39,6 +40,9 @@ def _secret_from_json(data: dict[str, Any]) -> Secret:
         created_at=datetime.fromisoformat(data["created_at"]),
         format_version=data.get("format_version", 1),
         key_id=data.get("key_id", "env"),
+        use=data.get("use"),
+        use_target=data.get("use_target"),
+        use_target_url=data.get("use_target_url"),
     )
 
 
@@ -63,7 +67,14 @@ class Secrets:
     def __init__(self, transport: HttpTransport) -> None:
         self._transport = transport
 
-    def create(self, environment: str, name: str, values: dict[str, str]) -> Secret:
+    def create(
+        self,
+        environment: str,
+        name: str,
+        values: dict[str, str],
+        kind: str | None = None,
+        target: str | None = None,
+    ) -> Secret:
         """Create a secret.
 
         Parameters
@@ -76,6 +87,11 @@ class Secrets:
             The plaintext key-value bag to encrypt and store. Sent only in
             the request body — never echoed back in any response, and never
             held by the SDK afterward.
+        kind
+            What the secret is for, so that it is bound as it is created: ``package_index``,
+            ``repository`` or ``environment``. `None` leaves it unbound.
+        target
+            The index's or repository's name; `None` for the environment.
 
         Returns
         -------
@@ -85,7 +101,7 @@ class Secrets:
         Raises
         ------
         lakana.errors.NotFound
-            If the environment does not exist.
+            If the environment, or the named index or repository, does not exist.
         lakana.errors.Conflict
             If a secret of this name already exists in this environment.
         """
@@ -93,7 +109,11 @@ class Secrets:
         response = self._transport.request(
             ROUTES["secrets.create"],
             path_params={"environment_name": environment},
-            json={"name": request.name, "values": request.values},
+            json={
+                "name": request.name,
+                "values": request.values,
+                **({"use": {"kind": kind, "target": target}} if kind is not None else {}),
+            },
         )
         return _secret_from_json(response.json())
 
@@ -168,3 +188,36 @@ class Secrets:
             ROUTES["secrets.revoke"],
             path_params={"environment_name": environment, "secret_name": name},
         )
+
+    def bind(self, environment: str, name: str, kind: str, target: str | None = None) -> Secret:
+        """Bind a secret to the one use it may serve.
+
+        Parameters
+        ----------
+        environment
+            The environment the secret is scoped to.
+        name
+            The secret's name.
+        kind
+            ``package_index``, ``repository`` or ``environment``.
+        target
+            The index's or repository's name; `None` for the environment.
+
+        Returns
+        -------
+        Secret
+            The bound secret's metadata.
+
+        Raises
+        ------
+        lakana.errors.NotFound
+            If the environment, the secret or the target does not exist.
+        lakana.errors.PermissionDenied
+            If the caller may not manage secrets in the environment.
+        """
+        response = self._transport.request(
+            ROUTES["secrets.bind"],
+            path_params={"environment_name": environment, "secret_name": name},
+            json={"kind": kind, "target": target},
+        )
+        return _secret_from_json(response.json())

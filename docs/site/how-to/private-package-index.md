@@ -20,8 +20,8 @@ a password or token for it.
 
 <!-- source: docs/examples/getting-started/run.sh#private-index-register -->
 ```bash
-lakana index add team --url https://pkgs.example.org/simple --credential-secret team-index
 lakana secret create team-index --env dev --values-stdin < credential.json
+lakana index add team --url https://pkgs.example.org/simple --credential-secret team-index
 ```
 
 `credential.json` holds the user name and the password:
@@ -33,17 +33,29 @@ lakana secret create team-index --env dev --values-stdin < credential.json
 For an index that takes a token, put the token into `password` and use the user name the index
 asks for with tokens. Delete the file afterwards.
 
-- `team-index` is the name of a secret, the one the index names. Create that secret in **every environment** whose
-  projects use the index. Environments can hold different passwords under the same name. A
-  deploy into an environment that lacks the secret stops and says so.
+- `team-index` is the name of a secret, the one the index names. Create it before you register
+  the index, in **every environment** whose projects use the index. Environments can hold
+  different passwords under the same name. Registering the index binds each secret of that name
+  to it. That takes the right to manage secrets (the `ADMIN` role) in every environment that has
+  an unbound secret of that name; if you lack it in one, the command is refused and nothing is
+  bound. A secret created after the index is not bound yet: create it with its use, or bind it,
+  as [Manage secrets](manage-secrets.md#bind-a-secret-to-its-use) shows. A deploy into an
+  environment that lacks the secret stops and says so; a build with a secret that is not bound to
+  the index is refused, and the message gives the command that binds it.
+- A secret has one use: this index, a repository, or its environment's own work (storage and
+  webhooks). Lakana sends it nowhere else. `lakana secret list --env ENV` shows each secret's use.
 - An index that asks for no password can be registered too: leave out `--credential-secret`.
 - Registering needs the permission `MANAGE_PACKAGE_INDEX` on the instance. The `ADMIN` role has
-  it, and an administrator can also grant it to someone as a single action. Whoever holds it
-  can register an index at any URL and bind the **name** of any secret of an environment to it.
-  Together with the permission to deploy and run in that environment, this sends that secret's
-  `password` value to the host of the registered URL. So grant it only to people you would give
-  those secrets. Under the current runner, everyone who may deploy and run Python code can read
-  what the worker reads anyway (see the start of this page).
+  it, and an administrator can also grant it to someone as a single action. Whoever holds only
+  that permission can register an index at any URL, but can name only a secret that an
+  administrator has already bound to that same index. Naming any other secret is refused, the
+  refusal is recorded in the audit log, and the message gives the `lakana secret bind` command
+  to ask someone who manages secrets to run. Under the current runner, someone who also holds
+  `DEPLOY` and `RUN` reads what the worker reads anyway (see the start of this page), so binding
+  protects against an index manager redirecting a secret, not against code that runs in the
+  worker. Changing the URL of an index that has a bound secret
+  needs the right to manage secrets in that secret's environment too, because the URL is where
+  the secret goes.
 - Anyone who can read an environment can list the indexes: `lakana index list` shows names and
   URLs, never a password.
 
@@ -63,7 +75,7 @@ In short:
 - It is not PyPI's own address (`pypi.org`, `files.pythonhosted.org`): PyPI takes no credential
   and needs no registration. A lock may name `https://pypi.org/simple` as it is.
 - TestPyPI (`https://test.pypi.org/simple`) is an index of its own. Register it **without**
-  `--credential-secret`: its downloads need no credential, and Lakana refuses to bind one to it.
+  `--credential-secret`: its downloads need no credential, and Lakana refuses a credential for it.
 
 Two forms that many indexes use work as they are: **GitLab** with the numeric project ID
 (`https://gitlab.example.org/api/v4/projects/1234/packages/pypi/simple`, not the project's path,
@@ -183,7 +195,9 @@ lakana secret rotate team-index --env dev --values-stdin < credential.json
 ```
 
 An environment that was built keeps working without the secret. The next build uses the new
-value. To take the credential off an index, an administrator clears the secret's name:
+value. The secret stays bound to the index, and no other index or repository can name it unless
+someone who manages secrets moves it with `lakana secret bind`. To take the credential off an
+index, an administrator clears the secret's name:
 
 <!-- source: docs/examples/getting-started/run.sh#private-index-clear -->
 ```bash
@@ -207,7 +221,8 @@ next build.
 | `pyproject.toml: the index … is a registered package index and needs `explicit = true`` | The index is declared without `explicit = true`. | Add it and the `[tool.uv.sources]` lines, run `uv lock`, commit, deploy. |
 | `pyproject.toml: the index named … points at …, but the package index registered as …` | Your index has the name of a registered index and another URL. Checked at a deploy only, and not for an index whose `url` is a folder, such as `wheelhouse`. | Use the registered URL or another name. |
 | `pyproject.toml: `index-url` names the registered package index …` (or `extra-index-url`) | A registered index is set as `index-url` or `extra-index-url`. | Declare it as a `[[tool.uv.index]]` table with `explicit = true` instead. |
-| `uv.lock: the package index … needs the secret … which does not exist` | The environment has no secret of that name. | Run the `lakana secret create` command the message shows. |
+| `uv.lock: the package index … needs the secret … which does not exist` | The environment has no secret of that name. | Someone who manages secrets creates it with its use: `lakana secret create NAME --env ENV --index INDEX --values-stdin`. A secret created without `--index` is not bound, and the next build is refused. |
+| `uv.lock: Secret … is not bound to a use yet` or `… is bound to …, not to package index …` (at a run: `environment build failed: Secret …`) | The secret exists, but nobody bound it to this index: it is unbound, or it serves another index, a repository or its environment. Lakana sends a secret only to the use it is bound to. | Someone who manages secrets runs the command the message ends with: `lakana secret bind NAME --env ENV --index INDEX`. |
 | `uv.lock: the secret … has no usable "password"` | The secret has no `password` value, or one that cannot be passed on (a NUL character). | Run the `lakana secret rotate` command the message shows, with a JSON object that has `username` and `password`. |
 | `uv.lock: the secret … has a "username" (or a "password", or both) longer than 4096 characters` | The value the message names is longer than 4,096 characters. A deploy and a run refuse it, instead of failing the build with a message about the argument list. | Run the `lakana secret rotate` command the message shows, with a shorter value. |
 | `uv.lock: the credentials of the package indexes this project uses, in environment …, are too long together` | The user names and passwords of all the indexes the project uses together are too long to pass to the build (about 100 KB once encoded). | Shorten them with `lakana secret rotate`, or use fewer indexes with a credential. |
@@ -217,7 +232,7 @@ next build.
 | `uv.lock: the package index … has a credential, but its host takes none` | The index's row holds a credential for a host that takes none (TestPyPI); possible only for a row that was changed in the database directly. No credential is sent. | An administrator removes the credential with the `lakana index update NAME --clear credential_secret` command the message shows. |
 | `uv.lock: the stored URL of the package index … is not valid any more` | The index's row in the database holds a URL that Lakana would not accept today, so no credential is sent to it. This happens only to a row that was changed in the database directly. | An administrator sets the URL again with the `lakana index update NAME --url URL` command the message shows. |
 | `environment build failed: The package index … refused the credential in secret …` | The index answered 401 or 403: the password is wrong or expired, or the account may not read the package. | Run the `lakana secret rotate` command the message shows, then start the run again; if the password was right, give the account the right to read the package on the index. No new deploy is needed. |
-| `environment build failed: The package index … asked for a credential, and none is registered for it` | The index asks for a password and has no `credential_secret`. | An administrator runs the `lakana index update NAME --credential-secret NAME` command the message shows and creates the secret. |
+| `environment build failed: The package index … asked for a credential, and none is registered for it` | The index asks for a password and has no `credential_secret`. | An administrator creates the secret first, with `lakana secret create SECRET --env ENV --values-stdin`, then runs `lakana index update NAME --credential-secret SECRET`. Naming it binds it. |
 | `environment build failed: uv exited with status 1` | Most often an index whose files sit on another host that asks for a credential: the credential is not sent there. The task's log shows uv's own error. | This layout is not supported: keep the index's files on its own host and port. |
 | `environment build failed: … has no wheel for this platform and Python` | See "Wheels only". | Publish a wheel, or remove the dependency. |
 | `The package index … already has this URL` or `A package index named … already exists` (from `lakana index add`) | A name or a URL can be registered once. | Use that index, or remove it first with the command the message shows. |
@@ -232,7 +247,7 @@ The first failure of a deploy looks like this:
 
 <!-- output -->
 ```text
-uv.lock: the package index 'team' needs the secret 'team-index' in environment 'dev', which does not exist. Create it with `lakana secret create team-index --env dev --values-stdin` (a JSON object with "username" and "password")
+uv.lock: the package index 'team' needs the secret 'team-index' in environment 'dev', which does not exist. Create it with `lakana secret create team-index --env dev --index team --values-stdin` (a JSON object with "username" and "password")
 ```
 
 And a wrong password, in `lakana runs show`:
@@ -248,6 +263,13 @@ unreachable public index does, and the task is tried again until its retries run
 
 ## What this does and does not protect
 
+- A secret is bound to the one index it serves. Someone who may register indexes
+  (`MANAGE_PACKAGE_INDEX`) cannot redirect another secret to a host of their choice: they can name
+  only a secret already bound to that index, and they cannot change the URL of an index whose
+  secret is bound unless they also manage secrets in its environment. A refusal is recorded in
+  the audit log as `AUTHORIZATION_DENIED`. This stops the redirection by an index manager. It
+  does not stop code that runs in the worker under the current runner, which reads what the
+  worker reads.
 - The credential is offered only to the host and port of the registered URL. A project that
   points the index's name at another host gets no credential there.
 - The index's files must be on the same host and port as the index. A file that the index

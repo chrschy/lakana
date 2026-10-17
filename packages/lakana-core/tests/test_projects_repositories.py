@@ -415,7 +415,11 @@ def test_concurrent_create_loser_is_already_exists(
 def test_an_update_racing_a_delete_is_not_found(
     session: Session, service: RepositoryService, principal: PrincipalRef
 ) -> None:
-    """The row is gone when the update commits; the answer is the service's own."""
+    """The row is gone when the update commits; the answer is the service's own.
+
+    A change of the URL or the credential takes the row lock before anything is flushed, so a
+    real delete waits for it; a change of another field is first written at the commit.
+    """
     service.create(principal, name="r", kind=RepositoryKind.HTTPS, url="https://h/r.git")
     fired = []
 
@@ -431,7 +435,7 @@ def test_an_update_racing_a_delete_is_not_found(
 
     event.listen(session, "before_flush", _rival)
     with pytest.raises(NotFoundError, match="No repository named 'r'"):
-        service.update(principal, "r", {"url": "https://h/other.git"})
+        service.update(principal, "r", {"default_ref": "main"})
     event.remove(session, "before_flush", _rival)
     assert session.execute(select(Repository.name)).scalars().all() == []
     assert (

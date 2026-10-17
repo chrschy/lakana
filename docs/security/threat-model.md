@@ -293,9 +293,20 @@ What the credential of a registered package index does not protect against. Each
    deploy check still requires the index's secret to exist in the environment it deploys to, and
    a cached environment reads no secret.
 
-7. **A holder of `MANAGE_PACKAGE_INDEX` chooses which host receives a secret.** A secret is
-   bound to an index by its name only. See "What the administrator rule does not cover (M5c2c)"
-   under "Explicitly not defended".
+7. **A holder of `MANAGE_PACKAGE_INDEX` alone cannot redirect a secret to another host.** A secret
+   is bound to one use (a package index, a repository, or its environment) and only
+   `MANAGE_SECRET` binds it. The holder names only a secret already bound to that index and
+   changes the URL of an index with a bound secret only with `MANAGE_SECRET` in its environment;
+   each refusal to name a secret, bind one or move a URL is audited as `AUTHORIZATION_DENIED`. The
+   residual is an unbound secret, which
+   keeps serving its environment's storage and webhooks and is refused to an index until an
+   administrator binds it. A second residual, from before binding: anyone holding
+   instance-scoped `MANAGE_ENVIRONMENT` can change `storage_options`, including `s3.endpoint`,
+   without `MANAGE_SECRET`, and the environment's storage secret then goes to that endpoint.
+   Under `LocalProcessRunner` a holder who also has `DEPLOY` and `RUN`
+   still reads what the worker reads (item 1 and the trust domain): binding stops the
+   redirection by an index manager, not code that runs in the worker. See "What the
+   administrator rule does not cover (M5c2c)" under "Explicitly not defended".
 
 What a registered index's URL may look like is stated once, in
 [Package indexes](../site/reference/package-indexes.md): `https` (`http` only for loopback), no
@@ -396,13 +407,16 @@ otherwise would misrepresent what the platform does.
     the code reads and writes that account's tables there. `MANAGE_REPOSITORY` with `DEPLOY` and
     `RUN` can reach the same through a bound repository.
   - A holder of `MANAGE_PACKAGE_INDEX`, which can be granted as a single action, registers an
-    index at any URL and binds the name of any secret of an environment to it. With `DEPLOY` and
-    `RUN` on that environment, the `password` value of that secret is sent to the registered
-    host by the next build of a project that names the index. `MANAGE_REPOSITORY` has the same
-    property for a secret's `token` at a deploy. Under `LocalProcessRunner` such a holder can
-    read what the worker reads anyway (one trust domain); the permission is to be given only to
-    people trusted with those secrets. Without `DEPLOY`, a holder can stop the projects that use
-    an index (a changed URL, a removed index) and nothing more.
+    index at any URL but cannot send a secret to it: a secret is bound to one use, only
+    `MANAGE_SECRET` binds it, and the holder names only a secret already bound to that index.
+    Moving the URL of an index with a bound secret needs `MANAGE_SECRET` in that secret's
+    environment. `MANAGE_REPOSITORY` follows the same rules for a repository. Every refusal is
+    audited as `AUTHORIZATION_DENIED` (every refusal to name a secret, bind one or move a URL).
+    Under `LocalProcessRunner` a holder who also has `DEPLOY` and `RUN` still reads what the
+    worker reads, so binding does not stop code that runs in the worker. Residual: an unbound
+    secret keeps serving its environment's storage and webhooks. Without `DEPLOY`, a holder can stop
+    the projects that
+    use an index (a changed URL, a removed index) and nothing more.
   - The rule is not retroactive: a grant, a group membership or a token that a holder of one of
     the three actions created before the upgrade stays. The audit log lists them
     (`GRANT_CREATED`, `GROUP_MEMBER_ADDED` and `PAT_ISSUED` events by that principal).
