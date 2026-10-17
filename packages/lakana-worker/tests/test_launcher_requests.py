@@ -303,6 +303,10 @@ HOSTILE: list[Any] = [
     pytest.param(_with(BUILD, hosts=["fe80::1"], indexes=[]), "hosts:", id="host-ipv6-link-local"),
     pytest.param(_with(BUILD, hosts=["::"], indexes=[]), "hosts:", id="host-ipv6-unspecified"),
     pytest.param(_with(BUILD, hosts=["127.1"], indexes=[]), "hosts:", id="host-short-ipv4"),
+    pytest.param(_with(BUILD, hosts=["127.0.0.0x1"], indexes=[]), "hosts:", id="host-mixed-hex"),
+    pytest.param(_with(BUILD, hosts=["0.0x0.0.0"], indexes=[]), "hosts:", id="host-hex-label"),
+    pytest.param(_with(BUILD, hosts=["100.64.0.1"], indexes=[]), "hosts:", id="host-shared-space"),
+    pytest.param(_with(BUILD, hosts=["224.0.0.1"], indexes=[]), "hosts:", id="host-multicast"),
     pytest.param(_with(RUN, op="exec"), "op must be one of", id="op-exec"),
     pytest.param(
         _with(RUN, token="x" * 64), "does not carry the launcher's token", id="wrong-token"

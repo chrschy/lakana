@@ -94,6 +94,7 @@ _CONSTANT_NOW = frozenset(
 
 _STACK = re.compile(r"\A[a-z0-9][a-z0-9_-]{0,62}\Z")
 _ROOT_NAME = re.compile(r"\A[a-z0-9][a-z0-9_-]{0,62}\Z")
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 _NUMBER = re.compile(r"[0-9]{1,10}")
 _IMAGE = re.compile(
     r"\A[a-z0-9][a-z0-9._/:-]{0,200}(?::[A-Za-z0-9._-]{1,128})?(?:@sha256:[0-9a-f]{64})?\Z"
@@ -307,7 +308,10 @@ def _path(environ: Mapping[str, str], name: str, default: Path) -> Path:
     if text is None:
         return default
     if not _plain_absolute(text):
-        raise SettingsError(f"{PREFIX}{name} must be an absolute path without '..'.")
+        raise SettingsError(
+            f"{PREFIX}{name} must be an absolute path without '..', a leading '//' "
+            "or control characters."
+        )
     return Path(text)
 
 
@@ -327,7 +331,12 @@ def _plain_absolute(text: str) -> bool:
     bool
         ``True`` for a path such as ``/srv/landing``.
     """
-    return os.path.isabs(text) and os.path.normpath(text) == text and not text.startswith("//")
+    return (
+        os.path.isabs(text)
+        and os.path.normpath(text) == text
+        and not text.startswith("//")
+        and _CONTROL.search(text) is None
+    )
 
 
 def _is_under(path: Path, parent: Path) -> bool:
@@ -389,9 +398,13 @@ def load_settings(environ: Mapping[str, str]) -> LauncherSettings:
         For the first setting that is missing or malformed.
     """
     for name in sorted(environ):
-        if name.startswith(PREFIX) and name[len(PREFIX) :] not in KNOWN_SETTINGS:
+        if (
+            name.startswith(PREFIX)
+            and name[len(PREFIX) :] not in KNOWN_SETTINGS
+            and environ[name].strip()
+        ):
             short = name[len(PREFIX) :]
-            reason = " (it is a constant now)" if short in _CONSTANT_NOW else ""
+            reason = " (it is a constant now; remove it)" if short in _CONSTANT_NOW else ""
             raise SettingsError(
                 f"{name} is not a setting{reason}; the settings are "
                 + ", ".join(PREFIX + known for known in KNOWN_SETTINGS)

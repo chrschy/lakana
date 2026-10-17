@@ -213,6 +213,15 @@ def _roots(path: str) -> dict[str, str]:
         pytest.param(_roots("/etc"), "INGESTION_ROOTS must be", id="root-etc"),
         pytest.param(_roots("/etc/ssl"), "INGESTION_ROOTS must be", id="root-under-etc"),
         pytest.param(_roots("//"), "INGESTION_ROOTS must be", id="root-double-slash"),
+        pytest.param(_roots("/srv/a\nb"), "INGESTION_ROOTS must be", id="root-newline"),
+        pytest.param(_roots("/srv/a\x00b"), "INGESTION_ROOTS must be", id="root-nul"),
+        pytest.param(_roots("/srv/a\x1bb"), "INGESTION_ROOTS must be", id="root-escape"),
+        pytest.param(_roots("/srv/a\x7fb"), "INGESTION_ROOTS must be", id="root-delete"),
+        pytest.param(
+            {**_BASE, "LAKANA_LAUNCHER__SOCKET": "/run/a\nb.sock"},
+            "SOCKET must be an absolute path",
+            id="socket-newline",
+        ),
         pytest.param(_roots("//run"), "INGESTION_ROOTS must be", id="root-double-slash-run"),
         pytest.param(
             _roots("//var/run"), "INGESTION_ROOTS must be", id="root-double-slash-var-run"
@@ -295,3 +304,12 @@ def test_a_refused_root_does_not_name_its_path() -> None:
     with pytest.raises(SettingsError) as caught:
         load_settings(_roots("/etc/" + _SECRET_PATH))
     assert _SECRET_PATH not in str(caught.value)
+
+
+def test_a_blank_former_variable_is_ignored_and_a_set_one_says_to_remove_it() -> None:
+    """Compose passes empty values for unset variables; only a value is a mistake."""
+    blank = {**_BASE, "LAKANA_LAUNCHER__TASK_USER": "  "}
+
+    assert load_settings(blank) == load_settings(_BASE)
+    with pytest.raises(SettingsError, match=r"TASK_USER is not a setting .*remove it"):
+        load_settings({**_BASE, "LAKANA_LAUNCHER__TASK_USER": "0:0"})

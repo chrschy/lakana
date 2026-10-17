@@ -50,7 +50,7 @@ _HOST = re.compile(
 )
 _CONTROL = re.compile(r"[\x00-\x20\x7f]")
 _URL_CHARS = re.compile(r"[A-Za-z0-9._~:/@!$&'()*+,;=%\[\]-]+")
-_NUMERIC_HOST = re.compile(r"[0-9.]+|0[xX][0-9a-fA-F.]*")
+_NUMERIC_LABEL = re.compile(r"[0-9]")
 MIN_CPUS = 0.01
 """Least CPU share Docker accepts; below it a share rounds to no limit at all."""
 
@@ -485,9 +485,10 @@ def _python(data: dict[str, Any], settings: LauncherSettings) -> str:
 def _allowed_host(host: str) -> bool:
     """Say whether a host name may be reached by a build.
 
-    A host name is allowed. A number is allowed only as a public IP address: loopback,
-    link-local (the cloud metadata address), private and unspecified addresses, and the short
-    spellings a resolver would turn into one, are not.
+    A host name is allowed. A host whose last label starts with a digit is a number, and is
+    allowed only as a global unicast IP address: loopback, link-local (the cloud metadata
+    address), private, shared (100.64.0.0/10), multicast and unspecified addresses, and the
+    short or hex spellings a resolver would turn into one, are not.
 
     Parameters
     ----------
@@ -501,15 +502,13 @@ def _allowed_host(host: str) -> bool:
     """
     if _HOST.match(host) is None:
         return False
-    if _NUMERIC_HOST.fullmatch(host) is None:
+    if _NUMERIC_LABEL.match(host.rsplit(".", 1)[-1]) is None:
         return True
     try:
         address = ipaddress.ip_address(host)
     except ValueError:
         return False
-    return not (
-        address.is_loopback or address.is_link_local or address.is_private or address.is_unspecified
-    )
+    return address.is_global and not address.is_multicast
 
 
 def _host_of(url: str, *, schemes: tuple[str, ...], userinfo: bool) -> str | None:
