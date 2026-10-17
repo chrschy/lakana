@@ -68,33 +68,19 @@ name = "{repo}"
 version = "0.1.0"
 requires-python = ">=3.11"
 # This project depends on no package yet: a SQL-only project needs no lock. CI installs lakana
-# from LAKANA_INDEX_URL.
+# from PyPI (or from LAKANA_INDEX_URL, when you set it).
 dependencies = []
 
 # To add a Python asset (a .py file under assets/), a project needs lakana[assets] and a lock:
-#   1. Delete `dependencies = []` above and uncomment the dependency and the two uv tables below.
-#   2. Put the wheel of lakana (a file lakana-<version>-py3-none-any.whl) in the folder `wheelhouse`
-#      of this project, and nothing else. lakana then comes only from that folder, so the project
-#      uses exactly the version that wrote this file; every other package comes from the public
-#      package index. How to build the wheel: the tutorial "Train a model and score with it",
-#      section "Dependencies". lakana is on PyPI as a pre-beta: for a version published there,
-#      delete the two uv tables and the folder.
-#   3. Run `uv lock` in this directory. It needs the public package index.
-#   4. Commit pyproject.toml, uv.lock and wheelhouse, then deploy: the worker builds the asset's
-#      venv from uv.lock (its first build needs the public package index too), and a deploy
-#      without it names what is missing.
+#   1. Delete `dependencies = []` above and uncomment the dependency line below.
+#   2. Run `uv lock` in this directory. It needs the public package index, where lakana comes
+#      from too, at exactly the version that wrote this file.
+#   3. Commit pyproject.toml and uv.lock, then deploy: the worker builds the asset's venv from
+#      uv.lock (its first build needs the public package index too), and a deploy without it
+#      names what is missing.
 # SQL-only projects need none of this. See "Python assets" in docs/site/how-to/projects.md.
 #
 # dependencies = ["lakana[assets]=={version}"]
-#
-# [[tool.uv.index]]
-# name = "lakana"
-# url = "wheelhouse"
-# format = "flat"
-# explicit = true
-#
-# [tool.uv.sources]
-# lakana = {{ index = "lakana" }}
 
 [dependency-groups]
 dev = ["pytest>=8"]
@@ -102,10 +88,9 @@ dev = ["pytest>=8"]
 
 _GITHUB = """\
 # Deploys main to prod; dry-runs pull requests against dev.
-# lakana is pinned to the CLI version that generated this file and installed only from
-# LAKANA_INDEX_URL (a repository variable), so the job that holds the deploy token installs from
-# an index you chose. For a version that is on PyPI, set it to https://pypi.org/simple (see
-# docs/site/how-to/projects.md).
+# lakana is pinned to the CLI version that generated this file and installed from PyPI. To use a
+# mirror or a build you host yourself, set the repository variable LAKANA_INDEX_URL to that
+# index (see docs/site/how-to/projects.md).
 # Actions are pinned to full commit SHAs; bump them deliberately (Dependabot understands this form).
 # Repository secret: LAKANA_URL, and LAKANA_TOKEN_DEV for a service principal holding DEPLOY on dev
 # only. Environment secret (GitHub environment "prod", restricted to the main branch and/or
@@ -140,8 +125,8 @@ jobs:
           python-version: "3.13"
       - name: Install lakana
         run: |
-          : "${{LAKANA_INDEX_URL:?set LAKANA_INDEX_URL to the index that hosts lakana}}"
-          pip install --index-url "$LAKANA_INDEX_URL" "lakana=={version}"
+          pip install --index-url "${{LAKANA_INDEX_URL:-https://pypi.org/simple}}" \
+"lakana=={version}"
       - name: Dry run against dev
         run: lakana deploy --env dev --ref "$REF_SHA" --dry-run --timeout 1800
   deploy:
@@ -163,18 +148,17 @@ jobs:
           python-version: "3.13"
       - name: Install lakana
         run: |
-          : "${{LAKANA_INDEX_URL:?set LAKANA_INDEX_URL to the index that hosts lakana}}"
-          pip install --index-url "$LAKANA_INDEX_URL" "lakana=={version}"
+          pip install --index-url "${{LAKANA_INDEX_URL:-https://pypi.org/simple}}" \
+"lakana=={version}"
       - name: Deploy to prod
         run: lakana deploy --env prod --ref "$REF_SHA" --timeout 1800
 """
 
 _GITLAB = """\
 # Deploys main to prod; dry-runs merge requests against dev.
-# lakana is pinned to the CLI version that generated this file and installed only from
-# LAKANA_INDEX_URL (a CI/CD variable), so the job that holds the deploy token installs from
-# an index you chose. For a version that is on PyPI, set it to https://pypi.org/simple (see
-# docs/site/how-to/projects.md).
+# lakana is pinned to the CLI version that generated this file and installed from PyPI. To use a
+# mirror or a build you host yourself, set the CI/CD variable LAKANA_INDEX_URL to that index
+# (see docs/site/how-to/projects.md).
 # CI/CD variables: LAKANA_URL; LAKANA_TOKEN_DEV (masked) for a service principal holding DEPLOY on
 # dev only; LAKANA_TOKEN_PROD (masked AND protected, so only pipelines on protected branches see
 # it) for a principal holding DEPLOY on prod. Protect only main under Settings > Repository.
@@ -189,8 +173,7 @@ lakana-dry-run:
   variables:
     LAKANA_TOKEN: $LAKANA_TOKEN_DEV
   script:
-    - ': "${{LAKANA_INDEX_URL:?set LAKANA_INDEX_URL to the index that hosts lakana}}"'
-    - pip install --index-url "$LAKANA_INDEX_URL" "lakana=={version}"
+    - pip install --index-url "${{LAKANA_INDEX_URL:-https://pypi.org/simple}}" "lakana=={version}"
     - lakana deploy --env dev --ref "$CI_COMMIT_SHA" --dry-run --timeout 1800
 
 lakana-deploy:
@@ -202,8 +185,7 @@ lakana-deploy:
   variables:
     LAKANA_TOKEN: $LAKANA_TOKEN_PROD
   script:
-    - ': "${{LAKANA_INDEX_URL:?set LAKANA_INDEX_URL to the index that hosts lakana}}"'
-    - pip install --index-url "$LAKANA_INDEX_URL" "lakana=={version}"
+    - pip install --index-url "${{LAKANA_INDEX_URL:-https://pypi.org/simple}}" "lakana=={version}"
     - lakana deploy --env prod --ref "$CI_COMMIT_SHA" --timeout 1800
 """
 
@@ -366,9 +348,9 @@ def init(
     if _is_dev_build(__version__):
         lines.append(
             f"Note: lakana {__version__} is a development build, so the CI install "
-            f"`lakana=={__version__}` can't be installed from the index. Ignore this until "
+            f"`lakana=={__version__}` can't be installed from PyPI. Ignore this until "
             "you use CI; then edit the pinned version in .github/workflows/lakana-deploy.yml "
-            "and .gitlab-ci.yml."
+            "and .gitlab-ci.yml, or set LAKANA_INDEX_URL to an index that has it."
         )
     typer.echo("\n".join(lines))
 

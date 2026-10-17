@@ -23,11 +23,10 @@ only if `git commit` says it does not know who you are. A per-directory identity
 With an identity found, `init` says nothing about git.
 
 The generated `pyproject.toml` does not depend on `lakana`: a SQL-only project needs no lock. The CI files pin
-the version of the CLI that ran `lakana init` and install it from an index you name (see below).
+the version of the CLI that ran `lakana init` and install it from PyPI (see below).
 To add a Python asset, follow the numbered steps in the comments of that `pyproject.toml`:
-depend on `lakana[assets]`, take `lakana` from the folder `wheelhouse` of your project, or from PyPI
-for a released version (see "Python assets", step 4), run `uv lock`, and commit `pyproject.toml`, `uv.lock`
-and the folder. A deploy that has Python assets but no usable lock says what is missing. A complete
+depend on `lakana[assets]` (see "Python assets", step 4), run `uv lock`, and commit
+`pyproject.toml` and `uv.lock`. A deploy that has Python assets but no usable lock says what is missing. A complete
 example is in "Python assets". Local mode (`lakana server start --local`) runs Python assets when
 `uv` is on your `PATH`; the Compose bundle's image ships it ([`deploy-with-compose.md`](deploy-with-compose.md), "Python
 assets"). If a worker cannot run them, its startup log says why and what to set.
@@ -398,18 +397,12 @@ def station_scores(readings: pl.DataFrame, stations: pl.DataFrame) -> pl.DataFra
     return scored.join(stations, on="station_id")
 ```
 
-**4. Add the dependencies.** The generated `pyproject.toml` carries the `lakana` wheel in a folder,
-and `uv` takes `lakana` from that folder and from nowhere else, so the project uses exactly the
-version of the CLI that wrote the file, whether or not it is published. Every other package comes
-from the public package index: `uv lock` and the worker's first build of the project's environment need a network
-connection to it (the worker uses `LAKANA_RUN__HTTPS_PROXY` if you set one, see "Operator
-settings").
-
-Put the wheel into the folder `wheelhouse` of the project, and nothing else. How to build it from
-a checkout of Lakana is in the tutorial
-[Train a model and score with it](../tutorials/train-a-model.md#dependencies). Then delete
-`dependencies = []` in `pyproject.toml` and uncomment the block below it. The `pyproject.toml`
-that `lakana init` wrote already has the right lines; with them uncommented, the file reads:
+**4. Add the dependencies.** The generated `pyproject.toml` carries the dependency on `lakana`
+in a comment, pinned to the version of the CLI that wrote the file. Delete `dependencies = []`
+and remove the `# ` in front of the `dependencies` line. `lakana` and every other package come
+from the public package index: `uv lock` and the worker's first build of the project's
+environment need a network connection to it (the worker uses `LAKANA_RUN__HTTPS_PROXY` if you set
+one, see "Operator settings"). With the line uncommented, the file reads:
 
 ```toml
 [project]
@@ -418,22 +411,12 @@ version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = ["lakana[assets]==<version>"]
 
-[[tool.uv.index]]
-name = "lakana"
-url = "wheelhouse"
-format = "flat"
-explicit = true
-
-[tool.uv.sources]
-lakana = { index = "lakana" }
-
 [dependency-groups]
 dev = ["pytest>=8"]
 ```
 
 The `<version>` that `lakana init` wrote is the version of the CLI that ran it. It must be the
-version of the wheel in `wheelhouse`: it is in the file's name, between `lakana-` and
-`-py3-none-any.whl`; write that if the two differ. To see which version the instance runs, run
+version of the instance. To see which version the instance runs, run
 `lakana --version`: it prints the CLI's version and the instance's (from `GET /api/v1/info`, which
 needs a credential; in Python, `client.info().version`). It asks once and gives up after 3 s in all. If the
 instance is down, too slow, answers like something else than Lakana, or no profile is configured, it says so and still exits 0. If the pin differs from
@@ -441,8 +424,12 @@ the instance's, the deploy refuses and names the version the instance runs (`uv.
 but this instance runs Y (…); update the dependency and run `uv lock``); change the pin to that
 version.
 
-`lakana` is on PyPI as a pre-beta. For a version published there you need no folder: delete the two
-`uv` tables and the folder `wheelhouse` and keep the pin.
+A version of `lakana` that is not on PyPI, such as a build of a checkout, cannot be locked from
+the public index. Build its wheel (`uv build --package lakana --wheel --out-dir wheelhouse`), put
+it in a folder `wheelhouse` of the project and add a flat `uv` index for that folder as the only
+source of `lakana`: a `[[tool.uv.index]]` table with `name = "lakana"`, `url = "wheelhouse"`,
+`format = "flat"` and `explicit = true`, and `[tool.uv.sources]` with
+`lakana = { index = "lakana" }`. Commit the folder with the lock.
 
 `uv` is the Python package manager from Astral. Its lock file, `uv.lock`, pins every package and
 its hash. You create it and commit it; Lakana never resolves versions for you:
@@ -1123,28 +1110,28 @@ The generated CI files dry-run pull/merge requests against `dev` with `LAKANA_TO
 in them passes `--timeout 1800`, so a deploy that has not ended after 30 minutes fails the job (exit 1)
 instead of holding it until the runner's own limit.
 
-The job that holds the prod token installs `lakana` from an index you name, not from whichever
-index pip happens to know. Both CI files install with
-`pip install --index-url "$LAKANA_INDEX_URL" "lakana==<version>"` and stop with
-`set LAKANA_INDEX_URL to the index that hosts lakana` when the variable is unset. For a version
-that is on PyPI, set `LAKANA_INDEX_URL` to `https://pypi.org/simple`. For a build that is not
-published, point it at an index you control that hosts lakana and mirrors its dependencies. Never
-switch to `--extra-index-url` next to PyPI: pip takes the name from whichever index offers it.
+The job that holds the prod token installs `lakana` from one index, not from whichever index pip
+happens to know. Both CI files install with
+`pip install --index-url "${LAKANA_INDEX_URL:-https://pypi.org/simple}" "lakana==<version>"`:
+from PyPI when the variable `LAKANA_INDEX_URL` is unset or empty. To use a mirror, or a build that
+is not published, set `LAKANA_INDEX_URL` to an index you control that hosts that version of
+`lakana` and mirrors its dependencies. Never switch to `--extra-index-url` next to PyPI: pip
+takes the name from whichever index offers it.
 
 The GitHub workflow pins each action (`actions/checkout`, `actions/setup-python`) to a full commit
 SHA with the release in a trailing `# vX.Y.Z` comment, since a mutable tag in the job that holds
 the prod token is a supply-chain hole; bump them by hand or with Dependabot. The pinned actions run on node24 and need runner
 2.327.1 or newer; older self-hosted and GitHub Enterprise Server runners fail on them.
 
-- **GitHub:** put `LAKANA_URL` and `LAKANA_TOKEN_DEV` in repository secrets and `LAKANA_INDEX_URL` in
-  repository variables (if the URL carries credentials, make it a secret and change `vars.` to
-  `secrets.` in the workflow). Create the `prod` environment, restrict it to the `main` branch (and
+- **GitHub:** put `LAKANA_URL` and `LAKANA_TOKEN_DEV` in repository secrets. Only for a mirror, put
+  `LAKANA_INDEX_URL` in repository variables (if the URL carries credentials, make it a secret and
+  change `vars.` to `secrets.` in the workflow). Create the `prod` environment, restrict it to the `main` branch (and
   optionally required reviewers), and store `LAKANA_TOKEN` as an *environment* secret there. The
   workflow has `contents: read` only and serialises deploys per target. Fork pull requests get no
   secrets, so their dry-run is skipped.
-- **GitLab:** protect `main` and no other branch, then add `LAKANA_URL`, `LAKANA_INDEX_URL`,
+- **GitLab:** protect `main` and no other branch, then add `LAKANA_URL`,
   `LAKANA_TOKEN_DEV` (masked) and `LAKANA_TOKEN_PROD` as a variable that is both *masked* and
-  *protected*. GitLab exposes a protected variable to every pipeline on a protected branch or tag,
+  *protected*; add `LAKANA_INDEX_URL` only for a mirror. GitLab exposes a protected variable to every pipeline on a protected branch or tag,
   including a merge request pipeline whose source branch is protected, so keep the protected set to
   `main`. Each job maps its own variable to `LAKANA_TOKEN`; never define a project variable named
   `LAKANA_TOKEN`, because project variables override a job's `variables:`. The prod job uses a
