@@ -86,6 +86,8 @@ Each cell is a summary. The page named in the last column has the detail. The ch
 
 | Release | What it asks | Where |
 |---|---|---|
+| 0.13.0 | Migration `0033` (adds `schema_id` to row filters and column masks). Iceberg tables are read by field id: a renamed column keeps its data; a column dropped and added again, also by a type change with `evolve_schema`, is a new column whose older rows read as NULL; reads of a table whose nested fields were renamed or re-added, that has a column type Lakana cannot read, or whose column names differ only in letter case are refused. A commit through the Iceberg REST catalog that adds a data file without field ids is refused, as is one of more than 2,000 data files or one whose check takes over 60 seconds; files committed earlier without field ids read as NULL. A read under a row filter or column mask is refused when a column the policy uses was renamed or replaced since the policy was created: create the policy again for its column, then revoke the old one. A query that changes data is refused wherever the statement sits. Errors on reads under a row filter or column mask show a fixed message. | [Notes for 0.13.0](#notes-for-0130) |
+| 0.12.1 | No migration. Columns qualified with the table's name work, also under a row filter or column mask. | [Notes for 0.12.1](#notes-for-0121) |
 | 0.12.0 | Migrations `0020` to `0032`. Before you upgrade, check that an administrator can sign in. A grant of `MANAGE_GRANT`, `MANAGE_GROUP` or `MANAGE_TOKEN` as a single action no longer has an effect: only the `ADMIN` role does. A project whose `uv.lock` names a package index that is not registered, or a git or URL dependency, stops at its next run: an administrator registers the index, and the project declares it with `explicit = true`, is locked and deployed again. The worker ignores a project's `[tool.uv]` settings. Every query runs in a process of its own: a query past its time limit is ended, a query can be cancelled and can end as `CANCELLED`, and a worker over its memory limit ends its largest query or Python task before it stops itself. If you search the server's or the worker's log: a record of several lines now has `    | ` at the start of its later lines, control characters are written as escapes (a carriage return as `\x0d`), and uvicorn's level names have no colours. A query or a deploy that an earlier release left `RUNNING` for ever is ended within about a minute and shows `FAILED` with the cause `worker_lost` (a deploy shows `failed`); nothing is run again by itself. Stop every old worker before you migrate and start the new ones after: a worker of the earlier release does not register, so the new scheduler ends its queries and deploys after a lease. `lakana query list` and `lakana worker list` are new. With three or more workers that take ad-hoc queries, one user can have at most all but one of them busy at once (three workers: two queries running at once; four: three); the Compose bundle's default of two workers is not affected. Data quality checks are new, and a check can keep the data that failed it (`on_failure: keep`); a project can set the default of its checks in `lakana.yaml`: a project without a `checks/` directory runs unchanged, one with checks needs every worker upgraded with the server, and a commit through the Iceberg REST catalog that would leave a table with no current snapshot is now refused. `lakana check rows` shows the rows that a check found, and `lakana table maintain` removes the failed snapshot of a check after seven days. | [Notes for 0.12.0](#notes-for-0120), [Data quality checks](#data-quality-checks), [Workers for one kind of work, and a limit per user](#workers-for-one-kind-of-work-and-a-limit-per-user), [Use a private package index](../how-to/private-package-index.md), [Queries run in a process of their own](#queries-run-in-a-process-of-their-own), [Queries and deploys cannot get stuck](#queries-and-deploys-cannot-get-stuck), [Control characters in the log](../how-to/deploy-with-compose.md#the-sweep) |
 | 0.11.0 | Migrations `0018` and `0019`; set every secret you created again; every worker upgraded first; lock Python projects again; new limits on request bodies and SQL text; workers stop at 4 GB. | [Upgrade to the release with artifacts](../how-to/upgrade-to-artifacts.md) |
 | 0.10.0 | A package index URL with a query string is refused; move a `uv.toml` into `pyproject.toml`; lineage and failure causes changed. | This row |
@@ -93,38 +95,9 @@ Each cell is a summary. The page named in the last column has the detail. The ch
 
 ## Notes for the next release
 
-### Errors under a row filter or column mask
+Nothing yet.
 
-No migration. A query that reads a table under a row filter or column mask no longer shows the
-database's text for a failure, except binder, catalog and parser errors: the run's error, and a check's error, hold one fixed message that names
-the table and does not show the value. Cancellations, time limits and memory errors, and errors on a table with no filter or mask, keep their text.
-
-### Columns can be qualified with the table's name
-
-No migration. `SELECT orders.id FROM gold.orders`, `gold.orders.id` and `o.id` after
-`FROM gold.orders AS o` now work, also under a row filter or column mask; before, they failed with a
-message about a read called `__lakana_...`. The table's own name serves as the alias only when no
-other table, alias, CTE, derived table or view of the query has that name. The full name
-(`gold.orders.id`) works in the level of the query that reads the table; inside a subquery, a CTE,
-a derived table or a `LATERAL` join write `orders.id` or give the table an alias. When two
-tables share a name (`gold.orders JOIN silver.orders`, or a subquery over `silver.orders`
-inside a query over `gold.orders`), nothing changes: the query runs as before, and a column qualified with that name
-fails in the database as before. Give each table an alias.
-
-### A query that changes data is refused wherever the statement sits
-
-No migration. A query, an asset, a check or a view whose SQL holds `INSERT`, `UPDATE`,
-`DELETE`, `MERGE`, `COPY`, `CREATE`, `DROP`, `ATTACH`, `SET` or another statement that is not a
-read is refused also when the statement sits inside a CTE or a subquery:
-``A query reads data and cannot change it: `DELETE` is not allowed, also not inside a CTE or
-subquery.`` DuckDB 1.5 rejects these shapes itself; the next major DuckDB release runs them, so
-Lakana refuses them first. A query may not call `getvariable` either.
-
-`DESCRIBE`, `SUMMARIZE`, `SHOW` and `SELECT ... INTO` are refused in a query too, also inside
-a subquery or a CTE (`SELECT * FROM (SUMMARIZE t)` no longer works). `DESCRIBE`, `SUMMARIZE`
-and `SHOW` were never allowed as the whole statement; `SELECT ... INTO` is now refused there
-too. To get the numbers, use an aggregate query (`SELECT count(*), min(x), max(x) FROM t`) and
-read the column list from the result.
+## Notes for 0.13.0
 
 ### Iceberg tables are read by field id
 
@@ -171,6 +144,41 @@ before this release are not checked. If such a file lacks field ids, every colum
 as NULL, with no error. Ask the owner of the table to write its rows again, with Lakana
 (`replace`) or with a client that writes field ids. Field ids that match no column of the table
 read as NULL as well.
+
+### A query that changes data is refused wherever the statement sits
+
+No migration. A query, an asset, a check or a view whose SQL holds `INSERT`, `UPDATE`,
+`DELETE`, `MERGE`, `COPY`, `CREATE`, `DROP`, `ATTACH`, `SET` or another statement that is not a
+read is refused also when the statement sits inside a CTE or a subquery:
+``A query reads data and cannot change it: `DELETE` is not allowed, also not inside a CTE or
+subquery.`` DuckDB 1.5 rejects these shapes itself; the next major DuckDB release runs them, so
+Lakana refuses them first. A query may not call `getvariable` either.
+
+`DESCRIBE`, `SUMMARIZE`, `SHOW` and `SELECT ... INTO` are refused in a query too, also inside
+a subquery or a CTE (`SELECT * FROM (SUMMARIZE t)` no longer works). `DESCRIBE`, `SUMMARIZE`
+and `SHOW` were never allowed as the whole statement; `SELECT ... INTO` is now refused there
+too. To get the numbers, use an aggregate query (`SELECT count(*), min(x), max(x) FROM t`) and
+read the column list from the result.
+
+### Errors under a row filter or column mask
+
+No migration. A query that reads a table under a row filter or column mask no longer shows the
+database's text for a failure, except binder, catalog and parser errors: the run's error, and a check's error, hold one fixed message that names
+the table and does not show the value. Cancellations, time limits and memory errors, and errors on a table with no filter or mask, keep their text.
+
+## Notes for 0.12.1
+
+### Columns can be qualified with the table's name
+
+No migration. `SELECT orders.id FROM gold.orders`, `gold.orders.id` and `o.id` after
+`FROM gold.orders AS o` now work, also under a row filter or column mask; before, they failed with a
+message about a read called `__lakana_...`. The table's own name serves as the alias only when no
+other table, alias, CTE, derived table or view of the query has that name. The full name
+(`gold.orders.id`) works in the level of the query that reads the table; inside a subquery, a CTE,
+a derived table or a `LATERAL` join write `orders.id` or give the table an alias. When two
+tables share a name (`gold.orders JOIN silver.orders`, or a subquery over `silver.orders`
+inside a query over `gold.orders`), nothing changes: the query runs as before, and a column qualified with that name
+fails in the database as before. Give each table an alias.
 
 ## Notes for 0.12.0
 
