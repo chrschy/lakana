@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.13.0](https://github.com/chrschy/lakana/compare/v0.12.1...v0.13.0) (2026-10-17)
+
+
+### ⚠ BREAKING CHANGES
+
+* **query:** Iceberg tables are read by field id. A renamed column keeps its data; a column dropped and added again, also by a type change with evolve_schema, is a new column whose older rows read as NULL. Reads of a table whose nested fields were renamed or re-added, that has a column type Lakana cannot read, or whose column names differ only in letter case are refused until the table is fixed. A commit through the Iceberg REST catalog that adds a data file without Iceberg field ids (for example pyiceberg's add_files) is refused (422), as is one of more than 2,000 data files or one whose check takes over 60 seconds; files committed earlier without field ids read as NULL, so write them again. A read under a row filter or column mask is refused when a column the policy uses was renamed or replaced since the policy was created; policies from earlier releases are judged against every schema the table has had. To repair, create each affected policy again for the column it is meant for, then revoke the old one; reads stay refused until the old one is revoked. Migration 0033 adds schema_id to row filters and column masks.
+
+### Bug Fixes
+
+* **policy:** replace the query engine's error text on reads under a row filter or column mask ([#122](https://github.com/chrschy/lakana/issues/122)) ([2a85e81](https://github.com/chrschy/lakana/commit/2a85e81330add357159ade5a20ad98f06a3dc4f0))
+* **query:** read Iceberg tables by field id and refuse commits of files without field ids ([0fa4c38](https://github.com/chrschy/lakana/commit/0fa4c385c41fe867d2002ffee60b13f11fdf7af5))
+* **query:** refuse a statement that changes data anywhere in a query ([#115](https://github.com/chrschy/lakana/issues/115)) ([47d946b](https://github.com/chrschy/lakana/commit/47d946bd83041d91e055c1bbbdcacd7bfeb323de))
+
 ## [0.12.1](https://github.com/chrschy/lakana/compare/v0.12.0...v0.12.1) (2026-10-16)
 
 
