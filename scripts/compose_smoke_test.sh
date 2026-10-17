@@ -130,6 +130,37 @@ python3 -c 'import json,sys; a=json.loads(sys.argv[1]); assert [(x["name"], x["c
 mkdir -p "$copy"
 lakana --profile team artifact download models.doubler "$copy/first" --env dev
 python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["factor"] == 2' "$copy/first/model.json"
+# SeaweedFS's internal HTTP APIs are unreachable from the worker (#14): `seaweedfs` is only the
+# S3 gateway, and the master, volume server and filer live on `seaweedfs-core`, on a network the
+# worker does not join. Run from inside the worker, with the image's own Python (it has no curl).
+docker compose exec -T worker python - <<'PY'
+import socket
+import urllib.error
+import urllib.request
+
+# The internal host is not even resolvable (assumes the host's DNS has no wildcard search
+# domain, which would resolve any name); the gateway's host refuses every internal port.
+try:
+    socket.getaddrinfo("seaweedfs-core", 9333)
+except socket.gaierror:
+    pass
+else:
+    raise SystemExit("the worker resolves seaweedfs-core: the internal network is reachable")
+for port in (9333, 19333, 8080, 18080, 8888, 18888, 8181, 9101):
+    try:
+        socket.create_connection(("seaweedfs", port), timeout=3).close()
+    except OSError:
+        continue
+    raise SystemExit(f"the worker reached seaweedfs:{port}, an internal SeaweedFS port")
+# S3 through the configured endpoint answers; with no credentials it refuses (403).
+try:
+    urllib.request.urlopen("http://seaweedfs:8333/lakana/", timeout=5)
+except urllib.error.HTTPError as err:
+    if err.code != 403:
+        raise SystemExit(f"S3 without credentials answered {err.code}, expected 403")
+else:
+    raise SystemExit("S3 answered an unauthenticated bucket listing")
+PY
 # A restart is a no-op and data survives
 docker compose down
 docker compose up -d --wait --wait-timeout 180

@@ -427,21 +427,16 @@ otherwise would misrepresent what the platform does.
   or per-query grant check: every control in the "Defended" table above applies only to
   queries run through Lakana's own worker. Governed credential vending is deferred (issue
   #5).
-- **SeaweedFS's internal HTTP APIs inside the Compose team bundle (#14).** In
-  team mode, the worker runs user SQL with `httpfs` and external access enabled against a
-  `seaweedfs` container on the same Compose network; the AST blacklist (see "Bypassing
-  policy by reading files directly" above) is the only control between that SQL and
-  SeaweedFS's own admin surface, and it is defence in depth, not the primary control.
-  `compose.yaml` runs `weed server -disableHttp`, which closes the filer's unauthenticated
-  plain-HTTP file read/write/delete route — the path a single missed blacklist entry would
-  use to reach every environment's raw bytes — since the S3 gateway itself talks to the
-  filer over gRPC, not HTTP, and keeps working. SeaweedFS's master (port 9333) and volume
-  server (port 8080) HTTP listeners are not covered by that flag and stay reachable,
-  unauthenticated, from any container on the network; no host port is published for either,
-  so this is reachable only from inside the Compose network, not from the host's own
-  network. The structural fix — SeaweedFS's JWT signing (`security.toml`) for the filer and
-  volume servers, or isolating SeaweedFS onto a network the worker can't reach — is deferred
-  to a follow-up issue, not designed here.
+- **SeaweedFS's internal HTTP APIs inside the Compose team bundle (#14) — closed by network
+  isolation.** The worker runs user SQL with `httpfs` and external access enabled, and
+  SeaweedFS's master (9333), volume server (8080) and filer HTTP APIs need no credentials.
+  `compose.yaml` runs them in `seaweedfs-core` (also `-disableHttp` on the filer), on an
+  `internal: true` network only SeaweedFS's containers share; the S3 gateway `seaweedfs` is the
+  one service on both that network and the one the server and workers use, and it listens on
+  8333 and its gRPC port 18333 (its other HTTP ports are off). A worker's HTTP can reach SeaweedFS only through S3 with the keys. A test asserts the
+  network layout and the CI smoke test checks it from inside the worker. **Residual:** the gateway's gRPC port 18333 (it includes IAM) cannot be turned off and has no authentication. It is reachable from the default network, so from code in the worker: user SQL cannot reach it, because DuckDB's HTTP filesystem cannot speak gRPC, but a Python task, which runs as trusted code in the worker today, could remove the storage identity and make storage unavailable until a restart. The planned container runner keeps task networks away from SeaweedFS. The isolation relies on Docker's own network isolation (the default). The S3 keys
+  in the worker's reach give full bucket access, and a host administrator (Docker access) is
+  outside the model.
 - **Applying Iceberg row-level deletes.** A table written to by an engine other than Lakana's
   own append path — e.g. a merge-on-read `UPDATE`/`DELETE` from another engine through Lakana's Iceberg REST
   catalog — can commit a snapshot with position- or equality-delete files. Lakana's query
