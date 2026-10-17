@@ -492,6 +492,32 @@ def test_rewrite_rejects_a_statement_that_is_not_a_query() -> None:
         rewrite_query("DELETE FROM gold.sales", sources={"gold.sales": _parquet("a.parquet")})
 
 
+@pytest.mark.parametrize(
+    ("sql", "key"),
+    [
+        ("PIVOT gold.sales ON a USING sum(b)", "PIVOT"),
+        ("SELECT 1 AS a; SELECT b FROM gold.sales", "BLOCK"),
+    ],
+)
+def test_rewrite_rejects_a_catalog_table_under_a_statement_that_is_no_query(
+    sql: str, key: str
+) -> None:
+    """Defence in depth: a top-level `PIVOT` or a `;`-separated block passes the walk.
+
+    The statement has no scope to attach a CTE to, so the rewrite refuses it itself, naming
+    what it parsed to.
+
+    Parameters
+    ----------
+    sql
+        A statement that is not an `exp.Query` and names a catalog table.
+    key
+        The statement kind the message names.
+    """
+    with pytest.raises(ValidationError, match=f"{key} may not reference a catalog table"):
+        rewrite_query(sql, sources={"gold.sales": _parquet("a.parquet")})
+
+
 def test_rewrite_leaves_a_reference_not_in_sources_untouched() -> None:
     """A table reference outside `sources` is not this call's concern and is left alone."""
     rewritten = rewrite_query(
