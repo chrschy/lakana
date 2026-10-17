@@ -7,10 +7,8 @@ from typing import Annotated
 
 import typer
 
-from lakana._models import Secret
 from lakana.cli import _output
-from lakana.cli._state import CliError, CliState, confirm, state_of
-from lakana.errors import LakanaError
+from lakana.cli._state import CliError, confirm, state_of
 from lakana.resources.package_indexes import UPDATABLE
 
 index_app = typer.Typer(
@@ -18,9 +16,8 @@ index_app = typer.Typer(
 )
 
 _LIST_COLUMNS = ["name", "url", "credential_secret"]
-_MAX_SHOWN_NAME = 120
-"""The longest quoted, escaped secret name a hint shows in a command; a longer one is not cut
-(a command that ends inside its quotes is broken) but left out."""
+_WHOLE = 100_000
+"""Far above any name, so that a name in a command is escaped but never cut."""
 
 
 @index_app.command("add")
@@ -57,60 +54,18 @@ def add(
     state = state_of(ctx)
     index = state.client().package_indexes.create(name, url, credential_secret=credential_secret)
     _output.done(state, f"Registered package index {_output.inline(name)}", index)
-    if (
-        credential_secret is not None
-        and state.output == "table"
-        and _still_unbound(state, credential_secret, name)
-    ):
-        written = _output.inline(shlex.quote(credential_secret), limit=_MAX_SHOWN_NAME + 1)
-        index = _output.inline(shlex.quote(name), limit=_MAX_SHOWN_NAME + 1)
-        command = (
-            f"lakana secret create {written} --env ENV --index {index} --values-stdin"
-            if len(written) <= _MAX_SHOWN_NAME and len(index) <= _MAX_SHOWN_NAME
-            else f"lakana secret create NAME --env ENV --index {index} --values-stdin (NAME is "
-            "the name you gave, too long to show here)"
-        )
+    if credential_secret is not None and state.output == "table":
+        secret = _output.inline(shlex.quote(credential_secret), limit=_WHOLE)
+        index_name = _output.inline(shlex.quote(name), limit=_WHOLE)
         typer.echo(
-            "Next: someone who may manage secrets creates the secret, bound to this index, in "
-            f"each environment whose projects use it: {command} "
-            '(a JSON object with "username" and "password").',
+            f"Next: in each environment where the secret {secret} does not exist yet, someone who "
+            "may manage secrets creates it, bound to this index (the values are a JSON object "
+            'with "username" and "password"):\n'
+            f"  lakana secret create {secret} --env ENV --index {index_name} --values-stdin\n"
+            "Where it exists but is not bound to this index, they bind it:\n"
+            f"  lakana secret bind {secret} --env ENV --index {index_name}",
             err=True,
         )
-
-
-def _still_unbound(state: CliState, secret: str, index: str) -> bool:
-    """Say whether the secret an index names is still waiting to be bound to it.
-
-    An administrator who registers an index binds the secrets of that name that already exist,
-    so nothing is left to do for them. The answer is "unbound" unless a secret of that name was
-    found and every one found is bound to this index; when the caller may not list secrets,
-    or none exists yet, someone has still to create or bind it.
-
-    Parameters
-    ----------
-    state
-        The CLI state.
-    secret
-        The credential secret's name.
-    index
-        The index's name.
-
-    Returns
-    -------
-    bool
-        `True` when a hint to create or bind the secret is still right.
-    """
-    client = state.client()
-    found: list[Secret] = []
-    try:
-        for environment in client.environments.list():
-            try:
-                found += [s for s in client.secrets.list(environment.name) if s.name == secret]
-            except LakanaError:
-                return True
-    except LakanaError:
-        return True
-    return not found or any(s.use != "package_index" or s.use_target != index for s in found)
 
 
 @index_app.command("list")

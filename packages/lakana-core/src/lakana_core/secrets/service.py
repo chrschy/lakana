@@ -22,10 +22,18 @@ from sqlalchemy.orm import Session
 from lakana_core.audit.service import AuditService
 from lakana_core.auth import Action, AuthorizationService, PrincipalRef, Securable
 from lakana_core.errors import AlreadyExistsError, NotFoundError, ValidationError
+from lakana_core.identifiers import shown
 from lakana_core.models import AuditEventType, Environment, Secret, SecretUseKind
 from lakana_core.secrets.crypto import SecretBinding, encrypt_secret_values
 from lakana_core.secrets.keys import KeyProvider
-from lakana_core.secrets.uses import SecretUse, lock_entry, record_binding, resolve_use, target_row
+from lakana_core.secrets.uses import (
+    SecretUse,
+    lock_entry,
+    record_binding,
+    resolve_use,
+    target_row,
+    used_by_its_environment,
+)
 
 
 class SecretService:
@@ -141,11 +149,24 @@ class SecretService:
         PermissionDenied
             If the acting principal may not manage secrets in this
             environment.
+        ValidationError
+            If `use` is an index or repository and the environment itself uses a secret of
+            this name, for storage or webhooks.
         """
         self._authz.authorize(p, Action.MANAGE_SECRET, Securable.environment_scope(environment))
         env = self._get_environment(environment)
         if use is not None:
             lock_entry(self._session, use)
+            if use.kind is not SecretUseKind.ENVIRONMENT and used_by_its_environment(
+                self._session, env, name
+            ):
+                raise ValidationError(
+                    f"The name '{shown(name)}' is what environment '{shown(environment)}' uses "
+                    f"for storage or webhooks, so a secret of that name serves its environment "
+                    f"(storage or webhooks) and cannot be created for {use.wanted()}. Create it "
+                    "with --own-env, or give the index or repository a secret of its own under "
+                    "another name."
+                )
         secret_id = uuid.uuid4()
         encrypted = encrypt_secret_values(
             values, self._key_provider, SecretBinding(secret_id, env.id, name)

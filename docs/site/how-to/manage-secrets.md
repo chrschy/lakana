@@ -66,6 +66,10 @@ secrets:
 Error: Secret 'pypi-corp' of environment 'prod' is not bound to package index 'corp'. Ask someone who may manage secrets in 'prod' to bind it to this index: lakana secret bind pypi-corp --env prod --index corp
 ```
 
+Creating a secret with `--index` or `--repository` is refused when its environment already uses
+that name for storage or webhooks; create it with `--own-env`, or give the index a secret under
+another name. `lakana secret bind` moves such a secret on purpose.
+
 An unbound secret works for its environment's storage and webhooks. A secret that its
 environment uses for them is refused when anyone names it from an index or a repository, with
 the command that moves it on purpose. The URL of an index or repository with a bound secret

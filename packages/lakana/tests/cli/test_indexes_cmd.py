@@ -60,31 +60,19 @@ def test_index_add_sends_the_fields_and_says_what_to_do_next(tmp_path: Path) -> 
         "credential_secret": "team-index",
     }
     assert "Registered package index team" in result.stdout
-    assert _plain(result.stderr).endswith(
-        "Next: someone who may manage secrets creates the secret, bound to this index, in each "
-        "environment whose projects use it: lakana secret create team-index --env ENV --index "
-        'team --values-stdin (a JSON object with "username" and "password").'
+    hint = result.stderr
+    assert "Next: in each environment where the secret team-index does not exist yet" in _plain(
+        hint
     )
+    assert "\n  lakana secret create team-index --env ENV --index team --values-stdin\n" in hint
+    assert "\n  lakana secret bind team-index --env ENV --index team\n" in hint + "\n"
 
 
 def test_index_add_quotes_a_secret_name_in_the_hint(tmp_path: Path) -> None:
-    api = FakeApi()
-    api.on("POST", _BASE, status=201, json={**_INDEX, "credential_secret": "a;b"})
-    result = invoke(
-        make_state(tmp_path, api),
-        "index",
-        "add",
-        "team",
-        "--url",
-        "https://pkgs.example.org/simple",
-        "--credential-secret",
-        "a;b",
-    )
-    assert result.exit_code == 0, result.output
-    assert "lakana secret create 'a;b' --env ENV --index team" in _plain(result.stderr)
+    assert "lakana secret create 'a;b' --env ENV --index team" in _add_with_secret(tmp_path, "a;b")
 
 
-def _add_with_secret(tmp_path: Path, secret: str) -> str:
+def _add_with_secret(tmp_path: Path, secret: str, index: str = "team") -> str:
     """Run `index add` with a credential secret and return what it wrote to stderr.
 
     Parameters
@@ -93,14 +81,46 @@ def _add_with_secret(tmp_path: Path, secret: str) -> str:
         Pytest's per-test directory.
     secret
         The secret's name.
+    index
+        The index's name.
 
     Returns
     -------
     str
-        Standard error without styling.
+        What the command wrote to standard error, with its line breaks.
     """
     api = FakeApi()
-    api.on("POST", _BASE, status=201, json={**_INDEX, "credential_secret": secret})
+    api.on("POST", _BASE, status=201, json={**_INDEX, "name": index, "credential_secret": secret})
+    result = invoke(
+        make_state(tmp_path, api),
+        "index",
+        "add",
+        index,
+        "--url",
+        "https://pkgs.example.org/simple",
+        "--credential-secret",
+        secret,
+    )
+    assert result.exit_code == 0, result.output
+    return result.stderr
+
+
+def test_index_add_never_cuts_a_name_inside_a_command(tmp_path: Path) -> None:
+    """Long names stay whole, each command on a line of its own."""
+    secret = "a;" + "b" * 220
+    text = _add_with_secret(tmp_path, secret, index="i" * 200)
+    assert (
+        f"\n  lakana secret create '{secret}' --env ENV --index {'i' * 200} --values-stdin\n"
+        in text
+    )
+    assert f"\n  lakana secret bind '{secret}' --env ENV --index {'i' * 200}" in text
+    assert "…" not in text
+
+
+def test_index_add_makes_no_request_to_the_secret_routes(tmp_path: Path) -> None:
+    """The hint needs no lookup, so a manager's command leaves no secret request behind."""
+    api = FakeApi()
+    api.on("POST", _BASE, status=201, json=_INDEX)
     result = invoke(
         make_state(tmp_path, api),
         "index",
@@ -109,27 +129,10 @@ def _add_with_secret(tmp_path: Path, secret: str) -> str:
         "--url",
         "https://pkgs.example.org/simple",
         "--credential-secret",
-        secret,
+        "team-index",
     )
     assert result.exit_code == 0, result.output
-    return _plain(result.stderr)
-
-
-def test_index_add_shows_a_command_only_when_it_is_complete(tmp_path: Path) -> None:
-    """A name that needs quoting and is too long is not cut inside its quotes."""
-    text = _add_with_secret(tmp_path, "a;" + "b" * 220)
-    assert text.endswith(
-        "lakana secret create NAME --env ENV --index team --values-stdin (NAME is the name you "
-        'gave, too long to show here) (a JSON object with "username" and "password").'
-    )
-    assert "'" not in text and "…" not in text
-
-
-def test_index_add_shows_a_quoted_name_of_the_largest_size_whole(tmp_path: Path) -> None:
-    secret = "a;" + "b" * 116  # 120 characters with its quotes: the longest that is shown
-    assert f"lakana secret create '{secret}' --env ENV --index team" in _add_with_secret(
-        tmp_path, secret
-    )
+    assert [(r.method, r.url.path) for r in api.requests] == [("POST", _BASE)]
 
 
 def test_index_add_without_a_secret_gives_no_hint_and_json_stays_json(tmp_path: Path) -> None:
@@ -257,54 +260,3 @@ def test_a_name_with_control_characters_is_shown_escaped_in_every_message(
     assert "a\\x1b[2Jb\\nforged line" in updated.stdout
     assert "a\\x1b[2Jb\\nforged line" in removed.stdout
     assert "\\x1b" in added.stderr and "\\x1b" in refused.output
-
-
-def test_index_add_prints_no_hint_when_the_secret_was_bound_by_the_command(
-    tmp_path: Path,
-) -> None:
-    """An administrator who names an existing secret binds it, so nothing is left to do."""
-    api = FakeApi()
-    api.on("POST", _BASE, status=201, json=_INDEX)
-    api.on(
-        "GET",
-        "/api/v1/environments",
-        json=[
-            {
-                "name": "dev",
-                "storage_root": "file:///x",
-                "storage_secret_ref": None,
-                "is_protected": False,
-                "properties": {},
-            }
-        ],
-    )
-    api.on(
-        "GET",
-        "/api/v1/environments/dev/secrets",
-        json=[
-            {
-                "id": "s1",
-                "name": "team-index",
-                "environment": "dev",
-                "created_by": "a1",
-                "created_at": "2026-01-01T00:00:00+00:00",
-                "format_version": 2,
-                "key_id": "env",
-                "use": "package_index",
-                "use_target": "team",
-            }
-        ],
-    )
-    result = invoke(
-        make_state(tmp_path, api),
-        "index",
-        "add",
-        "team",
-        "--url",
-        "https://pkgs.example.org/simple",
-        "--credential-secret",
-        "team-index",
-    )
-    assert result.exit_code == 0, result.output
-    assert "Registered package index team" in result.stdout
-    assert "Next:" not in result.stderr

@@ -255,18 +255,18 @@ def bind(
     CliError
         Unless exactly one of the three options is given (exit 2).
     """
-    use = chosen_use(index, repository, own_env)
-    if use is None:
+    chosen = chosen_use(index, repository, own_env)
+    if chosen is None:
         raise CliError("Pass exactly one of --index, --repository or --own-env")
-    kind, target = use
+    kind, target = chosen
     state = state_of(ctx)
     environment = resolve_environment(state, env)
     secret = state.client().secrets.bind(environment, name, kind, target)
     noun = {"package_index": "package index", "repository": "repository"}.get(kind)
-    use = f"{noun} {_output.inline(target or '')}" if noun else "its environment"
+    what = f"{noun} {_output.inline(target or '')}" if noun else "its environment"
     _output.done(
         state,
-        f"Bound secret {_output.inline(name)} in {_output.inline(environment)} to {use}",
+        f"Bound secret {_output.inline(name)} in {_output.inline(environment)} to {what}",
         secret,
     )
 

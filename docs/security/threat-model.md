@@ -293,7 +293,7 @@ What the credential of a registered package index does not protect against. Each
    deploy check still requires the index's secret to exist in the environment it deploys to, and
    a cached environment reads no secret.
 
-7. **A holder of `MANAGE_PACKAGE_INDEX` cannot choose which host receives a secret.** A secret
+7. **A holder of `MANAGE_PACKAGE_INDEX` alone cannot redirect a secret to another host.** A secret
    is bound to one use (a package index, a repository, or its environment) and only
    `MANAGE_SECRET` binds it. The holder names only a secret already bound to that index and
    changes the URL of an index with a bound secret only with `MANAGE_SECRET` in its environment;

@@ -883,3 +883,35 @@ def test_creating_a_secret_for_an_entry_that_was_removed_is_refused(
 
     with pytest.raises(NotFoundError):
         _secret(session, "prod", "pypi", use)
+
+
+@pytest.mark.parametrize("use_of", ["index", "repository"])
+def test_a_secret_the_environment_uses_is_not_created_with_an_index_or_repository_use(
+    session: Session, world: dict[str, PrincipalRef], use_of: str
+) -> None:
+    """Creating `s3` for an index while storage names it is refused, and nothing is stored."""
+    prod = session.execute(select(Environment).where(Environment.name == "prod")).scalar_one()
+    prod.storage_secret_ref = "s3"
+    session.commit()
+    if use_of == "index":
+        entry = _indexes(session).create(
+            world["admin"], name="corp", url="https://corp.example.org/simple"
+        )
+        use = SecretUse.package_index(entry)
+    else:
+        repository = Repository(
+            id=uuid.uuid4(), name="repo", kind=RepositoryKind.HTTPS, url="https://git.example.org/r"
+        )
+        session.add(repository)
+        session.commit()
+        use = SecretUse.repository(repository)
+
+    with pytest.raises(ValidationError) as caught:
+        _secret(session, "prod", "s3", use)
+
+    assert "serves its environment (storage or webhooks)" in str(caught.value)
+    assert "--own-env" in str(caught.value)
+    assert "of its own" in str(caught.value)
+    assert _uses(session, "s3") == {}
+    own = _secret(session, "prod", "s3", SecretUse.environment())
+    assert own.use_kind is SecretUseKind.ENVIRONMENT
