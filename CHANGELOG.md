@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.14.0](https://github.com/chrschy/lakana/compare/v0.13.0...v0.14.0) (2026-10-17)
+
+
+### ⚠ BREAKING CHANGES
+
+* **secrets:** A secret now has one use (a package index, a repository, or its own environment) and Lakana sends it nowhere else. Migration 0034 binds a secret only when exactly one index or repository names it and its environment does not use it for storage or a webhook; every other secret stays unbound, keeps serving its environment's storage and webhooks, and is refused to every index and repository until it is bound. A secret created without a use is unbound as well. Only someone who may manage secrets (ADMIN) binds: holders of MANAGE_PACKAGE_INDEX or MANAGE_REPOSITORY alone can name only a secret already bound to that entry, and changing the URL of an entry with a bound secret needs MANAGE_SECRET in that secret's environment. After upgrading, an administrator runs `lakana secret list --env ENV` in each environment, checks the URLs in `lakana index list` and `lakana repo list`, and binds every credential that shows no use: `lakana secret bind NAME --env ENV --index INDEX` (or `--repository REPO`), and storage and webhook secrets with `--own-env`. A secret serves one entry: where several indexes or repositories shared one, create one secret per entry (`lakana secret create NEW --env ENV --repository REPO --values-stdin`) and point the entry at it (`lakana repo update REPO --credential-secret NEW`). Scripts that create a secret for an index or repository add `--index NAME` or `--repository NAME` to `lakana secret create`.
+
+### Features
+
+* **cli:** a sample project in lakana init, and lakana server reset --local ([#133](https://github.com/chrschy/lakana/issues/133)) ([6d21c7f](https://github.com/chrschy/lakana/commit/6d21c7f547abd7bb5c0366c2dfb7cbb1da77e717))
+* **secrets:** bind each secret to one use, and refuse it for any other ([bb3f477](https://github.com/chrschy/lakana/commit/bb3f4774790640f2f0fcf196c6fd161eb709acfb))
+
+
+### Bug Fixes
+
+* **security:** keep SeaweedFS's internal APIs off the network the worker uses ([#132](https://github.com/chrschy/lakana/issues/132)) ([715647e](https://github.com/chrschy/lakana/commit/715647e86d14b2e101772cf90068dd89514fb303))
+* **worker:** replace a connection the server reset, and give maintenance a time limit ([#137](https://github.com/chrschy/lakana/issues/137)) ([497f41c](https://github.com/chrschy/lakana/commit/497f41ceb57928a8fb7d60fbc9a08afa77eea266))
+
+
+### Documentation
+
+* the upgrade notes name 0.13.0 and 0.12.1 ([#124](https://github.com/chrschy/lakana/issues/124)) ([9e7ad74](https://github.com/chrschy/lakana/commit/9e7ad74e2d5a980cfe53ef8cb578046d5da62343))
+
 ## [0.13.0](https://github.com/chrschy/lakana/compare/v0.12.1...v0.13.0) (2026-10-17)
 
 
