@@ -2921,7 +2921,8 @@ class CatalogService:
             `snapshot.manifest_list` does not lie under the table's own
             location; if a snapshot the commit adds names a data file that is not Parquet,
             cannot be read, or has no Iceberg field ids
-            (`field_ids.check_added_files_have_field_ids`), unless `own_data_files`; if the
+            (`field_ids.check_added_files_have_field_ids`; also if there are more than 2,000 such
+            files or the check takes over a minute), unless `own_data_files`; if the
             metadata location computed from the table's
             (unchanged) location falls outside the environment's storage
             root; if applying `updates` produces metadata pyiceberg
@@ -2932,6 +2933,8 @@ class CatalogService:
             `updates` holds anything but `RemoveSnapshotsUpdate` or the removal of a tag
             named like `failed_snapshot_tag`'s (the protected-environment lockdown's
             maintenance exemption is structural).
+        StorageUnavailableError
+            If storage failed while the field-id check read a manifest or a footer.
         ConflictError
             If a requirement fails, or another writer committed first.
         PermissionDenied
@@ -3056,11 +3059,11 @@ class CatalogService:
             # A file without field ids would read as NULL in every column: refused here, at
             # the one commit path other clients reach, after the manifest list is known to lie
             # under the table's location.
-            for table_update in updates:
-                if isinstance(table_update, AddSnapshotUpdate):
-                    check_added_files_have_field_ids(
-                        table_update.snapshot, current, resolved.file_io, ref.dotted()
-                    )
+            added_snapshots = [u.snapshot for u in updates if isinstance(u, AddSnapshotUpdate)]
+            if added_snapshots:
+                check_added_files_have_field_ids(
+                    added_snapshots, current, resolved.file_io, ref.dotted()
+                )
         if any(isinstance(u, RemovePropertiesUpdate) for u in updates) and not (
             self._may_see_state(p, ref)
         ):

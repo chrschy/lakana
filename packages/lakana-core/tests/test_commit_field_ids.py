@@ -15,6 +15,7 @@ from pyiceberg.manifest import (
     DataFile,
     DataFileContent,
     FileFormat,
+    ManifestContent,
     ManifestEntry,
     ManifestEntryStatus,
     write_manifest,
@@ -22,6 +23,7 @@ from pyiceberg.manifest import (
 )
 from pyiceberg.schema import Schema
 from pyiceberg.table import StaticTable
+from pyiceberg.table.metadata import TableMetadata
 from pyiceberg.table.refs import SnapshotRefType
 from pyiceberg.table.snapshots import Operation, Snapshot, Summary
 from pyiceberg.table.update import AddSnapshotUpdate, SetSnapshotRefUpdate
@@ -31,7 +33,7 @@ from pyiceberg.types import LongType, NestedField, StringType
 from lakana_core.auth import PrincipalRef
 from lakana_core.catalog import field_ids as field_ids_module
 from lakana_core.catalog.service import CatalogService, LoadedTable
-from lakana_core.errors import ValidationError
+from lakana_core.errors import StorageUnavailableError, ValidationError
 from lakana_core.identifiers import NamespacePath, TableRef
 from lakana_core.models import WriteMode
 
@@ -95,24 +97,26 @@ def _parquet(table: LoadedTable, name: str, *, field_ids: bool) -> str:
     return uri
 
 
-def _data_file(uri: str) -> DataFile:
+def _data_file(uri: str, file_format: FileFormat = FileFormat.PARQUET) -> DataFile:
     """Describe a written file as a manifest entry's data file.
 
     Parameters
     ----------
     uri
         The file's URI.
+    file_format
+        The format the entry claims.
 
     Returns
     -------
     DataFile
-        An unpartitioned Parquet data file without column statistics.
+        An unpartitioned data file without column statistics.
     """
     path = Path(uri.removeprefix("file://"))
     return DataFile.from_args(
         content=DataFileContent.DATA,
         file_path=uri,
-        file_format=FileFormat.PARQUET,
+        file_format=file_format,
         partition=Record(),
         record_count=1,
         file_size_in_bytes=path.stat().st_size if path.exists() else 1,
@@ -129,6 +133,129 @@ def _data_file(uri: str) -> DataFile:
     )
 
 
+def _snapshot(
+    metadata: TableMetadata,
+    parent: Snapshot | None,
+    uris: list[str],
+    snapshot_id: int,
+    *,
+    manifest_content: ManifestContent = ManifestContent.DATA,
+    file_format: FileFormat = FileFormat.PARQUET,
+    missing_manifest: bool = False,
+) -> Snapshot:
+    """Write a snapshot that adds `uris` on top of `parent`, as an Iceberg client does.
+
+    Parameters
+    ----------
+    metadata
+        The table's metadata, for its location, spec and schema.
+    parent
+        The snapshot to build on, or `None` for the first one.
+    uris
+        The data files to add, in manifest order.
+    snapshot_id
+        The new snapshot's id.
+    manifest_content
+        What the manifest list claims the new manifest holds.
+    file_format
+        The format the entries claim.
+    missing_manifest
+        Whether the manifest list names a manifest that was never written.
+
+    Returns
+    -------
+    Snapshot
+        The snapshot; its manifest list is written.
+    """
+    io = PyArrowFileIO()
+    sequence = 1 if parent is None else (parent.sequence_number or 0) + 1
+    manifest_path = f"{metadata.location}/metadata/{snapshot_id}-m0.avro"
+    with write_manifest(
+        format_version=metadata.format_version,
+        spec=metadata.spec(),
+        schema=metadata.schema(),
+        output_file=io.new_output(manifest_path if not missing_manifest else manifest_path + ".w"),
+        snapshot_id=snapshot_id,
+        avro_compression="null",
+    ) as writer:
+        for uri in uris:
+            writer.add(
+                ManifestEntry.from_args(
+                    status=ManifestEntryStatus.ADDED,
+                    snapshot_id=snapshot_id,
+                    sequence_number=sequence,
+                    file_sequence_number=sequence,
+                    data_file=_data_file(uri, file_format),
+                )
+            )
+    new_manifest = writer.to_manifest_file()
+    new_manifest[3] = manifest_content
+    if missing_manifest:
+        new_manifest[0] = manifest_path
+    manifests = [*([] if parent is None else parent.manifests(io)), new_manifest]
+    list_path = f"{metadata.location}/metadata/snap-{snapshot_id}.avro"
+    with write_manifest_list(
+        format_version=metadata.format_version,
+        output_file=io.new_output(list_path),
+        snapshot_id=snapshot_id,
+        parent_snapshot_id=None if parent is None else parent.snapshot_id,
+        sequence_number=sequence,
+        avro_compression="null",
+    ) as list_writer:
+        list_writer.add_manifests(manifests)
+    return Snapshot(
+        snapshot_id=snapshot_id,
+        parent_snapshot_id=None if parent is None else parent.snapshot_id,
+        sequence_number=sequence,
+        timestamp_ms=int(time.time() * 1000),
+        manifest_list=list_path,
+        summary=Summary(operation=Operation.APPEND),
+        schema_id=metadata.current_schema_id,
+    )
+
+
+def _commit_snapshots(
+    catalog: CatalogService,
+    principal: PrincipalRef,
+    ref: TableRef,
+    snapshots: list[Snapshot],
+    *,
+    own_data_files: bool = False,
+) -> LoadedTable:
+    """Commit snapshots, the last one becoming `main`.
+
+    Parameters
+    ----------
+    catalog
+        The catalog under test.
+    principal
+        The acting principal.
+    ref
+        The table.
+    snapshots
+        The snapshots to add, in order.
+    own_data_files
+        Whether to skip the field-id check, as Lakana's own writes do.
+
+    Returns
+    -------
+    LoadedTable
+        The table after the commit.
+    """
+    return catalog.commit_table(
+        principal,
+        ref,
+        requirements=[],
+        updates=[
+            *(AddSnapshotUpdate(snapshot=snapshot) for snapshot in snapshots),
+            SetSnapshotRefUpdate(
+                ref_name="main", type=SnapshotRefType.BRANCH, snapshot_id=snapshots[-1].snapshot_id
+            ),
+        ],
+        own_data_files=own_data_files,
+    )
+
+
 def _commit_files(
     catalog: CatalogService,
     principal: PrincipalRef,
@@ -136,8 +263,12 @@ def _commit_files(
     table: LoadedTable,
     uris: list[str],
     snapshot_id: int,
+    *,
+    manifest_content: ManifestContent = ManifestContent.DATA,
+    file_format: FileFormat = FileFormat.PARQUET,
+    missing_manifest: bool = False,
 ) -> LoadedTable:
-    """Commit a snapshot that adds `uris` on top of the current one, as an Iceberg client does.
+    """Commit a snapshot that adds `uris` on top of the current one.
 
     Parameters
     ----------
@@ -153,66 +284,28 @@ def _commit_files(
         The data files to add, in manifest order.
     snapshot_id
         The new snapshot's id.
+    manifest_content
+        What the manifest list claims the new manifest holds.
+    file_format
+        The format the entries claim.
+    missing_manifest
+        Whether the manifest list names a manifest that was never written.
 
     Returns
     -------
     LoadedTable
         The table after the commit.
     """
-    io = PyArrowFileIO()
-    metadata = table.metadata
-    parent = metadata.current_snapshot()
-    sequence = 1 if parent is None else (parent.sequence_number or 0) + 1
-    manifest_path = f"{metadata.location}/metadata/{snapshot_id}-m0.avro"
-    with write_manifest(
-        format_version=metadata.format_version,
-        spec=metadata.spec(),
-        schema=metadata.schema(),
-        output_file=io.new_output(manifest_path),
-        snapshot_id=snapshot_id,
-        avro_compression="null",
-    ) as writer:
-        for uri in uris:
-            writer.add(
-                ManifestEntry.from_args(
-                    status=ManifestEntryStatus.ADDED,
-                    snapshot_id=snapshot_id,
-                    sequence_number=sequence,
-                    file_sequence_number=sequence,
-                    data_file=_data_file(uri),
-                )
-            )
-    manifests = [*([] if parent is None else parent.manifests(io)), writer.to_manifest_file()]
-    list_path = f"{metadata.location}/metadata/snap-{snapshot_id}.avro"
-    with write_manifest_list(
-        format_version=metadata.format_version,
-        output_file=io.new_output(list_path),
-        snapshot_id=snapshot_id,
-        parent_snapshot_id=None if parent is None else parent.snapshot_id,
-        sequence_number=sequence,
-        avro_compression="null",
-    ) as list_writer:
-        list_writer.add_manifests(manifests)
-    snapshot = Snapshot(
-        snapshot_id=snapshot_id,
-        parent_snapshot_id=None if parent is None else parent.snapshot_id,
-        sequence_number=sequence,
-        timestamp_ms=int(time.time() * 1000),
-        manifest_list=list_path,
-        summary=Summary(operation=Operation.APPEND),
-        schema_id=metadata.current_schema_id,
+    snapshot = _snapshot(
+        table.metadata,
+        table.metadata.current_snapshot(),
+        uris,
+        snapshot_id,
+        manifest_content=manifest_content,
+        file_format=file_format,
+        missing_manifest=missing_manifest,
     )
-    return catalog.commit_table(
-        principal,
-        ref,
-        requirements=[],
-        updates=[
-            AddSnapshotUpdate(snapshot=snapshot),
-            SetSnapshotRefUpdate(
-                ref_name="main", type=SnapshotRefType.BRANCH, snapshot_id=snapshot_id
-            ),
-        ],
-    )
+    return _commit_snapshots(catalog, principal, ref, [snapshot])
 
 
 def _no_field_ids(uri: str) -> str:
@@ -367,3 +460,185 @@ def test_a_file_outside_the_table_is_never_opened(
     _commit_files(catalog, principal, ref, created, [f"file://{outside}"], snapshot_id=900_000_030)
 
     assert opened == []
+
+
+def test_a_data_file_in_a_manifest_labelled_as_deletes_is_refused(
+    catalog: CatalogService, principal: PrincipalRef, tmp_path: Path
+) -> None:
+    """A read walks every manifest, so the check does too, whatever the list entry claims."""
+    ref, created = _created(catalog, principal, tmp_path)
+    uri = _parquet(created, "hidden.parquet", field_ids=False)
+
+    with pytest.raises(ValidationError) as caught:
+        _commit_files(
+            catalog,
+            principal,
+            ref,
+            created,
+            [uri],
+            900_000_040,
+            manifest_content=ManifestContent.DELETES,
+        )
+
+    assert str(caught.value) == _no_field_ids(uri)
+
+
+def test_an_orc_file_is_refused(
+    catalog: CatalogService, principal: PrincipalRef, tmp_path: Path
+) -> None:
+    ref, created = _created(catalog, principal, tmp_path)
+    uri = _parquet(created, "a.orc", field_ids=True)
+
+    with pytest.raises(ValidationError) as caught:
+        _commit_files(
+            catalog, principal, ref, created, [uri], 900_000_050, file_format=FileFormat.ORC
+        )
+
+    assert str(caught.value) == (
+        f"The commit adds `{uri}` to `gold.sales` as ORC, so nothing was applied. Lakana reads "
+        "Parquet data files only; write the file as Parquet."
+    )
+
+
+def test_a_missing_manifest_is_refused(
+    catalog: CatalogService, principal: PrincipalRef, tmp_path: Path
+) -> None:
+    ref, created = _created(catalog, principal, tmp_path)
+    uri = _parquet(created, "a.parquet", field_ids=True)
+
+    with pytest.raises(ValidationError) as caught:
+        _commit_files(catalog, principal, ref, created, [uri], 900_000_060, missing_manifest=True)
+
+    assert str(caught.value) == (
+        "A manifest of the commit's snapshot for `gold.sales` could not be read, so nothing was "
+        "applied. Write the manifests and the manifest list before the commit."
+    )
+
+
+def test_a_missing_data_file_is_refused(
+    catalog: CatalogService, principal: PrincipalRef, tmp_path: Path
+) -> None:
+    ref, created = _created(catalog, principal, tmp_path)
+    uri = f"{created.metadata.location}/data/never-written.parquet"
+
+    with pytest.raises(ValidationError) as caught:
+        _commit_files(catalog, principal, ref, created, [uri], 900_000_070)
+
+    assert "could not be read as a Parquet file" in str(caught.value)
+    assert uri in str(caught.value)
+
+
+def test_a_commit_of_too_many_files_is_refused_before_any_footer_is_read(
+    catalog: CatalogService,
+    principal: PrincipalRef,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ref, created = _created(catalog, principal, tmp_path)
+    monkeypatch.setattr(field_ids_module, "MAX_CHECKED_FILES", 3)
+    uris = [_parquet(created, f"f{i}.parquet", field_ids=True) for i in range(4)]
+
+    def refuse(*_args: object) -> bool:
+        raise AssertionError("a footer was read")
+
+    monkeypatch.setattr(field_ids_module, "has_field_ids", refuse)
+
+    with pytest.raises(ValidationError) as caught:
+        _commit_files(catalog, principal, ref, created, uris, 900_000_080)
+
+    assert str(caught.value) == (
+        "The commit adds 4 data files to `gold.sales`; Lakana checks at most 3 per commit. "
+        "Split the load into smaller commits."
+    )
+
+
+def test_a_check_that_outlasts_its_deadline_refuses_the_commit(
+    catalog: CatalogService,
+    principal: PrincipalRef,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ref, created = _created(catalog, principal, tmp_path)
+    uri = _parquet(created, "a.parquet", field_ids=True)
+    ticks = iter([0.0, 1000.0, 1000.0, 1000.0])
+    monkeypatch.setattr(field_ids_module, "_clock", lambda: next(ticks))
+
+    with pytest.raises(ValidationError) as caught:
+        _commit_files(catalog, principal, ref, created, [uri], 900_000_090)
+
+    assert str(caught.value) == (
+        "Checking the data files the commit adds to `gold.sales` for Iceberg field ids took "
+        "longer than 60 seconds, so nothing was applied. Try the commit again, or split it into "
+        "smaller commits."
+    )
+
+
+def test_a_footer_above_the_limit_is_refused(
+    catalog: CatalogService,
+    principal: PrincipalRef,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ref, created = _created(catalog, principal, tmp_path)
+    uri = _parquet(created, "a.parquet", field_ids=True)
+    monkeypatch.setattr(field_ids_module, "MAX_FOOTER_BYTES", 10)
+
+    with pytest.raises(ValidationError) as caught:
+        _commit_files(catalog, principal, ref, created, [uri], 900_000_100)
+
+    assert str(caught.value) == (
+        f"The commit adds `{uri}` to `gold.sales`, whose Parquet footer is larger than 16 MiB, "
+        "so nothing was applied. Write the file with fewer columns and row groups."
+    )
+
+
+def test_a_storage_failure_is_not_blamed_on_the_client(
+    catalog: CatalogService,
+    principal: PrincipalRef,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ref, created = _created(catalog, principal, tmp_path)
+    uri = _parquet(created, "a.parquet", field_ids=True)
+
+    def fail(*_args: object) -> bool:
+        raise OSError("AWS Error SLOW_DOWN for https://bucket.example/secret?X-Amz-Signature=abc")
+
+    monkeypatch.setattr(field_ids_module, "has_field_ids", fail)
+
+    with pytest.raises(StorageUnavailableError) as caught:
+        _commit_files(catalog, principal, ref, created, [uri], 900_000_110)
+
+    assert "Try the commit again" in str(caught.value)
+    assert "secret" not in str(caught.value)
+
+
+def test_only_the_snapshots_of_the_commit_are_checked(
+    catalog: CatalogService,
+    principal: PrincipalRef,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A legacy file without ids stays unchecked when a commit adds two snapshots on top."""
+    ref, created = _created(catalog, principal, tmp_path)
+    legacy_uri = _parquet(created, "legacy.parquet", field_ids=False)
+    legacy = _snapshot(created.metadata, None, [legacy_uri], 900_000_120)
+    after_legacy = _commit_snapshots(catalog, principal, ref, [legacy], own_data_files=True)
+    first_uri = _parquet(created, "one.parquet", field_ids=True)
+    second_uri = _parquet(created, "two.parquet", field_ids=True)
+    parent = after_legacy.metadata.current_snapshot()
+    first = _snapshot(after_legacy.metadata, parent, [first_uri], 900_000_121)
+    second = _snapshot(after_legacy.metadata, first, [second_uri], 900_000_122)
+    reads: Counter[str] = Counter()
+    real = field_ids_module.has_field_ids
+
+    def counting(file_io: object, path: str) -> bool:
+        reads[path] += 1
+        return real(file_io, path)  # ty: ignore[invalid-argument-type]
+
+    monkeypatch.setattr(field_ids_module, "has_field_ids", counting)
+
+    committed = _commit_snapshots(catalog, principal, ref, [first, second])
+
+    assert committed.metadata.current_snapshot_id == 900_000_122
+    assert reads == Counter({first_uri: 1, second_uri: 1})

@@ -15,16 +15,18 @@ A commit through the catalog that adds a data file without field ids is refused
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 from pyiceberg.io import FileIO
 from pyiceberg.manifest import (
     DataFile,
     DataFileContent,
     FileFormat,
-    ManifestContent,
     ManifestEntryStatus,
 )
 from pyiceberg.schema import Schema, index_name_by_id
@@ -52,7 +54,7 @@ from pyiceberg.types import (
     UUIDType,
 )
 
-from lakana_core.errors import UnsupportedTableError, ValidationError
+from lakana_core.errors import StorageUnavailableError, UnsupportedTableError, ValidationError
 from lakana_core.query_rewrite import ReadField
 from lakana_core.storage.resolver import is_within_location
 
@@ -270,6 +272,18 @@ _FIELD_ID = b"PARQUET:field_id"
 _FOOTER_READERS = 8
 """How many data-file footers one commit reads at the same time."""
 
+MAX_CHECKED_FILES = 2_000
+"""The most added data files one commit may have; more are refused, not left unchecked."""
+
+CHECK_DEADLINE_SECONDS = 60.0
+"""How long all footer reads of one commit may take together before the commit is refused."""
+
+MAX_FOOTER_BYTES = 16 * 1024 * 1024
+"""The largest Parquet footer the check reads; the trailer names its size before it is read."""
+
+_clock = time.monotonic
+"""The clock the deadline runs on; a test replaces it instead of waiting."""
+
 _NO_FIELD_IDS = (
     "The commit adds `{file}` to `{table}`, which has no Iceberg field ids. Lakana reads Iceberg "
     "data by field id, as the Iceberg specification requires. Write the file with a client that "
@@ -288,6 +302,31 @@ _UNREADABLE_MANIFEST = (
     "A manifest of the commit's snapshot for `{table}` could not be read, so nothing was "
     "applied. Write the manifests and the manifest list before the commit."
 )
+_TOO_MANY_FILES = (
+    "The commit adds {count} data files to `{table}`; Lakana checks at most {limit:,} per "
+    "commit. Split the load into smaller commits."
+)
+_TIMED_OUT = (
+    "Checking the data files the commit adds to `{table}` for Iceberg field ids took longer "
+    "than {seconds:g} seconds, so nothing was applied. Try the commit again, or split it into "
+    "smaller commits."
+)
+_FOOTER_TOO_LARGE = (
+    "The commit adds `{file}` to `{table}`, whose Parquet footer is larger than 16 MiB, so "
+    "nothing was applied. Write the file with fewer columns and row groups."
+)
+_STORAGE_UNAVAILABLE = (
+    "Storage could not be read right now, so the data files the commit adds to `{table}` were "
+    "not checked and nothing was applied. Try the commit again."
+)
+
+
+class _FooterTooLarge(Exception):
+    """A Parquet trailer names a footer above `MAX_FOOTER_BYTES`."""
+
+
+class _NotParquet(Exception):
+    """A file does not end in the Parquet magic bytes."""
 
 
 def has_field_ids(file_io: FileIO, path: str) -> bool:
@@ -304,14 +343,48 @@ def has_field_ids(file_io: FileIO, path: str) -> bool:
     -------
     bool
         Whether each column of the footer's schema has ``PARQUET:field_id`` metadata. Only
-        the footer is read.
+        the trailer and the footer are read.
+
+    Raises
+    ------
+    _NotParquet
+        If the file does not end in the Parquet magic bytes.
+    _FooterTooLarge
+        If the trailer names a footer above `MAX_FOOTER_BYTES`.
     """
     with file_io.new_input(path).open() as stream:
+        stream.seek(-8, 2)
+        trailer = stream.read(8)
+        if len(trailer) != 8 or trailer[4:] != b"PAR1":
+            raise _NotParquet
+        if int.from_bytes(trailer[:4], "little") > MAX_FOOTER_BYTES:
+            raise _FooterTooLarge
+        stream.seek(0)
         schema = pq.read_schema(stream)
     return all(field.metadata is not None and _FIELD_ID in field.metadata for field in schema)
 
 
-def _footer(file_io: FileIO, path: str) -> bool | None:
+def _is_unavailable(exc: Exception) -> bool:
+    """Tell whether a read failure is storage being unavailable rather than the file being wrong.
+
+    Parameters
+    ----------
+    exc
+        What a storage read raised.
+
+    Returns
+    -------
+    bool
+        Whether it is an `OSError` that is not a missing file and not a malformed one.
+    """
+    return (
+        isinstance(exc, OSError)
+        and not isinstance(exc, FileNotFoundError)
+        and not isinstance(exc, pa.ArrowInvalid)
+    )
+
+
+def _footer(file_io: FileIO, path: str, table: str) -> str:
     """Read one footer for the commit check, without letting its error text out.
 
     Parameters
@@ -320,29 +393,37 @@ def _footer(file_io: FileIO, path: str) -> bool | None:
         Reads the table's storage.
     path
         The data file's URI.
+    table
+        The table's dotted name, for the log.
 
     Returns
     -------
-    bool or None
-        `has_field_ids`'s answer, or `None` when the footer could not be read; the log then
-        has the exception's class, never its text, which can name storage details.
+    str
+        `"ok"`, `"no_ids"`, `"unreadable"` (missing, not Parquet or malformed), `"too_large"`
+        or `"unavailable"` (storage failed); the log has the exception's class and the
+        table, never its text, which can name storage details.
     """
     try:
-        return has_field_ids(file_io, path)
+        return "ok" if has_field_ids(file_io, path) else "no_ids"
+    except _FooterTooLarge:
+        return "too_large"
     except Exception as exc:  # any reader failure refuses the commit with a fixed text
-        logger.warning("A data file of a commit could not be read (%s).", type(exc).__name__)
-        return None
+        logger.warning(
+            "A data file of a commit to %s could not be read (%s).", table, type(exc).__name__
+        )
+        return "unavailable" if _is_unavailable(exc) else "unreadable"
 
 
 def _added_data_files(
-    snapshot: Snapshot, metadata: TableMetadata, file_io: FileIO, table: str
+    snapshots: Sequence[Snapshot], metadata: TableMetadata, file_io: FileIO, table: str
 ) -> list[DataFile]:
-    """List the data files a snapshot adds, from the manifests its parent does not have.
+    """List the data files the snapshots of one commit add, from manifests their parents lack.
 
     Parameters
     ----------
-    snapshot
-        The snapshot a commit adds; its manifest list lies under the table's location.
+    snapshots
+        The snapshots a commit adds, in commit order; each manifest list lies under the
+        table's location.
     metadata
         The table's metadata before the commit.
     file_io
@@ -353,55 +434,77 @@ def _added_data_files(
     Returns
     -------
     list of DataFile
-        The live entries of status `ADDED` and content data, in manifest order. A manifest
-        outside the table's location is not opened: a read refuses such a table anyway.
+        The live entries of status `ADDED` and content data, in manifest order, each file
+        once. A manifest outside the table's location is not opened: a read refuses such a
+        table anyway. A manifest is read whatever content its list entry claims, as a read
+        does; only an entry's own content decides what is a data file.
 
     Raises
     ------
     ValidationError
         If the manifest list or a manifest cannot be read.
+    StorageUnavailableError
+        If storage failed while reading them.
     """
-    parent = (
-        None
-        if snapshot.parent_snapshot_id is None
-        else metadata.snapshot_by_id(snapshot.parent_snapshot_id)
-    )
-    try:
-        known = set() if parent is None else {m.manifest_path for m in parent.manifests(file_io)}
-        added = []
-        for manifest in snapshot.manifests(file_io):
-            if (
-                manifest.manifest_path in known
-                or manifest.content != ManifestContent.DATA
-                or not is_within_location(metadata.location, manifest.manifest_path)
-            ):
-                continue
-            for entry in manifest.fetch_manifest_entry(file_io, discard_deleted=True):
+    added_here = {s.snapshot_id: s for s in snapshots}
+    seen_manifests: set[str] = set()
+    seen_files: set[str] = set()
+    added: list[DataFile] = []
+    for snapshot in snapshots:
+        parent_id = snapshot.parent_snapshot_id
+        parent = (
+            None
+            if parent_id is None
+            else added_here.get(parent_id) or metadata.snapshot_by_id(parent_id)
+        )
+        try:
+            known = (
+                set() if parent is None else {m.manifest_path for m in parent.manifests(file_io)}
+            )
+            for manifest in snapshot.manifests(file_io):
                 if (
-                    entry.status == ManifestEntryStatus.ADDED
-                    and entry.data_file.content == DataFileContent.DATA
+                    manifest.manifest_path in known
+                    or manifest.manifest_path in seen_manifests
+                    or not is_within_location(metadata.location, manifest.manifest_path)
                 ):
-                    added.append(entry.data_file)
-    except Exception as exc:  # any reader failure refuses the commit with a fixed text
-        raise ValidationError(_UNREADABLE_MANIFEST.format(table=table)) from exc
+                    continue
+                seen_manifests.add(manifest.manifest_path)
+                for entry in manifest.fetch_manifest_entry(file_io, discard_deleted=True):
+                    if (
+                        entry.status == ManifestEntryStatus.ADDED
+                        and entry.data_file.content == DataFileContent.DATA
+                        and entry.data_file.file_path not in seen_files
+                    ):
+                        seen_files.add(entry.data_file.file_path)
+                        added.append(entry.data_file)
+        except Exception as exc:  # any reader failure refuses the commit with a fixed text
+            logger.warning(
+                "A manifest of a commit to %s could not be read (%s).", table, type(exc).__name__
+            )
+            if _is_unavailable(exc):
+                raise StorageUnavailableError(_STORAGE_UNAVAILABLE.format(table=table)) from None
+            raise ValidationError(_UNREADABLE_MANIFEST.format(table=table)) from exc
     return added
 
 
 def check_added_files_have_field_ids(
-    snapshot: Snapshot, metadata: TableMetadata, file_io: FileIO, table: str
+    snapshots: Sequence[Snapshot], metadata: TableMetadata, file_io: FileIO, table: str
 ) -> None:
-    """Refuse a snapshot that adds a data file without Iceberg field ids.
+    """Refuse snapshots that add a data file without Iceberg field ids.
 
-    Only files the commit adds are read, each footer once, at most `_FOOTER_READERS` at a
-    time, and only under the table's location: a file elsewhere, or one whose path holds a
-    glob character, is not opened, and a read refuses the table for it. Files committed before
-    this check existed are not looked at. An entry a client marks `EXISTING` in a new manifest
-    is not looked at either; such a file reads as NULL, which hides nothing a policy protects.
+    Only files the commit's own snapshots add are read, each footer once, at most
+    `_FOOTER_READERS` at a time, within `CHECK_DEADLINE_SECONDS` in all, and only under the
+    table's location: a file elsewhere, or one whose path holds a glob character, is not
+    opened, and a read refuses the table for it. At most `MAX_CHECKED_FILES` files are
+    checked per commit; a commit with more is refused. Files committed before this check
+    existed are not looked at, nor are files a parent snapshot already lists. An entry a
+    client marks `EXISTING` in a new manifest is not looked at either; such a file reads as
+    NULL, which hides nothing a policy protects.
 
     Parameters
     ----------
-    snapshot
-        The snapshot the commit adds.
+    snapshots
+        The snapshots the commit adds, in commit order.
     metadata
         The table's metadata before the commit.
     file_io
@@ -412,11 +515,20 @@ def check_added_files_have_field_ids(
     Raises
     ------
     ValidationError
-        For the first added file, in manifest order, that is not Parquet, cannot be read, or
-        lacks field ids; or if a manifest cannot be read. The message names that file and the
-        table, nothing else.
+        For the first added file, in manifest order, that is not Parquet; else for the first
+        one that cannot be read, has a footer above `MAX_FOOTER_BYTES` or lacks field ids; or
+        if a manifest cannot be read, there are more than `MAX_CHECKED_FILES` files, or the
+        reads outlast `CHECK_DEADLINE_SECONDS`. The message names that file and the table,
+        nothing else.
+    StorageUnavailableError
+        If storage failed while reading a footer or a manifest.
     """
-    files = _added_data_files(snapshot, metadata, file_io, table)
+    deadline = _clock() + CHECK_DEADLINE_SECONDS
+    files = _added_data_files(snapshots, metadata, file_io, table)
+    if len(files) > MAX_CHECKED_FILES:
+        raise ValidationError(
+            _TOO_MANY_FILES.format(count=len(files), table=table, limit=MAX_CHECKED_FILES)
+        )
     for data_file in files:
         if data_file.file_format != FileFormat.PARQUET:
             raise ValidationError(
@@ -427,12 +539,25 @@ def check_added_files_have_field_ids(
     paths = [f.file_path for f in files if is_within_location(metadata.location, f.file_path)]
     pool = ThreadPoolExecutor(max_workers=_FOOTER_READERS)
     try:
-        for path, outcome in zip(
-            paths, pool.map(lambda p: _footer(file_io, p), paths), strict=True
-        ):
+        futures = [pool.submit(_footer, file_io, path, table) for path in paths]
+        for path, future in zip(paths, futures, strict=True):
+            remaining = deadline - _clock()
+            try:
+                outcome = future.result(timeout=max(remaining, 0.0)) if remaining > 0 else None
+            except FutureTimeout:
+                outcome = None
             if outcome is None:
+                raise ValidationError(
+                    _TIMED_OUT.format(table=table, seconds=CHECK_DEADLINE_SECONDS)
+                )
+            if outcome == "unavailable":
+                raise StorageUnavailableError(_STORAGE_UNAVAILABLE.format(table=table))
+            if outcome == "unreadable":
                 raise ValidationError(_UNREADABLE_FILE.format(file=path, table=table))
-            if not outcome:
+            if outcome == "too_large":
+                raise ValidationError(_FOOTER_TOO_LARGE.format(file=path, table=table))
+            if outcome == "no_ids":
                 raise ValidationError(_NO_FIELD_IDS.format(file=path, table=table))
     finally:
-        pool.shutdown(wait=True, cancel_futures=True)
+        # A read that is stuck is not waited for: the commit is refused now.
+        pool.shutdown(wait=False, cancel_futures=True)

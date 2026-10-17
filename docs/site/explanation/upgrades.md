@@ -141,10 +141,11 @@ From this release on, a commit through the Iceberg REST catalog that adds a data
 field ids, for example one registered with pyiceberg's `add_files`, is refused and nothing is
 applied ([the refusal](../reference/checks.md#when-a-commit-through-the-iceberg-rest-catalog-is-refused)).
 Write the files with a client that sets field ids: pyiceberg's `append` and `overwrite` do, and
-Lakana's own writes always do. Files that other Iceberg clients committed before this release are
+Lakana's own writes always do. A commit may add at most 2,000 data files, and the check has 60
+seconds; split a larger load into several commits. Files that other Iceberg clients committed before this release are
 not checked. If such a file lacks field ids, every column of it reads as NULL, with no error. Ask
 the owner of the table to write its rows again, with Lakana (`replace`) or with a client that
-writes field ids.
+writes field ids. Field ids that match no column of the table read as NULL as well.
 
 
 ## Notes for 0.12.0

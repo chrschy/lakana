@@ -2093,15 +2093,27 @@ URLs as data. `executor.execute_query`/`stream_query`/`describe_query` refuse a 
 sequence outright (`TypeError`): only a name-to-value mapping is accepted.
 
 **A foreign commit cannot add a data file without field ids.** `commit_table` calls
-`field_ids.check_added_files_have_field_ids` for every `AddSnapshotUpdate`, after the manifest
-list is known to lie under the table's location and before anything is applied: it opens only
-manifests the parent snapshot does not have and that lie under the table's location, takes
-their `ADDED` data entries, and reads each footer once, eight at a time, only for a file under
-the table's location (a file elsewhere is never opened, and a read refuses the table for it).
-The first offending file in manifest order is named with the table; a reader's error text never
-reaches the caller (the log has the exception's class). `append` and `write_batches` pass
-`own_data_files=True`: pyiceberg wrote those files with field ids. Files committed before the
-check existed are not checked; a file without field ids reads as NULL in every column.
+`field_ids.check_added_files_have_field_ids` once, with every `AddSnapshotUpdate` of the commit,
+after each manifest list is known to lie under the table's location and before anything is
+applied. It opens only manifests the parent snapshot (or an earlier snapshot of the same commit)
+does not have and that lie under the table's location, whatever content the manifest list claims
+for them, as a read walks every manifest. It takes their `ADDED` data entries, so inherited
+files, including legacy ones, are never read. It reads each footer once, eight at a time, only
+for a file under the table's location (a file elsewhere is never opened, and a read refuses the
+table for it). The trailer is read first and a footer above 16 MiB is refused. The check is
+bounded: at most 2,000 added files per commit, and 60 seconds for all reads together
+(`MAX_CHECKED_FILES`, `CHECK_DEADLINE_SECONDS`, `MAX_FOOTER_BYTES`); a commit over either bound
+is refused whole. A non-Parquet entry is reported first; otherwise the first offending file in
+manifest order is named with the table. A reader's error text never reaches the caller (the log
+has the exception's class and the table). A storage failure answers `StorageUnavailableError`
+(503, retry), not a client fault. `append` and `write_batches` pass `own_data_files=True`:
+pyiceberg wrote those files with field ids. Limits by design: a client can mark an entry
+`EXISTING` in a new manifest and skip the check (the file then reads as NULL, which a policy
+does not leak), field ids that match no column read as NULL, and a commit-time check cannot see
+an object overwritten in storage afterwards, so it guards correctness and is no boundary
+against a writer who holds storage credentials. Files committed before the check existed are
+not checked; a file without field ids reads as NULL in every column. The check runs inside the
+request while its database session is open; releasing it before the reads is not done.
 
 **A submitted query holds no statement but a read, at any depth.** `check_blacklist` requires
 the statement as a whole to be an `exp.Query`, and `_reject_statements_inside` then walks the
