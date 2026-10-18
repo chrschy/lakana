@@ -336,26 +336,21 @@ def _redact(message: str, locations: Sequence[str]) -> str:
     return message
 
 
-_KEEPS_ITS_TEXT = re.compile(
-    r"^Query failed: (?:(?:Binder|Catalog|Parser) Error"
-    r"|a file of a table this query reads stores column )"
-)
-"""The start of the engine's text for a failure that carries no stored value, as a query child
-words it: a name or a statement the reader wrote that the engine cannot resolve or parse, and the
-child's own fixed text for a file that stores a column in another type."""
+_KEEPS_ITS_TEXT = re.compile(r"^Query failed: a file of a table this query reads stores column ")
+"""The start of the query child's own fixed text for a file that stores a column in another
+type. It is the worker's wording and names a column, not a value, so it is kept; every text of the
+engine itself is replaced on a read under a row filter or column mask."""
 
 
 def _without_the_value(failure: LakanaError, restricted: frozenset[str]) -> LakanaError:
     """Replace the engine's text for a failure, on a read under a row filter or column mask.
 
-    A row filter or column mask expression runs on every stored value, also on the ones the
-    policy hides, and the engine's text for a failure can quote a value. A query that reads a
-    table under such a policy therefore keeps that text only for the kinds known to carry no
-    stored value (binder, catalog and parser errors, see `_KEEPS_ITS_TEXT`); every other
-    failure of the engine gets one fixed message: an invalid query as before, and an internal error
-    with its own fixed text and kind. What is
-    not the engine's text (a cancel, a timeout, a transient or memory error, the worker's own
-    wording) is returned as it is.
+    Errors on a read under a row filter or column mask always show one fixed message, whatever
+    the class of the engine's error (parser, binder, catalog, conversion, out of range, ...): the
+    engine's text can quote the rewritten SQL or a stored value, and the policy's expressions run
+    on every row, also on the ones it hides. An internal error gets its own fixed text and keeps
+    its kind. What is not the engine's text (a cancel, a timeout, a transient or memory error, the
+    worker's own wording) is returned as it is.
 
     Parameters
     ----------

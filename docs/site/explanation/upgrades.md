@@ -168,6 +168,10 @@ find them, as an administrator:
 A script or a deploy that creates a filter or mask with such an expression now fails at the
 creation, with the message above; fix the expression there.
 
+### Errors on reads under a row filter or column mask
+
+Errors on reads under a row filter or column mask always show the fixed message, whatever the class of the database's error. Binder, catalog and parser errors, which used to keep their text, now show it too. A misspelled column or function in your own query on such a table is told the same way: run the query against a table that has no filter or mask, or check the names with `lakana table get`.
+
 ## Notes for 0.15.0
 
 ### A database check on a secret's use

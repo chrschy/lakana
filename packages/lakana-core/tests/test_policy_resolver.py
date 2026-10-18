@@ -824,8 +824,10 @@ def test_resolver_and_validator_share_one_has_group_name() -> None:
     assert resolver.HAS_GROUP is expressions.HAS_GROUP
 
 
-def test_a_mask_is_typed_only_when_it_was_type_checked_and_stands_alone(session: Session) -> None:
-    """`typed_masks` names the columns whose single mask was checked; a legacy mask stays out."""
+def test_a_mask_is_typed_only_when_every_mask_of_the_column_was_type_checked(
+    session: Session,
+) -> None:
+    """`typed_masks` names the columns whose masks were all checked; a legacy mask stays out."""
     alice = _add_principal(session, "alice")
     _add_mask(session, principal_id=alice.id, column="ssn", expression="'***'", type_checked=True)
     _add_mask(session, principal_id=alice.id, column="email", expression="'x'")
@@ -835,4 +837,4 @@ def test_a_mask_is_typed_only_when_it_was_type_checked_and_stands_alone(session:
     resolved = PolicyResolver(session).resolve(alice, _ref())
 
     assert resolved.column_masks["name"] == "NULL"
-    assert resolved.typed_masks == frozenset({"ssn"})
+    assert resolved.typed_masks == frozenset({"ssn", "name"})

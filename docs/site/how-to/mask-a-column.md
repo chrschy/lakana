@@ -192,6 +192,11 @@ type of its column; the upgrade notes say what to look for. To get the check and
 create the mask again and revoke the old one. A column of a type with no cast (a struct, a list, a
 map) can be masked with `NULL` or the column itself only.
 
+On an external table made from CSV or JSON files, Lakana stores the types it inferred from one sample
+file, while the query engine infers the types of every file itself. A mask that is another column
+(or the column itself) can then fail on a column the engine reads as another type than the sample
+suggested; masks with `NULL` or a constant do not depend on it.
+
 When a stored value still makes a mask fail, everyone it applies to gets this message, and the query
 engine's text is not shown:
 
@@ -202,8 +207,8 @@ The query failed on a value it could not convert or compute, under a row filter 
 
 The same message appears when a person's own query fails on a value of a table under a filter or
 mask. In their own query, `try_cast`, `try_strptime` and `TRY(...)` return
-`NULL` instead of failing. Binder, catalog and parser errors, and errors on a table with no filter
-or mask, are shown as before.
+`NULL` instead of failing. Every other error on such a table also shows this message; errors on a table with no filter
+or mask are shown as before.
 
 ## When Lakana refuses
 

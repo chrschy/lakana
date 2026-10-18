@@ -164,8 +164,8 @@ The query failed on a value it could not convert or compute, under a row filter 
 
 The same message appears when a person's own query fails on a value of a table under a filter or
 mask. In their own query, `try_cast`, `try_strptime` and `TRY(...)` return
-`NULL` instead of failing. Binder, catalog and parser errors, and errors on a table with no filter
-or mask, are shown as before.
+`NULL` instead of failing. Every other error on such a table also shows this message; errors on a table with no filter
+or mask are shown as before.
 
 ## When Lakana refuses
 

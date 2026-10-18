@@ -22,6 +22,7 @@ from lakana_core.auth import AllowAllAuthorization, PrincipalRef
 from lakana_core.catalog.query_service import QueryService, WriteTarget
 from lakana_core.catalog.service import CatalogService
 from lakana_core.config import StorageConfig
+from lakana_core.errors import ValidationError
 from lakana_core.identifiers import NamespacePath, TableRef
 from lakana_core.models import (
     ColumnMask,
@@ -363,41 +364,67 @@ def test_a_conversion_error_on_a_table_without_a_policy_keeps_the_text_of_the_fi
     assert run.error_message.startswith("Query failed: a value could not be converted")
 
 
-def test_a_binder_error_under_a_policy_keeps_its_message(
+def test_a_binder_error_under_a_policy_shows_the_fixed_message(
     session: Session, principal: PrincipalRef, catalog: CatalogService
 ) -> None:
-    """A binder error names no stored value, so its text stays."""
+    """Errors on reads under a row filter or column mask always show the fixed message."""
     _mask(session, principal, catalog, "secret", "NULL")
 
     run = _query(session, principal, "SELECT nope FROM gold.people")
 
-    assert run.status == QueryRunStatus.FAILED
-    assert run.error_message is not None
-    assert run.error_message.startswith("Query failed: Binder Error")
-    assert "The query failed on a value" not in run.error_message
-
-
-def test_a_failure_of_a_kind_that_is_not_listed_is_replaced_under_a_policy(
-    session: Session, principal: PrincipalRef, catalog: CatalogService
-) -> None:
-    """Only binder, catalog and parser errors keep their text; any other kind is replaced."""
-    _mask(session, principal, catalog, "secret", "NULL")
-
-    run = _query(session, principal, "SELECT timezone('HIDDEN-X', now()) FROM gold.people")
-
     _assert_fixed(run, "gold.people", "")
+    assert "Binder" not in (run.error_message or "")
 
 
-def test_a_catalog_error_under_a_policy_keeps_its_message(
+def test_a_catalog_error_under_a_policy_shows_the_fixed_message(
     session: Session, principal: PrincipalRef, catalog: CatalogService
 ) -> None:
-    """A function that does not exist is a catalog error: its text stays."""
+    """A function that does not exist is told the same way."""
     _mask(session, principal, catalog, "secret", "NULL")
 
     run = _query(session, principal, "SELECT no_such_function(id) FROM gold.people")
 
-    assert run.error_message is not None
-    assert run.error_message.startswith("Query failed: Catalog Error")
+    _assert_fixed(run, "gold.people", "")
+
+
+_ENGINE_TEXTS = [
+    'Parser Error: syntax error at or near "x"\n\nLINE 1: SELECT HIDDEN-X FROM t',
+    'Binder Error: Referenced column "HIDDEN-X" not found\n\nLINE 1: SELECT 1',
+    "Catalog Error: Scalar Function with name HIDDEN-X does not exist!",
+    "Conversion Error: Could not convert string 'HIDDEN-X' to INT32",
+    "Out of Range Error: Overflow in addition of INT32 (HIDDEN-X)",
+    "Invalid Input Error: HIDDEN-X",
+    "Constraint Error: HIDDEN-X",
+    "Not implemented Error: HIDDEN-X",
+    "Invalid Error: HIDDEN-X",
+    "Mismatch Type Error: HIDDEN-X",
+    "IO Error: HIDDEN-X",
+    "Something else entirely: HIDDEN-X",
+]
+
+
+@pytest.mark.parametrize("engine_text", _ENGINE_TEXTS)
+def test_every_class_of_engine_error_under_a_policy_gets_the_fixed_message(
+    engine_text: str,
+) -> None:
+    """No class of the engine's text escapes the fixed message on a read under a policy."""
+    raw = ValidationError(f"Query failed: {engine_text}")
+
+    replaced = _without_the_value(raw, frozenset({"gold.people"}))
+    several = _without_the_value(raw, frozenset({"gold.people", "gold.plain"}))
+    untouched = _without_the_value(raw, frozenset())
+
+    assert str(replaced) == policy_read_failure("gold.people")
+    assert str(several) == policy_read_failure(None)
+    assert "HIDDEN-X" not in str(replaced) + str(several)
+    assert untouched is raw
+
+
+def test_the_workers_own_text_for_a_file_that_stores_another_type_stays() -> None:
+    """The query process's fixed wording names a column, no value, and is not the engine's."""
+    raw = ValidationError("Query failed: a file of a table this query reads stores column x")
+
+    assert _without_the_value(raw, frozenset({"gold.people"})) is raw
 
 
 def test_an_internal_failure_under_a_policy_gets_a_fixed_text_and_stays_internal() -> None:

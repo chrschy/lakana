@@ -44,9 +44,10 @@ class ResolvedPolicy:
         it was written against. Unlike `column_masks`, two masks on a column that collapse to
         `NULL` are still two entries, so the check for a rename sees both.
     typed_masks
-        The columns whose single applicable mask was checked against the column's type when it
-        was created (`ColumnMask.type_checked`). Only these are cast to the column's type on a
-        read; a mask of an earlier release is used as written.
+        The columns whose applicable masks were all checked against the column's type when they
+        were created (`ColumnMask.type_checked`). Only these are cast to the column's type on a
+        read, the `NULL` of two masks on one column included; a mask of an earlier release is
+        used as written.
     """
 
     row_filters: list[str] = field(default_factory=list)
@@ -270,7 +271,7 @@ class PolicyResolver:
             for row in mask_rows
         ]
         typed_masks = frozenset(
-            column for column, rows in by_column.items() if len(rows) == 1 and rows[0].type_checked
+            column for column, rows in by_column.items() if all(row.type_checked for row in rows)
         )
         return ResolvedPolicy(
             row_filters=row_filters,
