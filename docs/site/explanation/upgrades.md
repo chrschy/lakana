@@ -122,6 +122,21 @@ Each cell is a summary. The page named in the last column has the detail. The ch
 | 0.10.0 | A package index URL with a query string is refused; move a `uv.toml` into `pyproject.toml`; lineage and failure causes changed. | This row |
 | 0.9.0 | Upgrade every worker before you deploy Python assets; rewrite `asset(deps=...)` as `asset(inputs=...)`; move helper modules out of `assets/`; an older bundle needs three additions. | [Upgrading](../how-to/deploy-with-compose.md#upgrading), [Projects and deploys](../how-to/projects.md) |
 
+## Notes for the next release
+
+### A database check on a secret's use
+
+Migration `0035` runs automatically (see step 3 of [What every upgrade
+asks](#what-every-upgrade-asks)). It adds a check to the `secrets` table: a secret is unbound,
+bound to its own environment, or bound to a package index or repository with that entry's id, and
+nothing else. Lakana never wrote anything else, so no secret should break it. If one does (a
+secret edited by hand in the database), the migration stops before it changes anything and names
+the secret ids; bind each of them again with `lakana secret bind` on the release you are
+upgrading from, and run the upgrade again. The migration never rewrites a binding itself.
+
+A change of an index's or a repository's URL or credential that races its removal now answers
+"not found" (404) in local mode, as it already did elsewhere, instead of a server error.
+
 ## Notes for 0.14.0
 
 ### The project moved to the lakana-labs organisation

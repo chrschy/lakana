@@ -2466,7 +2466,8 @@ that uses it. User reference: `docs/site/reference/package-indexes.md`; how-to:
 
 - **A secret has one use, and only `MANAGE_SECRET` binds it.** A secret is bound to a named
   package index, a named repository, or its own environment (storage and webhooks); the
-  use is `secrets.use_kind` and `secrets.use_target_id`. The four places that decrypt a secret
+  use is `secrets.use_kind` and `secrets.use_target_id`, and the CHECK `ck_secrets_use_consistent`
+  (migration 0035) keeps the pair unset together, environment-only, or kind plus id. The four places that decrypt a secret
   for an index, a repository, storage or a webhook check the use first and refuse another one,
   with the command that moves it. `MANAGE_PACKAGE_INDEX` and `MANAGE_REPOSITORY` are not
   `MANAGE_SECRET`: their holder can name only a secret already bound to that same entry, and
