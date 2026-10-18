@@ -27,10 +27,12 @@ for refused in "regoin = 'EU'" "customers.region = 'EU'"; do
 done
 
 # A text column compared with a number is refused with the fix, as the page shows.
+# The terminal wraps the error at its width, so the line breaks are folded into spaces first.
 if message=$(lakana row-filter create gold.customers --principal alice --expression "region = 5" 2>&1); then
   echo "a filter that compares text with a number was created" >&2
   exit 1
 fi
+message=$(printf '%s' "$message" | tr -s '\n ' '  ')
 expected="'region = 5' is not a valid filter expression: \`region\` is text; compare it with '5', not 5."
 case "$message" in
   *"$expected"*) ;;

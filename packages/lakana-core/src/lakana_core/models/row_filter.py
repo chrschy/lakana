@@ -1,15 +1,13 @@
 """The row filter model."""
 
-import uuid
-from datetime import datetime
-
-from sqlalchemy import CheckConstraint, ForeignKey, Integer, String, Text, Uuid
+from sqlalchemy import Integer, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
-from lakana_core.models.base import Base, UTCDateTime
+from lakana_core.models.base import Base
+from lakana_core.models.policy_record import PolicyRecord
 
 
-class RowFilter(Base):
+class RowFilter(PolicyRecord, Base):
     """One row filter: a subject sees only rows matching an expression, on one table.
 
     Exactly one of `principal_id`/`group_id` is set (the subject) — enforced
@@ -62,32 +60,6 @@ class RowFilter(Base):
     """
 
     __tablename__ = "row_filters"
-    __table_args__ = (
-        CheckConstraint(
-            "(principal_id IS NULL) != (group_id IS NULL)",
-            name="exactly_one_subject",
-        ),
-    )
 
-    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
-    principal_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("principals.id", ondelete="CASCADE"), nullable=True, index=True
-    )
-    group_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("groups.id", ondelete="CASCADE"), nullable=True, index=True
-    )
-    environment: Mapped[str] = mapped_column(String(255))
-    namespace: Mapped[str] = mapped_column(String(1024))
-    table: Mapped[str] = mapped_column(String(255))
-    environment_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("environments.id", ondelete="SET NULL"), nullable=True, index=True
-    )
-    table_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("tables.id", ondelete="SET NULL"), nullable=True, index=True
-    )
     expression: Mapped[str] = mapped_column(Text)
     schema_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    created_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("principals.id"))
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime)
-    revoked_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("principals.id"), nullable=True)
-    revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)

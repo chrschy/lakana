@@ -1,6 +1,6 @@
 {
-  "duplicated_lines": 1433,
-  "clones": 74,
+  "duplicated_lines": 1402,
+  "clones": 72,
   "pairs": {
     "lakana/_artifact_manifest.py ↔ lakana_core/artifacts/manifest.py": {
       "clones": 1,
@@ -98,13 +98,9 @@
       "clones": 1,
       "lines": 8
     },
-    "lakana_core/models/column_mask.py ↔ lakana_core/models/grant.py": {
+    "lakana_core/models/grant.py ↔ lakana_core/models/policy_record.py": {
       "clones": 1,
-      "lines": 11
-    },
-    "lakana_core/models/column_mask.py ↔ lakana_core/models/row_filter.py": {
-      "clones": 2,
-      "lines": 30
+      "lines": 10
     },
     "lakana_core/notifications/views.py ↔ lakana_server/api/platform/schemas.py": {
       "clones": 1,
