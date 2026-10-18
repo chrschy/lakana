@@ -461,9 +461,19 @@ def test_record_lock_owner_does_nothing_on_windows(
 
 
 def test_process_cmdline_reads_a_live_process_and_none_for_a_missing_one() -> None:
-    """The command line of this process contains its interpreter; a missing pid has none."""
+    """A live child's command line comes back with its arguments; a missing pid has none.
+
+    A child, not this process: pytest-xdist rewrites its workers' own command line.
+    """
     if not Path("/proc/self/cmdline").exists():
         pytest.skip("no /proc on this platform")
 
-    assert "python" in (server._process_cmdline(os.getpid()) or "").lower()
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", "marker-arg"])
+    try:
+        assert server._process_cmdline(child.pid) == (
+            f"{sys.executable} -c import time; time.sleep(30) marker-arg "
+        )
+    finally:
+        child.kill()
+        child.wait(timeout=10)
     assert server._process_cmdline(2**31 - 2) is None
