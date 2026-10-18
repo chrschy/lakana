@@ -71,7 +71,7 @@ def test_init_writes_compose_and_env_and_a_team_profile(tmp_path: Path, released
     assert "ports" not in compose["services"]["seaweedfs-core"]
     env = _env(target / ".env")
     assert stat.S_IMODE((target / ".env").stat().st_mode) == 0o600
-    assert env["LAKANA_IMAGE"] == "ghcr.io/chrschy/lakana:0.4.0"
+    assert env["LAKANA_IMAGE"] == "ghcr.io/lakana-labs/lakana:0.4.0"
     assert (
         env["LAKANA_BIND"] == "127.0.0.1"
         and env["LAKANA_PORT"] == "8000"

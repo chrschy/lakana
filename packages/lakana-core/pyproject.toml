@@ -23,14 +23,14 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
     "Topic :: Database",
 ]
-urls = { Homepage = "https://github.com/chrschy/lakana", Documentation = "https://github.com/chrschy/lakana/tree/main/docs/site", Repository = "https://github.com/chrschy/lakana", Issues = "https://github.com/chrschy/lakana/issues", Changelog = "https://github.com/chrschy/lakana/blob/main/CHANGELOG.md" }
+urls = { Homepage = "https://github.com/lakana-labs/lakana", Documentation = "https://lakana-labs.github.io/lakana/", Repository = "https://github.com/lakana-labs/lakana", Issues = "https://github.com/lakana-labs/lakana/issues", Changelog = "https://github.com/lakana-labs/lakana/blob/main/CHANGELOG.md" }
 dynamic = ["version"]
 dependencies = [
     "sqlalchemy>=2.1.3",
     "alembic>=1.13",
     "pydantic>=2.7",
     "pydantic-settings>=2.16.0",
-    "pyiceberg>=0.12",
+    "pyiceberg>=0.12,<0.13",
     "fsspec>=2026.9.0",
     # pyiceberg's PyArrowFileIO needs pyarrow, but pyarrow only arrives
     # transitively through pyiceberg's optional "pyarrow" extra, which this
@@ -49,7 +49,7 @@ dependencies = [
     # MIT. SQL parsing, identifier resolution, lineage extraction, and the
     # rewrite that replaces a qualified table reference with a scoped read —
     # one dependency for all four.
-    "sqlglot>=30.21.0",
+    "sqlglot>=30.21.0,<31",
     # Apache-2.0 OR BSD-3-Clause. Envelope encryption for secrets: AES-256-GCM
     # via AESGCM, verified directly against this exact version during
     # plan-writing (see this plan's Global Constraints).

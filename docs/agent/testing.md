@@ -214,10 +214,18 @@ every missing output of it means "run everything".
   branch protection changes. Workflow permissions are `read-all`; its job adds only
   `security-events: write` (the SARIF upload to code scanning) and `id-token: write` (publishing
   the score that the README badge shows). Its results are at
-  <https://scorecard.dev/viewer/?uri=github.com/chrschy/lakana>. Findings are fixed one at a
+  <https://scorecard.dev/viewer/?uri=github.com/lakana-labs/lakana>. Findings are fixed one at a
   time, when it reports them, never in bulk. `scripts/tests/test_workflows.py` pins the
   permissions, the triggers and its runner; another test there pins every action of every workflow
   by commit SHA.
+- **`canary.yml`** (Dependency canary) runs daily and on demand. It builds the wheels from `main`
+  and runs `scripts/five_minute_test.sh` as the `five-minute` job does: `lakana` is pinned to the
+  job's own build, every third-party dependency resolves from PyPI unpinned, so it sees a breaking
+  release of `sqlglot`, `duckdb`, `pyiceberg` or anything else within a day, which the lock and the
+  pull-request jobs cannot. A failure is a failed scheduled run (GitHub notifies the maintainer;
+  the job has `contents: read` only and files no issue); the step summary lists the resolved
+  versions (`pip freeze`) so the run names the release that broke it. It is outside `ci.yml` and
+  its `changes` gating, and on GitHub's runner whatever `CI_RUNNER` says.
 - **`security-deep.yml`** runs semgrep and Trivy weekly. The semgrep scan (a pinned image, no write
   scope, no token in the workspace) keeps its SARIF as an artifact; `semgrep-upload` alone has
   `security-events: write` and does nothing but upload it to code scanning. Dependabot does not
@@ -229,7 +237,8 @@ every missing output of it means "run everything".
 - **Token permissions.** No workflow has a write permission at its top level: each job names its
   own (`cla.yml` and `security-deep.yml` included). `scripts/tests/test_workflows.py` fails on one.
 - **`release.yml`** is described in `docs/agent/release.md`; it also attaches the SBOM to each
-  GitHub release.
+  GitHub release, and publishes the documentation site on GitHub Pages (`pages` and
+  `pages-deploy`; see "The documentation site on GitHub Pages" there).
 
 ## The documentation site
 
@@ -375,7 +384,7 @@ A change under `docs/examples/` is not a documentation-only change, so CI runs t
 uv sync --locked --all-packages --group docs
 uv run python scripts/docs_blocks.py            # check every block; add --fix to rewrite synced ones
 uv run --group docs zensical build --strict     # build into site-build/ (a traceback after the message is normal on failure)
-uv run python scripts/check_built_site.py site-build   # external resources and missing files in the build
+uv run python scripts/check_built_site.py site-build   # external resources, missing files and URLs outside /lakana/
 uv run --group docs zensical serve              # preview on http://localhost:8000
 uv run bash scripts/run_docs_examples.sh        # every example, or name one: ... getting-started
 uv run pytest scripts/tests                     # the tests that read the site and the workflows

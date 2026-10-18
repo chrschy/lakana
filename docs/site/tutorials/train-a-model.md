@@ -464,7 +464,10 @@ lakana deployments set-run-as forecasts --env dev --principal etl-dev
 <!-- output -->
 ```text
 Created service-account etl-dev
-Created grant 0fa07703-cece-4aa6-bb25-97ccb4d04896 (DATA_ENGINEER on ENVIRONMENT)
+It can do nothing yet. Next:
+  lakana grant create --principal etl-dev --role ANALYST --kind ENVIRONMENT --env ENV
+  lakana token issue etl-dev NAME
+Created grant 0fa07703-cece-4aa6-bb25-97ccb4d04896 (DATA_ENGINEER on environment dev) to etl-dev
 ┌────────────────────┬──────────────────────────────────────────┐
 │ repository         │ forecasts                                │
 │ project_version_id │ 105d369e-e764-46a1-bc36-c1f92894ef31     │
@@ -570,7 +573,7 @@ lakana table lineage gold.spend_predictions --env dev
 
 ## Stop the instance
 
-Go to the terminal where the instance runs and press Ctrl-C. The instance shuts down. Your tables
+Go to the terminal where the instance runs and press Ctrl-C, or run `lakana server stop` from any terminal. The instance shuts down. Your tables
 and your model stay where they are, and `lakana server start --local` brings the instance back with
 them.
 

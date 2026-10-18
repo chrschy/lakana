@@ -1898,3 +1898,63 @@ def test_child_env_tells_the_worker_where_the_server_is(
     monkeypatch.setenv("LAKANA_RUN__SERVER_URL", "http://elsewhere:9000")
     given = server._child_env(data_dir, 8765, "k", key_id=None, secret=None)
     assert given["LAKANA_RUN__SERVER_URL"] == "http://elsewhere:9000"
+
+
+def test_child_env_turns_off_the_request_log_unless_asked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Local mode drops the per-request line only; the log level is left alone."""
+    from typing import cast
+
+    data_dir = cast("DataDir", SimpleNamespace(database_url="sqlite:///x.db"))
+    monkeypatch.delenv("LAKANA_LOG__LEVEL", raising=False)
+    monkeypatch.delenv("LAKANA_LOG__ACCESS", raising=False)
+    quiet = server._child_env(data_dir, 8765, "k", key_id=None, secret=None)
+    assert quiet["LAKANA_LOG__ACCESS"] == "false"
+    assert "LAKANA_LOG__LEVEL" not in quiet
+    loud = server._child_env(data_dir, 8765, "k", key_id=None, secret=None, log_requests=True)
+    assert "LAKANA_LOG__ACCESS" not in loud
+    monkeypatch.setenv("LAKANA_LOG__ACCESS", "true")
+    given = server._child_env(data_dir, 8765, "k", key_id=None, secret=None)
+    assert given["LAKANA_LOG__ACCESS"] == "true"
+
+
+def test_start_passes_the_request_log_choice_to_the_children(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--log-requests` leaves the request log on; without it the children are told it is off."""
+    _stub_environment(monkeypatch)
+    monkeypatch.setattr(server, "pid_alive", lambda pid: False)
+    monkeypatch.delenv("LAKANA_LOG__ACCESS", raising=False)
+    values = []
+    for extra in ((), ("--log-requests",)):
+        fake = FakeSupervisor()
+        _install_fake_supervisor(monkeypatch, fake)
+        api = FakeApi()
+        api.on("POST", "/api/v1/environments", status=201, json=_DEV)
+        state = make_state(tmp_path, api)
+        result = invoke(state, *_start_args(tmp_path / f"data{len(extra)}"), *extra)
+        assert result.exit_code == 0, result.stderr
+        assert fake.config is not None
+        values.append(fake.config.env.get("LAKANA_LOG__ACCESS"))
+    assert values == ["false", None]
+
+
+def test_the_ready_line_is_the_last_thing_start_prints(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing is written to stdout after the ready line, so it stays at the bottom."""
+    _stub_environment(monkeypatch)
+    monkeypatch.setattr(server, "pid_alive", lambda pid: False)
+    fake_stdout = _RecordingStdout()
+    monkeypatch.setattr(server, "sys", SimpleNamespace(stdout=fake_stdout, stderr=sys.stderr))
+    _install_fake_supervisor(monkeypatch, FakeSupervisor())
+    api = FakeApi()
+    api.on("POST", "/api/v1/environments", status=201, json=_DEV)
+    state = make_state(tmp_path, api)
+
+    result = invoke(state, *_start_args(tmp_path / "data"))
+
+    assert result.exit_code == 0, result.stderr
+    writes = [call for call in fake_stdout.calls if call.startswith("write:")]
+    assert writes[-1].startswith("write:Lakana is running at")

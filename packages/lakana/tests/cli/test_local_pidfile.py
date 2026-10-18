@@ -155,3 +155,32 @@ def test_remove_is_idempotent(tmp_path: Path) -> None:
     remove_pidfile(path)
 
     assert not path.exists()
+
+
+def test_the_lock_owner_round_trips_and_clears(tmp_path: Path) -> None:
+    """The supervisor's PID is kept in the lock file, so `server stop` can find it."""
+    lock = tmp_path / "lock"
+    lock.touch()
+    assert _pidfile.read_lock_owner(lock) is None
+    _pidfile.write_lock_owner(lock, 4321)
+    assert _pidfile.read_lock_owner(lock) == 4321
+    _pidfile.clear_lock_owner(lock)
+    assert _pidfile.read_lock_owner(lock) is None
+
+
+def test_garbage_in_the_lock_file_reads_as_no_owner(tmp_path: Path) -> None:
+    """A lock file with text, a non-positive number or no file at all has no owner."""
+    lock = tmp_path / "lock"
+    assert _pidfile.read_lock_owner(lock) is None
+    for text in ("hello", "-5", "0", "1 2"):
+        lock.write_text(text)
+        assert _pidfile.read_lock_owner(lock) is None
+
+
+def test_clearing_a_lock_file_that_is_gone_is_not_an_error(tmp_path: Path) -> None:
+    """The holder may leave after the file was removed; clearing it then does nothing."""
+    lock = tmp_path / "missing-lock"
+
+    _pidfile.clear_lock_owner(lock)
+
+    assert not lock.exists()

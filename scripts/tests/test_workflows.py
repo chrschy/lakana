@@ -122,6 +122,25 @@ def test_pip_audit_audits_every_dependency_group() -> None:
     assert "--all-groups" in audit
 
 
+def test_the_secret_scan_runs_the_checksummed_gitleaks_binary() -> None:
+    """The secret scan runs the gitleaks command line (MIT), checked against a pinned SHA-256.
+
+    The gitleaks GitHub Action needs a paid licence key for a repository owned by an
+    organisation, so the job downloads one pinned release, refuses it unless its checksum
+    matches, and scans the pull request's commits (or the pushed ones).
+    """
+    job = _jobs("security.yml")["secrets"]
+    assert not any("gitleaks/gitleaks-action" in str(s.get("uses", "")) for s in job["steps"])
+    commands = "\n".join(c for s in job["steps"] for c in _commands(s))
+    assert "sha256sum -c" in commands
+    assert "releases/download/v${GITLEAKS_VERSION}/" in commands
+    env = next(s["env"] for s in job["steps"] if "GITLEAKS_SHA256" in s.get("env", {}))
+    assert len(env["GITLEAKS_SHA256"]) == 64
+    assert '/gitleaks" git ' in commands
+    assert "--log-opts" in commands
+    assert set(job["permissions"]) == {"contents"}
+
+
 def test_dependabot_watches_the_docker_image_pins() -> None:
     """The base image and the pinned uv image in the Dockerfile get update pull requests."""
     config = yaml.safe_load((ROOT / ".github" / "dependabot.yml").read_text())
@@ -1175,13 +1194,14 @@ def test_every_published_artefact_gets_a_build_provenance_attestation() -> None:
     assert any(".intoto.jsonl" in c for s in release["steps"] for c in _commands(s))
     (image,) = attest(jobs["attest-image"])
     assert image["with"]["push-to-registry"] is False
-    assert image["with"]["subject-name"] == "ghcr.io/chrschy/lakana"
+    assert image["with"]["subject-name"] == "ghcr.io/lakana-labs/lakana"
     assert image["with"]["subject-digest"] == "${{ needs.publish-image.outputs.digest }}"
     for name, job in jobs.items():
         if name not in attesting:
             perms = _effective_permissions(workflow, job)
             assert perms.get("attestations") != "write", name
-            if name not in {"publish-core", "publish-runtime", "publish-sdk"}:
+            # the three PyPI publishes and the Pages deployment (its own test) use OIDC
+            if name not in {"publish-core", "publish-runtime", "publish-sdk", "pages-deploy"}:
                 assert perms.get("id-token") != "write", name
 
 
@@ -1253,3 +1273,145 @@ def test_the_five_minute_script_installs_uv_by_hash_and_dependabot_keeps_it_curr
     assert [u["directory"] for u in config["updates"] if u["package-ecosystem"] == "pip"] == [
         "/scripts"
     ]
+
+
+def _canary() -> dict:
+    """Load the dependency canary workflow.
+
+    Returns
+    -------
+    dict
+        The parsed ``canary.yml``.
+    """
+    return yaml.safe_load((WORKFLOWS / "canary.yml").read_text())
+
+
+def test_the_canary_runs_every_day_and_on_demand() -> None:
+    """A breaking upstream release is seen within a day: a daily schedule, and a manual run."""
+    triggers = _canary()[True]
+    assert set(triggers) == {"schedule", "workflow_dispatch"}
+    (entry,) = triggers["schedule"]
+    minute, hour, day, month, weekday = entry["cron"].split()
+    assert (day, month, weekday) == ("*", "*", "*"), "daily means every day"
+    assert minute.isdigit() and hour.isdigit()
+
+
+def test_the_canary_has_the_least_privilege() -> None:
+    """No token write scope anywhere: a failure is a failed run, not an issue the job writes."""
+    workflow = _canary()
+    assert workflow["permissions"] == {}
+    (job,) = workflow["jobs"].values()
+    assert job["permissions"] == {"contents": "read"}
+    assert isinstance(job["timeout-minutes"], int)
+    checkout = next(s for s in job["steps"] if s.get("uses", "").startswith("actions/checkout@"))
+    assert checkout["with"]["persist-credentials"] is False
+
+
+def test_the_canary_runs_on_github_s_runner() -> None:
+    """A scheduled job has no pull request to judge it, so the `CI_RUNNER` switch does not apply."""
+    (job,) = _canary()["jobs"].values()
+    assert job["runs-on"] == "ubuntu-latest"
+
+
+def test_the_canary_installs_its_own_build_with_unpinned_dependencies() -> None:
+    """The five-minute script runs against wheels built from `main`; third parties float.
+
+    Only `lakana` is pinned (to the build's own version, with `--find-links`), never with
+    `--no-index` or a constraints file: an unpinned install is the point of the job.
+    """
+    (job,) = _canary()["jobs"].values()
+    commands = "\n".join(c for step in job["steps"] for c in _commands(step))
+    assert "uv build --all-packages" in commands
+    assert "five_minute_test.sh --find-links /dist" in commands
+    assert "lakana[server]==$version" in commands
+    assert "--no-index" not in commands
+    assert "--constraint" not in commands and " -c " not in commands
+    assert "uv.lock" not in commands
+    checkout = next(s for s in job["steps"] if s.get("uses", "").startswith("actions/checkout@"))
+    assert checkout["with"]["fetch-depth"] == 0  # the version comes from git tags
+
+
+def test_the_canary_shows_the_versions_it_resolved_even_when_it_fails() -> None:
+    """A failure names the version that broke it: the summary is written even on a failure."""
+    (job,) = _canary()["jobs"].values()
+    script = (ROOT / "scripts" / "five_minute_test.sh").read_text()
+    assert "pip freeze" in script
+    summary = [s for s in job["steps"] if '>> "$GITHUB_STEP_SUMMARY"' in s.get("run", "")]
+    assert summary and all(s.get("if") == "${{ always() }}" for s in summary)
+
+
+def _all_commands(job: dict) -> list[str]:
+    """Collect every command of every step of a job.
+
+    Parameters
+    ----------
+    job
+        A workflow job.
+
+    Returns
+    -------
+    list of str
+        The commands, in order.
+    """
+    return [command for step in job["steps"] for command in _commands(step)]
+
+
+def test_each_release_publishes_the_documentation_site_on_github_pages() -> None:
+    """The site at https://lakana-labs.github.io/lakana/ is built from the release tag.
+
+    One job builds with the same commands as CI's `docs` job, from the tag release-please
+    created, and only for a release; no manual trigger can deploy something else.
+    """
+    workflow = yaml.safe_load((WORKFLOWS / "release.yml").read_text())
+    assert set(workflow[True]) == {"push"}  # no manual trigger: only a release deploys
+    job = workflow["jobs"]["pages"]
+    assert job["needs"] == "release-please"
+    assert job["if"] == workflow["jobs"]["sbom"]["if"]
+    assert job["runs-on"] == "ubuntu-latest"
+    checkout = next(s for s in job["steps"] if s.get("uses", "").startswith("actions/checkout@"))
+    assert checkout["with"]["ref"] == "${{ needs.release-please.outputs.tag }}"
+    assert checkout["with"]["persist-credentials"] is False
+    commands = _all_commands(job)
+    assert "uv sync --locked --all-packages --group docs" in commands
+    assert "uv run python scripts/docs_blocks.py" in commands
+    assert "uv run --group docs zensical build --strict" in commands
+    assert "uv run python scripts/check_built_site.py site-build" in commands
+    assert commands.index("uv run --group docs zensical build --strict") < commands.index(
+        "uv run python scripts/check_built_site.py site-build"
+    )
+    upload = next(
+        s for s in job["steps"] if s.get("uses", "").startswith("actions/upload-pages-artifact@")
+    )
+    assert upload["with"]["path"] == "site-build"
+
+
+def test_the_site_is_deployed_by_a_job_that_runs_nothing_else() -> None:
+    """The deploy job holds `pages: write` and `id-token: write` and builds nothing.
+
+    The build job, which runs the project's code, is read-only; every other job of the
+    workflow lacks the two scopes the deployment needs.
+    """
+    workflow = yaml.safe_load((WORKFLOWS / "release.yml").read_text())
+    jobs = workflow["jobs"]
+    assert workflow["permissions"] == {}
+    assert jobs["pages"]["permissions"] == {"contents": "read"}
+    deploy = jobs["pages-deploy"]
+    assert deploy["needs"] == "pages"
+    assert deploy["permissions"] == {"pages": "write", "id-token": "write"}
+    assert deploy["runs-on"] == "ubuntu-latest"
+    assert deploy["environment"] == {
+        "name": "github-pages",
+        "url": "${{ steps.deployment.outputs.page_url }}",
+    }
+    (step,) = deploy["steps"]
+    assert step["uses"].startswith("actions/deploy-pages@")
+    assert step["id"] == "deployment"
+    for name, other in jobs.items():
+        if name != "pages-deploy":
+            assert "pages" not in _effective_permissions(workflow, other), name
+
+
+def test_the_site_is_built_for_the_address_it_is_served_from() -> None:
+    """GitHub Pages serves the project under `/lakana/`, so the build needs that `site_url`."""
+    config = (ROOT / "mkdocs.yml").read_text()
+    assert re.search(r"^site_url: https://lakana-labs\.github\.io/lakana/$", config, re.MULTILINE)

@@ -2,7 +2,7 @@
 
 > **Pre-beta.** Lakana is published as a 0.x pre-beta: the API and the data layout may change
 > between releases, and it is not ready for production data yet. See the
-> [project README](https://github.com/chrschy/lakana#readme).
+> [project README](https://github.com/lakana-labs/lakana#readme).
 
 A typed Python client for the Lakana platform API. `lakana` never imports `lakana-core`,
 `lakana-server`, or `lakana-worker` — it only speaks HTTP to a running Lakana server, over the
@@ -494,10 +494,17 @@ filesystem for storage, no Docker and no Postgres.
 
 ```bash
 pip install "lakana[server]"
-lakana server start --local          # runs in the foreground; Ctrl-C stops it
+lakana server start --local          # runs in the foreground; no line per request
 lakana sql "SELECT 42"               # in another terminal, once it's ready
 lakana server status                 # exit 0 if running, 1 otherwise
+lakana server stop                   # same as Ctrl-C in the instance's terminal
 ```
+
+`--log-requests` on `start` prints a line for every request (local mode sets `LAKANA_LOG__ACCESS=false`
+otherwise); `LAKANA_LOG__LEVEL` sets the level for the server and the worker as before. `lakana server stop` asks the instance in the
+data directory (`--data-dir DIR` for another one) to shut down and waits up to 30 seconds; nothing
+running is not an error, it exits non-zero when the instance is still there after the wait (it never
+kills it), and it is refused for a remote or Compose instance (`docker compose down` stops those).
 
 A `--kind local` repository must lie under one of `LAKANA_REPO_ROOTS`; local mode defaults that to
 your home directory (resolved), so `lakana repo add demo --kind local --url "$PWD"` works anywhere
@@ -533,7 +540,7 @@ requires. On first start, a `local` profile is saved automatically
 `lakana server start --local` binds only to `127.0.0.1` — it is never reachable from another
 machine, whatever `--port` you pick.
 
-To start completely over, stop the instance (Ctrl-C, SIGTERM, or — on POSIX — closing the
+To start completely over, stop the instance (`lakana server stop`, Ctrl-C, SIGTERM, or — on POSIX — closing the
 terminal, which sends SIGHUP) and run `lakana server reset --local` (`--data-dir DIR` for another
 data directory, `--yes` to skip the question). It names what it deletes (`lakana.db` and its
 SQLite side files, `lake/`, `master.key`, the pidfiles, and the number of tables) and asks

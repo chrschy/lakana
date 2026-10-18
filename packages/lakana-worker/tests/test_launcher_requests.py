@@ -41,7 +41,7 @@ CACHE_KEY = b"k" * 32
 KEY = "a" * 64
 SETTINGS = LauncherSettings(
     stack="lakana",
-    images={"3.13": "ghcr.io/chrschy/lakana-task:0.14.0-py3.13"},
+    images={"3.13": "ghcr.io/lakana-labs/lakana-task:0.14.0-py3.13"},
     work_volume="lakana-task-work",
     socket=Path("/run/lakana-launcher/launcher.sock"),
     ingestion_roots={"landing": "/srv/landing"},
@@ -503,7 +503,7 @@ def test_the_run_spec_fixes_every_field_that_matters() -> None:
     spec = run_container_spec(run, SETTINGS, no_new_privileges=True)
 
     host = spec["HostConfig"]
-    assert spec["Image"] == "ghcr.io/chrschy/lakana-task:0.14.0-py3.13"
+    assert spec["Image"] == "ghcr.io/lakana-labs/lakana-task:0.14.0-py3.13"
     assert spec["Entrypoint"] == ["/env/bin/python", "-P", "-m", "lakana.runner"]
     assert spec["User"] == "10001:10001"
     assert spec["WorkingDir"] == "/code"
@@ -599,7 +599,7 @@ def test_volume_names_change_with_the_image_and_the_index_set() -> None:
     )
     newer = LauncherSettings(
         stack="lakana",
-        images={"3.13": "ghcr.io/chrschy/lakana-task:0.15.0-py3.13"},
+        images={"3.13": "ghcr.io/lakana-labs/lakana-task:0.15.0-py3.13"},
         work_volume="lakana-task-work",
     )
     assert isinstance(build, BuildRequest) and isinstance(other, BuildRequest)
@@ -887,7 +887,7 @@ def test_every_spec_overrides_the_entrypoint_with_its_own_command() -> None:
         build_container_spec(
             build, SETTINGS, no_new_privileges=True, proxy_url=None, cache_key=CACHE_KEY
         ),
-        probe_container_spec(SETTINGS, "ghcr.io/chrschy/lakana-task:0.14.0-py3.13"),
+        probe_container_spec(SETTINGS, "ghcr.io/lakana-labs/lakana-task:0.14.0-py3.13"),
     ]
     for spec in specs:
         assert spec["Cmd"] == []

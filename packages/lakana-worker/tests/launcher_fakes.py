@@ -33,7 +33,7 @@ def settings(state: Path, **changes: Any) -> LauncherSettings:
     """
     values: dict[str, Any] = {
         "stack": "lakana",
-        "images": {"3.13": "ghcr.io/chrschy/lakana-task:0.14.0-py3.13"},
+        "images": {"3.13": "ghcr.io/lakana-labs/lakana-task:0.14.0-py3.13"},
         "work_volume": "lakana-task-work",
         "socket": Path("l.sock"),
         "state_dir": state,
@@ -134,7 +134,9 @@ class FakeEngine:
     calls: list[tuple[str, str, Any]] = field(default_factory=list)
     containers: dict[str, dict[str, Any]] = field(default_factory=dict)
     networks: dict[str, dict[str, Any]] = field(default_factory=dict)
-    images: set[str] = field(default_factory=lambda: {"ghcr.io/chrschy/lakana-task:0.14.0-py3.13"})
+    images: set[str] = field(
+        default_factory=lambda: {"ghcr.io/lakana-labs/lakana-task:0.14.0-py3.13"}
+    )
     stdin: list[bytes] = field(default_factory=list)
     _released: dict[str, threading.Event] = field(default_factory=dict)
     _count: int = 0

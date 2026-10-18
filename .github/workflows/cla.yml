@@ -1,7 +1,7 @@
 # Enabled from the moment the repository is public, when outside contributors can open pull
 # requests.
 #
-# Signatures are stored in a separate private repository, chrschy/lakana-cla-signatures, so
+# Signatures are stored in a separate private repository, lakana-labs/lakana-cla-signatures, so
 # that they do not become public with this one. The token CLA_SIGNATURES_TOKEN (a fine-grained
 # personal access token that can write the contents of that repository only) is an Actions
 # secret of this repository.
@@ -42,8 +42,8 @@ jobs:
           PERSONAL_ACCESS_TOKEN: ${{ secrets.CLA_SIGNATURES_TOKEN }}
         with:
           path-to-signatures: signatures/v3/cla.json
-          path-to-document: https://github.com/chrschy/lakana/blob/main/docs/legal/CLA.md
-          remote-organization-name: chrschy
+          path-to-document: https://github.com/lakana-labs/lakana/blob/main/docs/legal/CLA.md
+          remote-organization-name: lakana-labs
           remote-repository-name: lakana-cla-signatures
           branch: main
           allowlist: chrschy,dependabot[bot],github-actions[bot]

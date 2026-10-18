@@ -167,9 +167,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     # forced a different, auto-generated credential (below)
                     # still logs the full token, since that is the only way
                     # to learn it.
-                    logger.warning(
-                        "Restored the bootstrap PAT for %r using the configured key id "
-                        "%r; the token was supplied by the caller and is not logged.",
+                    # The normal first start of a local instance, and of a restored
+                    # Compose instance: nothing for the reader to act on, so DEBUG.
+                    logger.debug(
+                        "Created the first administrator %r with the access token whose key "
+                        "id %r was supplied at start-up; the token is not logged.",
                         resolved_settings.bootstrap_admin,
                         configured_key_id,
                     )

@@ -1846,7 +1846,7 @@ carries any of the three, and a grant below instance scope never satisfied these
   the `grant create` command for the kind of subject that occurs, and who must act now). The
   `lakana grant list` table shows the marker `no effect` in a `note` column with one explaining
   line under the table, followed by the command that revokes each marked grant with its whole id
-  (the first five, then a count; the table may leave `id` out); `--output json`, the SDK and REST
+  (the first five, then a count; a narrow table may still leave `id` out when subjects are ids); `--output json`, the SDK and REST
   (`GrantOut.note`) carry the full
   sentence `no effect: <ACTION> needs the ADMIN role`. Nothing is deleted on upgrade.
 - **The bootstrap is the one exemption.** `AllowAllAuthorization` asks for no role: it creates
@@ -3452,7 +3452,7 @@ matter for an operator deciding where to run it:
   server's public API (the bootstrap admin token and the SeaweedFS S3 keys, both from
   `.env`) — it holds no direct database or storage credential of its own, consistent with
   "The REST API is the only way in" above.
-- **The image is public.** `ghcr.io/chrschy/lakana` needs no login to pull. Its package visibility
+- **The image is public.** `ghcr.io/lakana-labs/lakana` needs no login to pull. Its package visibility
   is a setting of the GitHub package, not of the repository: check it when the image name changes.
 - **Worker shutdown (closed by M5c3b).** `SIGTERM` stops claiming; a running task run is
   released after `LAKANA_RUN__DRAIN_GRACE_SECONDS` (the bundle waits 45 s before `SIGKILL`), and a
@@ -3493,9 +3493,12 @@ misreads (e.g. `token=token, …` in `lakana login`) — never a pattern broad e
 credential. Prefer fixture tokens that don't trip the rules at all; allowlist one only when the
 test needs its shape (e.g. the SDK's masking tests, which need a secret with underscores and
 dashes). gitleaks scans every commit in a PR, so a false positive in any earlier commit needs an
-allowlist entry even after the line has changed. Any
+allowlist entry even after the line has changed. The `secrets` job runs the gitleaks command line
+(MIT) from one pinned release whose SHA-256 is checked, not the gitleaks GitHub Action, which needs
+a paid licence key for a repository owned by an organisation; raise the version and the checksum
+together from the release's checksums file. Any
 feature touching auth, policy, secrets, or the query path should also get a `/security-review`
 pass before merge. Semgrep runs weekly (`security-deep.yml`); CodeQL (`codeql.yml`) runs on every
 pull request, every push to `main` and weekly; both upload SARIF to code scanning. OpenSSF Scorecard (`scorecard.yml`) runs on every push to `main`,
 weekly and on a branch-protection change, and publishes its score for the README badge; read the
-results at <https://scorecard.dev/viewer/?uri=github.com/chrschy/lakana>.
+results at <https://scorecard.dev/viewer/?uri=github.com/lakana-labs/lakana>.

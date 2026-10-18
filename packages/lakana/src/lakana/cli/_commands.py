@@ -124,6 +124,7 @@ LOCAL_COMMANDS: frozenset[str] = frozenset(
         "server start",
         "server status",
         "server reset",
+        "server stop",
         "bundle init",
     }
 )

@@ -28,7 +28,7 @@ repository instead. You need [`uv`](https://docs.astral.sh/uv/), a Python packag
 
 <!-- not tested: installs from a checkout -->
 ```bash
-git clone https://github.com/chrschy/lakana.git
+git clone https://github.com/lakana-labs/lakana.git
 cd lakana
 uv sync --all-packages
 source .venv/bin/activate
@@ -49,18 +49,18 @@ queries and builds, and a place to keep tables. Start it:
 lakana server start --local
 ```
 
-The instance stays in the foreground and prints a log line for each request it handles. When it
-is ready, it prints a line like this one:
+The instance stays in the foreground and keeps this terminal. It prints no line per request, so
+the line that says it is ready is the last one you see. When it is ready, it prints a
+line like this one:
 
 <!-- output -->
 ```text
 Lakana is running at http://127.0.0.1:8765 — profile 'local', environment 'dev'. Try: lakana sql "SELECT 42"
 ```
 
-The other lines are normal and need no action. They include one line per request and a line
-about a restored token. The ready line may have scrolled up; look for it. To see fewer of them,
-start with `LAKANA_LOG__LEVEL=WARNING` in front of the command; local mode passes it to the
-server and the worker.
+To see a line for every request the server answers, start with the option `--log-requests`. To
+see more or fewer of the other lines, set `LAKANA_LOG__LEVEL` (for example to `DEBUG`) in front of
+the command; local mode passes it to the server and the worker.
 
 The worker has a memory limit, 4 GB by default (`LAKANA_WORKER__MEMORY_LIMIT`; `off` turns it
 off). It covers the worker and the tasks and queries it started. On Linux, a worker that goes over it ends the
@@ -94,8 +94,8 @@ instance http://127.0.0.1:8765: 0.8.1.dev6+g6af3c5d2a
     If the start fails with "Port 8765 is in use.", another program uses that port. Stop that
     program and start again, or pass another port with `--port`; the commands below then find
     your instance on it. If it fails with "Lakana is already running", an instance you
-    started earlier still runs; its message names the address. Use it, or stop it with Ctrl-C
-    in its terminal and start again.
+    started earlier still runs; its message names the address. Use it, or stop it with
+    `lakana server stop` (add `--data-dir` if you started it with one) and start again.
 
 An **environment** is a separate place where a project is deployed and its tables live. A local
 instance has one, called `dev`. Every command below that needs an environment names it with
@@ -374,8 +374,16 @@ A column may carry the name of its table or an alias, as in any SQL: `station_ra
 
 ## Stop the instance
 
-Go to the first terminal and press Ctrl-C. The instance shuts down. Your tables stay where they
-are, and `lakana server start --local` brings the instance back with them.
+Go to the first terminal and press Ctrl-C, or stop the instance from any terminal:
+
+<!-- source: docs/examples/getting-started/run.sh#stop -->
+```bash
+lakana server stop
+```
+
+The instance shuts down and the command says so; if none runs, it says that instead and exits
+without an error. Your tables stay where they are, and `lakana server start --local` brings the
+instance back with them.
 
 ## Start over
 

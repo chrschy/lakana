@@ -12,6 +12,10 @@ starts with ``http://``, ``https://`` or ``//``. A plain ``<a href>`` is a link 
 reader may follow, not a load, and is fine. A CSS file or ``<style>`` element is
 external when an ``@import`` or a ``url()`` (a ``data:`` URL is not) names another host.
 
+The site is served under the path of ``site_url`` in ``mkdocs.yml`` (``/lakana/`` on GitHub
+Pages), so a ``href`` or ``src`` that starts with a single ``/`` and not with that path would
+point outside the site; it is reported, ``<a>`` links included.
+
 Usage: ``uv run python scripts/check_built_site.py site-build``
 """
 
@@ -23,6 +27,8 @@ from collections.abc import Sequence
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
+
+_SITE_URL = re.compile(r"^site_url:\s*['\"]?(?P<url>[^'\"\s#]+)", re.MULTILINE)
 
 _LOADING_ATTRIBUTES = {
     "script": ("src",),
@@ -120,6 +126,7 @@ class _Loads(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.loads: list[tuple[str, str]] = []
+        self.anchors: list[str] = []
         self.style = ""
         self._in_style = False
 
@@ -136,6 +143,8 @@ class _Loads(HTMLParser):
         values = {name: value or "" for name, value in attrs}
         if tag == "style":
             self._in_style = True
+        if tag == "a" and values.get("href", "").strip():
+            self.anchors.append(values["href"].strip())
         for attribute in _LOADING_ATTRIBUTES.get(tag, ()):
             if attribute not in values:
                 continue
@@ -182,7 +191,30 @@ class _Loads(HTMLParser):
             self.style += data
 
 
-def _exists(site: Path, page: Path, url: str) -> bool:
+def site_base_path(config: Path) -> str:
+    """Read the path the site is served under from the ``site_url`` of its configuration.
+
+    Parameters
+    ----------
+    config
+        The ``mkdocs.yml`` file; it may be missing.
+
+    Returns
+    -------
+    str
+        The path with a leading and a trailing slash, ``/`` for a site at the root of its
+        host, for a configuration without ``site_url`` and for a missing file.
+    """
+    try:
+        text = config.read_text(encoding="utf-8")
+    except OSError:
+        return "/"
+    match = _SITE_URL.search(text)
+    path = urlsplit(match["url"]).path.strip("/") if match else ""
+    return f"/{path}/" if path else "/"
+
+
+def _exists(site: Path, page: Path, url: str, base_path: str = "/") -> bool:
     """Say whether a local URL points at a file of the built site.
 
     Parameters
@@ -193,6 +225,8 @@ def _exists(site: Path, page: Path, url: str) -> bool:
         The HTML file that holds the URL.
     url
         A relative or root-relative URL, possibly with a query or a fragment.
+    base_path
+        The path the site is served under; a root-relative URL starts with it.
 
     Returns
     -------
@@ -200,6 +234,8 @@ def _exists(site: Path, page: Path, url: str) -> bool:
         Whether the file, or the directory's ``index.html``, exists inside `site`.
     """
     path = unquote(urlsplit(url).path)
+    if path.startswith("/"):
+        path = path.removeprefix(base_path.rstrip("/"))
     base = site if path.startswith("/") else page.parent
     target = (base / path.lstrip("/")).resolve()
     if target.is_dir():
@@ -207,13 +243,37 @@ def _exists(site: Path, page: Path, url: str) -> bool:
     return target.is_file() and target.is_relative_to(site.resolve())
 
 
-def check_site(site: Path) -> list[str]:
+def _outside_the_site(url: str, base_path: str) -> bool:
+    """Say whether a URL starts at the host root, outside the path the site is served under.
+
+    Parameters
+    ----------
+    url
+        An attribute value.
+    base_path
+        The path the site is served under.
+
+    Returns
+    -------
+    bool
+        ``True`` for a URL with a single leading ``/`` that does not start with `base_path`.
+    """
+    parts = urlsplit(url)
+    if parts.scheme or parts.netloc:
+        return False
+    return parts.path.startswith("/") and not parts.path.startswith(base_path)
+
+
+def check_site(site: Path, base_path: str = "/") -> list[str]:
     """Check every HTML and CSS file of a built site.
 
     Parameters
     ----------
     site
         The built site's directory.
+    base_path
+        The path the site is served under (``/lakana/`` on GitHub Pages); see
+        :func:`site_base_path`.
 
     Returns
     -------
@@ -237,13 +297,25 @@ def check_site(site: Path) -> list[str]:
             "feature that adds it, so the site works on an internal network."
             for url in css_problems(parser.style)
         ]
-        for tag, url in parser.loads:
-            if is_external(url):
+        for tag, url in [*parser.loads, *(("a", href) for href in parser.anchors)]:
+            if _outside_the_site(url, base_path):
+                problems.append(
+                    f"{shown}: <{tag}> points at {url}, which starts at the root of the host "
+                    f"and so leaves the site under {base_path}; use a relative URL, or set "
+                    "`site_url` in mkdocs.yml."
+                )
+            elif tag == "a":
+                continue
+            elif is_external(url):
                 problems.append(
                     f"{shown}: <{tag}> loads {url} from another host; use a file under "
                     "docs/site/assets or remove it, so the site works on an internal network."
                 )
-            elif urlsplit(url).scheme == "" and urlsplit(url).path and not _exists(site, page, url):
+            elif (
+                urlsplit(url).scheme == ""
+                and urlsplit(url).path
+                and not _exists(site, page, url, base_path)
+            ):
                 problems.append(
                     f"{shown}: <{tag}> points at {url}, which is not in the built site; "
                     "add the file under docs/site or fix the path."
@@ -266,6 +338,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("site", type=Path, help="the built site, usually site-build")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path("mkdocs.yml"),
+        help="the configuration whose site_url gives the path the site is served under",
+    )
     args = parser.parse_args(argv)
     if not any(args.site.rglob("*.html")):
         print(
@@ -273,7 +351,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             "`uv run --group docs zensical build --strict`."
         )
         return 1
-    problems = check_site(args.site)
+    if not args.config.is_file():
+        print(
+            f"{args.config} does not exist; pass the site's configuration with --config "
+            "(its site_url decides which absolute URLs are legal)."
+        )
+        return 1
+    problems = check_site(args.site, site_base_path(args.config))
     for problem in problems:
         print(problem)
     pages = len(list(args.site.rglob("*.html")))

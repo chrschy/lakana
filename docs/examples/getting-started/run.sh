@@ -189,3 +189,11 @@ grep -Fq 'Lakana is running from' "$captured"
 grep -Fq 'Ctrl-C' "$captured"
 test -n "$(lakana --output json sql 'SELECT 1 AS one')"
 lakana sql "SELECT * FROM gold.station_ranking" >/dev/null
+
+# The tutorial's last step: stop the instance from another terminal. It must say so and leave.
+capture_start
+# docs:start stop
+lakana server stop
+# docs:end stop
+capture_end
+grep -Fq 'Stopped the local instance' "$captured"

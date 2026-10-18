@@ -54,8 +54,26 @@ def test_serve_runs_uvicorn_on_the_configured_host_and_port(
         "host": "127.0.0.1",
         "port": 8765,
         "log_level": "info",
+        "access_log": True,
     }
     assert call["log_config"] == uvicorn_log_config()
+
+
+@pytest.mark.parametrize(("given", "expected"), [(None, True), ("false", False), ("true", True)])
+def test_uvicorn_access_log_follows_the_log_access_setting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, given: str | None, expected: bool
+) -> None:
+    """`LAKANA_LOG__ACCESS=false` turns uvicorn's per-request access log off."""
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{tmp_path}/lakana.db")
+    monkeypatch.delenv("LAKANA_LOG__ACCESS", raising=False)
+    if given is not None:
+        monkeypatch.setenv("LAKANA_LOG__ACCESS", given)
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(server_main.uvicorn, "run", lambda app, **kw: calls.append(kw))
+
+    server_main.main([])
+
+    assert calls[0]["access_log"] is expected
 
 
 @pytest.mark.parametrize(

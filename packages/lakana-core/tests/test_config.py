@@ -807,6 +807,17 @@ def test_the_log_level_is_info_by_default_and_read_from_the_environment(
     assert Settings().log.level == "WARNING"
 
 
+def test_the_access_log_is_on_by_default_and_read_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`LAKANA_LOG__ACCESS=false` turns off the server's per-request line."""
+    monkeypatch.setenv("LAKANA_DATABASE__URL", "sqlite:///x.db")
+    monkeypatch.delenv("LAKANA_LOG__ACCESS", raising=False)
+    assert Settings().log.access is True
+    monkeypatch.setenv("LAKANA_LOG__ACCESS", "false")
+    assert Settings().log.access is False
+
+
 @pytest.mark.parametrize("value", ["DEBUG", "info", "Warning", "eRRor"])
 def test_the_log_level_is_accepted_in_any_letter_case(value: str) -> None:
     """The four names are accepted whatever their case, and kept in upper case."""

@@ -1,4 +1,4 @@
-"""`lakana server start --local`, `status` and `reset`: run Lakana on this machine."""
+"""`lakana server start --local`, `status`, `stop` and `reset`: run Lakana on this machine."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import secrets
 import signal
 import socket
 import sys
+import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,7 +37,15 @@ from lakana.cli.local._datadir import (
     prepare_data_dir,
     resolve_data_dir,
 )
-from lakana.cli.local._pidfile import pid_alive, read_pidfile, remove_pidfile, write_pidfile
+from lakana.cli.local._pidfile import (
+    clear_lock_owner,
+    pid_alive,
+    read_lock_owner,
+    read_pidfile,
+    remove_pidfile,
+    write_lock_owner,
+    write_pidfile,
+)
 from lakana.cli.local._scripts import find_script
 from lakana.cli.local._supervisor import Supervisor, SupervisorConfig, SupervisorError
 from lakana.errors import LakanaError, NotFound
@@ -45,6 +54,8 @@ server_app = typer.Typer(help="Run Lakana on this machine (local only).", no_arg
 
 _DEFAULT_PORT = 8765
 _HEALTH_TIMEOUT = 2.0
+_STOP_TIMEOUT_SECONDS = 30.0
+_STOP_POLL_SECONDS = 0.1
 _BOOTSTRAP_ENV_VARS = ("LAKANA_BOOTSTRAP_PAT_KEY_ID", "LAKANA_BOOTSTRAP_PAT_SECRET")
 _LOOPBACK_URL_RE = re.compile(r"http://127\.0\.0\.1:\d+")
 
@@ -415,6 +426,7 @@ def _child_env(
     *,
     key_id: str | None,
     secret: str | None,
+    log_requests: bool = False,
 ) -> dict[str, str]:
     """Build the environment passed to both child processes.
 
@@ -430,6 +442,10 @@ def _child_env(
         The bootstrap credential's key id; `None` after the first run.
     secret
         The bootstrap credential's secret; `None` after the first run.
+    log_requests
+        Keep the server's request log. Without it the server is told to print no line per
+        request (`LAKANA_LOG__ACCESS=false`), so the ready line is not scrolled away; every other
+        log line is unchanged, and a `LAKANA_LOG__ACCESS` already in the environment wins.
 
     Returns
     -------
@@ -461,6 +477,8 @@ def _child_env(
     else:
         for name in _BOOTSTRAP_ENV_VARS:
             env.pop(name, None)
+    if not log_requests:
+        env.setdefault("LAKANA_LOG__ACCESS", "false")
     env.setdefault("LAKANA_RUN__SERVER_URL", f"http://127.0.0.1:{port}")
     env.setdefault("LAKANA_REPO_ROOTS", json.dumps([os.path.realpath(Path.home())]))
     return env
@@ -685,8 +703,17 @@ def start(
     port: Annotated[
         int, typer.Option("--port", help="Port to bind on 127.0.0.1 (default 8765).")
     ] = _DEFAULT_PORT,
+    log_requests: Annotated[
+        bool,
+        typer.Option(
+            "--log-requests",
+            help="Print a line for every request the server answers (default: none).",
+        ),
+    ] = False,
 ) -> None:
     """Start Lakana on this machine: migrate, then the server and worker.
+
+    Stop it with Ctrl-C, or from another terminal with 'lakana server stop'.
 
     Parameters
     ----------
@@ -698,6 +725,8 @@ def start(
         The data directory; defaults to `default_data_dir()`.
     port
         The port `lakana-server` binds to on `127.0.0.1`.
+    log_requests
+        Keep the server's request log.
 
     Raises
     ------
@@ -729,10 +758,60 @@ def start(
         if not acquired:
             _raise_already_running(root)
         _refuse_lockless_instance(root)
-        _run_locked(state, root, port)
+        # Empty first: a supervisor that was killed left its pid here, and until ours is
+        # written, no `stop` may trust it (the pid may belong to an unrelated process by now).
+        clear_lock_owner(root.lock_path)
+        try:
+            _record_lock_owner(root)
+            _run_locked(state, root, port, log_requests)
+        finally:
+            clear_lock_owner(root.lock_path)
 
 
-def _run_locked(state: CliState, root: DataDir, port: int) -> None:
+def _record_lock_owner(root: DataDir) -> None:
+    """Write this process's PID into the lock file, so `lakana server stop` can find it.
+
+    A failure is reported on stderr and start-up goes on: the instance runs, and `stop` then
+    refuses with the Ctrl-C hint instead of guessing.
+
+    Parameters
+    ----------
+    root
+        The data directory.
+    """
+    if os.name == "nt":
+        return
+    try:
+        write_lock_owner(root.lock_path, os.getpid())
+    except OSError as exc:
+        sys.stderr.write(
+            f"Warning: couldn't record this instance's process in {root.lock_path} ({exc}); "
+            "'lakana server stop' will not work for it, stop it with Ctrl-C.\n"
+        )
+
+
+def _process_cmdline(pid: int) -> str | None:
+    """Read the command line of a process, where the platform exposes it.
+
+    Parameters
+    ----------
+    pid
+        The process id.
+
+    Returns
+    -------
+    str or None
+        The command line with its arguments joined by spaces; `None` when `/proc/<pid>` does
+        not exist (no `/proc` on this platform, or no such process).
+    """
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return None
+    return raw.replace(b"\0", b" ").decode(errors="replace")
+
+
+def _run_locked(state: CliState, root: DataDir, port: int, log_requests: bool = False) -> None:
     """Run the local instance; the caller holds the data directory's lock.
 
     Parameters
@@ -743,6 +822,8 @@ def _run_locked(state: CliState, root: DataDir, port: int) -> None:
         The prepared data directory.
     port
         The port `lakana-server` binds to on `127.0.0.1`.
+    log_requests
+        Keep the server's request log (see `_child_env`).
 
     Raises
     ------
@@ -772,7 +853,7 @@ def _run_locked(state: CliState, root: DataDir, port: int) -> None:
     key = load_or_create_master_key(root)
     key_id = secrets.token_hex(8) if first_run else None
     secret = secrets.token_urlsafe(32) if first_run else None
-    env = _child_env(root, port, key, key_id=key_id, secret=secret)
+    env = _child_env(root, port, key, key_id=key_id, secret=secret, log_requests=log_requests)
 
     sup = make_supervisor(
         SupervisorConfig(
@@ -914,16 +995,151 @@ def status(
     raise typer.Exit(0 if running else 1)
 
 
-def _refuse_remote_target(state: CliState) -> None:
-    """Refuse a reset when `--url`, `LAKANA_URL` or a chosen profile points off this machine.
+def _can_signal() -> bool:
+    """Report whether `lakana server stop` can signal the running instance on this platform.
 
-    The reset never talks to a server; this only stops someone who is aimed at a remote
-    instance from believing the command reset it.
+    Returns
+    -------
+    bool
+        `False` on Windows, where a console process cannot be sent the stop signal from another.
+    """
+    return os.name != "nt"
+
+
+@server_app.command("stop")
+def stop(
+    ctx: typer.Context,
+    data_dir: Annotated[
+        Path | None, typer.Option("--data-dir", help="Data directory (default: XDG).")
+    ] = None,
+) -> None:
+    """Stop this machine's local instance, as Ctrl-C in its terminal does.
+
+    Asks the instance in the data directory to shut down and waits up to 30 seconds for it to
+    leave. Nothing running is not an error. It stops only the instance on this machine: a
+    Compose stack stops with 'docker compose down' in its bundle directory.
+
+    Parameters
+    ----------
+    ctx
+        The Typer context.
+    data_dir
+        The data directory; defaults to `default_data_dir()`.
+
+    Raises
+    ------
+    CliError
+        If aimed at a remote instance or run where signals are not supported (exit 2); if the
+        instance was started by an older lakana, which did not record its process (exit 2); if
+        it does not leave in time (exit 1); if a pidfile can't be read or removed (exit 3).
+    """
+    state = state_of(ctx)
+    _refuse_remote_target(state, stopping=True)
+    if not _can_signal():
+        raise CliError(
+            "'lakana server stop' is not supported on this platform",
+            hint="stop the instance with Ctrl-C in the terminal where it runs",
+        )
+    root = DataDir(resolve_data_dir(data_dir or default_data_dir()))
+    info = _read_pidfile_or_fail(root.server_pid)
+    port = info[1] if info is not None else None
+    where = f"at http://127.0.0.1:{port}" if port is not None else f"in {root.root}"
+    if not _lock_held(root):
+        _stop_without_lock(root, info)
+        return
+    owner = read_lock_owner(root.lock_path)
+    if owner is None:
+        raise CliError(
+            f"Lakana is running from {root.root}, but this instance did not record which "
+            "process to stop (it was started by an older lakana)",
+            hint="stop it with Ctrl-C in its terminal",
+        )
+    if not pid_alive(owner):
+        raise CliError(
+            f"Lakana is running from {root.root}, but the process {owner} recorded for it is gone",
+            hint="stop it with Ctrl-C in its terminal",
+        )
+    cmdline = _process_cmdline(owner)
+    if cmdline is not None and "lakana" not in cmdline:
+        raise CliError(
+            f"Process {owner}, recorded as the one running from {root.root}, is not a Lakana "
+            "process; nothing was signalled",
+            hint="stop the instance with Ctrl-C in its terminal",
+        )
+    try:
+        os.kill(owner, signal.SIGTERM)
+    except OSError as exc:
+        raise CliError(
+            f"Can't signal process {owner}, which holds {root.root}: {exc}",
+            hint="stop it with Ctrl-C in its terminal, or as the user who started it",
+        ) from exc
+    deadline = time.monotonic() + _STOP_TIMEOUT_SECONDS
+    while _lock_held(root):
+        if time.monotonic() >= deadline:
+            raise CliError(
+                f"The local instance (process {owner}) is still shutting down after "
+                f"{_STOP_TIMEOUT_SECONDS:g} seconds",
+                1,
+                hint=f"wait and run 'lakana server stop' again, or end it with 'kill {owner}' "
+                "(Lakana never kills it for you)",
+            )
+        time.sleep(_STOP_POLL_SECONDS)
+    sys.stdout.write(f"Stopped the local instance {where}.\n")
+
+
+def _stop_without_lock(root: DataDir, info: tuple[int, int | None] | None) -> None:
+    """Report that nothing holds the lock: clean stale pidfiles, or refuse an older instance.
+
+    Parameters
+    ----------
+    root
+        The data directory.
+    info
+        The server pidfile's content, if any.
+
+    Raises
+    ------
+    CliError
+        If a lock-less instance of an older lakana is alive (exit 2), or a pidfile can't be
+        read or removed (exit 3).
+    """
+    if info is not None:
+        pid, port = info
+        if port is not None and pid_alive(pid) and _probe_health(f"http://127.0.0.1:{port}"):
+            raise CliError(
+                f"Lakana is running from {root.root} at http://127.0.0.1:{port}, but this "
+                "instance did not record which process to stop (it was started by an older "
+                "lakana)",
+                hint="stop it with Ctrl-C in its terminal",
+            )
+    had_pidfiles = any(
+        _read_pidfile_or_fail(path) is not None for path in (root.server_pid, root.worker_pid)
+    )
+    if had_pidfiles:
+        _remove_pidfiles(root)
+        sys.stdout.write(
+            f"No local instance is running in {root.root}; removed the stale pidfiles it left. "
+            "Start one with 'lakana server start --local'.\n"
+        )
+        return
+    sys.stdout.write(
+        f"No local instance is running in {root.root}. "
+        "Start one with 'lakana server start --local'.\n"
+    )
+
+
+def _refuse_remote_target(state: CliState, *, stopping: bool = False) -> None:
+    """Refuse a reset or stop when `--url`, `LAKANA_URL` or a profile points off this machine.
+
+    The command never talks to a server; this only stops someone who is aimed at a remote
+    instance from believing the command reset or stopped it.
 
     Parameters
     ----------
     state
         The CLI state with `--url` and `--profile`.
+    stopping
+        Refuse for `lakana server stop` (with its hint) instead of `reset`.
 
     Raises
     ------
@@ -932,6 +1148,14 @@ def _refuse_remote_target(state: CliState) -> None:
         `LAKANA_PROFILE`, is not a loopback address (exit 2).
     """
     url = selected_url(state)
+    if url is not None and not is_loopback_url(url) and stopping:
+        raise CliError(
+            f"{url} is a remote instance; 'lakana server stop' stops only the instance on "
+            "this machine",
+            hint="a Compose stack stops with 'docker compose down' in the bundle directory "
+            "(see docs/site/how-to/deploy-with-compose.md). To stop this machine's instance, "
+            "unset LAKANA_URL and leave out --url and --profile.",
+        )
     if url is not None and not is_loopback_url(url):
         raise CliError(
             f"{url} is a remote instance; 'lakana server reset' resets only the instance on "
@@ -994,10 +1218,13 @@ def reset(
         return
     root = DataDir(root_path)
     with try_locked(root.lock_path) as acquired:
+        if acquired:
+            clear_lock_owner(root.lock_path)
         if not acquired:
             raise CliError(
                 f"Lakana is running from {root.root}; nothing was deleted",
-                hint="stop it with Ctrl-C in its terminal, then run the reset again",
+                hint="stop it with 'lakana server stop' (or Ctrl-C in its terminal), then run the "
+                "reset again",
             )
         info = _read_pidfile_or_fail(root.server_pid)
         if (
@@ -1009,7 +1236,8 @@ def reset(
             raise CliError(
                 f"Lakana is running from {root.root} at http://127.0.0.1:{info[1]}; "
                 "nothing was deleted",
-                hint="stop it with Ctrl-C in its terminal, then run the reset again",
+                hint="stop it with 'lakana server stop' (or Ctrl-C in its terminal), then run the "
+                "reset again",
             )
         plan = _reset.plan_reset(root_path)
         sys.stdout.write("\n".join(plan.describe()) + "\n")

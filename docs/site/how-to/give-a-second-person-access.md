@@ -23,9 +23,12 @@ lakana principal create alice --type user
 <!-- output -->
 ```text
 Created user alice
+It can do nothing yet. Next:
+  lakana grant create --principal alice --role ANALYST --kind ENVIRONMENT --env ENV
+  lakana token issue alice NAME
 ```
 
-A principal can do nothing until it has a grant.
+A principal can do nothing until it has a grant. The command prints the two steps that follow.
 
 ## Grant the smallest set
 
@@ -40,7 +43,7 @@ lakana grant create --principal alice --role ANALYST --kind ENVIRONMENT --env de
 
 <!-- output -->
 ```text
-Created grant c913f5e7-8bf0-4b21-9630-46de66a0082d (ANALYST on ENVIRONMENT)
+Created grant c913f5e7-8bf0-4b21-9630-46de66a0082d (ANALYST on environment dev) to alice
 ```
 
 The role `VIEWER` is smaller still: it reads tables and cannot run a query. Roles that do more
@@ -61,13 +64,15 @@ will be used, so that you can tell tokens apart when you revoke one:
 lakana token issue alice alice-laptop
 ```
 
-The secret is printed once and cannot be shown again; the notice that says so goes to the error
-output. Here the secret is shortened:
+The secret is printed once and cannot be shown again; the two notices go to the error output: one
+says so, one says whom to give the token to and what they type. Here the secret is shortened:
 
 <!-- output -->
 ```text
 Issued token 634fb88f45cabc42 (alice-laptop) for alice
 Token: lakana_pat_634fb88f45cabc42_<secret>
+Store this token now: it can't be shown again.
+Give this token to alice over a trusted channel; they run `lakana login`.
 ```
 
 Hand over three things: the token, the address of the instance (the URL that the person passes to
@@ -124,20 +129,26 @@ the next step shows.
 
 ## See who has access
 
-List the principals, the grants of one person and their tokens:
+List the principals, the grants of one person, who has access to the environment, and the tokens
+of the person:
 
 <!-- source: docs/examples/give-access/run.sh#who -->
 ```bash
 lakana principal list
-lakana --output json grant list --principal alice
+lakana grant list --principal alice
+lakana grant list --env dev
 lakana token list alice
 ```
 
-`--output json` is used for the grants because the table of `grant list` leaves out columns on a
-narrow terminal, the `id` among them, and names a person by an identifier instead of a name. The
-`id` is what `grant revoke` needs. Without `--principal`, `lakana grant list` shows every grant of
-the instance; `--env dev` narrows it to one environment. The column `last_used_at` of `token list`
-shows whether a token is in use.
+The table of `grant list` names each grant's subject (`user alice`, `service ci-bot` or
+`group analysts`) and shows its role. The `id` column is always shown whole, at any width: a long name
+wraps onto more lines and other columns give way first. A line under the table gives the command
+that revokes a grant. If a name cannot be found (reading names needs the right to list principals
+and groups), the table shows the id there and a notice says so. A column that is empty for every grant
+is left out, and when the terminal is too narrow a line under the table says which columns were
+left out; `--output json` always has every field. `--env dev` lists who has access to one
+environment, with their roles; without a filter `lakana grant list` shows the grants on the
+instance. The column `last_used_at` of `token list` shows whether a token is in use.
 
 <!-- output -->
 ```text
@@ -147,22 +158,20 @@ shows whether a token is in use.
 │ admin │ USER │ True      │
 │ alice │ USER │ True      │
 └───────┴──────┴───────────┘
-[
-  {
-    "id": "c913f5e7-8bf0-4b21-9630-46de66a0082d",
-    "principal_id": "95331776-1545-4c4d-8129-bdf9614a2bd2",
-    "group_id": null,
-    "role": "ANALYST",
-    "action": null,
-    "kind": "ENVIRONMENT",
-    "environment": "dev",
-    "namespace": null,
-    "table": null,
-    "granted_by": "4277ad31-5aac-4600-9649-3bfe813c1790",
-    "granted_at": "2026-10-17T13:46:53.211465+00:00",
-    "note": null
-  }
-]
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━━┓
+┃ id                                   ┃ subject    ┃ role    ┃ environment ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━━┩
+│ c913f5e7-8bf0-4b21-9630-46de66a0082d │ user alice │ ANALYST │ dev         │
+└──────────────────────────────────────┴────────────┴─────────┴─────────────┘
+Not shown: kind. Use --output json to see it.
+Revoke it with: lakana grant revoke c913f5e7-8bf0-4b21-9630-46de66a0082d
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━━┓
+┃ id                                   ┃ subject    ┃ role    ┃ environment ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━━┩
+│ c913f5e7-8bf0-4b21-9630-46de66a0082d │ user alice │ ANALYST │ dev         │
+└──────────────────────────────────────┴────────────┴─────────┴─────────────┘
+Not shown: kind. Use --output json to see it.
+Revoke it with: lakana grant revoke c913f5e7-8bf0-4b21-9630-46de66a0082d
 ┏━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
 ┃ key_id           ┃ name         ┃ last_used_at                     ┃
 ┡━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩

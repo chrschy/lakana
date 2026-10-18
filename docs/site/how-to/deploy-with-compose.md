@@ -12,23 +12,23 @@ This is the "team" deployment path; for a single user on their own laptop, see l
 - `pip install lakana` — the `lakana` CLI generates the bundle and is also the client you use
   against it afterwards. Lakana is pre-beta: the API and the data layout may change between 0.x
   releases.
-- The image `ghcr.io/chrschy/lakana` is public; pulling it needs no login.
+- The image `ghcr.io/lakana-labs/lakana` is public; pulling it needs no login.
 
 ## Verify a download
 
 Every release after 0.13.0 carries a signed build provenance attestation, made by Lakana's
 release workflow, for each wheel, each sdist and the image. It proves that the file or image
-you hold was built by the `chrschy/lakana` repository from the tagged commit. Checking it is
+you hold was built by the `lakana-labs/lakana` repository from the tagged commit. Checking it is
 optional. You need the [GitHub CLI](https://cli.github.com/) (`gh`). Download a wheel and verify
 it, or verify the image you pulled:
 
 <!-- not tested: needs a published release and the GitHub CLI -->
 ```bash
 pip download "lakana==<version>" --no-deps
-gh attestation verify lakana-<version>-py3-none-any.whl --repo chrschy/lakana \
-  --signer-workflow chrschy/lakana/.github/workflows/release.yml
-gh attestation verify oci://ghcr.io/chrschy/lakana:<version> --repo chrschy/lakana \
-  --signer-workflow chrschy/lakana/.github/workflows/release.yml
+gh attestation verify lakana-<version>-py3-none-any.whl --repo lakana-labs/lakana \
+  --signer-workflow lakana-labs/lakana/.github/workflows/release.yml
+gh attestation verify oci://ghcr.io/lakana-labs/lakana:<version> --repo lakana-labs/lakana \
+  --signer-workflow lakana-labs/lakana/.github/workflows/release.yml
 ```
 
 `--signer-workflow` ties the check to Lakana's release workflow, not to any workflow of the
@@ -72,7 +72,7 @@ state is deployed. Remote repositories (`https`, `ssh`) need no mount.
 
 | Key | Purpose |
 |---|---|
-| `LAKANA_IMAGE` | The Lakana image reference (`ghcr.io/chrschy/lakana:<version>` by default — see "Upgrading" and "`--image`" below). |
+| `LAKANA_IMAGE` | The Lakana image reference (`ghcr.io/lakana-labs/lakana:<version>` by default — see "Upgrading" and "`--image`" below). |
 | `LAKANA_BIND` | The host address the server's port is published on (see "Exposing it" below). |
 | `LAKANA_PORT` | The host port the server is published on. |
 | `LAKANA_WORKERS` | Worker replica count, used by `deploy: {replicas: ${LAKANA_WORKERS}}`. |
@@ -106,7 +106,7 @@ to the target directory is the one you see.
 `$`, `#`, or whitespace, is refused (exit 2) before it can corrupt either generated file. A
 development or local build of the CLI (a version `hatch-vcs` derives as a dev snapshot, not a
 tagged release) has no matching published image, so `--image` is required for it; a release
-build defaults to `ghcr.io/chrschy/lakana:<its own version>`.
+build defaults to `ghcr.io/lakana-labs/lakana:<its own version>`.
 
 ### Secrets settings
 
@@ -238,6 +238,7 @@ in `compose.yaml` reach the `migrate` job, the `server`, the `worker` and the tw
 | `LAKANA_QUERY_LIMITS__RUNNING_PER_PRINCIPAL` | `auto` | The most ad-hoc queries one user or service account runs at once, counted over every environment. A further query waits in the queue and is not refused; it starts when fewer than the limit of that person's queries are running, and other people's queries are not held back meanwhile. Pipeline work (deploys, tasks and the queries they run, maintenance) is never counted. With `auto`, one user may run ad-hoc queries on every worker that takes interactive work while there are one or two such workers, and on all of them but one from three on. A whole number of 1 or more replaces the rule: `1` with two workers keeps one free for others, and a number at or above the number of workers means no limit. `auto`, in any letter case, or a whole number; anything else (0, a negative or fractional number, other text) stops the process at start with a message that names this setting. A query running on a worker that was lost still counts until the scheduler ends it, about a minute. The server and every worker read it, so set it in the shared `x-lakana-env` block and nowhere else. |
 | `LAKANA_DENIAL_AUDIT__PER_PRINCIPAL_PER_MINUTE` | `30` | `AUTHORIZATION_DENIED` rows the audit log records per principal per minute, in each server and each worker (above 0). A refusal past it is still refused, but not recorded: the next row recorded for that principal has `suppressed` in its detail, the number not recorded. The first refusal of each action is always recorded. Every refusal that is not recorded is still written to the log of that server or worker (`docker compose logs`), one INFO line from `lakana_core.audit.authorization` that starts `AUTHORIZATION_DENIED not recorded in the audit table` and names the principal, the action and the object; filter on it if the log grows. So the audit table stays bounded, and which object was probed after the limit is reached is in the log, not in the table. When a server or worker stops cleanly, the counts not yet recorded are written as one summary row per principal, for at most 100 principals and about 3 seconds so that a slow database cannot delay the stop; a warning says how many principals' counts were left out. |
 | `LAKANA_LOG__LEVEL` | `INFO` | How much the server and the worker log: `DEBUG`, `INFO`, `WARNING` or `ERROR`, in any letter case; anything else stops the process at start with a message that names the setting. Lakana's own lines and the server's start-up and error lines follow it, and uvicorn's access log (one line per request) is printed at `INFO` and `DEBUG` only. The progress of a migration (alembic's "Running upgrade" lines, from `lakana-server migrate`) follows the level too. Other libraries log from `WARNING` at every level. Above `INFO`, the denials over `LAKANA_DENIAL_AUDIT__PER_PRINCIPAL_PER_MINUTE` leave no line in the log, only the summary row in the audit table. Set it for the server and the worker alike (the `x-lakana-env` block does). |
+| `LAKANA_LOG__ACCESS` | `true` | Whether the server prints uvicorn's access log, one line per request. `false` turns off that line and nothing else. `lakana server start --local` sets it to `false` unless you pass `--log-requests`. Only the server reads it. |
 | `LAKANA_RUN__MAINTENANCE_TIMEOUT` | `1800` | Seconds one table maintenance run (`lakana table maintain`) may take, 30 minutes by default; more than 0. The worker checks the time between its steps and between the files it deletes, stops at the first safe point and fails the run with the cause `timeout`; the table stays consistent, and running maintenance on it again continues where it stopped. A Python task's input query waits behind a maintenance run on the same worker for about this long: the run stops at the first safe point after it. Only the workers read it. |
 | `LAKANA_RUN__SWEEP_INTERVAL` | `3600` | Seconds between the artifact and code-archive sweeps of the worker that holds the scheduler role, and between the attempt-directory and deploy-checkout sweeps of every worker. `0` turns them off. |
 | `LAKANA_WORKER__TAKES` | `all` | What a worker takes: `all`, `interactive` or `pipeline`, in any letter case. Anything else stops the worker at start with `LAKANA_WORKER__TAKES must be all, interactive or pipeline (got 'X').` Only the worker reads it, so it does not belong in the shared `x-lakana-env` block: set it in the environment of the workers it is meant for. What the values mean, and when to use them: [Separate workers for ad-hoc queries and pipelines](#separate-workers-for-ad-hoc-queries-and-pipelines). |
@@ -740,7 +741,7 @@ Two things to check before editing `.env`:
 
    <!-- not tested: moved as is; sorted in the second pull request -->
    ```bash
-   docker pull ghcr.io/chrschy/lakana:<new version>
+   docker pull ghcr.io/lakana-labs/lakana:<new version>
    ```
 
 2. **`compose.yaml` is a static file `init` wrote once, with the CLI version that ran it —
@@ -750,7 +751,7 @@ Two things to check before editing `.env`:
 
    <!-- not tested: moved as is; sorted in the second pull request -->
    ```bash
-   lakana --profile upgrade-check bundle init /tmp/lakana-upgrade-check --image ghcr.io/chrschy/lakana:<new version>
+   lakana --profile upgrade-check bundle init /tmp/lakana-upgrade-check --image ghcr.io/lakana-labs/lakana:<new version>
    diff lakana-deploy/compose.yaml /tmp/lakana-upgrade-check/compose.yaml
    rm -rf /tmp/lakana-upgrade-check
    lakana profile remove upgrade-check --yes
@@ -963,7 +964,7 @@ digest; for the whole digest use `lakana --output json artifact versions list <n
   thing that protects its files: if you remove it, the next sweep removes those files, and that
   cannot be undone. Ask whether a task or a person stored or read version `<n>` after your backup
   was taken (their messages say `Stored <env>/<name> version <n>`). If so, Lakana has no command
-  to bring the version back yet ([issue 68](https://github.com/chrschy/lakana/issues/68)).
+  to bring the version back yet ([issue 68](https://github.com/lakana-labs/lakana/issues/68)).
 - **It names a file that a broken version is missing: remove it, unless somebody needs its
   version.** A broken version is one whose download fails with `is missing from storage` (see
   "Versions whose files are gone"). Look up each `sha256` of the object as
@@ -1105,26 +1106,26 @@ list --env <env>` shows the runs: wait until none of the asset is queued or runn
 **Stop sign 1: an object the catalog does not know names a missing file, and somebody needs its
 version.** Keep the object, its files and every broken version of the artifact. While the object
 exists the missing file's record stays, and the asset cannot store the file again. Lakana has no
-command to bring such a version back yet ([issue 68](https://github.com/chrschy/lakana/issues/68)).
+command to bring such a version back yet ([issue 68](https://github.com/lakana-labs/lakana/issues/68)).
 What keeps everything: copy the missing file back from a storage backup (first case above). If you
 decide later that nobody needs the version, remove the object as step 2 says and go on at step 3.
 
 **Stop sign 2: the sweep leaves the artifact whole, or step 2 found more than 20 objects or an
 unreadable one.** Keep everything of the artifact: the sweep removes nothing of it and the asset
 cannot get a working version. What keeps everything: copy the missing file back from a storage
-backup (first case above). Or wait for [issue 68](https://github.com/chrschy/lakana/issues/68).
+backup (first case above). Or wait for [issue 68](https://github.com/lakana-labs/lakana/issues/68).
 Or reduce the objects yourself, each removal being a decision of step 2 (copy first): get to at
 most 20 objects that are all readable, then go on at step 3.
 
 **Stop sign 3: the second round failed too.** Keep what is left and do not run the asset again:
 each run stores another broken version. Report it in [issue
-68](https://github.com/chrschy/lakana/issues/68) with the output of `lakana --output json
+68](https://github.com/lakana-labs/lakana/issues/68) with the output of `lakana --output json
 artifact versions list` and the worker's log lines of the sweep.
 
 ## Revoking the bootstrap credential
 
 The credential `init` saves into the `team` profile (`lakana_pat_<key id>_<secret>`,
-`LAKANA_BOOTSTRAP_PAT_KEY_ID`/`LAKANA_BOOTSTRAP_PAT_SECRET` in `.env`) is a normal PAT for the
+`LAKANA_BOOTSTRAP_PAT_KEY_ID`/`LAKANA_BOOTSTRAP_PAT_SECRET` in `.env`) is a normal personal access token for the
 bootstrap admin principal (named `admin` by default) — it stays valid until you revoke it.
 Create a named admin to replace it, then revoke the bootstrap one. To add an ordinary user instead,
 see [Give a second person access](give-a-second-person-access.md):
@@ -1152,7 +1153,7 @@ exits 0 rather than failing the container, so `up -d --wait` still succeeds.
 *new* profile (named `default`, since none of the global `--profile`, `LAKANA_PROFILE`, or an
 explicit `--profile` set a name) instead of updating `team` — the `team` profile keeps the
 bootstrap token, every command in this guide (and every operator habit built on it) still
-uses `team` by default, and revoking `admin`'s PAT in the last step then breaks all of them.
+uses `team` by default, and revoking `admin`'s token in the last step then breaks all of them.
 `login` takes its own `--profile` flag (`packages/lakana/src/lakana/cli/auth.py`), so it goes
 after `login`, not before it.
 

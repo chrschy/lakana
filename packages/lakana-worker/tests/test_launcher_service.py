@@ -388,7 +388,7 @@ def test_a_missing_image_is_pulled_once(tmp_path: Path) -> None:
     _started(engine, tmp_path).run(_run(), lambda line: None)
 
     pulls = [q for m, p, q in engine.calls if p == "/images/create"]
-    assert pulls == [{"fromImage": "ghcr.io/chrschy/lakana-task:0.14.0-py3.13"}]
+    assert pulls == [{"fromImage": "ghcr.io/lakana-labs/lakana-task:0.14.0-py3.13"}]
 
 
 def _intercept(engine: FakeEngine, match: Any, reply: Any) -> None:
@@ -999,7 +999,7 @@ def test_a_failed_pull_names_the_image_and_the_next_step(tmp_path: Path) -> None
     """A host without registry access says what to do."""
     engine = FakeEngine(images=set(), pull_works=False)
 
-    with pytest.raises(EngineError, match=r"pull the task image ghcr\.io/chrschy/lakana-task"):
+    with pytest.raises(EngineError, match=r"pull the task image ghcr\.io/lakana-labs/lakana-task"):
         _started(engine, tmp_path)
 
 

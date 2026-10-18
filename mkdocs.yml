@@ -5,6 +5,7 @@
 # not check navigation (see the comment at `nav`).
 site_name: Lakana
 site_description: A data lakehouse for small and medium teams.
+site_url: https://lakana-labs.github.io/lakana/
 docs_dir: docs/site
 site_dir: site-build
 theme:

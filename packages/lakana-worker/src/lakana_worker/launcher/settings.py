@@ -479,7 +479,7 @@ def load_settings(environ: Mapping[str, str]) -> LauncherSettings:
         )
     images_message = (
         f"{PREFIX}IMAGES must be a JSON object from Python version to task image, such as "
-        '{"3.14": "ghcr.io/chrschy/lakana-task:0.14.0-py3.14"}; the versions are '
+        '{"3.14": "ghcr.io/lakana-labs/lakana-task:0.14.0-py3.14"}; the versions are '
         f"{', '.join(SUPPORTED_PYTHONS)}."
     )
     images = _json_object(environ, "IMAGES", images_message)

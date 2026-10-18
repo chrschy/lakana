@@ -85,7 +85,7 @@ starts no workflow runs. The repository setting "Allow GitHub Actions to create 
 pull requests" is therefore **off**, and `release.yml` passes a fine-grained personal access
 token to the action as `token: ${{ secrets.RELEASE_PLEASE_TOKEN }}`.
 
-- Scope: only the repository `chrschy/lakana`, with the repository permissions *Contents:
+- Scope: only the repository `lakana-labs/lakana`, with the repository permissions *Contents:
   read and write*, *Pull requests: read and write* and *Issues: read and write* (release-please
   creates its `autorelease` labels), nothing else.
 - Create the token and store it as the Actions secret `RELEASE_PLEASE_TOKEN` **before the first
@@ -143,7 +143,7 @@ With one workflow (`release.yml`) publishing all four packages, the environment 
 axis left to disambiguate, so each package needs its own. The jobs publish to production PyPI
 (the action's default repository); there is no TestPyPI path in the workflow.
 
-The trusted publisher of each project on pypi.org is: owner `chrschy`, repository `lakana`,
+The trusted publisher of each project on pypi.org is: owner `lakana-labs`, repository `lakana`,
 workflow `release.yml`, and the environment of that package from the list above.
 
 **Adding a package is two steps, and the YAML is only the first.** A new package publishes
@@ -222,7 +222,7 @@ bad release never advances past the point that would have caught it:
   matching `latest` container. It regenerates
   `dist/requirements.txt` (the shared `dist` artifact only carries wheels/sdists) and builds
   **multi-arch** (`linux/amd64,linux/arm64`, via `docker/setup-qemu-action` +
-  `docker/setup-buildx-action`), pushing `ghcr.io/chrschy/lakana:<version>` — a public package.
+  `docker/setup-buildx-action`), pushing `ghcr.io/lakana-labs/lakana:<version>` — a public package.
 - **`compose-smoke-release`** needs `publish-image` and runs
   `scripts/compose_smoke_test.sh` against the just-pushed tag: `lakana bundle init` → `docker
   compose up -d --wait` → create/append/query → `docker compose down` → `up` again (proving
@@ -268,6 +268,33 @@ write token. The workflow's own `permissions` is `{}`; every
 job names what it needs, and `release-please` needs nothing from `GITHUB_TOKEN` because it uses
 `RELEASE_PLEASE_TOKEN`. `scripts/tests/test_workflows.py` pins this by effective permissions.
 
+## The documentation site on GitHub Pages
+
+The site is served at <https://lakana-labs.github.io/lakana/> (repository setting: Pages, source
+"GitHub Actions"; the `github-pages` environment). Two jobs of `release.yml` publish it, and
+only for a release (`released == 'true'`); the workflow has no manual trigger.
+
+- `pages` checks out the **release tag** (`persist-credentials: false`), builds with the commands
+  of CI's `docs` job (`docs_blocks.py`, `zensical build --strict`,
+  `scripts/check_built_site.py site-build`) and uploads `site-build` with
+  `actions/upload-pages-artifact`. It has `contents: read` only.
+- `pages-deploy` runs `actions/deploy-pages` in the `github-pages` environment and holds only
+  `pages: write` and `id-token: write`; it builds nothing.
+
+So the site always describes the latest **release**: a documentation change merged to `main`
+appears with the next release, not at once. Every page is under `/lakana/`, so `site_url` in
+`mkdocs.yml` must stay `https://lakana-labs.github.io/lakana/`, and the built-site check refuses
+a `href` or `src` that starts at the host root (`/assets/...`) outside that path.
+
+To publish again (a failed deployment, a Pages outage), open the run of the `Release` workflow
+for the **latest** release in the Actions tab, open its `pages` job and choose "Re-run this job"
+(GitHub re-runs `pages-deploy`, which depends on it). Never choose "Re-run all jobs": it re-runs
+release-please, which finds the release already made, so both Pages jobs are skipped and the run
+turns green without deploying. "Re-run failed jobs" on `pages-deploy` alone works only while the
+uploaded site is kept (one day). Re-running the run of an **older** release puts that older site
+back. `scripts/tests/test_workflows.py` pins the trigger, the checkout
+ref, the commands, the two jobs' permissions and the environment.
+
 ## Build provenance attestations
 
 Every release is signed with GitHub's build provenance attestations (Sigstore, keyless:
@@ -293,10 +320,10 @@ this repository's `release.yml` from the tagged commit.
 How a user verifies (also in the user documentation, "Verify a download" in the Compose how-to):
 
 ```bash
-gh attestation verify lakana-<version>-py3-none-any.whl --repo chrschy/lakana \
-  --signer-workflow chrschy/lakana/.github/workflows/release.yml
-gh attestation verify oci://ghcr.io/chrschy/lakana:<version> --repo chrschy/lakana \
-  --signer-workflow chrschy/lakana/.github/workflows/release.yml
+gh attestation verify lakana-<version>-py3-none-any.whl --repo lakana-labs/lakana \
+  --signer-workflow lakana-labs/lakana/.github/workflows/release.yml
+gh attestation verify oci://ghcr.io/lakana-labs/lakana:<version> --repo lakana-labs/lakana \
+  --signer-workflow lakana-labs/lakana/.github/workflows/release.yml
 ```
 
 Check it after each release: the first release that has attestations is the first one cut after

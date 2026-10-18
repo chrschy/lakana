@@ -14,7 +14,7 @@ from lakana_worker.launcher.service import Launcher, StartError
 
 _ENV = {
     "LAKANA_LAUNCHER__STACK": "lakana",
-    "LAKANA_LAUNCHER__IMAGES": '{"3.13": "ghcr.io/chrschy/lakana-task:0.14.0-py3.13"}',
+    "LAKANA_LAUNCHER__IMAGES": '{"3.13": "ghcr.io/lakana-labs/lakana-task:0.14.0-py3.13"}',
 }
 
 
