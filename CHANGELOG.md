@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.14.0](https://github.com/lakana-labs/lakana/compare/v0.13.0...v0.14.0) (2026-10-18)
+
+
+### ⚠ BREAKING CHANGES
+
+* new images are published as ghcr.io/lakana-labs/lakana instead of ghcr.io/chrschy/lakana. A Compose bundle written by an earlier `lakana deploy init` names the old image in its .env; change LAKANA_IMAGE to ghcr.io/lakana-labs/lakana:<new version> before you pull. Old links to github.com/chrschy/lakana redirect.
+* **secrets:** A secret now has one use (a package index, a repository, or its own environment) and Lakana sends it nowhere else. Migration 0034 binds a secret only when exactly one index or repository names it and its environment does not use it for storage or a webhook; every other secret stays unbound, keeps serving its environment's storage and webhooks, and is refused to every index and repository until it is bound. A secret created without a use is unbound as well. Only someone who may manage secrets (ADMIN) binds: holders of MANAGE_PACKAGE_INDEX or MANAGE_REPOSITORY alone can name only a secret already bound to that entry, and changing the URL of an entry with a bound secret needs MANAGE_SECRET in that secret's environment. After upgrading, an administrator runs `lakana secret list --env ENV` in each environment, checks the URLs in `lakana index list` and `lakana repo list`, and binds every credential that shows no use: `lakana secret bind NAME --env ENV --index INDEX` (or `--repository REPO`), and storage and webhook secrets with `--own-env`. A secret serves one entry: where several indexes or repositories shared one, create one secret per entry (`lakana secret create NEW --env ENV --repository REPO --values-stdin`) and point the entry at it (`lakana repo update REPO --credential-secret NEW`). Scripts that create a secret for an index or repository add `--index NAME` or `--repository NAME` to `lakana secret create`.
+
+### Features
+
+* clearer access commands, lakana server stop, a dependency canary, and docs on Pages ([7b6fe89](https://github.com/lakana-labs/lakana/commit/7b6fe892f61fd42a18c0b226c514ee3ca8bd440e))
+* **cli:** a sample project in lakana init, and lakana server reset --local ([#133](https://github.com/lakana-labs/lakana/issues/133)) ([6d21c7f](https://github.com/lakana-labs/lakana/commit/6d21c7f547abd7bb5c0366c2dfb7cbb1da77e717))
+* **secrets:** bind each secret to one use, and refuse it for any other ([bb3f477](https://github.com/lakana-labs/lakana/commit/bb3f4774790640f2f0fcf196c6fd161eb709acfb))
+* **worker:** add the task launcher, the only holder of the Docker socket ([#151](https://github.com/lakana-labs/lakana/issues/151)) ([ee55bc9](https://github.com/lakana-labs/lakana/commit/ee55bc9edf5a0e253ae0628f49dfcf8a11ea653e))
+
+
+### Bug Fixes
+
+* **security:** keep SeaweedFS's internal APIs off the network the worker uses ([#132](https://github.com/lakana-labs/lakana/issues/132)) ([715647e](https://github.com/lakana-labs/lakana/commit/715647e86d14b2e101772cf90068dd89514fb303))
+* **worker:** replace a connection the server reset, and give maintenance a time limit ([#137](https://github.com/lakana-labs/lakana/issues/137)) ([497f41c](https://github.com/lakana-labs/lakana/commit/497f41ceb57928a8fb7d60fbc9a08afa77eea266))
+* **worker:** treat a process group of exited processes as gone on macOS ([#152](https://github.com/lakana-labs/lakana/issues/152)) ([a710add](https://github.com/lakana-labs/lakana/commit/a710add782e60e3b088bd07cf01874091b22dc90))
+
+
+### Documentation
+
+* the upgrade notes name 0.13.0 and 0.12.1 ([#124](https://github.com/lakana-labs/lakana/issues/124)) ([9e7ad74](https://github.com/lakana-labs/lakana/commit/9e7ad74e2d5a980cfe53ef8cb578046d5da62343))
+* the upgrade notes name 0.14.0 ([#163](https://github.com/lakana-labs/lakana/issues/163)) ([561716b](https://github.com/lakana-labs/lakana/commit/561716b853ba6c95d17bfc6bb7a129c62d9f0ce9))
+
+
+### Dependencies
+
+* bump alpine from 3.22 to 3.24 in /packages/lakana-worker/tests/sshd in the test-images group ([#158](https://github.com/lakana-labs/lakana/issues/158)) ([642303f](https://github.com/lakana-labs/lakana/commit/642303f3959162e2435a15dad08c1d59b2bb225d))
+* bump the python group with 2 updates ([#159](https://github.com/lakana-labs/lakana/issues/159)) ([6d09852](https://github.com/lakana-labs/lakana/commit/6d09852de0a595b5ab7ec4b593b31b61216a66f3))
+* bump ty from 0.0.86 to 0.0.87 ([#160](https://github.com/lakana-labs/lakana/issues/160)) ([f926e83](https://github.com/lakana-labs/lakana/commit/f926e837412d46fbb3cb5a63b464f0c4b61e1977))
+
 ## [0.13.0](https://github.com/chrschy/lakana/compare/v0.12.1...v0.13.0) (2026-10-17)
 
 
