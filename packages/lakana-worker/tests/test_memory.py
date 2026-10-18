@@ -12,6 +12,7 @@ import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -458,6 +459,50 @@ def test_a_failing_record_or_kill_does_not_prevent_the_exit(
     assert exits == [EXIT_CODE]
     assert "recording the failure failed" in caplog.text
     assert "killing the worker's children failed" in caplog.text
+
+
+def test_a_recording_thread_that_cannot_start_does_not_prevent_the_exit(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Under memory pressure a new thread may not start; the worker must exit all the same.
+
+    Otherwise the watchdog would keep looping with `stopping` set, and every later outcome
+    would be dropped.
+
+    Parameters
+    ----------
+    monkeypatch
+        Replaces the thread class `stop_worker` uses.
+    caplog
+        Captures the log.
+    """
+
+    class Unstartable(threading.Thread):
+        """A thread that cannot start, as when the system has no memory for one."""
+
+        def start(self) -> None:
+            """Fail to start.
+
+            Raises
+            ------
+            RuntimeError
+                Always.
+            """
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(memory, "threading", SimpleNamespace(Thread=Unstartable))
+    exits: list[int] = []
+    with caplog.at_level(logging.ERROR):
+        stop_worker(
+            GB,
+            LIMIT,
+            record=lambda: None,
+            kill_children=lambda: None,
+            exit_process=exits.append,
+            mark_stopping=lambda: None,
+        )
+    assert exits == [EXIT_CODE]
+    assert "Recording the memory failure could not start" in caplog.text
 
 
 def test_a_recording_that_hangs_is_abandoned_after_the_timeout(

@@ -1587,6 +1587,7 @@ def test_a_worker_stopped_for_memory_while_it_counts_a_check_leaves_the_task_to_
         for pid in REGISTRY.pids():
             os.killpg(pid, signal.SIGKILL)
         thread.join(30)
+        assert not thread.is_alive(), "the worker's thread did not end after its child was killed"
 
     memory_module.stop_worker(
         5 * 1024**3,

@@ -654,7 +654,8 @@ def stop_worker(
     The children go first: a task's subprocess is usually what grew, and the growth must stop
     before the (slower) recording. The worker is marked stopping before that, so that the main
     thread, which wakes when a task's process dies, does not record an outcome of its own
-    (`Activity.stopping`).
+    (`Activity.stopping`). The exit runs whatever fails before it, a recording thread that
+    cannot start included.
 
     Parameters
     ----------
@@ -681,17 +682,27 @@ def stop_worker(
         total // _MB,
         limit.origin(),
     )
-    if mark_stopping is not None:
-        mark_stopping()
-    else:
-        ACTIVITY.stopping = True
-    _guarded(kill_children, "killing the worker's children")()
-    thread = threading.Thread(target=_guarded(record, "recording the failure"), daemon=True)
-    thread.start()
-    thread.join(record_timeout)
-    if thread.is_alive():
-        logger.error("Recording the memory failure took more than %.0f s; skipped.", record_timeout)
-    exit_process(EXIT_CODE)
+    try:
+        if mark_stopping is not None:
+            mark_stopping()
+        else:
+            ACTIVITY.stopping = True
+        _guarded(kill_children, "killing the worker's children")()
+        thread = threading.Thread(target=_guarded(record, "recording the failure"), daemon=True)
+        try:
+            thread.start()
+        except Exception:
+            # Under memory pressure a new thread may not start. A worker that stays alive with
+            # `stopping` set would drop every later outcome, so it exits all the same.
+            logger.exception("Recording the memory failure could not start; skipped.")
+            return
+        thread.join(record_timeout)
+        if thread.is_alive():
+            logger.error(
+                "Recording the memory failure took more than %.0f s; skipped.", record_timeout
+            )
+    finally:
+        exit_process(EXIT_CODE)
 
 
 def _guarded(step: Callable[[], None], what: str) -> Callable[[], None]:

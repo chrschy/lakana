@@ -245,9 +245,15 @@ def poll_once(
     -------
     bool
         `True` if an item was claimed and run (or its claim was refused: the poll did not idle),
-        `False` if the queues of its kinds were empty or the worker may not claim.
+        `False` if the queues of its kinds were empty, the worker may not claim, or the memory
+        watchdog is stopping it (`Activity.stopping`).
     """
     if may_claim is not None and not may_claim():
+        return False
+    if ACTIVITY.stopping:
+        # The memory watchdog is stopping the worker: the loop idles until the exit. A child
+        # started now would outlive the worker. What was claimed before (or by a poll that read
+        # the flag just before it was set) is left to the lease sweep if the stop misses it.
         return False
     takes = pool.takes if pool is not None else pools.ALL
     pipeline_too = pools.takes_kind(takes, pools.PIPELINE)

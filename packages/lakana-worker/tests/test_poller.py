@@ -591,6 +591,56 @@ def test_nothing_is_claimed_while_the_worker_may_not_claim(
     assert stored.status is QueryRunStatus.QUEUED
 
 
+def test_a_worker_that_is_stopping_for_memory_claims_nothing(
+    session: Session, principal: PrincipalRef, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#154: between the memory stop and the exit the loop idles; nothing new is claimed.
+
+    A child started then would outlive the worker, and its run would be recorded with the
+    memory message or left running. No statement reaches the database.
+
+    Parameters
+    ----------
+    session
+        The database session.
+    principal
+        Submits the query.
+    tmp_path
+        Holds the deployed project.
+    monkeypatch
+        Sets `ACTIVITY.stopping` and fails a task claim.
+    """
+    from lakana_worker.activity import ACTIVITY
+
+    _deploy_world(session, principal, tmp_path)
+    query = QueryService(session, AllowAllAuthorization()).submit_query(
+        principal, "dev", "SELECT 1"
+    )
+    statements: list[str] = []
+    event.listen(
+        session.get_bind(), "before_cursor_execute", lambda *args: statements.append(args[2])
+    )
+    monkeypatch.setattr(poller, "claim_task", lambda *_a: pytest.fail("a task was claimed"))
+    monkeypatch.setattr(ACTIVITY, "stopping", True)
+    engine = RunEngine(
+        session_factory=lambda: Session(session.get_bind()),
+        authz_factory=lambda _s: AllowAllAuthorization(),
+        settings=TaskSettings(worker_id="w1"),
+    )
+    with (
+        mock.patch("lakana_worker.poller.run_one") as run_one_mock,
+        mock.patch("lakana_worker.poller.run_deploy") as run_deploy_mock,
+    ):
+        assert poll_once(session, AllowAllAuthorization(), engine=engine, worker_id="w1") is False
+    assert statements == []
+    run_one_mock.assert_not_called()
+    run_deploy_mock.assert_not_called()
+    session.expire_all()
+    stored = session.get(QueryRun, query.id)
+    assert stored is not None
+    assert stored.status is QueryRunStatus.QUEUED
+
+
 def test_a_worker_that_may_claim_claims(
     session: Session, principal: PrincipalRef, tmp_path: Path
 ) -> None:

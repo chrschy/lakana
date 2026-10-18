@@ -55,7 +55,9 @@ class Activity:
 
         The process is about to exit and the watchdog owns the outcome, so the main thread
         records nothing more, and what leaves the registry from then on stays in its snapshot.
-        Clearing it (a new process, in tests) drops what left while it was set.
+        Clearing it (a new process, in tests) drops what left while it was set; the clear is
+        not atomic with a block that ends at the same moment, so its caller must have no thread
+        left inside a block. Production never clears it.
 
         Returns
         -------
