@@ -271,7 +271,11 @@ def test_each_package_publishes_to_production_pypi_from_its_own_environment() ->
 
 _BEFORE_THE_GATE = {"release-please", "build", "sbom", "approve"}
 _APPROVE_KEYS = {"needs", "if", "runs-on", "timeout-minutes", "environment", "permissions", "steps"}
-_STATUS_FUNCTIONS = re.compile(r"\b(always|cancelled|failure)\s*\(|\bsuccess\s*\(\)\s*\|\|")
+_STATUS_FUNCTIONS = re.compile(r"\b(always|cancelled|failure|success)\s*\(")
+"""Any status function in an ``if`` drops the implicit ``success() &&``.
+
+The job could then run after a rejection.
+"""
 
 
 def _reaches(jobs: dict, name: str, target: str) -> bool:
@@ -324,6 +328,12 @@ def _gate_violations(jobs: dict) -> list[str]:
         problems.append("approve does not need release-please and build")
     for name, job in jobs.items():
         if name in _BEFORE_THE_GATE:
+            if name in {"release-please", "approve"}:
+                continue
+            if "write" in (job.get("permissions") or {}).values():
+                problems.append(f"`{name}` runs before the gate with a write permission")
+            if "secrets." in str(job):
+                problems.append(f"`{name}` runs before the gate and reads a secret")
             continue
         if not _reaches(jobs, name, "approve"):
             problems.append(f"`{name}` does not wait for approve")
@@ -354,6 +364,16 @@ def test_one_approval_job_gates_a_release() -> None:
         ),
         (lambda j: j["approve"]["steps"].append({"uses": "x/y@z"}), "more than one plain"),
         (lambda j: j.update(upload={"needs": "build", "steps": []}), "`upload` does not wait"),
+        (lambda j: j["pages"].update(**{"if": "${{ !success() }}"}), "`pages` has a status"),
+        (lambda j: j["pages"].update(**{"if": "x || success()"}), "`pages` has a status"),
+        (
+            lambda j: j["build"].update(permissions={"contents": "write"}),
+            "`build` runs before the gate with a write permission",
+        ),
+        (
+            lambda j: j["sbom"]["steps"].append({"run": "x", "env": {"T": "${{ secrets.T }}"}}),
+            "`sbom` runs before the gate and reads a secret",
+        ),
     ],
 )
 def test_the_gate_check_catches_a_broken_workflow(

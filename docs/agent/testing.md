@@ -773,7 +773,10 @@ jscpd is a pinned npm tool in `tools/jscpd` (`package.json` with one exact versi
 `package-lock.json`, Dependabot's `npm` entry, and the licence check of
 `scripts/check_licenses.py` reads the lock like any other). CI runs `npm ci --ignore-scripts` there
 and never a bare `npx jscpd`. A clone is a block of at least 70 tokens (`--min-tokens 70`, about
-six lines) that appears twice.
+six lines) that appears twice. The licence check needs the `license` field of every package in the lock,
+which npm writes from version 11 on: regenerate the lock with `npx npm@11 install
+--package-lock-only` in `tools/jscpd` when a Dependabot update leaves it out (the check then
+fails and names the packages).
 
 `scripts/duplication_ratchet.py` reads jscpd's JSON report (`jscpd-report/jscpd-report.json`,
 ignored by git) and the baseline `scripts/duplication-baseline.json`: duplicated lines, number of

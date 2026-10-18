@@ -174,8 +174,9 @@ approve or reject promptly.
 
 `scripts/tests/test_workflows.py` pins the job (its full key set, so it can gain no
 `continue-on-error`, permission or `uses:`) and that every job apart from `release-please`,
-`build` and `sbom` reaches it through `needs` with no `always()`, `cancelled()`, `failure()` or
-`success() ||` in its `if`. A new job after the gate needs no test change; a new job before it
+`build` and `sbom` reaches it through `needs` with no status function (`always()`, `cancelled()`,
+`failure()`, `success()`, negated or not) in its `if`, and that `build` and `sbom` hold no write
+permission and read no secret. A new job after the gate needs no test change; a new job before it
 has to be added to the test's list on purpose.
 
 **Maintainer setup, before the next release.** The workflow cannot create the environment's
