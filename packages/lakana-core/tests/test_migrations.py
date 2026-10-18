@@ -2982,3 +2982,160 @@ def test_0034_reads_an_unusual_manifest_without_failing_or_inventing_a_webhook(
     finally:
         engine.dispose()
     assert found == {"plain": "PACKAGE_INDEX", "hooked": None}
+
+
+_REVISION_0035 = "a3d7c9e1f502"
+
+
+def _insert_secret(
+    connection: sa.Connection, kind: str | None, target: str | None, name: str
+) -> str:
+    """Insert one secret row with the given use, bypassing every service.
+
+    Parameters
+    ----------
+    connection
+        An open connection, inside a transaction the caller commits.
+    kind
+        The value for `use_kind`, or `None`.
+    target
+        The value for `use_target_id` (32 hex characters), or `None`.
+    name
+        The secret's name.
+
+    Returns
+    -------
+    str
+        The new row's id.
+    """
+    row_id = uuid.uuid4().hex
+    connection.execute(
+        sa.text(
+            "INSERT INTO secrets (id, environment_id, name, ciphertext, nonce, wrapped_data_key,"
+            " format_version, key_id, created_by, created_at, use_kind, use_target_id)"
+            " VALUES (:id, :env, :name, x'00', x'00', x'00', 2, 'env', :who,"
+            " '2026-10-18 00:00:00', :kind, :target)"
+        ),
+        {
+            "id": row_id,
+            "env": uuid.uuid4().hex,
+            "name": name,
+            "who": uuid.uuid4().hex,
+            "kind": kind,
+            "target": target,
+        },
+    )
+    return row_id
+
+
+def test_0035_refuses_an_inconsistent_secret_use_and_its_downgrade_drops_the_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revision `0035`: use_kind and use_target_id are set together; the environment has no target.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    """
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, _REVISION_0035)
+    engine = create_engine(f"sqlite:///{db_path}")
+    target = uuid.uuid4().hex
+    try:
+        with engine.begin() as connection:
+            _insert_secret(connection, None, None, "unbound")
+            _insert_secret(connection, "PACKAGE_INDEX", target, "index")
+            _insert_secret(connection, "REPOSITORY", target, "repo")
+            _insert_secret(connection, "ENVIRONMENT", None, "env")
+        inconsistent = (
+            ("PACKAGE_INDEX", None),
+            ("REPOSITORY", None),
+            (None, target),
+            ("ENVIRONMENT", target),
+        )
+        for kind, bound in inconsistent:
+            with pytest.raises(IntegrityError), engine.begin() as connection:
+                _insert_secret(connection, kind, bound, "bad")
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, _REVISION_0034)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        with engine.begin() as connection:
+            _insert_secret(connection, "PACKAGE_INDEX", None, "allowed-again")
+    finally:
+        engine.dispose()
+
+
+def test_0035_names_the_secrets_that_break_the_rule_and_changes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An existing inconsistent secret stops the upgrade, with its id and the way out.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    """
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, _REVISION_0034)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        with engine.begin() as connection:
+            _insert_secret(connection, None, None, "fine")
+            broken = _insert_secret(connection, "PACKAGE_INDEX", None, "broken")
+    finally:
+        engine.dispose()
+
+    with pytest.raises(RuntimeError) as raised:
+        command.upgrade(config, _REVISION_0035)
+    message = str(raised.value)
+    assert broken in message
+    assert "lakana secret bind" in message
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        with engine.connect() as connection:
+            version = connection.execute(
+                sa.text("SELECT version_num FROM alembic_version")
+            ).scalar()
+            kinds = dict(connection.execute(sa.text("SELECT name, use_kind FROM secrets")).all())
+    finally:
+        engine.dispose()
+    assert version == _REVISION_0034
+    assert kinds == {"fine": None, "broken": "PACKAGE_INDEX"}
+
+
+def test_secret_model_and_migrations_agree_on_the_use_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The model declares the same check, so the migrated schema has no drift from it.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    """
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    command.upgrade(Config(str(ALEMBIC_INI)), "head")
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        checks = {c["name"] for c in inspect(engine).get_check_constraints("secrets")}
+    finally:
+        engine.dispose()
+    assert "ck_secrets_use_consistent" in checks
+    assert "ck_secrets_use_consistent" in {
+        c.name for c in Base.metadata.tables["secrets"].constraints
+    }

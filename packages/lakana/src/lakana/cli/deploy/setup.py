@@ -29,11 +29,8 @@ from lakana.errors import (
 
 ENVIRONMENT = "dev"
 SECRET_NAME = "seaweedfs-s3"  # nosec B105 -- a secret's name, not a credential value
-STORAGE = {
-    "scheme": "s3",
-    "root": "s3://lakana/dev",
-    "options": {"s3.endpoint": "http://seaweedfs:8333"},
-}
+OPTIONS = {"s3.endpoint": "http://seaweedfs:8333"}
+STORAGE = {"scheme": "s3", "root": "s3://lakana/dev", "options": OPTIONS}
 _VARIABLES = (
     "LAKANA_SETUP_URL",
     "LAKANA_SETUP_TOKEN",
@@ -92,9 +89,11 @@ def run_setup(
     """
     if out is None:
         out = sys.stdout
+    created = False
     try:
         env = client.environments.get(ENVIRONMENT)
     except NotFound:
+        created = True
         env = client.environments.create(ENVIRONMENT, storage=STORAGE)
         out.write(f"Created environment '{ENVIRONMENT}' at {STORAGE['root']}\n")
     else:
@@ -117,8 +116,16 @@ def run_setup(
         client.secrets.rotate(ENVIRONMENT, SECRET_NAME, values)
         out.write(f"Set storage secret '{SECRET_NAME}' again in the current stored format\n")
     if env.storage_secret_ref != SECRET_NAME:
-        client.environments.update_storage(ENVIRONMENT, secret_ref=SECRET_NAME)
-        out.write(f"Bound '{SECRET_NAME}' to '{ENVIRONMENT}'\n")
+        # One request: the secret is presented to the endpoint in the options, so it is
+        # attached together with the bundle's own, never to options someone else set.
+        client.environments.update_storage(ENVIRONMENT, options=OPTIONS, secret_ref=SECRET_NAME)
+        if created:
+            out.write(f"Bound '{SECRET_NAME}' to '{ENVIRONMENT}'\n")
+        else:
+            out.write(
+                f"Set the storage options of '{ENVIRONMENT}' to the bundle's and attached "
+                f"'{SECRET_NAME}'\n"
+            )
 
 
 def _run_with_retry(

@@ -90,7 +90,16 @@ secret, what it is bound to now and the command.
 An unbound secret works for its environment's storage and webhooks. A secret that its
 environment uses for them is refused when anyone names it from an index or a repository, with
 the command that moves it on purpose. The URL of an index or repository with a bound secret
-changes only with the right to manage secrets in that secret's environment.
+changes only with the right to manage secrets in that secret's environment. The same holds for
+the storage options of an environment that has a storage secret: `lakana env set-storage ENV
+--option KEY=VALUE` needs `MANAGE_SECRET` in `ENV` (the `ADMIN` role) as well as
+`MANAGE_ENVIRONMENT`, because an option such as `s3.endpoint` decides where the secret is sent.
+`--option` replaces all the options, so pass every option the environment should have (for
+example `--option s3.endpoint=URL --option s3.region=REGION`). Sending the options the
+environment already has changes nothing and needs no extra right.
+
+Attaching a secret to an environment (`--secret-ref`) approves the options it has then: check
+`s3.endpoint` first. The audit event records that endpoint.
 
 ## See how each secret is stored
 

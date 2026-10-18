@@ -1759,3 +1759,92 @@ def test_0034_ambiguous_and_environment_used_secrets_on_postgres() -> None:
     assert found[env_one, "old-hook"] == unbound
     assert found[env_two, "old-hook"] == ("PACKAGE_INDEX", index_ids["oh"])
     assert found[env_one, "token"] == unbound
+
+
+def test_0035_secret_use_check_on_postgres() -> None:
+    """0035 refuses an inconsistent secret use, names existing ones, and downgrades cleanly."""
+    revision_0034 = "f1c4a8e2b6d9"
+    revision_0035 = "a3d7c9e1f502"
+    now = datetime.now(UTC)
+
+    def insert(
+        conn: sqlalchemy.Connection, kind: str | None, target: uuid.UUID | None
+    ) -> uuid.UUID:
+        """Insert one secret with the given use.
+
+        Parameters
+        ----------
+        conn
+            An open connection in a transaction.
+        kind
+            The `use_kind`, or `None`.
+        target
+            The `use_target_id`, or `None`.
+
+        Returns
+        -------
+        uuid.UUID
+            The new secret's id.
+        """
+        row_id = uuid.uuid4()
+        conn.execute(sqlalchemy.text("SET LOCAL session_replication_role = replica"))
+        conn.execute(
+            sqlalchemy.text(
+                "INSERT INTO secrets (id, environment_id, name, ciphertext, nonce, "
+                "wrapped_data_key, format_version, key_id, created_by, created_at, use_kind, "
+                "use_target_id) VALUES (:id, :env, :name, '\\x00', '\\x00', '\\x00', 2, 'env', "
+                ":who, :now, :kind, :target)"
+            ),
+            {
+                "id": row_id,
+                "env": uuid.uuid4(),
+                "name": str(row_id),
+                "who": uuid.uuid4(),
+                "now": now,
+                "kind": kind,
+                "target": target,
+            },
+        )
+        return row_id
+
+    with PostgresContainer("postgres:16", driver="pg8000") as pg:
+        url = pg.get_connection_url()
+        migrate.upgrade(url, revision_0034)
+        engine = sqlalchemy.create_engine(url)
+        with engine.begin() as conn:
+            broken = insert(conn, "PACKAGE_INDEX", None)
+        with pytest.raises(Exception, match=str(broken)):
+            migrate.upgrade(url, revision_0035)
+        # The refused upgrade must have left the database at 0034: moving to 0034 again changes
+        # nothing, so a version left at 0035 would show here.
+        migrate.upgrade(url, revision_0034)
+        assert _alembic_version(engine) == revision_0034
+        with engine.begin() as conn:
+            conn.execute(sqlalchemy.text("DELETE FROM secrets"))
+
+        migrate.upgrade(url, revision_0035)
+        assert _alembic_version(engine) == revision_0035
+        target = uuid.uuid4()
+        with engine.begin() as conn:
+            insert(conn, None, None)
+            insert(conn, "PACKAGE_INDEX", target)
+            insert(conn, "REPOSITORY", target)
+            insert(conn, "ENVIRONMENT", None)
+        for kind, bound in (
+            ("PACKAGE_INDEX", None),
+            ("REPOSITORY", None),
+            (None, target),
+            ("ENVIRONMENT", target),
+        ):
+            # The driver reports a violated CHECK as a `ProgrammingError` (code 23514), not an
+            # `IntegrityError`; the constraint's name tells which rule refused the row.
+            with (
+                pytest.raises(DBAPIError, match="ck_secrets_use_consistent"),
+                engine.begin() as conn,
+            ):
+                insert(conn, kind, bound)
+
+        migrate.downgrade(url, revision_0034)
+        with engine.begin() as conn:
+            insert(conn, "PACKAGE_INDEX", None)
+        engine.dispose()

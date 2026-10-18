@@ -80,7 +80,10 @@ def test_first_run_creates_dev_then_the_secret_then_binds_it() -> None:
     secret_body = json.loads(api.requests[3].content)
     assert secret_body["name"] == "seaweedfs-s3"
     assert secret_body["values"] == {"s3.access-key-id": "ak", "s3.secret-access-key": "sk"}
-    assert json.loads(api.requests[4].content)["secret_ref"] == "seaweedfs-s3"
+    assert json.loads(api.requests[4].content) == {
+        "options": {"s3.endpoint": "http://seaweedfs:8333"},
+        "secret_ref": "seaweedfs-s3",
+    }
 
 
 _ROTATE_PATH = "/api/v1/environments/dev/secrets/seaweedfs-s3"
@@ -184,6 +187,26 @@ def test_existing_dev_without_secret_gets_secret_and_binding() -> None:
         ("POST", _SECRETS_PATH),
         ("PATCH", _STORAGE_PATH),
     ]
+
+
+def test_dev_recreated_with_another_endpoint_gets_the_bundles_endpoint_with_the_secret() -> None:
+    """Delete, recreate with other options, restart: one PATCH sets both.
+
+    The secret is never attached on its own, so it cannot end up on the other endpoint.
+    """
+    api = FakeApi()
+    api.on("GET", _ENV_PATH, status=200, json=_dev(None))
+    api.on("GET", _SECRETS_PATH, status=200, json=[_SECRET_2])
+    api.on("PATCH", _STORAGE_PATH, status=200, json=_dev("seaweedfs-s3"))
+    out = io.StringIO()
+
+    setup.run_setup(api.client(), access_key="ak", secret_key="sk", out=out)
+
+    patches = [r for r in api.requests if r.method == "PATCH"]
+    assert [json.loads(r.content) for r in patches] == [
+        {"options": {"s3.endpoint": "http://seaweedfs:8333"}, "secret_ref": "seaweedfs-s3"}
+    ]
+    assert "the storage options of 'dev' to the bundle's" in out.getvalue()
 
 
 def test_secret_exists_but_unbound_only_binds() -> None:

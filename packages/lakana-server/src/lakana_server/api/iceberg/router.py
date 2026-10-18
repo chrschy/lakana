@@ -527,5 +527,6 @@ def commit_table(
         ref,
         requirements=parse_table_requirements(body.requirements),
         updates=parse_table_updates(body.updates),
+        release_session=True,
     )
     return _to_table_response(loaded, catalog.commit_answer(principal, loaded))

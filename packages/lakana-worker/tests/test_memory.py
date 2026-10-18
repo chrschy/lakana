@@ -12,6 +12,7 @@ import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -460,6 +461,50 @@ def test_a_failing_record_or_kill_does_not_prevent_the_exit(
     assert "killing the worker's children failed" in caplog.text
 
 
+def test_a_recording_thread_that_cannot_start_does_not_prevent_the_exit(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Under memory pressure a new thread may not start; the worker must exit all the same.
+
+    Otherwise the watchdog would keep looping with `stopping` set, and every later outcome
+    would be dropped.
+
+    Parameters
+    ----------
+    monkeypatch
+        Replaces the thread class `stop_worker` uses.
+    caplog
+        Captures the log.
+    """
+
+    class Unstartable(threading.Thread):
+        """A thread that cannot start, as when the system has no memory for one."""
+
+        def start(self) -> None:
+            """Fail to start.
+
+            Raises
+            ------
+            RuntimeError
+                Always.
+            """
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(memory, "threading", SimpleNamespace(Thread=Unstartable))
+    exits: list[int] = []
+    with caplog.at_level(logging.ERROR):
+        stop_worker(
+            GB,
+            LIMIT,
+            record=lambda: None,
+            kill_children=lambda: None,
+            exit_process=exits.append,
+            mark_stopping=lambda: None,
+        )
+    assert exits == [EXIT_CODE]
+    assert "Recording the memory failure could not start" in caplog.text
+
+
 def test_a_recording_that_hangs_is_abandoned_after_the_timeout(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -559,6 +604,66 @@ def test_the_activity_registry_marks_and_clears() -> None:
         assert activity.snapshot() == ((run,), (claim,))
         raise RuntimeError
     assert activity.snapshot() == ((), ())
+
+
+def test_what_leaves_the_registry_once_the_worker_stops_stays_in_its_snapshot() -> None:
+    """#154: a task and a query that end after the stop began are still recorded by the stop.
+
+    The watchdog marks the worker stopping before it kills the children; a thread whose child
+    dies then leaves its block without recording anything, and the recording that follows
+    must still find it. A new process starts empty: clearing `stopping` drops them.
+    """
+    activity = Activity()
+    run = uuid.uuid4()
+    claim = TaskClaim(uuid.uuid4(), "w", 1)
+    with activity.query(run), activity.task(claim):
+        activity.stopping = True
+    assert activity.snapshot() == ((run,), (claim,))
+    activity.stopping = False
+    assert activity.snapshot() == ((), ())
+
+
+def test_the_stop_records_a_task_whose_thread_left_it_before_the_recording_began() -> None:
+    """#154: the worker's thread leaves its task between the kill and the recording.
+
+    The thread holds a task until its child is killed, then returns without recording
+    (`Activity.stopping`), as `run_claimed` does. The kill waits for it to leave, so the
+    recording always starts after that: it must still see the task.
+    """
+    activity = Activity()
+    claim = TaskClaim(uuid.uuid4(), "w", 1)
+    entered, killed = threading.Event(), threading.Event()
+
+    def worker() -> None:
+        """Hold the task until the child is killed."""
+        with activity.task(claim):
+            entered.set()
+            killed.wait(10)
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    assert entered.wait(10)
+    recorded: list[tuple[TaskClaim, ...]] = []
+
+    def kill_children() -> None:
+        """Kill the child, and let the worker's thread leave its task."""
+        killed.set()
+        thread.join(10)
+        assert not thread.is_alive()
+
+    def mark_stopping() -> None:
+        """Mark the worker stopping, as the registry's default does."""
+        activity.stopping = True
+
+    stop_worker(
+        GB,
+        LIMIT,
+        record=lambda: recorded.append(activity.snapshot()[1]),
+        kill_children=kill_children,
+        exit_process=lambda code: None,
+        mark_stopping=mark_stopping,
+    )
+    assert recorded == [(claim,)]
 
 
 # -- starting it -------------------------------------------------------------------------------

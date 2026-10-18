@@ -45,9 +45,9 @@ from pyiceberg.table.update import (
     TableUpdate,
 )
 from pyiceberg.types import NestedField
-from sqlalchemy import delete, or_, select, text, update
+from sqlalchemy import delete, event, or_, select, text, update
 from sqlalchemy.exc import DBAPIError, IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import ORMExecuteState, Session, SessionTransaction
 
 from lakana_core.artifacts.store import current_version, version_row
 from lakana_core.audit.service import AuditService
@@ -170,6 +170,12 @@ from lakana_core.runs.lockdown import (
     table_target,
 )
 from lakana_core.runs.tasks import Written
+from lakana_core.secrets.uses import (
+    SecretBindingRefused,
+    approved_storage_options,
+    record_refusal,
+    require_secret_management_for_storage_change,
+)
 from lakana_core.storage.base import StoredObject
 from lakana_core.storage.resolver import (
     ResolvedStorage,
@@ -181,6 +187,12 @@ from lakana_core.storage.resolver import (
 )
 
 logger = logging.getLogger(__name__)
+
+_TRACKED_KEY = "lakana.catalog.tracks_writes"
+"""`Session.info` key: the session carries the write tracker of `CatalogService._track_writes`."""
+
+_WROTE_KEY = "lakana.catalog.transaction_wrote"
+"""`Session.info` key: the session's transaction flushed or executed a write."""
 
 WRITE_OUTCOME_UNKNOWN_MESSAGE = (
     "The write to {table} may or may not have been committed: the database did not confirm it, "
@@ -949,6 +961,7 @@ class CatalogService:
         self._authz = authz
         self._guard = ProtectedWriteGuard(session, authz)
         self._commit_sent = False
+        self._track_writes()
 
     def create_environment(
         self,
@@ -1145,18 +1158,7 @@ class CatalogService:
             If the principal may not manage environments.
         """
         self._authz.authorize(p, Action.MANAGE_ENVIRONMENT, Securable.environment_scope(name))
-        env = self._session.execute(
-            select(Environment)
-            .where(Environment.name == name)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        ).scalar_one_or_none()
-        if env is None:
-            self._session.rollback()
-            raise NotFoundError(f"No environment named {name!r}.")
-        if env.is_protected:
-            self._session.rollback()
-            raise ValidationError(f"Environment {name!r} is protected.")
+        env = self._lock_unprotected_environment(name)
         deployed = self._session.scalars(
             select(Repository.name)
             .join(EnvironmentDeployment, EnvironmentDeployment.repository_id == Repository.id)
@@ -1220,9 +1222,14 @@ class CatalogService:
         ValidationError
             If the environment is protected.
         PermissionDenied
-            If the principal may not manage environments, or —
-            only when `secret_ref` is given — may not manage secrets in
-            this one.
+            If the principal may not manage environments, or may not manage
+            secrets in this one when `secret_ref` is given.
+        SecretBindingRefused
+            (A `PermissionDenied`.) If `options` would change the options of
+            an environment that has a storage secret and the principal may not
+            manage secrets in it: the options decide where the secret is
+            presented. Unchanged options need no extra right. The refusal is
+            audited as `AUTHORIZATION_DENIED`.
 
         Notes
         -----
@@ -1236,10 +1243,15 @@ class CatalogService:
         self._authz.authorize(p, Action.MANAGE_ENVIRONMENT, Securable.instance_scope())
         if secret_ref is not None:
             self._authz.authorize(p, Action.MANAGE_SECRET, Securable.environment_scope(name))
-        env = self._find_environment(name)
-        if env.is_protected:
-            raise ValidationError(f"Environment {name!r} is protected.")
+        env = self._lock_unprotected_environment(name)
         if options is not None:
+            if dict(options) != env.storage_options:
+                try:
+                    require_secret_management_for_storage_change(self._authz, p, env)
+                except SecretBindingRefused as refusal:
+                    self._session.rollback()
+                    record_refusal(self._authz, p, refusal)
+                    raise
             env.storage_options = dict(options)
         if secret_ref is not None:
             env.storage_secret_ref = secret_ref
@@ -1250,6 +1262,11 @@ class CatalogService:
             detail={
                 "options_keys": sorted(options.keys()) if options is not None else None,
                 "secret_ref_set": secret_ref is not None,
+                **(
+                    {"approved_options": approved_storage_options(env.storage_options)}
+                    if secret_ref is not None
+                    else {}
+                ),
             },
         )
         self._session.commit()
@@ -2148,6 +2165,89 @@ class CatalogService:
             select(Table).where(Table.namespace_id == ns.id, Table.name == name)
         ).scalar_one_or_none()
 
+    def _lock_unprotected_environment(self, name: str) -> Environment:
+        """Lock an environment's row for a change and refuse a protected one.
+
+        Parameters
+        ----------
+        name
+            The environment's name.
+
+        Returns
+        -------
+        Environment
+            The locked row, refreshed from the database.
+
+        Raises
+        ------
+        NotFoundError
+            If no environment has that name (also when a concurrent delete wins the row lock).
+        ValidationError
+            If the environment is protected.
+        """
+        env = self._session.execute(
+            select(Environment)
+            .where(Environment.name == name)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).scalar_one_or_none()
+        if env is None:
+            self._session.rollback()
+            raise NotFoundError(f"No environment named {name!r}.")
+        if env.is_protected:
+            self._session.rollback()
+            raise ValidationError(f"Environment {name!r} is protected.")
+        return env
+
+    def _release_session(self) -> None:
+        """Give the session's database connection back to the pool before slow storage reads.
+
+        The transaction must have held only reads: a rollback would drop a write silently.
+        The session's write tracker (`_track_writes`) says whether anything was flushed or
+        executed as a statement that writes since the transaction began, and any change still
+        pending counts too.
+
+        Raises
+        ------
+        RuntimeError
+            If the transaction wrote. That is a bug in the caller, which must commit its
+            writes before it asks for the release; nothing is rolled back.
+        """
+        session = self._session
+        if session.info.get(_WROTE_KEY) or session.new or session.dirty or session.deleted:
+            raise RuntimeError(
+                "The database session was released for a slow storage read, but something was "
+                "written in the transaction and a rollback would lose it. Commit the write "
+                "before the call, or do not ask for the release."
+            )
+        session.rollback()
+
+    def _track_writes(self) -> None:
+        """Note on the session whether its transaction has written, once per session.
+
+        Flushes and statements that write (Core `insert`, `update`, `delete`) set the note;
+        the end of the session's outermost transaction clears it.
+        """
+        info = self._session.info
+        if _TRACKED_KEY in info:
+            return
+        info[_TRACKED_KEY] = True
+
+        def flushed(_session: Session, _context: object) -> None:
+            info[_WROTE_KEY] = True
+
+        def executed(state: ORMExecuteState) -> None:
+            if state.statement.is_dml:
+                info[_WROTE_KEY] = True
+
+        def ended(_session: Session, transaction: SessionTransaction) -> None:
+            if transaction.parent is None:
+                info[_WROTE_KEY] = False
+
+        event.listen(self._session, "after_flush", flushed)
+        event.listen(self._session, "do_orm_execute", executed)
+        event.listen(self._session, "after_transaction_end", ended)
+
     def _find_table(self, ref: TableRef) -> tuple[Namespace, Table]:
         """Resolve a table row from a reference, without authorizing.
 
@@ -2832,6 +2932,7 @@ class CatalogService:
         internal_rollback: bool = False,
         after_swap: Callable[[], None] | None = None,
         own_data_files: bool = False,
+        release_session: bool = False,
     ) -> LoadedTable:
         """Apply Iceberg updates to a table and publish them atomically.
 
@@ -2907,6 +3008,11 @@ class CatalogService:
             Only `CatalogService.append` and `write_batches` pass `True`: this service wrote
             the commit's data files through pyiceberg, which always writes field ids, so their
             footers are not read again. No request, route or token reaches this parameter.
+        release_session
+            Only the Iceberg REST commit route passes `True`: the database transaction is
+            ended before the field-id check reads manifests and footers, so that no pooled
+            connection sits idle for up to a minute. The session must not have written anything
+            in its transaction (see `_release_session`).
 
         Returns
         -------
@@ -2941,6 +3047,9 @@ class CatalogService:
             maintenance exemption is structural).
         StorageUnavailableError
             If storage failed while the field-id check read a manifest or a footer.
+        RuntimeError
+            If `release_session` is set and the session wrote in its transaction: a programming
+            error, nothing is released and nothing applied.
         ConflictError
             If a requirement fails, or another writer committed first.
         PermissionDenied
@@ -3067,6 +3176,14 @@ class CatalogService:
             # under the table's location.
             added_snapshots = [u.snapshot for u in updates if isinstance(u, AddSnapshotUpdate)]
             if added_snapshots:
+                # The reads can take a minute: no pooled connection sits idle in a transaction
+                # meanwhile. The pointer swap below compares against `expected`, so a table
+                # that changed meanwhile fails it like any concurrent commit. (It does not
+                # compare `unpublished_run_id`, which the set-back of a first build without
+                # rows clears without moving the pointer; that window existed before, and
+                # such a table has no earlier snapshot for a ref to be pointed at.)
+                if release_session:
+                    self._release_session()
                 check_added_files_have_field_ids(
                     added_snapshots, current, resolved.file_io, ref.dotted()
                 )

@@ -484,3 +484,47 @@ def test_task_token_lists_only_its_own_environment(client: TestClient, tmp_path:
 def test_list_still_requires_authentication(client: TestClient) -> None:
     """Filtering replaced the authorization check, not authentication: no token is 401."""
     assert client.get("/api/v1/environments").status_code == 401
+
+
+def test_changing_options_of_an_environment_with_a_storage_secret_is_403_and_audited(
+    client: TestClient, settings: Settings, tmp_path: Path
+) -> None:
+    """MANAGE_ENVIRONMENT alone gets 403 with the message; the denial row persists (#134)."""
+    from lakana_core.models import AuditEvent, AuditEventType
+
+    _create(client, tmp_path)
+    attached = client.patch(
+        "/api/v1/environments/dev/storage", headers=AUTH_HEADER, json={"secret_ref": "s3-creds"}
+    )
+    assert attached.status_code == 200, attached.text
+    bob = _token_for(client, "bob")
+    granted = client.post(
+        "/api/v1/grants",
+        headers=AUTH_HEADER,
+        json={"principal": "bob", "action": "MANAGE_ENVIRONMENT", "kind": "INSTANCE"},
+    )
+    assert granted.status_code == 201, granted.text
+
+    response = client.patch(
+        "/api/v1/environments/dev/storage",
+        headers=bob,
+        json={"options": {"s3.endpoint": "https://evil.example.org"}},
+    )
+
+    assert response.status_code == 403
+    detail = response.json()["detail"]
+    assert "would send its storage secret 's3-creds'" in detail
+    assert "the right to manage secrets in 'dev'" in detail
+    assert _storage_options(settings, "dev") == {}
+    engine = create_engine(settings.database)
+    with Session(engine) as session:
+        reasons = [
+            row.detail.get("reason")
+            for row in session.execute(
+                select(AuditEvent).where(
+                    AuditEvent.event_type == AuditEventType.AUTHORIZATION_DENIED
+                )
+            ).scalars()
+        ]
+    engine.dispose()
+    assert "storage_options_move_secret" in reasons

@@ -61,3 +61,22 @@ def test_the_check_finds_an_action_however_it_is_passed() -> None:
     assert commit_calls_with_an_action("commit_table(p, ref, action=a)")
     assert commit_calls_with_an_action("catalog.commit_table(p, ref, updates=[])") == []
     assert commit_calls_with_an_action("catalog.other(p, action=a)") == []
+
+
+def test_the_iceberg_rest_commit_asks_for_the_session_release() -> None:
+    """Only the REST route releases the database session during the field-id check."""
+    source = (Path(iceberg_package.__file__).parent / "router.py").read_text()
+    calls = [
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "commit_table"
+    ]
+
+    assert len(calls) == 1
+    assert [
+        k.value.value  # ty: ignore[unresolved-attribute]
+        for k in calls[0].keywords
+        if k.arg == "release_session"
+    ] == [True]

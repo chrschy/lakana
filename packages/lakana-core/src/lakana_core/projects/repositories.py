@@ -424,6 +424,11 @@ class RepositoryService:
         except ValidationError:
             self._session.rollback()
             raise
+        except StaleDataError:
+            # Local mode (SQLite) takes no row lock, so a concurrent delete shows up as the
+            # autoflush of the changed row finding it gone.
+            self._session.rollback()
+            raise NotFoundError(f"No repository named {name!r}.") from None
         AuditService(self._session).record(
             p.id,
             AuditEventType.REPOSITORY_UPDATED,

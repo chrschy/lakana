@@ -9,9 +9,10 @@ from pathlib import Path
 
 import pytest
 from core_test_helpers import _catalog_with
-from sqlalchemy import delete, select
+from sqlalchemy import delete, event, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.exc import StaleDataError
 
 from lakana_core.auth import (
     Action,
@@ -719,3 +720,45 @@ def test_an_update_racing_a_delete_of_the_same_index_is_not_found(
         service.update(admin, "team", {"url": "https://moved.example.org/simple"})
     assert _events(loser, AuditEventType.PACKAGE_INDEX_UPDATED) == []
     assert loser.execute(select(PackageIndex.name)).scalars().all() == []
+
+
+@pytest.mark.parametrize(
+    "changes", [{"url": "https://moved.example.org/simple"}, {"credential_secret": None}]
+)
+def test_an_update_whose_flush_finds_the_row_gone_is_not_found(
+    session: Session,
+    service: PackageIndexService,
+    admin: PrincipalRef,
+    changes: dict[str, str | None],
+) -> None:
+    """A `StaleDataError` at any flush of an update (local mode: no row locks) is a 404.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    service
+        The service under test.
+    admin
+        The acting principal.
+    changes
+        The fields to change.
+    """
+    service.create(admin, name="team", url=_URL)
+
+    def _gone(*_: object) -> None:
+        """Fail the way SQLite does when a concurrent delete removed the row.
+
+        Raises
+        ------
+        StaleDataError
+            Always.
+        """
+        raise StaleDataError("UPDATE statement on table 'package_indexes' expected to update 1 row")
+
+    event.listen(session, "before_flush", _gone)
+    try:
+        with pytest.raises(NotFoundError, match="No package index named 'team'"):
+            service.update(admin, "team", changes)
+    finally:
+        event.remove(session, "before_flush", _gone)

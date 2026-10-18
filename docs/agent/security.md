@@ -2466,7 +2466,8 @@ that uses it. User reference: `docs/site/reference/package-indexes.md`; how-to:
 
 - **A secret has one use, and only `MANAGE_SECRET` binds it.** A secret is bound to a named
   package index, a named repository, or its own environment (storage and webhooks); the
-  use is `secrets.use_kind` and `secrets.use_target_id`. The four places that decrypt a secret
+  use is `secrets.use_kind` and `secrets.use_target_id`, and the CHECK `ck_secrets_use_consistent`
+  (migration 0035) keeps the pair unset together, environment-only, or kind plus id. The four places that decrypt a secret
   for an index, a repository, storage or a webhook check the use first and refuse another one,
   with the command that moves it. `MANAGE_PACKAGE_INDEX` and `MANAGE_REPOSITORY` are not
   `MANAGE_SECRET`: their holder can name only a secret already bound to that same entry, and
@@ -2487,9 +2488,19 @@ that uses it. User reference: `docs/site/reference/package-indexes.md`; how-to:
   follows the same rules for a repository's `token`. A bind records the target's URL in the
   `SECRET_BOUND` detail and prints it, because binding approves the URL the entry has then;
   the environment's storage secret cannot be bound to an index or a repository
-  (`SecretService.bind`). Residual, from before binding: anyone holding instance-scoped
-  `MANAGE_ENVIRONMENT` can change `storage_options`, including `s3.endpoint`, without
-  `MANAGE_SECRET`, and the storage secret then goes to that endpoint. Without `DEPLOY` a holder of
+  (`SecretService.bind`). Where the storage secret goes is guarded the same way (#134): while an
+  environment has a `storage_secret_ref`, `update_environment_storage` changes `storage_options`
+  (any key; none is judged safe) only with `MANAGE_SECRET` in that environment besides the
+  instance-scoped `MANAGE_ENVIRONMENT`; the refusal is `AUTHORIZATION_DENIED` with reason
+  `storage_options_move_secret`, written after the rollback. The environment row is locked for
+  the check, so an attach that runs at the same time is seen. Options equal to the stored ones
+  need no extra right (nothing moves). Attaching a secret records `approved_options` (`s3.endpoint` without userinfo, and `s3.region`; no
+  other option, an explicit small list; a proxy or non-S3 endpoint key is not recorded) in the
+  `ENVIRONMENT_STORAGE_UPDATED` detail, because it approves the options then. The Compose `setup`
+  attaches `seaweedfs-s3` in one `PATCH` together with the bundle's own options, so the secret
+  never lands on options someone else set (delete, recreate with another endpoint, restart ends
+  on the bundle's endpoint); a `dev` at the bundle's root has its options reset that way. The storage root and scheme cannot change after creation,
+  and creation sets no secret; changing `secret_ref` already needs `MANAGE_SECRET`. Without `DEPLOY` a holder of
   `MANAGE_PACKAGE_INDEX` can only stop projects (`index update --url`, `index remove`). Trust
   domain: under `LocalProcessRunner` a holder who also has `DEPLOY` and `RUN` still reads what the
   worker reads (one trust domain): binding stops an index manager from redirecting a secret, not

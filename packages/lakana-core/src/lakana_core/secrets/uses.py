@@ -15,6 +15,7 @@ import shlex
 import uuid
 from dataclasses import dataclass, field
 from typing import TypeVar
+from urllib.parse import urlsplit
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -733,3 +734,76 @@ def require_secret_management_for_url_change(
                 scope,
                 "url_moves_bound_secret",
             )
+
+
+def require_secret_management_for_storage_change(
+    authz: AuthorizationService, p: PrincipalRef, environment: Environment
+) -> None:
+    """Refuse to change an environment's storage options without the right to manage its secrets.
+
+    The options (the endpoint, the region, any other key) decide where the storage secret is
+    presented, so while the environment has one, changing them changes the secret's use as
+    surely as binding it elsewhere would. The caller holds the environment row locked, so a
+    secret attached at the same time is seen.
+
+    Parameters
+    ----------
+    authz
+        Answers whether `p` may manage secrets in the environment.
+    p
+        The acting principal.
+    environment
+        The environment whose options change, read under lock.
+
+    Raises
+    ------
+    SecretBindingRefused
+        If the environment has a storage secret and `p` may not manage secrets in it.
+    """
+    secret = environment.storage_secret_ref
+    if secret is None:
+        return
+    scope = Securable.environment_scope(environment.name)
+    if authz.permits(p, Action.MANAGE_SECRET, scope):
+        return
+    name = plain(environment.name)
+    raise SecretBindingRefused(
+        f"Changing the storage options of environment '{name}' would send its storage secret "
+        f"'{plain(secret)}' to wherever they point. That needs the right to manage secrets in "
+        f"'{name}' (the ADMIN role). Ask someone who may manage secrets in '{name}' to make the "
+        f"change: lakana env set-storage {shlex.quote(name)} --option KEY=VALUE ... (--option "
+        "replaces all the options, so pass every option the environment should have, for "
+        "example --option s3.endpoint=URL --option s3.region=REGION)",
+        scope,
+        "storage_options_move_secret",
+    )
+
+
+def approved_storage_options(options: dict[str, str]) -> dict[str, str]:
+    """Pick the options that say where a storage secret goes, for the audit log.
+
+    Only `s3.endpoint` (without any user information in its URL) and `s3.region` are returned,
+    never another option, because options can carry inline credentials. Other keys that decide
+    the destination, such as a proxy, are not recorded; the list is explicit and small on
+    purpose.
+
+    Parameters
+    ----------
+    options
+        The environment's storage options.
+
+    Returns
+    -------
+    dict
+        The endpoint and region options that are set.
+    """
+    picked: dict[str, str] = {}
+    endpoint = options.get("s3.endpoint")
+    if endpoint is not None:
+        parts = urlsplit(endpoint)
+        if "@" in parts.netloc:
+            endpoint = parts._replace(netloc=parts.netloc.rsplit("@", 1)[1]).geturl()
+        picked["s3.endpoint"] = endpoint
+    if "s3.region" in options:
+        picked["s3.region"] = options["s3.region"]
+    return picked

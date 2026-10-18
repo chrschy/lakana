@@ -31,6 +31,7 @@ from lakana_core.models import (
 from lakana_core.storage.resolver import StorageResolver
 from lakana_worker import executor as executor_module
 from lakana_worker import pipeline as pipeline_module
+from lakana_worker.activity import ACTIVITY
 from lakana_worker.query_process import REGISTRY, QueryChild
 from lakana_worker.runners import TASKS
 
@@ -138,6 +139,23 @@ def _no_drain_leaks() -> Iterator[None]:
     executor_module._WORKER_STALE = None
     pipeline_module._MAINTENANCE_TIMEOUT = DEFAULT_MAINTENANCE_TIMEOUT
     pipeline_module._clock = time.monotonic
+
+
+@pytest.fixture(autouse=True)
+def _no_stopping_leaks() -> Iterator[None]:
+    """Clear the memory stop's flag after every test, and with it what the registry kept.
+
+    `stop_worker` without `mark_stopping` sets the process-wide `ACTIVITY.stopping`, and once
+    it is set nothing leaves the registry (#154): a later test would then drop its outcomes and
+    find entries of earlier tests in its snapshot.
+
+    Yields
+    ------
+    None
+        Once the test may run.
+    """
+    yield
+    ACTIVITY.stopping = False
 
 
 @pytest.fixture(autouse=True)

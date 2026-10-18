@@ -4,8 +4,16 @@ import enum
 import uuid
 from datetime import datetime
 
+from sqlalchemy import (
+    CheckConstraint,
+    ForeignKey,
+    Integer,
+    LargeBinary,
+    String,
+    UniqueConstraint,
+    Uuid,
+)
 from sqlalchemy import Enum as SAEnum
-from sqlalchemy import ForeignKey, Integer, LargeBinary, String, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column
 
 from lakana_core.models.base import Base, UTCDateTime
@@ -60,6 +68,13 @@ class Secret(Base):
     __tablename__ = "secrets"
     __table_args__ = (
         UniqueConstraint("environment_id", "name", name="uq_secrets_environment_name"),
+        CheckConstraint(
+            "(use_kind IS NULL AND use_target_id IS NULL)"
+            " OR (use_kind IS NOT NULL AND use_kind = 'ENVIRONMENT' AND use_target_id IS NULL)"
+            " OR (use_kind IS NOT NULL AND use_kind IN ('PACKAGE_INDEX', 'REPOSITORY')"
+            " AND use_target_id IS NOT NULL)",
+            name="use_consistent",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)

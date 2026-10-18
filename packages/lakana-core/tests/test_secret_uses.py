@@ -21,6 +21,7 @@ from lakana_core.models import (
 from lakana_core.secrets.uses import (
     SecretUse,
     SecretUseRefused,
+    approved_storage_options,
     bind_command,
     describe_use,
     require_use,
@@ -352,3 +353,23 @@ def test_the_environment_use_has_no_target_row_and_is_named_in_words(
         "its environment (storage and webhooks)"
     )
     assert resolve_use(session, SecretUseKind.ENVIRONMENT, None) == SecretUse.environment()
+
+
+def test_the_approved_options_keep_an_endpoint_without_user_information_as_it_is() -> None:
+    options = {"s3.endpoint": "http://seaweedfs:8333", "s3.access-key-id": "secret"}
+
+    assert approved_storage_options(options) == {"s3.endpoint": "http://seaweedfs:8333"}
+
+
+def test_the_approved_options_drop_user_information_from_the_endpoint() -> None:
+    options = {"s3.endpoint": "https://key:pw@host:9000/p", "s3.region": "eu"}
+
+    assert approved_storage_options(options) == {
+        "s3.endpoint": "https://host:9000/p",
+        "s3.region": "eu",
+    }
+
+
+def test_the_approved_options_without_an_endpoint_hold_the_region_only() -> None:
+    assert approved_storage_options({"s3.region": "eu", "s3.secret": "x"}) == {"s3.region": "eu"}
+    assert approved_storage_options({}) == {}

@@ -10,6 +10,7 @@ from core_test_helpers import _catalog_with
 from sqlalchemy import Engine, delete, event, insert, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.exc import StaleDataError
 
 from lakana_core.auth import Action, AllowAllAuthorization, PrincipalRef, SecurableKind
 from lakana_core.errors import (
@@ -444,6 +445,47 @@ def test_an_update_racing_a_delete_is_not_found(
         ).first()
         is None
     )
+
+
+@pytest.mark.parametrize("changes", [{"url": "https://h/moved.git"}, {"default_ref": "main"}])
+def test_an_update_whose_flush_finds_the_row_gone_is_not_found(
+    session: Session,
+    service: RepositoryService,
+    principal: PrincipalRef,
+    changes: dict[str, str | None],
+) -> None:
+    """A `StaleDataError` at any flush of an update (local mode: no row locks) is a 404.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    service
+        The service under test.
+    principal
+        The acting principal.
+    changes
+        The fields to change; a URL change flushes while it checks the binding, another field
+        only at the commit.
+    """
+    service.create(principal, name="r", kind=RepositoryKind.HTTPS, url="https://h/r.git")
+
+    def _gone(*_: object) -> None:
+        """Fail the way SQLite does when a concurrent delete removed the row.
+
+        Raises
+        ------
+        StaleDataError
+            Always.
+        """
+        raise StaleDataError("UPDATE statement on table 'repositories' expected to update 1 row")
+
+    event.listen(session, "before_flush", _gone)
+    try:
+        with pytest.raises(NotFoundError, match="No repository named 'r'"):
+            service.update(principal, "r", changes)
+    finally:
+        event.remove(session, "before_flush", _gone)
 
 
 def test_commit_failure_that_is_not_a_name_clash_is_a_conflict(

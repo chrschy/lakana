@@ -300,9 +300,10 @@ What the credential of a registered package index does not protect against. Each
    each refusal to name a secret, bind one or move a URL is audited as `AUTHORIZATION_DENIED`. The
    residual is an unbound secret, which
    keeps serving its environment's storage and webhooks and is refused to an index until an
-   administrator binds it. A second residual, from before binding: anyone holding
-   instance-scoped `MANAGE_ENVIRONMENT` can change `storage_options`, including `s3.endpoint`,
-   without `MANAGE_SECRET`, and the environment's storage secret then goes to that endpoint.
+   administrator binds it. Changing `storage_options` (the endpoint and every other key) of an
+   environment that has a storage secret also needs `MANAGE_SECRET` in it, besides
+   `MANAGE_ENVIRONMENT`; the refusal is audited as `AUTHORIZATION_DENIED`
+   (`storage_options_move_secret`).
    Under `LocalProcessRunner` a holder who also has `DEPLOY` and `RUN`
    still reads what the worker reads (item 1 and the trust domain): binding stops the
    redirection by an index manager, not code that runs in the worker. See "What the
