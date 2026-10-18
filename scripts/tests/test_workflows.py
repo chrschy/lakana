@@ -267,6 +267,60 @@ def test_each_package_publishes_to_production_pypi_from_its_own_environment() ->
     }
 
 
+_PUBLISHING_SCOPES = ("id-token", "packages", "pages", "attestations", "contents")
+
+
+def _reaches(jobs: dict, name: str, target: str) -> bool:
+    """Tell whether a job depends on another one, directly or through its ``needs``.
+
+    Parameters
+    ----------
+    jobs
+        The workflow's ``jobs`` mapping.
+    name
+        The job to start from.
+    target
+        The job it must depend on.
+
+    Returns
+    -------
+    bool
+        ``True`` when ``target`` is in the transitive ``needs`` of ``name``.
+    """
+    needs = jobs[name].get("needs", [])
+    needs = [needs] if isinstance(needs, str) else needs
+    return any(n == target or _reaches(jobs, n, target) for n in needs)
+
+
+def test_one_approval_job_gates_a_release() -> None:
+    """The ``approve`` job asks once, runs nothing but an echo and holds no permission."""
+    jobs = _jobs("release.yml")
+    job = jobs["approve"]
+    assert job["environment"] == "release-approval"
+    assert job["permissions"] == {}
+    assert set(job["needs"]) == {"release-please", "build"}
+    assert job["if"] == "needs.release-please.outputs.released == 'true'"
+    assert len(job["steps"]) == 1
+    assert set(job["steps"][0]) == {"run"}
+
+
+def test_every_job_that_can_publish_waits_for_the_approval() -> None:
+    """A job holding a write scope (apart from release-please) depends on ``approve``."""
+    jobs = _jobs("release.yml")
+    publishers = [
+        name
+        for name, job in jobs.items()
+        if name not in ("release-please", "approve")
+        and any(job.get("permissions", {}).get(scope) == "write" for scope in _PUBLISHING_SCOPES)
+    ]
+    assert {"publish-core", "publish-runtime", "publish-sdk", "publish-image"} <= set(publishers)
+    for name in publishers:
+        assert _reaches(jobs, name, "approve"), (
+            f"release.yml: job `{name}` publishes before the approval"
+        )
+    assert _reaches(jobs, "pages", "approve")
+
+
 def test_no_release_step_points_at_the_test_index() -> None:
     """Production PyPI is the default; no step overrides it with a repository or index URL."""
     text = (WORKFLOWS / "release.yml").read_text()
@@ -1033,7 +1087,7 @@ def test_only_the_job_that_uploads_the_sbom_can_write_to_the_release() -> None:
 
     job = jobs["sbom-release"]
     assert job["permissions"] == {"contents": "write"}
-    assert set(job["needs"]) == {"release-please", "sbom"}
+    assert set(job["needs"]) == {"release-please", "approve", "sbom"}
     assert job["if"] == jobs["sbom"]["if"]
     uses = [s["uses"].split("@")[0] for s in job["steps"] if "uses" in s]
     assert uses == ["actions/download-artifact"]
@@ -1182,7 +1236,7 @@ def test_every_published_artefact_gets_a_build_provenance_attestation() -> None:
     assert jobs["publish-image"]["permissions"] == {"contents": "read", "packages": "write"}
     (wheels,) = attest(jobs["attest-dist"])
     assert wheels["with"]["subject-path"].split() == ["dist/*.whl", "dist/*.tar.gz"]
-    assert jobs["attest-dist"]["needs"] == "build"
+    assert set(jobs["attest-dist"]["needs"]) == {"build", "approve"}
     # Scorecard looks for a signature among the release's assets: the bundle goes there from a
     # job that only downloads it, like the SBOM's.
     release = jobs["provenance-release"]
@@ -1365,7 +1419,7 @@ def test_each_release_publishes_the_documentation_site_on_github_pages() -> None
     workflow = yaml.safe_load((WORKFLOWS / "release.yml").read_text())
     assert set(workflow[True]) == {"push"}  # no manual trigger: only a release deploys
     job = workflow["jobs"]["pages"]
-    assert job["needs"] == "release-please"
+    assert set(job["needs"]) == {"release-please", "approve"}
     assert job["if"] == workflow["jobs"]["sbom"]["if"]
     assert job["runs-on"] == "ubuntu-latest"
     checkout = next(s for s in job["steps"] if s.get("uses", "").startswith("actions/checkout@"))

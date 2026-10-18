@@ -153,6 +153,31 @@ authentication. All four packages (`lakana`, `lakana-core`, `lakana-server`, `la
 both. Register the four as pending publishers before the first release (account settings,
 "Publishing"); a pending publisher becomes a normal one when its project's first upload succeeds.
 
+## One approval before anything is published
+
+The job **`approve`** is the release's only gate. It `needs` `release-please` and `build`,
+runs in the environment `release-approval`, has `permissions: {}`, checks nothing out and runs
+one `echo`. The run stops there until the maintainer approves it (Actions run page, "Review
+deployments"). Every job that publishes or signs depends on it, directly or through its
+`needs`: the four PyPI jobs, `publish-image` and `attest-image`, `attest-dist` and
+`provenance-release`, `sbom-release`, `pages` and `pages-deploy`. `release-please` (tag and
+GitHub release) and `build` (nothing leaves the run) run before the gate, as do `sbom` (it
+uploads to the run only) and the two smoke jobs, which follow their publish jobs anyway.
+**Rejecting publishes nothing**: PyPI, the registry, the release page and the docs site stay
+as they were. The tag and the GitHub release already exist; to retry, re-run the workflow on
+the same commit.
+
+`scripts/tests/test_workflows.py` pins the job and that every job holding a write scope
+(`id-token`, `packages`, `pages`, `attestations`, `contents`) reaches it through `needs`.
+
+**Maintainer setup, before the next release.** The workflow cannot create the environment's
+protection, and GitHub creates a missing environment *without* a reviewer, which would let
+the release through unapproved. Create `release-approval` under Settings > Environments with
+the maintainer as required reviewer and the same branch/tag rule as the PyPI environments.
+Then remove the required reviewer from `pypi-lakana`, which asked on its own until now; keep
+its branch rule and that of the other three PyPI environments (the trusted publishers name
+them).
+
 ## Publishing in dependency order
 
 `release.yml`'s publish side is four jobs, not one matrix, because a failed upload must
@@ -161,7 +186,7 @@ never leave a live package whose pinned dependency is missing:
 - **`build`** checks out the tag, runs `uv build --all-packages -o dist` once, verifies no
   wheel carries a local version segment (see below), and uploads `dist/` as a build
   artifact for the jobs that follow.
-- **`publish-core`** needs `build` and publishes `lakana-core` alone (`pypi-lakana-core`).
+- **`publish-core`** needs `build` and `approve` and publishes `lakana-core` alone (`pypi-lakana-core`).
 - **`publish-runtime`** needs `publish-core` and is a `fail-fast: false` matrix of
   `lakana-server` (`pypi-lakana-server`) and `lakana-worker` (`pypi-lakana-worker`) — both
   pin `lakana-core` (see below), so neither publishes until `lakana-core` already has.

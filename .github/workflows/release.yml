@@ -63,12 +63,25 @@ jobs:
           name: dist
           path: dist/
 
+  # The one approval of a release: every job that publishes or signs anything waits for it, so
+  # rejecting it publishes nothing. It runs no code and holds no permission; the reviewer is set
+  # on the `release-approval` environment (Settings > Environments, see docs/agent/release.md).
+  approve:
+    needs: [release-please, build]
+    if: needs.release-please.outputs.released == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: release-approval
+    permissions: {}
+    steps:
+      - run: echo "Release ${{ needs.release-please.outputs.tag }} approved for publishing"
+
   # Signs what `build` produced: a build provenance attestation (Sigstore, keyless) for every
   # wheel and sdist, which `gh attestation verify <file> --repo lakana-labs/lakana` checks (see
   # docs/agent/release.md). It runs next to the publish jobs, so a failure here never leaves a
   # half-published release; the bundle goes to the release page from `provenance-release`.
   attest-dist:
-    needs: build
+    needs: [build, approve]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -94,7 +107,7 @@ jobs:
           path: lakana-provenance.intoto.jsonl
 
   publish-core:
-    needs: build
+    needs: [build, approve]
     runs-on: ubuntu-latest
     environment: pypi-lakana-core
     permissions:
@@ -171,7 +184,7 @@ jobs:
   # "latest" container). Pruning old versions is a separate job below,
   # gated on the smoke test, so a bad image is never left as the only one.
   publish-image:
-    needs: [release-please, build, publish-sdk]
+    needs: [release-please, build, approve, publish-sdk]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -306,7 +319,7 @@ jobs:
   # The only job that can write to the repository's contents. It runs no third-party code
   # that builds anything: it downloads the SBOM and uploads it to the release.
   sbom-release:
-    needs: [release-please, sbom]
+    needs: [release-please, approve, sbom]
     if: needs.release-please.outputs.released == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -346,7 +359,7 @@ jobs:
   # the next release. It runs the project's code, so it only reads the repository; the
   # deployment is its own job below.
   pages:
-    needs: release-please
+    needs: [release-please, approve]
     if: needs.release-please.outputs.released == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
