@@ -147,6 +147,15 @@ def test_the_row_filter_how_to_does_what_the_page_says(
     assert refused(cli_state, 8, *filters, "--expression", "sha256(id) = 'x'", *where).startswith(
         "Error: 'sha256(id) = 'x'' is not a valid filter expression: "
     )
+    assert refused(cli_state, 8, *filters, "--expression", "region = 5", *where) == (
+        "Error: 'region = 5' is not a valid filter expression: "
+        "`region` is text; compare it with '5', not 5."
+    )
+    assert refused(cli_state, 8, *filters, "--expression", "region", *where) == (
+        "Error: 'region' is not a valid filter expression: `region` is text, not boolean; "
+        "a condition is needed here. Compare it with text such as 'x', "
+        "for example `region = ...`."
+    )
     assert refused(cli_state, 2, *filters, "--expression", "id > 1", "--env", "dev") == (
         "Error: Pass exactly one of --principal or --group"
     )

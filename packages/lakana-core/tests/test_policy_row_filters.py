@@ -661,7 +661,7 @@ def _ready(
 
 def test_create_accepts_columns_the_table_has_in_any_letter_case(session: Session) -> None:
     """The database matches a column without regard to case, so the filter does too."""
-    catalog = FakeColumnCatalog(names=["id", "Region"])
+    catalog = FakeColumnCatalog(names=["id", "Region"], types={"id": "long"})
     service, admin = _ready(session, catalog)
     row = service.create(admin, **_filter_args("REGION = 'EU' AND id > 1"))
     assert row.expression == "REGION = 'EU' AND id > 1"
@@ -986,9 +986,9 @@ def _page_quotes() -> list[str]:
     ]
 
 
-def test_the_page_quotes_fourteen_refusals() -> None:
+def test_the_page_quotes_seventeen_refusals() -> None:
     """The table the next tests read has the rows they expect."""
-    assert len(_page_quotes()) == 14
+    assert len(_page_quotes()) == 17
 
 
 def _create_error(session: Session, expression: str = "id > 1", **override: str) -> Exception:
@@ -1121,3 +1121,118 @@ def test_an_expression_that_is_too_long_is_refused_as_the_page_says() -> None:
     message = statement_too_long_message("The row-filter expression", 100_001, 100_000)
     [quoted] = [q for q in _page_quotes() if q.startswith("The row-filter expression is")]
     assert message.startswith(quoted.removesuffix(" ...").rstrip())
+
+
+_TYPED = {"id": "long", "region": "string", "salary": "double", "owner": "boolean"}
+"""The declared types the type-check tests give the fake table's columns."""
+
+
+def _create_filter(
+    session: Session, expression: str, catalog: FakeColumnCatalog | None = None
+) -> RowFilter:
+    """Create a row filter for a service account on a table with typed columns.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    expression
+        The filter's expression.
+    catalog
+        The table's columns; typed ones (`_TYPED`) unless given.
+
+    Returns
+    -------
+    RowFilter
+        The stored filter.
+    """
+    service = RowFilterService(
+        session,
+        AllowAllAuthorization(),
+        catalog or FakeColumnCatalog(types=_TYPED, schema_id=7),
+    )
+    admin = _admin()
+    _persist_actor(session, admin)
+    ensure_table(session, "dev", "gold", "customers")
+    PrincipalService(session, AllowAllAuthorization()).create_principal(
+        admin, name="alice", type=PrincipalType.SERVICE_ACCOUNT
+    )
+    return service.create(
+        admin,
+        principal="alice",
+        environment="dev",
+        namespace="gold",
+        table="customers",
+        expression=expression,
+    )
+
+
+@pytest.mark.parametrize(
+    ("expression", "fragment"),
+    [
+        ("region = 5", "`region` is text; compare it with '5', not 5."),
+        ("region = salary", "`region` is text but `salary` is double; compare columns"),
+        ("region", "`region` is text, not boolean; a condition is needed here."),
+        ("id = 'x'", "`id` is long; compare it with a number, not 'x'."),
+        ("owner = 1", "`owner` is boolean; compare it with TRUE or FALSE, not 1."),
+    ],
+)
+def test_create_refuses_an_expression_that_needs_an_implicit_cast(
+    session: Session, expression: str, fragment: str
+) -> None:
+    """A comparison across types, or a text used as a condition, is refused and not stored."""
+    with pytest.raises(ValidationError) as exc_info:
+        _create_filter(session, expression)
+    assert fragment in str(exc_info.value)
+    assert session.execute(select(RowFilter)).scalars().all() == []
+
+
+@pytest.mark.parametrize(
+    "expression",
+    ["id = 5", "id < salary", "region = 'EU'", "owner", "owner AND id > 1", "has_group('x')"],
+)
+def test_create_accepts_an_expression_that_compares_like_with_like(
+    session: Session, expression: str
+) -> None:
+    """The allowed shapes are stored, with the schema id the check read."""
+    created = _create_filter(session, expression)
+    assert created.expression == expression
+
+
+def test_create_refuses_a_constant_that_is_not_a_condition_without_reading_the_table(
+    session: Session,
+) -> None:
+    """A filter that reads no column is checked on its own, so the table is not read."""
+    catalog = FakeColumnCatalog(types=_TYPED)
+    with pytest.raises(ValidationError, match="the number 1 is not a condition"):
+        _create_filter(session, "1", catalog)
+    assert catalog.calls == []
+
+
+def test_create_names_a_missing_column_before_it_checks_types(session: Session) -> None:
+    """A column the table lacks keeps its own message."""
+    with pytest.raises(ValidationError, match="has no column 'ghost'"):
+        _create_filter(session, "ghost = 5")
+
+
+def test_a_comparison_across_types_is_refused_as_the_page_says(session: Session) -> None:
+    """Row `'region = 5' is not a valid filter expression ...`: the text is the code's."""
+    with pytest.raises(ValidationError) as caught:
+        _create_filter(session, "region = 5")
+    assert str(caught.value) in _page_quotes()
+
+
+def test_a_column_used_as_a_condition_is_refused_as_the_page_says(session: Session) -> None:
+    """Row `'region' is not a valid filter expression ...`: the code's first words."""
+    with pytest.raises(ValidationError) as caught:
+        _create_filter(session, "region")
+    [quoted] = [q for q in _page_quotes() if q.startswith("'region' is not a valid filter")]
+    assert str(caught.value).startswith(quoted.removesuffix(" ...").rstrip())
+
+
+def test_a_bad_typed_date_is_refused_as_the_page_says(session: Session) -> None:
+    """Row `'born = DATE '2026-13-01'' is not a valid expression ...`: the code's first words."""
+    with pytest.raises(ValidationError) as caught:
+        _create_filter(session, "born = DATE '2026-13-01'")
+    [quoted] = [q for q in _page_quotes() if q.startswith("'born = DATE '2026-13-01''")]
+    assert str(caught.value).startswith(quoted.removesuffix(" ...").rstrip())

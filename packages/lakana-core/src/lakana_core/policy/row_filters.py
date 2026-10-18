@@ -24,17 +24,20 @@ from lakana_core.policy.columns import (
     read_table_description,
     validate_for_table,
 )
+from lakana_core.policy.expression_types import check_expression_types
 from lakana_core.policy.expressions import columns_of
 
 
 def _check_columns_exist(
     catalog: ColumnSource, p: PrincipalRef, ref: TableRef, environment: str, expression: str
 ) -> int | None:
-    """Refuse a row filter that reads a column the table does not have; give its schema id.
+    """Refuse a row filter that reads a missing column or mixes types; give its schema id.
 
     The comparison ignores letter case, as the database does when the filter runs, so a
-    filter accepted here is a filter the query path can apply. A filter that reads no column
-    (`TRUE`, `has_group('staff')`) has nothing to check and does not read the table.
+    filter accepted here is a filter the query path can apply. Then it checks the filter's types
+    against the same columns (`check_expression_types`), so the schema id recorded is the one
+    whose types were checked. A filter that reads no column (`TRUE`, `has_group('staff')`) has no
+    column to look up and does not read the table; its types are still checked.
 
     Parameters
     ----------
@@ -61,10 +64,12 @@ def _check_columns_exist(
     ValidationError
         If the filter reads a column the table does not have; the message names the first such
         column in alphabetical order, so it is the same on every attempt, and lists the table's
-        columns.
+        columns; or if the filter compares values of different types or uses a non-boolean as a
+        condition (the message names the column, both types and what to write instead).
     """
     wanted = columns_of(expression)
     if not wanted:
+        check_expression_types(expression, kind="filter", columns=[])
         return None
     description = read_table_description(catalog, p, ref, policy="row filter")
     names = [spec.name for spec in description.columns]
@@ -80,6 +85,7 @@ def _check_columns_exist(
         if names:
             message += " Check the spelling."
         raise ValidationError(message)
+    check_expression_types(expression, kind="filter", columns=description.columns)
     return description.schema_id
 
 
@@ -218,7 +224,9 @@ class RowFilterService:
             If the target is a view, or subject fields don't satisfy the exactly-one-of rule, or
             `expression` is outside the restricted subset (a qualified column such as
             `t.region` is outside it), or reads a column the table does not have (compared
-            without regard to letter case, after authorization).
+            without regard to letter case, after authorization), or compares values of different
+            types or uses a non-boolean as a condition (checked against the table's current
+            schema, after the columns).
         ConflictError
             If the filter reads a column and the table's columns cannot be read.
         NotFoundError

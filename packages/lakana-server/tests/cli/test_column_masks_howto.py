@@ -114,6 +114,12 @@ def test_the_column_mask_how_to_does_what_the_page_says(
         "Error: 'sha256(ssn)' is not a valid mask expression: "
         "SHA2 is outside the restricted subset."
     )
+    assert refused(
+        cli_state, 8, *mask, "ssn", "--principal", "alice", "--expression", "0", "--env", "dev"
+    ) == (
+        "Error: '0' is not a valid mask expression: `ssn` is text, but the mask is a number. "
+        "Use a value of its own type: '***', NULL, or a text function such as substr(ssn, 1, 2)."
+    )
     assert refused(cli_state, 2, *mask, "ssn", "--expression", "NULL", "--env", "dev") == (
         "Error: Pass exactly one of --principal or --group"
     )

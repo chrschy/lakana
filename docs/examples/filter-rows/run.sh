@@ -26,6 +26,17 @@ for refused in "regoin = 'EU'" "customers.region = 'EU'"; do
   fi
 done
 
+# A text column compared with a number is refused with the fix, as the page shows.
+if message=$(lakana row-filter create gold.customers --principal alice --expression "region = 5" 2>&1); then
+  echo "a filter that compares text with a number was created" >&2
+  exit 1
+fi
+expected="'region = 5' is not a valid filter expression: \`region\` is text; compare it with '5', not 5."
+case "$message" in
+  *"$expected"*) ;;
+  *) echo "unexpected refusal: $message" >&2; exit 1 ;;
+esac
+
 # docs:start list
 lakana row-filter list --principal alice
 # docs:end list

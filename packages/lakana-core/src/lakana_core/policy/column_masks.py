@@ -24,12 +24,18 @@ from lakana_core.policy.columns import (
     read_table_description,
     validate_for_table,
 )
+from lakana_core.policy.expression_types import check_expression_types
 
 
 def _check_column_exists(
-    catalog: ColumnSource, p: PrincipalRef, ref: TableRef, environment: str, column: str
+    catalog: ColumnSource,
+    p: PrincipalRef,
+    ref: TableRef,
+    environment: str,
+    column: str,
+    expression: str,
 ) -> int | None:
-    """Refuse a mask on a column the table does not have; give the schema it is written against.
+    """Refuse a mask on a missing column or of another type; give the schema it is checked against.
 
     The comparison is exact, as it is when the mask is applied to a query, so
     a mask accepted here is a mask the query path can honour.
@@ -46,17 +52,21 @@ def _check_column_exists(
         Its environment, named in the message.
     column
         The column the mask is for.
+    expression
+        The mask, already validated.
 
     Returns
     -------
     int or None
         The id of the table's current schema as read for this check, so that the mask records
-        the schema whose columns were checked; `None` for a table without field ids.
+        the schema whose columns and types were checked; `None` for a table without field ids.
 
     Raises
     ------
     ValidationError
-        If the table has no column called `column`.
+        If the table has no column called `column`; or if the mask compares values of different
+        types, or its own type differs from the column's (the message names the column, both
+        types and a value that keeps the column's type).
     PermissionDenied
         If `p` lacks READ_TABLE on the table, which reading its columns needs.
     ConflictError
@@ -66,6 +76,9 @@ def _check_column_exists(
     description = read_table_description(catalog, p, ref, policy="mask")
     names = [spec.name for spec in description.columns]
     if column in names:
+        check_expression_types(
+            expression, kind="mask", columns=description.columns, masked_column=column
+        )
         return description.schema_id
     message = f"Table {dotted!r} in environment {environment!r} has no column {column!r}. "
     message += list_columns(names)
@@ -216,7 +229,9 @@ class ColumnMaskService:
         ValidationError
             If the target is a view, or subject fields don't satisfy the exactly-one-of rule, or
             `expression` is outside the mask grammar, or the table has no column `column`
-            (compared exactly, after authorization).
+            (compared exactly, after authorization), or the mask compares values of different
+            types or is not of the column's own type (checked against the table's current
+            schema).
         ConflictError
             If the table's columns cannot be read.
         NotFoundError
@@ -251,7 +266,7 @@ class ColumnMaskService:
         ref = TableRef(
             environment=environment, namespace=NamespacePath.parse(namespace), name=table
         )
-        schema_id = _check_column_exists(self._catalog, p, ref, environment, column)
+        schema_id = _check_column_exists(self._catalog, p, ref, environment, column, expression)
         row = ColumnMask(
             id=uuid.uuid4(),
             principal_id=principal_id,

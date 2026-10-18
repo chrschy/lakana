@@ -64,6 +64,25 @@ deeply", permanent for a SQL task. Every string from sqlglot is cut to 2,000 cha
 is processed and the module uses no regular expression, because a running pattern is not
 interrupted by the query timeout; the message is at most 300 printable characters.
 
+## Policy expressions are type-checked when they are created
+
+A row filter or column mask runs on every stored value, so one that needs an implicit conversion
+fails every query it covers, on the first value that cannot be converted (GHSA-32q2-rpmr-586j).
+`lakana_core.policy.expression_types.check_expression_types` refuses that at creation, in the same
+place that checks the columns exist (`_check_columns_exist` in `row_filters.py`,
+`_check_column_exists` in `column_masks.py`), against the schema whose id the policy records, so the
+types checked and the `schema_id` stored are one read. Rules: a comparison needs both sides of one
+kind (numbers among themselves, text, date/timestamp, otherwise the same type), `AND`/`OR`/`NOT`
+and a filter as a whole need booleans, `substr`/`||`/`md5` need text, a mask must have its
+column's own type, and a type the table does not declare in a form the check knows is refused (fail
+closed, never guessed). The only conversion a policy may contain is a typed `DATE '...'` or
+`TIMESTAMP '...'` literal, which `validate_restricted_expression` accepts only for a string literal
+that is a real date or moment in the exact `YYYY-MM-DD[ HH:MM:SS[.ffffff]]` form; it is a constant, so it
+cannot fail on a stored value. Any other `CAST`, `TRY_CAST` or `::` stays outside the subset. A new
+node type added to the subset needs a rule in `_Checker.type_of`; one without a rule is refused
+(`its type could not be determined`). Existing policies are not re-checked; the read path is
+unchanged and still replaces the engine's text with a fixed message.
+
 ## Names in log lines and in CLI output
 
 A table, namespace, artifact, environment, asset or file name can hold a line break or an escape

@@ -906,9 +906,9 @@ def _page_quotes() -> list[str]:
     ]
 
 
-def test_the_page_quotes_thirteen_refusals() -> None:
+def test_the_page_quotes_fifteen_refusals() -> None:
     """The table the next tests read has the rows they expect."""
-    assert len(_page_quotes()) == 13
+    assert len(_page_quotes()) == 15
 
 
 def test_a_qualified_mask_expression_is_refused_as_the_page_says(session: Session) -> None:
@@ -1008,3 +1008,104 @@ def test_a_mask_expression_that_qualifies_a_column_is_refused(session: Session) 
         "the table it is set on."
     )
     assert session.execute(select(ColumnMask)).scalars().all() == []
+
+
+_TYPED = {"id": "long", "ssn": "string", "salary": "double", "owner": "boolean", "c": "date"}
+"""The declared types the type-check tests give the fake table's columns."""
+
+
+def _create_mask(session: Session, column: str, expression: str) -> ColumnMask:
+    """Create a column mask for a service account on a table with typed columns.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    column
+        The masked column.
+    expression
+        The mask's expression.
+
+    Returns
+    -------
+    ColumnMask
+        The stored mask.
+    """
+    service = ColumnMaskService(
+        session, AllowAllAuthorization(), FakeColumnCatalog(types=_TYPED, schema_id=7)
+    )
+    admin = _admin()
+    _persist_actor(session, admin)
+    ensure_table(session, "dev", "gold", "customers")
+    PrincipalService(session, AllowAllAuthorization()).create_principal(
+        admin, name="alice", type=PrincipalType.SERVICE_ACCOUNT
+    )
+    return service.create(
+        admin,
+        principal="alice",
+        environment="dev",
+        namespace="gold",
+        table="customers",
+        column=column,
+        expression=expression,
+    )
+
+
+@pytest.mark.parametrize(
+    ("column", "expression"),
+    [
+        ("id", "0"),
+        ("id", "NULL"),
+        ("ssn", "'***'"),
+        ("ssn", "substr(ssn, 1, 3) || '***'"),
+        ("salary", "0"),
+        ("owner", "FALSE"),
+        ("c", "DATE '1900-01-01'"),
+    ],
+)
+def test_create_accepts_a_mask_of_the_columns_own_type(
+    session: Session, column: str, expression: str
+) -> None:
+    """INTEGER, TEXT, DOUBLE, BOOLEAN and DATE columns keep their type under a mask."""
+    assert _create_mask(session, column, expression).expression == expression
+
+
+@pytest.mark.parametrize(
+    ("column", "expression", "fragment"),
+    [
+        (
+            "id",
+            "'***'",
+            "`id` is long, but the mask is text. Use a value of its own type: 0 or NULL.",
+        ),
+        ("ssn", "0", "`ssn` is text, but the mask is a number. Use a value of its own type: '***'"),
+        ("c", "'1900-01-01'", "`c` is date, but the mask is text."),
+        ("owner", "0", "`owner` is boolean, but the mask is a number."),
+        ("ssn", "id = 1 AND ssn = 5", "`ssn` is text; compare it with '5', not 5."),
+    ],
+)
+def test_create_refuses_a_mask_of_another_type(
+    session: Session, column: str, expression: str, fragment: str
+) -> None:
+    """A mask that changes the column's type names both types and a value that keeps it."""
+    with pytest.raises(ValidationError) as exc_info:
+        _create_mask(session, column, expression)
+    assert fragment in str(exc_info.value)
+    assert session.execute(select(ColumnMask)).scalars().all() == []
+
+
+def test_a_mask_of_another_type_is_refused_as_the_page_says(session: Session) -> None:
+    """Row `'0' is not a valid mask expression ...`: the code's first words."""
+    with pytest.raises(ValidationError) as caught:
+        _create_mask(session, "ssn", "0")
+    [quoted] = [q for q in _page_quotes() if q.startswith("'0' is not a valid mask")]
+    assert str(caught.value).startswith(quoted.removesuffix(" ...").rstrip())
+
+
+def test_a_comparison_across_types_in_a_mask_is_refused_as_the_page_says(
+    session: Session,
+) -> None:
+    """Row `'ssn = 5' is not a valid mask expression ...`: the text is the code's."""
+    with pytest.raises(ValidationError) as caught:
+        _create_mask(session, "owner", "ssn = 5")
+    assert str(caught.value) in _page_quotes()

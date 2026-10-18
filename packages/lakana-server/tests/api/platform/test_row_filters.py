@@ -19,12 +19,12 @@ def test_create_a_row_filter_and_list_it_for_the_principal(client: TestClient) -
             "environment": "dev",
             "namespace": "gold",
             "table": "customers",
-            "expression": "id = current_user()",
+            "expression": "id > 5",
         },
     )
     assert created.status_code == 201, created.text
     body = created.json()
-    assert body["expression"] == "id = current_user()"
+    assert body["expression"] == "id > 5"
     assert body["namespace"] == "gold"
 
     listed = client.get(
@@ -143,6 +143,30 @@ def test_revoke_a_row_filter(client: TestClient) -> None:
     revoked = client.delete(f"/api/v1/row-filters/{row_filter_id}", headers=AUTH_HEADER)
     assert revoked.status_code == 204
 
+    listed = client.get(
+        "/api/v1/row-filters", headers=AUTH_HEADER, params={"principal_name": "alice"}
+    )
+    assert listed.json() == []
+
+
+def test_create_refuses_a_comparison_across_types_with_the_fix(client: TestClient) -> None:
+    """A number-against-text comparison is a 422 that names the column, both types and the fix."""
+    create_environment(client)
+    create_table(client, "dev", "gold", "customers")
+    client.post("/api/v1/principals", headers=AUTH_HEADER, json={"name": "alice", "type": "USER"})
+    response = client.post(
+        "/api/v1/row-filters",
+        headers=AUTH_HEADER,
+        json={
+            "principal": "alice",
+            "environment": "dev",
+            "namespace": "gold",
+            "table": "customers",
+            "expression": "id = 'EU'",
+        },
+    )
+    assert response.status_code == 422, response.text
+    assert "`id` is long; compare it with a number, not 'EU'." in response.json()["detail"]
     listed = client.get(
         "/api/v1/row-filters", headers=AUTH_HEADER, params={"principal_name": "alice"}
     )

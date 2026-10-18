@@ -45,7 +45,9 @@ The replacement is a small SQL expression. It may use:
 - literals (`NULL`, `'***'`, numbers) and comparisons and boolean logic;
 - the **bare** names of columns of the same table, which give the stored value (`ssn`, never `customers.ssn`; a field of a struct column such as `address.country` is not supported; to cover a struct column, mask the column as a whole, for example `address` with the replacement `NULL`, and a query that reads a field of it gets `NULL`);
 - `current_user()` and `has_group('name')`;
-- `substr(...)` or `substring(...)`, the `||` operator that joins text, and `md5(...)`.
+- `substr(...)` or `substring(...)`, the `||` operator that joins text, and `md5(...)`;
+- a date or a timestamp written as a typed literal: `DATE '1970-01-01'`,
+  `TIMESTAMP '1970-01-01 00:00:00'`.
 
 Everything else is refused when you create the mask, for example `sha256(ssn)`, `upper(ssn)`,
 `id + 1`, `CASE` and a subquery. The expression is kept as written and may be at most 100,000
@@ -130,25 +132,65 @@ and `/api/v1/column-masks` in the REST API.
 
 ## An expression must not fail on any stored value
 
-A mask runs on every stored value, also on the ones it hides. Lakana checks the expression when you
-create it, but not against the values in the table. If it fails on one, for example because it
-compares a text column with a number, everyone it applies to gets this message, and the query
+A mask runs on every stored value, also on the ones it hides. If it needs to convert a value, for
+example because it compares a text column with a number, it fails on the first value that cannot be
+converted, and then every query the mask covers fails. So Lakana checks the types of the expression
+against the table's columns, as they are now, when you create the mask. The rules for a comparison
+are those of a [row filter](filter-rows.md#an-expression-must-not-fail-on-any-stored-value): both
+sides of one kind, numbers of any kind against each other, a boolean where a condition is needed.
+
+A mask has one more rule: **it must give a value of the masked column's own type.** A mask that
+turns an integer column into text changes the type every reader of the column gets, and breaks
+what depends on it. This is refused (the exit code is 8):
+
+<!-- output -->
+```text
+Error: '0' is not a valid mask expression: `ssn` is text, but the mask is a number. Use a value of its own type: '***', NULL, or a text function such as substr(ssn, 1, 2).
+```
+
+and `'***'` is accepted for the same column. Which value keeps the type of which column:
+
+| Column type | A mask that keeps it |
+|---|---|
+| text (`string`) | `'***'`, `NULL`, `substr(ssn, 1, 2)`, `'x' \|\| ssn`, `md5(ssn)`, `current_user()` |
+| `int`, `long` | `0`, `-1`, `NULL` |
+| `float`, `double`, `decimal` | `0`, `1.5`, `NULL` |
+| `boolean` | `FALSE`, `NULL`, a comparison such as `id = 1`, `has_group('staff')` |
+| `date` | `DATE '1970-01-01'`, `NULL` |
+| `timestamp` | `TIMESTAMP '1970-01-01 00:00:00'`, `NULL` |
+| any other type (a struct, a list, `uuid`, `time`, `binary`, a timestamp with a time zone) | `NULL`, or the column itself |
+
+How Lakana decides the type of a mask: a literal has its own type (`'x'` is text, `5` is an integer,
+`1.5` a decimal number, `TRUE` a boolean, `DATE '...'` a date), a column has its declared type, and
+these parts have a fixed type:
+
+| Part | Type | It needs |
+|---|---|---|
+| `substr(x, start, length)`, `substring(...)` | text | `x` text; `start` and `length` numbers |
+| `x \|\| y` | text | both sides text |
+| `md5(x)` | text | `x` text |
+| `current_user()` | text | |
+| `has_group('name')`, a comparison, `AND`, `OR`, `NOT` | boolean | conditions for `AND`, `OR`, `NOT` |
+| `NULL` | the type of any column | |
+
+An integer fits a column of `float`, `double` or `decimal`; a number with a decimal point does not fit
+an `int` or `long` column. A date does not fit a timestamp column, or the other way round. An
+expression whose type Lakana cannot decide is refused, so that nothing unchecked is stored.
+
+A mask cannot convert a value (`CAST`, `try_cast` and `TRY` are refused). If a mask needs the value
+in another type, store the column in that type, or add a column of that type and mask that one.
+
+A mask that already exists is **not** checked again when you upgrade. List the masks
+(`lakana column-mask list`) and compare each expression with the type of its column; the upgrade
+notes say what to look for. To change an expression, revoke it and create the new one.
+
+When a stored value still makes a mask fail, everyone it applies to gets this message, and the query
 engine's text is not shown:
 
 <!-- output -->
 ```text
 The query failed on a value it could not convert or compute, under a row filter or column mask on `gold.customers`; the value is not shown. Check the casts and functions in the query. If it has none that could fail, a row filter or column mask on the table compares a value with one of another type: ask an administrator to check it.
 ```
-
-Write the expression so that it compares like with like:
-
-- Quote the value for a text column: `code = '5'`, not `code = 5`.
-- Compare columns only with columns of the same type.
-- Use only a BOOLEAN column on its own as a condition.
-
-A mask cannot convert a value (`CAST`, `try_cast` and `TRY` are refused). If a comparison needs
-the value in another type, store the column in that type, or add a column of that type and
-compare with that one in the mask. To change an expression, revoke it and create the new one.
 
 The same message appears when a person's own query fails on a value of a table under a filter or
 mask. In their own query, `try_cast`, `try_strptime` and `TRY(...)` return
@@ -166,6 +208,8 @@ brackets.
 | `Table 'gold.customers' in environment 'dev' has no column 'sn'. Its columns are: id, name, ssn. Check the spelling; column names are case-sensitive.` (8) | The column is not in the table. Pick one of the columns listed. If the name differs only by case, the message ends with `Did you mean 'ssn'?` |
 | `'read_parquet.ssn' is not a valid mask expression: the column 'read_parquet.ssn' is written with a qualifier. Write the bare column name, 'ssn'; a column mask always reads the table it is set on.` (8) | A column name in the expression has a dot in front of it (`t.ssn`, `customers.ssn`). Write `ssn`. A name whose first part is a column of the table says instead that a column mask does not support struct fields. |
 | `'sha256(ssn)' is not a valid mask expression: SHA2 is outside the restricted subset.` (8) | The expression uses something outside the list above. Use only what the list allows. |
+| `'0' is not a valid mask expression: `ssn` is text, but the mask is a number. Use a value of its own type: '***', NULL, ...` (8) | The mask has another type than its column. Use a value of the column's own type, as the message lists, or see the table above. |
+| `'ssn = 5' is not a valid mask expression: `ssn` is text; compare it with '5', not 5.` (8) | A comparison inside the mask puts a text against a number. Write the value in the column's own type. |
 | `Pass exactly one of --principal or --group` (2) | Name one person or one group, not both and not neither. |
 | `No principal named 'nobody'.` (6) | The principal does not exist. Create it first, or fix the spelling. A group says `No group named '...'.` |
 | `No table 'nope' in 'dev'/gold.` (6) | The table does not exist in that environment. Check the name and `--env`. |

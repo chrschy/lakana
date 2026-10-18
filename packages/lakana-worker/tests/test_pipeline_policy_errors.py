@@ -276,30 +276,26 @@ def test_a_failing_row_filter_shows_the_fixed_message(
 
 
 @pytest.mark.parametrize("expression", ["code = 5", "code = num", "code", "NOT code", "-low > 0"])
-def test_a_row_filter_the_service_accepts_can_fail_on_a_stored_value(
+def test_a_row_filter_stored_before_the_type_check_can_fail_on_a_stored_value(
     session: Session, principal: PrincipalRef, catalog: CatalogService, expression: str
 ) -> None:
-    """A text column compared with a number, or used as a condition, fails on the value."""
-    _filter(session, principal, catalog, "people", expression, stored=False)
+    """A text column compared with a number, or used as a condition, fails on the value.
+
+    The service refuses these now (#126); a filter made by an earlier release is not checked
+    again, so the test stores the expression as the database would hold it.
+    """
+    _filter(session, principal, catalog, "people", expression)
 
     run = _query(session, principal, "SELECT id FROM gold.people")
 
     _assert_fixed(run, "gold.people", "")
 
 
-def test_a_column_mask_the_service_accepts_can_fail_on_a_stored_value(
+def test_a_column_mask_stored_before_the_type_check_can_fail_on_a_stored_value(
     session: Session, principal: PrincipalRef, catalog: CatalogService
 ) -> None:
     """A mask that compares a text column with a number fails on the stored value."""
-    ColumnMaskService(session, AllowAllAuthorization(), catalog).create(
-        principal,
-        principal="admin",
-        environment="dev",
-        namespace="gold",
-        table="people",
-        column="secret",
-        expression='"secret" = "num"',
-    )
+    _mask(session, principal, catalog, "secret", '"secret" = "num"')
 
     run = _query(session, principal, "SELECT secret FROM gold.people")
 
@@ -310,7 +306,7 @@ def test_an_asset_run_under_a_failing_filter_records_the_fixed_message(
     session: Session, principal: PrincipalRef, catalog: CatalogService
 ) -> None:
     """A write that reads a policy-bound table records the same message."""
-    _filter(session, principal, catalog, "people", "code = 5", stored=False)
+    _filter(session, principal, catalog, "people", "code = 5")
     run = QueryService(session, AllowAllAuthorization()).submit_write(
         principal,
         "dev",

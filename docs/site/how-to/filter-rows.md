@@ -47,7 +47,10 @@ is a small SQL expression. It may use:
 - the **bare** names of the table's columns: write `region`, never `customers.region` or
   `t.region`. A field of a struct column (`address.country`) is not supported, but a filter on
   another column works on a table that has a struct column, and the struct comes back whole;
-- `current_user()` and `has_group('name')`.
+- `current_user()` and `has_group('name')`;
+- a date or a timestamp written as a typed literal: `DATE '2026-01-01'`, `TIMESTAMP '2026-01-01 00:00:00'`
+  (a fraction of a second may follow the seconds). Lakana checks the text when you create the filter,
+  so a text that is not a date is refused then and not on every row.
 
 Everything else is refused when you create the filter, for example `IN (...)`, `LIKE`, a function
 call and a subquery. A condition on a column that holds `NULL` is not true for that row, so the row
@@ -82,25 +85,59 @@ and `/api/v1/row-filters` in the REST API.
 
 ## An expression must not fail on any stored value
 
-A filter runs on every stored value, also on the ones it hides. Lakana checks the expression when you
-create it, but not against the values in the table. If it fails on one, for example because it
-compares a text column with a number, everyone it applies to gets this message, and the query
-engine's text is not shown:
+A filter runs on every stored value, also on the ones it hides. If it needs to convert a value, for
+example because it compares a text column with a number, it fails on the first value that cannot be
+converted, and then **every query the filter covers fails**. So Lakana checks the types of the
+condition against the table's columns, as they are now, when you create the filter, and refuses a
+condition that would need a conversion. The columns it checks are the ones of the schema the filter
+records (see [After a rename](#after-a-rename)).
+
+This is refused (the exit code is 8):
+
+<!-- output -->
+```text
+Error: 'region = 5' is not a valid filter expression: `region` is text; compare it with '5', not 5.
+```
+
+and `region = '5'` is accepted.
+
+What Lakana refuses, each with a message that names the column, both types and what to write:
+
+- A comparison (`=`, `<>`, `<`, `<=`, `>`, `>=`) whose two sides are not of one kind: a text
+  column against a number (`region = 5`), a number column against text (`id = 'x'`), two columns of
+  different types (`region = id`), a boolean against a number, a date against text.
+- A column or value that is not boolean used as a condition, on its own or beside `AND`, `OR` or
+  `NOT`: `region`, `NOT region`, `region AND id > 1`, `1`.
+- A minus sign in front of something that is not a number (`-region`).
+- A column whose type Lakana cannot compare (a struct, a list, a map).
+
+What stays accepted:
+
+- Numbers of any kind against each other: `int`, `long`, `float`, `double` and `decimal` never
+  fail to compare (`id = 5`, `id < salary`, `amount > 1.5`).
+- Text against text, and `current_user()` against a text column.
+- A date or a timestamp against a typed literal, and a date against a timestamp (`born < seen`).
+- `TRUE`, `FALSE`, a boolean column on its own, and `has_group('name')`.
+- `NULL` against anything.
+
+A date column is compared with `DATE '2026-01-01'`, a timestamp column with
+`TIMESTAMP '2026-01-01 00:00:00'`; text such as `'2026-01-01'` against a date column is refused,
+because the engine would have to convert it. Lakana cannot convert for you (`CAST`, `try_cast` and
+`TRY` are refused). If a comparison needs the value in another type, store the column in that type,
+or add a column of that type and filter on that one.
+
+A filter that already exists is **not** checked again when you upgrade. To find one that compares
+across types, list the filters (`lakana row-filter list`) and read the `expression` of each against
+the table's columns; the upgrade notes say what to look for. To change an expression, revoke it and
+create the new one.
+
+When a stored value still makes a filter fail, everyone it applies to gets this message, and the
+query engine's text is not shown:
 
 <!-- output -->
 ```text
 The query failed on a value it could not convert or compute, under a row filter or column mask on `gold.customers`; the value is not shown. Check the casts and functions in the query. If it has none that could fail, a row filter or column mask on the table compares a value with one of another type: ask an administrator to check it.
 ```
-
-Write the expression so that it compares like with like:
-
-- Quote the value for a text column: `code = '5'`, not `code = 5`.
-- Compare columns only with columns of the same type.
-- Use only a BOOLEAN column on its own as a condition.
-
-A filter cannot convert a value (`CAST`, `try_cast` and `TRY` are refused). If a comparison needs
-the value in another type, store the column in that type, or add a column of that type and
-filter on that one. To change an expression, revoke it and create the new one.
 
 The same message appears when a person's own query fails on a value of a table under a filter or
 mask. In their own query, `try_cast`, `try_strptime` and `TRY(...)` return
@@ -121,6 +158,9 @@ someone's query later. The messages are the ones the commands print; the exit co
 | `The columns of table 'gold.customers' could not be read; the server's log has the cause. Create the row filter again when the table is readable.` (7) | Storage or the table's metadata could not be read. Ask the person who runs the instance to look at the server's log, then try again. |
 | `You need READ_TABLE on 'gold.customers' so that the column can be checked.` (5) | To check the columns, Lakana reads the table's columns with your rights. Ask for `READ_TABLE` on the table. |
 | `'sha256(a)' is not a valid filter expression: ...` (8) | The condition uses something outside the list above. |
+| `'region = 5' is not a valid filter expression: `region` is text; compare it with '5', not 5.` (8) | A comparison puts a text against a number, or two columns of different types. Write the value in the column's own type, as the message says. |
+| `'region' is not a valid filter expression: `region` is text, not boolean; a condition is needed here. ...` (8) | A column that is not boolean stands where a condition is needed. Compare it with a value. |
+| `'born = DATE '2026-13-01'' is not a valid expression: '2026-13-01' is not a date. Write DATE 'YYYY-MM-DD', ...` (8) | A typed date or timestamp literal that is not one. Write `DATE '2026-01-01'` or `TIMESTAMP '2026-01-01 00:00:00'`. |
 | `Pass exactly one of --principal or --group` (2) | Name one person or one group, not both and not neither. |
 | `No principal named 'nobody'.` (6) | The principal does not exist. Create it first, or fix the spelling. A group says `No group named '...'.` |
 | `No table 'nope' in 'dev'/gold.` (6) | The table does not exist in that environment. Check the name and `--env`. |

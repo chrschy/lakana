@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Collection
+from datetime import datetime
 from typing import Literal, cast
 
 import sqlglot
@@ -53,6 +54,122 @@ HAS_GROUP = "has_group"
 """The one function name `exp.Anonymous` may take — anything else is refused.
 
 The resolver imports this, so validation and query-time substitution cannot disagree."""
+
+
+_TIMESTAMP_DTYPES = (exp.DType.TIMESTAMP, exp.DType.TIMESTAMPNTZ)
+"""The sqlglot types `TIMESTAMP '...'` parses to, according to the dialect."""
+
+_DATE_FORMAT = "YYYY-MM-DD"
+_TIMESTAMP_FORMAT = "YYYY-MM-DD HH:MM:SS"
+
+
+def _valid_date_text(text: str) -> bool:
+    """Say whether text is a date written exactly as `YYYY-MM-DD`.
+
+    Parameters
+    ----------
+    text
+        The text between the quotes of a `DATE '...'` literal.
+
+    Returns
+    -------
+    bool
+        `True` for a real calendar date in that form, with every digit in its place.
+    """
+    try:
+        parsed = datetime.strptime(text, "%Y-%m-%d")
+    except ValueError:
+        return False
+    return len(text) == len(_DATE_FORMAT) and parsed.strftime("%Y-%m-%d") == text
+
+
+def _valid_timestamp_text(text: str) -> bool:
+    """Say whether text is a timestamp written as `YYYY-MM-DD HH:MM:SS`, with optional fraction.
+
+    Parameters
+    ----------
+    text
+        The text between the quotes of a `TIMESTAMP '...'` literal; a date alone is accepted.
+
+    Returns
+    -------
+    bool
+        `True` for a real moment in that form (a fraction of one to six digits may follow the
+        seconds), with every digit in its place.
+    """
+    if _valid_date_text(text):
+        return True
+    whole, dot, fraction = text.partition(".")
+    if len(whole) != len(_TIMESTAMP_FORMAT):
+        return False
+    if dot and not (fraction.isascii() and fraction.isdecimal() and len(fraction) <= 6):
+        return False
+    try:
+        parsed = datetime.strptime(whole, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return False
+    return parsed.strftime("%Y-%m-%d %H:%M:%S") == whole
+
+
+def _check_typed_literal(node: exp.Cast, sql_expr: str) -> bool:
+    """Accept `DATE '...'` and `TIMESTAMP '...'` when the text is a real date or moment.
+
+    A typed literal is the one conversion a policy may contain, because it is a constant that is
+    checked here, once: a text that is not a date would fail on every row.
+
+    Parameters
+    ----------
+    node
+        A cast node.
+    sql_expr
+        The original expression text, for the error message only.
+
+    Returns
+    -------
+    bool
+        `True` if `node` is a well-formed typed literal. `False` if it is any other cast, which
+        the caller refuses as outside the subset.
+
+    Raises
+    ------
+    ValidationError
+        If it is a typed literal whose text is not a valid date or timestamp, or a
+        `TIMESTAMPTZ` literal.
+    """
+    target = node.to
+    literal = node.this
+    extra = {key for key, value in node.args.items() if value and key not in ("this", "to")}
+    if (
+        type(node) is not exp.Cast
+        or extra
+        or not isinstance(literal, exp.Literal)
+        or not literal.is_string
+        or target.expressions
+        or target.args.get("nested")
+    ):
+        return False
+    head = f"{_quoted(sql_expr)} is not a valid expression: "
+    shown_text = shown(literal.name)
+    if target.this is exp.DType.DATE:
+        if _valid_date_text(literal.name):
+            return True
+        raise ValidationError(
+            f"{head}'{shown_text}' is not a date. Write DATE '{_DATE_FORMAT}', "
+            "for example DATE '2026-01-01'."
+        )
+    if target.this in _TIMESTAMP_DTYPES:
+        if _valid_timestamp_text(literal.name):
+            return True
+        raise ValidationError(
+            f"{head}'{shown_text}' is not a timestamp. Write "
+            f"TIMESTAMP '{_TIMESTAMP_FORMAT}', for example TIMESTAMP '2026-01-01 00:00:00'."
+        )
+    if target.this is exp.DType.TIMESTAMPTZ:
+        raise ValidationError(
+            f"{head}a timestamp with a time zone is not supported. Write "
+            f"TIMESTAMP '{_TIMESTAMP_FORMAT}' (UTC) instead."
+        )
+    return False
 
 
 def _quoted(sql_expr: str) -> str:
@@ -210,6 +327,10 @@ def validate_restricted_expression(
             "Write it as a single condition over the table's columns."
         ) from exc
     for node in parsed.walk():
+        if isinstance(node, exp.Cast) and _check_typed_literal(node, sql_expr):
+            continue
+        if isinstance(node, exp.DataType) and isinstance(node.parent, exp.Cast):
+            continue
         if isinstance(node, exp.Anonymous):
             _validate_has_group_call(node, sql_expr)
             continue

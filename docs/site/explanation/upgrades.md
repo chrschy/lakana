@@ -123,6 +123,39 @@ Each cell is a summary. The page named in the last column has the detail. The ch
 | 0.10.0 | A package index URL with a query string is refused; move a `uv.toml` into `pyproject.toml`; lineage and failure causes changed. | This row |
 | 0.9.0 | Upgrade every worker before you deploy Python assets; rewrite `asset(deps=...)` as `asset(inputs=...)`; move helper modules out of `assets/`; an older bundle needs three additions. | [Upgrading](../how-to/deploy-with-compose.md#upgrading), [Projects and deploys](../how-to/projects.md) |
 
+## Notes for the next release
+
+### Row filters and column masks are type-checked when they are created
+
+A row filter or column mask is now checked against the table's columns, as they are when you
+create it, and refused if it would need Lakana to convert a value: a text column compared with a
+number (`code = 5`), two columns of different types, a column that is not boolean used as a
+condition, or a mask whose type differs from its column's (`0` on a text column). The message
+names the column, both types and what to write, for example "`code` is text; compare it with '5',
+not 5." Numbers of any kind still compare with each other. A date or timestamp is written as a
+typed literal (`DATE '2026-01-01'`), which is new and checked at creation. See [Show some people
+only some rows](../how-to/filter-rows.md#an-expression-must-not-fail-on-any-stored-value) and
+[Mask a column for some people](../how-to/mask-a-column.md#an-expression-must-not-fail-on-any-stored-value).
+
+Filters and masks that already exist are **not** checked again, and keep working as before. One
+that compares across types still fails every query it covers, with the message "The query failed
+on a value it could not convert or compute, under a row filter or column mask on ...". To find
+them, as an administrator:
+
+1. List them: `lakana row-filter list` and `lakana column-mask list` (`--env`, `--principal` or
+   `--group` narrow the list). Each row shows the table and the `expression`, and for a mask the
+   column.
+2. Read the columns and their types of each table named: `lakana table get NAMESPACE.TABLE`.
+3. Look for a comparison (`=`, `<>`, `<`, `<=`, `>`, `>=`) of a text column with a number or of
+   two columns of different types, for a column that stands alone as a condition and is not
+   boolean, and for a mask whose value is of another type than its column (a number on a text
+   column, text on a number column).
+4. Create the corrected filter or mask, then revoke the old one (the order matters: until the new
+   one exists, revoking the old one shows the real values).
+
+A script or a deploy that creates a filter or mask with such an expression now fails at the
+creation, with the message above; fix the expression there.
+
 ## Notes for 0.15.0
 
 ### A database check on a secret's use
