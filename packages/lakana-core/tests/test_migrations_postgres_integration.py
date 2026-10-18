@@ -1815,6 +1815,9 @@ def test_0035_secret_use_check_on_postgres() -> None:
             broken = insert(conn, "PACKAGE_INDEX", None)
         with pytest.raises(Exception, match=str(broken)):
             migrate.upgrade(url, revision_0035)
+        # The refused upgrade must have left the database at 0034: moving to 0034 again changes
+        # nothing, so a version left at 0035 would show here.
+        migrate.upgrade(url, revision_0034)
         assert _alembic_version(engine) == revision_0034
         with engine.begin() as conn:
             conn.execute(sqlalchemy.text("DELETE FROM secrets"))

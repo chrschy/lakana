@@ -1182,3 +1182,31 @@ def test_the_entry_stream_yields_what_pyiceberg_reads(
 
     assert len(streamed) == 2
     assert summary(streamed) == summary(read)
+
+
+def test_the_deadline_applies_while_the_manifest_list_is_being_iterated(
+    catalog: CatalogService,
+    principal: PrincipalRef,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ref, created = _created(catalog, principal, tmp_path)
+    uri = _parquet(created, "l.parquet", field_ids=True)
+    snapshot = _snapshot(created.metadata, None, [uri], 900_000_199)
+    # The deadline is set and the list opened in time; the first listed manifest is too late.
+    ticks = iter([0.0, 0.0])
+    monkeypatch.setattr(field_ids_module, "_clock", lambda: next(ticks, 1000.0))
+
+    with pytest.raises(ValidationError, match="took longer than 60 seconds"):
+        _commit_snapshots(catalog, principal, ref, [snapshot])
+
+
+def test_a_file_listed_twice_in_a_manifest_is_checked_once(
+    catalog: CatalogService, principal: PrincipalRef, tmp_path: Path
+) -> None:
+    ref, created = _created(catalog, principal, tmp_path)
+    uri = _parquet(created, "twice.parquet", field_ids=True)
+
+    _commit_files(catalog, principal, ref, created, [uri, uri], 900_000_200)
+
+    assert catalog.load_table(principal, ref).metadata.current_snapshot_id == 900_000_200
