@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
@@ -470,9 +471,12 @@ def test_process_cmdline_reads_a_live_process_and_none_for_a_missing_one() -> No
 
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", "marker-arg"])
     try:
-        assert server._process_cmdline(child.pid) == (
-            f"{sys.executable} -c import time; time.sleep(30) marker-arg "
-        )
+        # The kernel fills /proc/<pid>/cmdline once the exec has finished: wait for it, bounded.
+        deadline = time.monotonic() + 10
+        while not (cmdline := server._process_cmdline(child.pid)) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert cmdline is not None
+        assert cmdline.endswith("-c import time; time.sleep(30) marker-arg ")
     finally:
         child.kill()
         child.wait(timeout=10)
