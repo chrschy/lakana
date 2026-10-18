@@ -31,11 +31,20 @@ ENV TMPDIR=/var/tmp/lakana \
     PYTHONUNBUFFERED=1 \
     LAKANA_HOST=0.0.0.0 \
     LAKANA_PORT=8000
+# Directories that named volumes inherit owner and mode from on first use: the worker's attempt
+# directories (shared with task containers through the launcher), the launcher's socket directory
+# (its group is the worker's; set-group-id keeps the socket and token in that group, sticky stops
+# the worker from renaming or deleting them), the launcher's own state and the egress proxy's key.
 RUN groupadd --system --gid 10001 lakana \
  && useradd --system --uid 10001 --gid lakana --no-create-home --home-dir /home/lakana --shell /usr/sbin/nologin lakana \
  && mkdir -p /var/tmp/lakana /home/lakana/.cache/lakana-worker \
  && chown -R lakana:lakana /home/lakana /var/tmp/lakana \
- && chmod 0700 /home/lakana/.cache/lakana-worker
+ && chmod 0700 /home/lakana/.cache/lakana-worker \
+ && install -d -o 10001 -g 10001 -m 0700 /home/lakana/.cache/lakana-worker/attempts \
+ && install -d -o 0 -g 10001 -m 0770 /run/lakana-launcher \
+ && chmod 3770 /run/lakana-launcher \
+ && install -d -o 0 -g 0 -m 0700 /var/lib/lakana-launcher \
+ && install -d -o 0 -g 10001 -m 2750 /run/lakana-egress
 # git and ssh fetch repositories for deploys; runtime packages only.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git openssh-client \
@@ -46,6 +55,14 @@ RUN apt-get update \
 COPY --from=uv /uv /usr/local/bin/uv
 COPY --from=builder /opt/lakana /opt/lakana
 COPY --from=builder /usr/bin/tini /usr/bin/tini
+# The launcher holds the Docker socket, so it must not start on the venv above: every `.pth` file
+# of a dependency would run in it before `main`. It runs from this copy of its own package (it
+# imports only the standard library) with the base interpreter, `-I` (no environment, no user
+# site) and `-S` (no site at all). The bundle's `launcher` service sets this as its command:
+# launcher command: /usr/local/bin/python -I -S -c "import sys; sys.path.insert(0, '/opt/lakana-launcher'); from lakana_worker.launcher.__main__ import main; main()"
+COPY --from=builder /opt/lakana/lib/python3.14/site-packages/lakana_worker/launcher/ /opt/lakana-launcher/lakana_worker/launcher/
+RUN touch /opt/lakana-launcher/lakana_worker/__init__.py \
+ && chmod -R go-w /opt/lakana-launcher
 USER 10001:10001
 RUN python -c "import duckdb; duckdb.connect().execute('INSTALL httpfs')"
 EXPOSE 8000
