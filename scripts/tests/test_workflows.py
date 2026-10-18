@@ -332,7 +332,7 @@ def _gate_violations(jobs: dict) -> list[str]:
                 continue
             if "write" in (job.get("permissions") or {}).values():
                 problems.append(f"`{name}` runs before the gate with a write permission")
-            if "secrets." in str(job):
+            if re.search(r"\bsecrets\b", str(job)):
                 problems.append(f"`{name}` runs before the gate and reads a secret")
             continue
         if not _reaches(jobs, name, "approve"):
@@ -372,6 +372,10 @@ def test_one_approval_job_gates_a_release() -> None:
         ),
         (
             lambda j: j["sbom"]["steps"].append({"run": "x", "env": {"T": "${{ secrets.T }}"}}),
+            "`sbom` runs before the gate and reads a secret",
+        ),
+        (
+            lambda j: j["sbom"].update(secrets="inherit"),
             "`sbom` runs before the gate and reads a secret",
         ),
     ],
