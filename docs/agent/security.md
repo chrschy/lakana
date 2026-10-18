@@ -1846,7 +1846,7 @@ carries any of the three, and a grant below instance scope never satisfied these
   the `grant create` command for the kind of subject that occurs, and who must act now). The
   `lakana grant list` table shows the marker `no effect` in a `note` column with one explaining
   line under the table, followed by the command that revokes each marked grant with its whole id
-  (the first five, then a count; the table may leave `id` out); `--output json`, the SDK and REST
+  (the first five, then a count; a narrow table may still leave `id` out when subjects are ids); `--output json`, the SDK and REST
   (`GrantOut.note`) carry the full
   sentence `no effect: <ACTION> needs the ADMIN role`. Nothing is deleted on upgrade.
 - **The bootstrap is the one exemption.** `AllowAllAuthorization` asks for no role: it creates

@@ -678,7 +678,7 @@ def test_no_explaining_line_without_a_marker_or_in_json(tmp_path: Path) -> None:
     out = _render(tmp_path, stale, 120)
     assert "no effect: MANAGE_GRANT needs the ADMIN role" in out and _NO_EFFECT_LINE not in out
     assert "lakana grant revoke" not in out
-    assert "lakana grant revoke" not in _render(tmp_path, plain, 120)
+    assert _NO_EFFECT_LINE not in _render(tmp_path, plain, 120)
 
 
 def test_a_package_index_url_stays_on_one_line_while_the_name_wraps(tmp_path: Path) -> None:

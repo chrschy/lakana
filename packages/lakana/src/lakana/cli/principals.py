@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 from enum import StrEnum
 from typing import Annotated
 
@@ -42,7 +43,15 @@ def create(
     state = state_of(ctx)
     api_type = principal_type.value.upper().replace("-", "_")
     principal = state.client().principals.create(name, api_type)
-    _output.done(state, f"Created {principal_type.value} {_output.inline(name)}", principal)
+    who = shlex.quote(_output.inline(name))
+    _output.done(
+        state,
+        f"Created {principal_type.value} {_output.inline(name)}\n"
+        "It can do nothing yet. Next:\n"
+        f"  lakana grant create --principal {who} --role ANALYST --kind ENVIRONMENT --env ENV\n"
+        f"  lakana token issue {who} NAME",
+        principal,
+    )
 
 
 @principal_app.command("list")

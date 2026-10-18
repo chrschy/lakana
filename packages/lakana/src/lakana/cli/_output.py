@@ -487,6 +487,20 @@ def print_secret(state: CliState, label: str, secret: str) -> None:
     sys.stderr.write(f"Store this {label.lower()} now: it can't be shown again.\n")
 
 
+def next_step(state: CliState, text: str) -> None:
+    """Tell the reader what to do after a command, on stderr, in table mode only.
+
+    Parameters
+    ----------
+    state
+        The CLI state.
+    text
+        The sentence; put each name in it through `inline` first.
+    """
+    if state.output != "json":
+        sys.stderr.write(safe_text(text) + "\n")
+
+
 def error(state: CliState, kind: str, message: str, hint: str | None) -> None:
     """Report a failure on stderr.
 

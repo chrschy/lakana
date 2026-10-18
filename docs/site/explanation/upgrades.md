@@ -511,8 +511,9 @@ change groups and issue or revoke tokens. The three permissions behind this (`MA
    profile). `lakana whoami` prints who your credential is. The JSON of `grant list` has one
    entry per grant: an administrator is a grant with `"role": "ADMIN"` and `"kind": "INSTANCE"`,
    for the principal in `principal_id` or, for a group, in `group_id`. The table of `grant list`
-   shows these ids as `principal <id>` or `group <id>`, and the commands print no id next to a
-   name, so to read it by name list the principals and groups, then ask for the grants of each:
+   names each subject (`user alice`, `group analysts`) where the caller may list principals and
+   groups, and shows `principal <id>` or `group <id>` otherwise. To read the ids, list the
+   principals and groups, then ask for the grants of each:
 
 <!-- source: docs/examples/getting-started/run.sh#delegation-check -->
 ```bash

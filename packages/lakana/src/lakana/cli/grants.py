@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import shlex
-from collections.abc import Sequence
-from typing import Annotated, Protocol
+from collections.abc import Callable, Sequence
+from typing import TYPE_CHECKING, Annotated, Protocol
 
 import typer
 
 from lakana._models import Grant
 from lakana.cli import _output
 from lakana.cli._state import CliError, confirm, state_of
+from lakana.errors import LakanaError
+
+if TYPE_CHECKING:
+    from lakana.client import Client
 
 grant_app = typer.Typer(help="Manage grants.", no_args_is_help=True)
 
@@ -43,7 +47,7 @@ _MAX_REVOKE_LINES = 5
 """The most commands written out under the table; `--output json` has every grant."""
 
 
-def _revoke_lines(grants: Sequence[Grant]) -> list[str]:
+def _revoke_lines(grants: Sequence[Grant], subject: Callable[[Grant], str]) -> list[str]:
     """Write the command that revokes each grant without effect.
 
     The table leaves `id` out on a narrow terminal, so the line under it gives the
@@ -54,6 +58,8 @@ def _revoke_lines(grants: Sequence[Grant]) -> list[str]:
     ----------
     grants
         The listed grants.
+    subject
+        Says who a grant is for.
 
     Returns
     -------
@@ -66,7 +72,7 @@ def _revoke_lines(grants: Sequence[Grant]) -> list[str]:
     lines: list[str] = []
     for grant in stale[:_MAX_REVOKE_LINES]:
         what = _output.inline(grant.action or grant.role or "")
-        lines.append(f"{what}, {_output.inline(subject_of(grant))}:")
+        lines.append(f"{what}, {_output.inline(subject(grant))}:")
         lines.append(f"  lakana grant revoke {shlex.quote(_output.inline(grant.id))}")
     if len(stale) > _MAX_REVOKE_LINES:
         lines.append(f"and {len(stale) - _MAX_REVOKE_LINES} more: use --output json")
@@ -87,6 +93,128 @@ def _marker(grant: Grant) -> str:
         ``no effect`` when the server sent a note, else an empty cell.
     """
     return "no effect" if grant.note else ""
+
+
+_SUBJECT_KINDS = {"USER": "user", "SERVICE_ACCOUNT": "service"}
+"""How a principal's type is written in front of its name."""
+
+
+def _securable_of(grant: Grant) -> str:
+    """Say what a grant is on, naming the environment.
+
+    Parameters
+    ----------
+    grant
+        A grant.
+
+    Returns
+    -------
+    str
+        `the instance`, `environment dev`, `namespace gold.sales in environment dev` or
+        `table gold.sales.orders in environment dev`.
+    """
+    if grant.kind == "INSTANCE":
+        return "the instance"
+    where = f"environment {grant.environment}"
+    if grant.kind == "ENVIRONMENT":
+        return where
+    if grant.kind == "NAMESPACE":
+        return f"namespace {grant.namespace} in {where}"
+    return f"table {grant.namespace}.{grant.table} in {where}"
+
+
+def _names_of(client: Client, grants: Sequence[Grant]) -> dict[str, str]:
+    """Find the name behind each principal and group id the grants carry.
+
+    The API names a grant's subject by id only, and has no call that turns an id into a
+    name. Each principal's and each group's own grants carry those ids, so the names are
+    found by listing them, until every id is known. Admin-only listings that the caller
+    may not read leave their ids unresolved.
+
+    Parameters
+    ----------
+    client
+        The SDK client.
+    grants
+        The listed grants.
+
+    Returns
+    -------
+    dict
+        `id` to `user alice`, `service ci-bot` or `group analysts`, for the ids found.
+    """
+    wanted = {i for g in grants for i in (g.principal_id, g.group_id) if i is not None}
+    found: dict[str, str] = {}
+    try:
+        for principal in client.principals.list():
+            if wanted.issubset(found):
+                return found
+            kind = _SUBJECT_KINDS.get(principal.type, "principal")
+            for grant in client.grants.list(principal_name=principal.name):
+                if grant.principal_id is not None and grant.principal_id in wanted:
+                    found[grant.principal_id] = f"{kind} {principal.name}"
+        for group in client.groups.list():
+            if wanted.issubset(found):
+                return found
+            for grant in client.grants.list(group_name=group.name):
+                if grant.group_id is not None and grant.group_id in wanted:
+                    found[grant.group_id] = f"group {group.name}"
+    except LakanaError:
+        pass
+    return found
+
+
+def _subject_namer(
+    client: Client, grants: Sequence[Grant], principal: str | None, group: str | None
+) -> Callable[[Grant], str]:
+    """Build the function that says who a grant is for, by name where it can.
+
+    Parameters
+    ----------
+    client
+        The SDK client.
+    grants
+        The listed grants.
+    principal
+        The `--principal` filter: every grant is then this principal's.
+    group
+        The `--group` filter: every grant is then this group's.
+
+    Returns
+    -------
+    Callable
+        Reads `user alice`, `service ci-bot` or `group analysts` from a grant, and falls back
+        to `principal <id>` or `group <id>` for an id whose name could not be found.
+    """
+    names: dict[str, str] = {}
+    if group is not None:
+        names = {g.group_id: f"group {group}" for g in grants if g.group_id is not None}
+    elif principal is not None:
+        try:
+            kind = _SUBJECT_KINDS.get(client.principals.get(principal).type, "principal")
+        except LakanaError:
+            kind = "principal"
+        names = {g.principal_id: f"{kind} {principal}" for g in grants if g.principal_id}
+    else:
+        names = _names_of(client, grants)
+
+    def subject(grant: Grant) -> str:
+        """Say who one grant is for.
+
+        Parameters
+        ----------
+        grant
+            A listed grant.
+
+        Returns
+        -------
+        str
+            The name with its kind, or the id-based fallback.
+        """
+        known = names.get(grant.principal_id or grant.group_id or "")
+        return known if known is not None else subject_of(grant)
+
+    return subject
 
 
 def subject_of(item: _HasSubject) -> str:
@@ -181,8 +309,12 @@ def create(
         namespace=ns,
         table=table,
     )
+    recipient = f"group {_output.inline(group)}" if group else _output.inline(principal or "")
     _output.done(
-        state, f"Created grant {grant.id} ({grant.role or grant.action} on {grant.kind})", grant
+        state,
+        f"Created grant {_output.inline(grant.id)} ({grant.role or grant.action} on "
+        f"{_output.inline(_securable_of(grant))}) to {recipient}",
+        grant,
     )
 
 
@@ -197,9 +329,14 @@ def list_grants(
 ) -> None:
     """List active grants, optionally filtered.
 
-    The table names who each grant is for in `subject`. When the terminal is too narrow it
-    leaves out `kind`, `environment`, `id` and `namespace`, in that order; `--output json`
-    always has every field.
+    The table names who each grant is for in `subject` (`user alice`, `service ci-bot`,
+    `group analysts`); the API sends ids only, so the names cost one request per principal
+    and group until all are found, and a caller that may not list them sees the ids. A
+    column with nothing in it is left out. `--env NAME` lists who has access to one
+    environment, with names and roles. When the terminal is too narrow the table leaves out
+    `kind`, `namespace`, `table`, `environment` and last `id`, in that order, so that the `id`
+    that `grant revoke` needs stays, and a line under the table shows the revoke command;
+    `--output json` always has every field.
 
     A grant of `MANAGE_GRANT`, `MANAGE_GROUP` or `MANAGE_TOKEN` as a single action has the
     marker `no effect` in a `note` column, which never drops (a narrow terminal leaves out
@@ -224,22 +361,34 @@ def list_grants(
         Only grants on this table.
     """
     state = state_of(ctx)
-    grants = state.client().grants.list(
+    client = state.client()
+    grants = client.grants.list(
         principal_name=principal, group_name=group, environment=env, namespace=ns, table=table
     )
+    subject = _subject_namer(client, grants, principal, group) if state.output != "json" else None
     columns = ["id", "subject", "role", "action", "kind", "environment", "namespace", "table"]
-    droppable = ["kind", "environment", "id", "namespace"]
+    for name in ("role", "action", "environment", "namespace", "table"):
+        if not any(getattr(grant, name) for grant in grants):
+            columns.remove(name)
+    droppable = ["kind", "namespace", "table", "environment", "id"]
     footnotes: dict[str, str] = {}
+    if len(grants) == 1:
+        footnotes["id"] = (
+            f"Revoke it with: lakana grant revoke {shlex.quote(_output.inline(grants[0].id))}"
+        )
+    else:
+        footnotes["id"] = "Revoke one with: lakana grant revoke ID"
     if any(grant.note for grant in grants):
         columns.append("note")
-        droppable.append("table")
-        footnotes["note"] = "\n".join([_NO_EFFECT_LINE, *_revoke_lines(grants)])
+        footnotes["note"] = "\n".join(
+            [_NO_EFFECT_LINE, *_revoke_lines(grants, subject or subject_of)]
+        )
     _output.emit(
         state,
         grants,
         columns=columns,
         droppable=droppable,
-        derived={"subject": subject_of, "note": _marker},
+        derived={"subject": subject or subject_of, "note": _marker},
         whole=["subject", "note"],
         footnotes=footnotes,
     )
@@ -253,8 +402,7 @@ def revoke(
 ) -> None:
     """Revoke grant GRANT_ID.
 
-    Take the id from `grant list`; on a narrow terminal the table leaves it out, so widen the
-    terminal or use `--output json`.
+    Take the id from `grant list`, which keeps it in the table even on a narrow terminal.
 
     Parameters
     ----------

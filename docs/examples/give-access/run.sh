@@ -32,13 +32,14 @@ lakana principal create alice --type user
 # docs:end create
 capture_end
 grep -Fxq 'Created user alice' "$captured"
+grep -Fq 'lakana token issue alice NAME' "$captured"
 
 capture_start
 # docs:start grant
 lakana grant create --principal alice --role ANALYST --kind ENVIRONMENT --env dev
 # docs:end grant
 capture_end
-grep -Eq '^Created grant [0-9a-f-]{36} \(ANALYST on ENVIRONMENT\)$' "$captured"
+grep -Eq '^Created grant [0-9a-f-]{36} \(ANALYST on environment dev\) to alice$' "$captured"
 
 capture_start
 # docs:start token
@@ -48,6 +49,7 @@ capture_end
 grep -Eq '^Issued token [A-Za-z0-9]+ \(alice-laptop\) for alice$' "$captured"
 TOKEN=$(sed -n 's/^Token: //p' "$captured")
 case "$TOKEN" in lakana_pat_*) ;; *) echo "no token in the output" >&2; exit 1 ;; esac
+grep -Fq 'Give this token to alice over a trusted channel; they run `lakana login`.' "$captured"
 KEY_ID=$(sed -n 's/^Issued token \([A-Za-z0-9]*\) .*/\1/p' "$captured")
 
 # What the new person types, on a machine of their own: a configuration folder that has no
@@ -83,11 +85,13 @@ export XDG_CONFIG_HOME=$admin_config
 capture_start
 # docs:start who
 lakana principal list
-lakana --output json grant list --principal alice
+lakana grant list --principal alice
+lakana grant list --env dev
 lakana token list alice
 # docs:end who
 capture_end
-grep -Fq 'alice' "$captured"
+grep -Fq 'user alice' "$captured"
+grep -Eq '^Revoke it with: lakana grant revoke [0-9a-f-]{36}$' "$captured"
 
 GRANT_ID=$(lakana --output json grant list --principal alice | python3 -c 'import json,sys; g=json.load(sys.stdin); assert len(g) == 1, g; print(g[0]["id"])')
 

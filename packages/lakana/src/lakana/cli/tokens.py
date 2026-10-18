@@ -39,6 +39,11 @@ def issue(ctx: typer.Context, principal: str, name: str) -> None:
             f"for {_output.inline(principal)}",
         )
     _output.print_secret(state, "Token", issued.token)
+    _output.next_step(
+        state,
+        f"Give this token to {_output.inline(principal)} over a trusted channel; "
+        "they run `lakana login`.",
+    )
 
 
 @token_app.command("list")
