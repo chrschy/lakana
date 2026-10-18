@@ -13,7 +13,7 @@ import lakana
 from lakana._models import Column, Lineage, Table
 from lakana.cli import _files, _output
 from lakana.cli._break_glass import BREAK_GLASS, REASON, break_glass_reason
-from lakana.cli._state import CliError, confirm, resolve_environment, state_of
+from lakana.cli._state import CliError, CliState, confirm, resolve_environment, state_of
 
 table_app = typer.Typer(help="Manage tables and load data.", no_args_is_help=True)
 
@@ -235,6 +235,37 @@ def list_tables(ctx: typer.Context, namespace: str, env: _ENV = None) -> None:
     )
 
 
+def _emit_description(state: CliState, table: Table) -> None:
+    """Print a table's description and where it came from, when it has one.
+
+    Parameters
+    ----------
+    state
+        The CLI state.
+    table
+        The table.
+    """
+    if table.description:
+        source = "edited" if table.description_source == "edited" else "from the project"
+        _output.emit(state, f"Description ({source}): {table.description}")
+
+
+def _emit_columns(state: CliState, table: Table) -> None:
+    """Print a table's columns, with their descriptions when any has one.
+
+    Parameters
+    ----------
+    state
+        The CLI state.
+    table
+        The table.
+    """
+    if any(c.description for c in table.columns):
+        _output.emit(state, table.columns, columns=_DESCRIBE_COLUMNS, flexible=["description"])
+    else:
+        _output.emit(state, table.columns)
+
+
 @table_app.command("get")
 def get(ctx: typer.Context, name: str, env: _ENV = None) -> None:
     """Show table or view NAME, its columns, and a view's SQL and references.
@@ -267,7 +298,8 @@ def get(ctx: typer.Context, name: str, env: _ENV = None) -> None:
         else:
             _output.emit(state, table.sql or "")
         _output.emit(state, table.references)
-        _output.emit(state, table.columns)
+        _emit_description(state, table)
+        _emit_columns(state, table)
         return
     if table.kind == "ARTIFACT":
         _output.emit(state, table, columns=_GET_COLUMNS, derived=_DERIVED)
@@ -280,7 +312,83 @@ def get(ctx: typer.Context, name: str, env: _ENV = None) -> None:
     _output.emit(state, table, columns=[*_GET_COLUMNS, "metadata_location"], derived=_DERIVED)
     if table.state_message:
         _output.emit(state, table.state_message)
-    _output.emit(state, table.columns)
+    _emit_description(state, table)
+    _emit_columns(state, table)
+
+
+_DESCRIBE_COLUMNS = ["name", "type", "nullable", "description"]
+"""The columns of a table's schema listing in `table get`."""
+
+
+@table_app.command("describe")
+def describe(
+    ctx: typer.Context,
+    name: str,
+    column: Annotated[
+        str | None,
+        typer.Option("--column", help="Describe this column instead of the table."),
+    ] = None,
+    text: Annotated[
+        str | None,
+        typer.Option("--text", help="The description, up to 4,000 characters."),
+    ] = None,
+    reset: Annotated[
+        bool,
+        typer.Option("--reset", help="Remove your text, so the project's shows again."),
+    ] = False,
+    env: _ENV = None,
+) -> None:
+    """Describe table NAME or one of its columns, or reset the description.
+
+    The text you set is shown instead of the `description:` in the asset's header, and a deploy
+    never replaces it. `--reset` goes back to the header's text. You need to own the table, or
+    hold the right to drop it.
+
+    Parameters
+    ----------
+    ctx
+        The Typer context.
+    name
+        The qualified table name.
+    column
+        A column to describe instead of the table.
+    text
+        The new description.
+    reset
+        Remove the edit.
+    env
+        The environment.
+
+    Raises
+    ------
+    CliError
+        If neither or both of `--text` and `--reset` are given.
+    """
+    if (text is None) == (not reset):
+        raise CliError(
+            "Give exactly one of --text TEXT (set the description) and --reset "
+            "(go back to the project's text)."
+        )
+    state = state_of(ctx)
+    environment = resolve_environment(state, env)
+    table = state.client().tables.describe(
+        environment, name, None if reset else text, column=column
+    )
+    target = f"{_output.inline(name)}" + (f" column {_output.inline(column)}" if column else "")
+    if not reset:
+        _output.done(state, f"Described {target} in {_output.inline(environment)}", table)
+        return
+    shown = (
+        table.description
+        if column is None
+        else next((c.description for c in table.columns if c.name == column), None)
+    )
+    after = "now shows the project's text" if shown else "now has no description"
+    _output.done(
+        state,
+        f"Reset the description of {target} in {_output.inline(environment)}; it {after}",
+        table,
+    )
 
 
 @table_app.command("delete")

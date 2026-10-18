@@ -73,6 +73,11 @@ ROUTES: dict[str, Route] = {
     "tables.list": Route("GET", "/api/v1/environments/{env}/namespaces/{path}/tables"),
     "tables.get": Route("GET", "/api/v1/environments/{env}/namespaces/{path}/tables/{name}"),
     "tables.delete": Route("DELETE", "/api/v1/environments/{env}/namespaces/{path}/tables/{name}"),
+    "tables.describe": Route("PATCH", "/api/v1/environments/{env}/namespaces/{path}/tables/{name}"),
+    "tables.describe_column": Route(
+        "PUT",
+        "/api/v1/environments/{env}/namespaces/{path}/tables/{name}/columns/{column}/description",
+    ),
     "tables.create_external": Route(
         "POST", "/api/v1/environments/{env}/namespaces/{path}/tables/external"
     ),

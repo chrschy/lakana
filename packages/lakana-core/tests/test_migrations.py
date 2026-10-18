@@ -3201,3 +3201,67 @@ def test_0036_marks_existing_column_masks_as_not_type_checked(
         }
     finally:
         engine.dispose()
+
+
+_REVISION_0037 = "c6f3a9d2b8e4"
+
+
+def test_0037_adds_the_description_columns_and_table(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revision `0037`: descriptions on `tables` and `column_descriptions`, undone on downgrade.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    """
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, _REVISION_0036)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        assert "column_descriptions" not in inspect(engine).get_table_names()
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, _REVISION_0037)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        inspector = inspect(engine)
+        found = {c["name"]: c for c in inspector.get_columns("tables")}
+        assert found["description_project"]["nullable"] is True
+        assert found["description_edited"]["nullable"] is True
+        columns = {c["name"]: c for c in inspector.get_columns("column_descriptions")}
+        assert set(columns) == {
+            "id",
+            "table_id",
+            "column",
+            "description_project",
+            "description_edited",
+            "updated_by",
+            "updated_at",
+        }
+        assert [
+            (fk["referred_table"], fk["options"].get("ondelete"))
+            for fk in inspector.get_foreign_keys("column_descriptions")
+        ] == [("tables", "CASCADE"), ("principals", "SET NULL")]
+        assert [
+            u["column_names"] for u in inspector.get_unique_constraints("column_descriptions")
+        ] == [["table_id", "column"]]
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, _REVISION_0036)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        inspector = inspect(engine)
+        assert "column_descriptions" not in inspector.get_table_names()
+        assert {"description_project", "description_edited"}.isdisjoint(
+            c["name"] for c in inspector.get_columns("tables")
+        )
+    finally:
+        engine.dispose()

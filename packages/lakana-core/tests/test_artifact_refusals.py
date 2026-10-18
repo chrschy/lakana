@@ -222,6 +222,16 @@ def test_a_rename_that_fails_for_another_integrity_reason_is_a_conflict_with_a_n
             artifact_refusal("gold.churn", "maintenance"),
         ),
         (
+            lambda c, p: c.set_table_description(p, _REF, "text"),
+            ValidationError,
+            artifact_refusal("gold.churn", "a description"),
+        ),
+        (
+            lambda c, p: c.set_column_description(p, _REF, "id", "text"),
+            ValidationError,
+            artifact_refusal("gold.churn", "a description"),
+        ),
+        (
             lambda c, p: c.write_batches(
                 p, _REF, mode=WriteMode.REPLACE, schema=_ROWS.schema, batches=_ROWS.to_batches()
             ),
@@ -674,6 +684,8 @@ _ARTIFACT_HANDLING = {
         "load_table_at_check": "hides",
         "commit_table": "refuses",
         "describe_table": "describes",
+        "set_table_description": "refuses",
+        "set_column_description": "refuses",
         "can_read_table": "describes",
         "table_exists": "hides",
         "list_tables": "lists",

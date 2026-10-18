@@ -68,11 +68,19 @@ class Column:
         `"decimal(10,2)"`.
     nullable
         Whether the column accepts nulls.
+    description
+        The column's description; `None` when it has none, and from a server older than
+        descriptions.
+    description_source
+        ``project`` for the text of the asset header, ``edited`` for one set through the API;
+        `None` without a description.
     """
 
     name: str
     type: str
     nullable: bool
+    description: str | None = None
+    description_source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -175,6 +183,11 @@ class Table:
         than checks.
     state_message
         Why it is not published or is kept, naming the check and the run; `None` otherwise.
+    description
+        The table's description: the edit when it has one, else the asset header's text; `None`
+        when there is none, and from a server older than descriptions.
+    description_source
+        ``project`` or ``edited``; `None` without a description.
     """
 
     name: str
@@ -189,6 +202,8 @@ class Table:
     snapshot_id: int | None = None
     state: str = "published"
     state_message: str | None = None
+    description: str | None = None
+    description_source: str | None = None
 
 
 @dataclass(frozen=True)

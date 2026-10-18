@@ -125,6 +125,16 @@ Each cell is a summary. The page named in the last column has the detail. The ch
 
 ## Notes for the next release
 
+### Tables and columns have descriptions
+
+Migration `0037` adds the two texts of a description to `tables` and a table `column_descriptions`.
+Nothing is shown until the next deploy: it publishes each asset's `description:` and `columns:` onto
+the tables that already exist. A description set with `lakana table describe` is shown instead of the
+project's text and a deploy never replaces it; see [Describe a table](../how-to/describe-a-table.md).
+Going back to the previous release drops the descriptions, edits included. The JSON of a table
+and of each column gains `description` and `description_source`; nothing is removed. A table created
+through the API now records its creator as its owner, which is what lets the creator describe it.
+
 ### Row filters and column masks are type-checked when they are created
 
 A row filter or column mask is now checked against the table's columns, as they are when you

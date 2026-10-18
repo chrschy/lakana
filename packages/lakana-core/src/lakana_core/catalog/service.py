@@ -11,7 +11,8 @@ import json
 import logging
 import uuid
 from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from dataclasses import field as dataclass_field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
@@ -63,6 +64,15 @@ from lakana_core.catalog.append import (
 )
 from lakana_core.catalog.commit import commit_metadata_pointer
 from lakana_core.catalog.datafiles import list_data_files
+from lakana_core.catalog.descriptions import (
+    ShownDescription,
+    check_text,
+    column_descriptions,
+    edit_column,
+    edit_table,
+    sync_created_table,
+    table_description,
+)
 from lakana_core.catalog.external_location import check_claim_free, parse_external_location
 from lakana_core.catalog.field_ids import check_added_files_have_field_ids
 from lakana_core.catalog.identity import artifact_refusal, resolve_table_id
@@ -518,6 +528,12 @@ class TableDescription:
     file_format
         An external table's stored file format (`"parquet"`, `"csv"`, `"json"`); `None` for
         every other kind.
+    description
+        The text the table shows: its edit when it has one, else the project's; `None` for none.
+    description_source
+        ``"edited"`` or ``"project"``; `None` when there is no description.
+    column_descriptions
+        Column name → text and source, for the columns of `columns` that have a description.
     """
 
     ref: TableRef
@@ -533,6 +549,9 @@ class TableDescription:
     state_message: str | None = None
     schema_id: int | None = None
     file_format: str | None = None
+    description: str | None = None
+    description_source: Literal["project", "edited"] | None = None
+    column_descriptions: dict[str, ShownDescription] = dataclass_field(default_factory=dict)
 
 
 _NO_UNPUBLISHING = (
@@ -1808,7 +1827,7 @@ class CatalogService:
             properties=properties,
             location=location,
         )
-        return self._publish_table(prepared, prepared.metadata)
+        return self._publish_table(prepared, prepared.metadata, owner_id=p.id)
 
     def _prepare_table(
         self,
@@ -1897,7 +1916,9 @@ class CatalogService:
             metadata=metadata,
         )
 
-    def _publish_table(self, prepared: _PreparedTable, metadata: TableMetadata) -> LoadedTable:
+    def _publish_table(
+        self, prepared: _PreparedTable, metadata: TableMetadata, *, owner_id: uuid.UUID
+    ) -> LoadedTable:
         """Write a prepared table's metadata file and insert its catalog row.
 
         The second half of `create_table`. `metadata` is the prepared
@@ -1912,6 +1933,8 @@ class CatalogService:
             From `_prepare_table`.
         metadata
             The metadata to publish.
+        owner_id
+            The principal who creates the table, who owns it.
 
         Returns
         -------
@@ -1948,8 +1971,10 @@ class CatalogService:
             table_type=TableType.ICEBERG,
             metadata_location=written,
             previous_metadata_location=None,
+            owner_id=owner_id,
         )
         self._session.add(row)
+        sync_created_table(self._session, prepared.environment_id, row, ref.dotted())
         try:
             self._guard.record_pending()
             self._commit_sent = True
@@ -2617,6 +2642,34 @@ class CatalogService:
             p, Action.READ_TABLE, Securable.table_scope(ref.environment, ref.namespace, ref.name)
         )
         _, row = self._find_table(ref)
+        described = self._describe_row(p, ref, row)
+        shown_text = table_description(row)
+        return replace(
+            described,
+            description=None if shown_text is None else shown_text.text,
+            description_source=None if shown_text is None else shown_text.source,
+            column_descriptions=column_descriptions(
+                self._session, row.id, (c.name for c in described.columns)
+            ),
+        )
+
+    def _describe_row(self, p: PrincipalRef, ref: TableRef, row: Table) -> TableDescription:
+        """Describe a table row by kind, without its descriptions.
+
+        Parameters
+        ----------
+        p
+            The acting principal, who has been authorized to read the table.
+        ref
+            The table reference.
+        row
+            Its row.
+
+        Returns
+        -------
+        TableDescription
+            Its kind, columns, and per kind its metadata location or SQL and references.
+        """
         if row.table_type is TableType.VIEW:
             definition = row.view_definition or {}
             references = definition.get("references", [])
@@ -2679,6 +2732,171 @@ class CatalogService:
             state_message=message,
             schema_id=loaded.metadata.current_schema_id,
         )
+
+    def _authorize_describe(self, p: PrincipalRef, ref: TableRef, row: Table) -> None:
+        """Allow the table's owner, or a principal who may manage it, to change a description.
+
+        Managing a table is the right to drop it (`DROP_TABLE`), which the data engineer role
+        and the admin role hold; there is no separate action for it.
+
+        Parameters
+        ----------
+        p
+            The acting principal.
+        ref
+            The table reference.
+        row
+            Its row.
+
+        Raises
+        ------
+        PermissionDenied
+            If `p` neither owns the table nor holds `DROP_TABLE` on it.
+        ValidationError
+            If the row is an artifact, which has no description.
+        """
+        if row.owner_id != p.id:
+            self._authz.authorize(
+                p,
+                Action.DROP_TABLE,
+                Securable.table_scope(ref.environment, ref.namespace, ref.name),
+            )
+        if row.table_type is TableType.ARTIFACT:
+            raise ValidationError(artifact_refusal(ref.dotted(), "a description"))
+
+    def _find_table_to_describe(self, p: PrincipalRef, ref: TableRef) -> Table:
+        """Find the table whose description `p` wants to change, and check `p` may.
+
+        A name that holds no table is answered as a refusal when `p` could not have changed
+        the description of a table of that name, so the answer does not tell what exists.
+
+        Parameters
+        ----------
+        p
+            The acting principal.
+        ref
+            The table reference.
+
+        Returns
+        -------
+        Table
+            The row.
+
+        Raises
+        ------
+        NotFoundError
+            If the table does not exist and `p` holds `DROP_TABLE` where it would be.
+        PermissionDenied
+            If `p` neither owns the table nor holds `DROP_TABLE` on it.
+        ValidationError
+            If the row is an artifact, which has no description.
+        """
+        try:
+            _, row = self._find_table(ref)
+        except NotFoundError:
+            self._authz.authorize(
+                p,
+                Action.DROP_TABLE,
+                Securable.table_scope(ref.environment, ref.namespace, ref.name),
+            )
+            raise
+        self._authorize_describe(p, ref, row)
+        return row
+
+    def set_table_description(
+        self, p: PrincipalRef, ref: TableRef, description: str | None
+    ) -> None:
+        """Set the edit of a table's description, or reset it.
+
+        The edit is shown instead of the project's text. `None` removes the edit, so the
+        project's text shows again. One `TABLE_DESCRIBED` audit event records the change with the
+        length of the edit before and after, not the text.
+
+        Parameters
+        ----------
+        p
+            The acting principal.
+        ref
+            The table reference.
+        description
+            The new text, or `None` to reset.
+
+        Raises
+        ------
+        NotFoundError
+            If the table does not exist.
+        PermissionDenied
+            If `p` neither owns the table nor holds `DROP_TABLE` on it.
+        ValidationError
+            If the text is blank or over `MAX_DESCRIPTION_LENGTH` characters, or the row is an
+            artifact.
+        """
+        row = self._find_table_to_describe(p, ref)
+        check_text(description, f"table {ref.dotted()}")
+        old, new = edit_table(row, description)
+        AuditService(self._session).record(
+            p.id,
+            AuditEventType.TABLE_DESCRIBED,
+            securable=Securable.table_scope(ref.environment, ref.namespace, ref.name),
+            detail={
+                "table": ref.dotted(),
+                "old_length": old,
+                "new_length": new,
+                "reset": description is None,
+            },
+        )
+        self._session.commit()
+
+    def set_column_description(
+        self, p: PrincipalRef, ref: TableRef, column: str, description: str | None
+    ) -> None:
+        """Set the edit of a column's description, or reset it.
+
+        Like `set_table_description`, with a `COLUMN_DESCRIBED` event that also names the column.
+        The column must be in the table's schema now, and `p` must be able to read the table.
+
+        Parameters
+        ----------
+        p
+            The acting principal.
+        ref
+            The table reference.
+        column
+            The column's name.
+        description
+            The new text, or `None` to reset.
+
+        Raises
+        ------
+        NotFoundError
+            If the table or the column does not exist.
+        PermissionDenied
+            If `p` neither owns the table nor holds `DROP_TABLE` on it, or may not read it.
+        ValidationError
+            If the text is blank or over `MAX_DESCRIPTION_LENGTH` characters.
+        """
+        row = self._find_table_to_describe(p, ref)
+        names = [c.name for c in self.describe_table(p, ref).columns]
+        if column not in names:
+            have = ", ".join(names) if names else "none"
+            raise NotFoundError(
+                f"Table {ref.dotted()} has no column {shown(column)!r}. Its columns: {have}."
+            )
+        check_text(description, f"column {column} of table {ref.dotted()}")
+        old, new = edit_column(self._session, row.id, column, description, p.id)
+        AuditService(self._session).record(
+            p.id,
+            AuditEventType.COLUMN_DESCRIBED,
+            securable=Securable.table_scope(ref.environment, ref.namespace, ref.name),
+            detail={
+                "table": ref.dotted(),
+                "column": column,
+                "old_length": old,
+                "new_length": new,
+                "reset": description is None,
+            },
+        )
+        self._session.commit()
 
     def can_read_table(self, p: PrincipalRef, ref: TableRef) -> bool:
         """Whether `p` holds READ_TABLE on a table, view or artifact, right now.
@@ -4761,6 +4979,7 @@ class CatalogService:
                 view_definition=definition,
             )
             self._session.add(row)
+            sync_created_table(self._session, env.id, row, ref.dotted())
         else:
             row = existing
             row.view_definition = definition
@@ -5305,7 +5524,7 @@ class CatalogService:
                 snapshot_before=None,
                 publishes=True,
             )
-            self._publish_table(prepared, metadata)
+            self._publish_table(prepared, metadata, owner_id=p.id)
         except Exception as exc:
             landed = self._settle_failed_write(
                 exc,

@@ -1900,3 +1900,36 @@ def test_0036_on_postgres() -> None:
         migrate.upgrade(url, revision_0036)
         assert _alembic_version(engine) == revision_0036
         engine.dispose()
+
+
+def test_0037_on_postgres() -> None:
+    """0037 adds the two description texts and `column_descriptions`; the downgrade drops them."""
+    revision_0036 = "b5e2d8f1a7c3"
+    revision_0037 = "c6f3a9d2b8e4"
+    with PostgresContainer("postgres:16", driver="pg8000") as pg:
+        url = pg.get_connection_url()
+        migrate.upgrade(url, revision_0036)
+        engine = sqlalchemy.create_engine(url)
+        assert "column_descriptions" not in sqlalchemy.inspect(engine).get_table_names()
+
+        migrate.upgrade(url, revision_0037)
+        assert _alembic_version(engine) == revision_0037
+        inspector = sqlalchemy.inspect(engine)
+        found = {c["name"]: c for c in inspector.get_columns("tables")}
+        for name in ("description_project", "description_edited"):
+            assert type(found[name]["type"]).__name__ == "TEXT"
+            assert found[name]["nullable"] is True
+        columns = {c["name"] for c in inspector.get_columns("column_descriptions")}
+        assert {"table_id", "column", "description_project", "description_edited"} <= columns
+        assert [
+            u["column_names"] for u in inspector.get_unique_constraints("column_descriptions")
+        ] == [["table_id", "column"]]
+
+        migrate.downgrade(url, revision_0036)
+        assert _alembic_version(engine) == revision_0036
+        inspector = sqlalchemy.inspect(engine)
+        assert "column_descriptions" not in inspector.get_table_names()
+        assert "description_edited" not in {c["name"] for c in inspector.get_columns("tables")}
+        migrate.upgrade(url, revision_0037)
+        assert _alembic_version(engine) == revision_0037
+        engine.dispose()

@@ -19,6 +19,7 @@ from test_projects_dag import make_asset
 import lakana_core.projects.deploys as deploys_module
 from lakana_core.auth import Action, AllowAllAuthorization, PrincipalRef, SecurableKind
 from lakana_core.catalog.identity import resolve_table_id
+from lakana_core.catalog.service import CatalogService
 from lakana_core.errors import ConflictError, NotFoundError, PermissionDenied, ValidationError
 from lakana_core.grants.authorization import GrantAuthorization
 from lakana_core.grants.service import GrantService
@@ -69,6 +70,7 @@ from lakana_core.projects.project_config import (
     ScheduleConfig,
 )
 from lakana_core.runs.store import DEPLOY_LOST_MESSAGE
+from lakana_core.storage.resolver import StorageResolver
 
 _BRONZE = NamespacePath.from_parts(["bronze"])
 _SILVER = NamespacePath.from_parts(["silver"])
@@ -317,6 +319,44 @@ def test_record_deploy_writes_version_pointer_run_and_audit(
     assert event.detail["sha"] == "a" * 40
     assert event.detail["project_version_id"] == str(version.id)
     assert event.detail["diff"]["added"] == 1
+
+
+def test_a_deploy_and_a_rollback_publish_the_assets_descriptions(
+    session: Session, env: None, principal: PrincipalRef
+) -> None:
+    """The header's text lands on the existing table; a rollback brings the earlier text back."""
+    repo = _repo(session)
+
+    def asset(text: str) -> ParsedAsset:
+        return make_asset(
+            "bronze.events",
+            metadata=AssetMetadata(
+                materialize="table", description=text, columns={"id": f"id: {text}"}
+            ),
+        )
+
+    _deployed(session, principal, repo, "a" * 40, asset("first"))
+    catalog = CatalogService(session, StorageResolver(session), AllowAllAuthorization())
+    events = TableRef("dev", _BRONZE, "events")
+    shown = catalog.describe_table(principal, events)
+    assert (shown.description, shown.description_source) == ("first", "project")
+    assert shown.column_descriptions["id"].text == "id: first"
+
+    catalog.set_table_description(principal, events, "by hand")
+    _deployed(session, principal, repo, "b" * 40, asset("second"))
+    shown = catalog.describe_table(principal, events)
+    assert (shown.description, shown.description_source) == ("by hand", "edited")
+    catalog.set_table_description(principal, events, None)
+    assert catalog.describe_table(principal, events).description == "second"
+
+    service = DeployService(session, AllowAllAuthorization())
+    view = service.submit(
+        principal, "dev", repository=repo.name, kind=DeployKind.ROLLBACK, to_previous=True
+    )
+    run = _claimed(session, session.get(DeployRun, view.id))
+    assert run is not None
+    service.execute_rollback(principal, run, worker_id="w1")
+    assert catalog.describe_table(principal, events).description == "first"
 
 
 def test_redeploying_a_sha_reuses_the_job_version(

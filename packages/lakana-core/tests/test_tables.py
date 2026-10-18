@@ -1496,8 +1496,9 @@ def test_no_new_catalog_method_builds_a_loaded_table_without_a_decision() -> Non
         )
     )
     assert callers == [
+        # `describe_table` reads through it, then adds the descriptions.
+        "_describe_row",
         "append",
-        "describe_table",
         "load_table",
         # A reader that names one snapshot a check result recorded, never the current state.
         "load_table_at_check",

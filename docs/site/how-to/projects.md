@@ -80,6 +80,10 @@ columns:
 SELECT station_id, ts, temp_c FROM bronze.weather WHERE temp_c IS NOT NULL
 ```
 
+`description` and `columns` describe the table and its columns. A deploy publishes them as the
+project's text, and a description set with `lakana table describe` wins over them and survives
+every deploy; see [Describe a table](describe-a-table.md).
+
 An asset may call only the generator table functions `range`, `generate_series` and `unnest`,
 which read no data and are not inputs; every other table function (`read_parquet`, `iceberg_scan`,
 `glob`, anything unknown) fails the deploy with an issue at `path:line` (the line where the SQL body starts) — register the

@@ -402,6 +402,100 @@ def test_tables_get_parses_the_schema_into_columns() -> None:
     assert table.columns == [Column(name="id", type="long", nullable=False)]
 
 
+def test_tables_get_carries_the_descriptions() -> None:
+    """`Table` and `Column` hold the description and where it came from; older servers send none."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "name": "sales",
+                "namespace": "bronze",
+                "uuid": "u1",
+                "metadata_location": "file:///m.json",
+                "description": "Orders",
+                "description_source": "project",
+                "schema": [
+                    {
+                        "name": "id",
+                        "type": "long",
+                        "nullable": False,
+                        "description": "Key",
+                        "description_source": "edited",
+                    },
+                    {"name": "note", "type": "string", "nullable": True},
+                ],
+            },
+        )
+
+    table = Tables(_transport(handler)).get("dev", "bronze.sales")
+
+    assert (table.description, table.description_source) == ("Orders", "project")
+    assert [(c.description, c.description_source) for c in table.columns] == [
+        ("Key", "edited"),
+        (None, None),
+    ]
+
+
+def test_tables_describe_patches_the_table_and_resets_with_none() -> None:
+    """`describe` PATCHes `{"description": text}`; `None` is sent as `null`."""
+    seen: list[tuple[str, str, bytes]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path, request.content))
+        return httpx.Response(
+            200,
+            json={
+                "name": "sales",
+                "namespace": "bronze",
+                "uuid": "u1",
+                "metadata_location": None,
+                "description": "Orders",
+                "description_source": "edited",
+                "schema": [],
+            },
+        )
+
+    tables = Tables(_transport(handler))
+    table = tables.describe("dev", "bronze.sales", "Orders")
+    tables.describe("dev", "bronze.sales", None)
+
+    assert table.description == "Orders"
+    path = "/api/v1/environments/dev/namespaces/bronze/tables/sales"
+    assert [(m, p) for m, p, _ in seen] == [("PATCH", path), ("PATCH", path)]
+    assert [json.loads(body) for _, _, body in seen] == [
+        {"description": "Orders"},
+        {"description": None},
+    ]
+
+
+def test_tables_describe_with_a_column_puts_to_the_columns_route() -> None:
+    """`describe(..., column=...)` PUTs `.../columns/{column}/description`."""
+    seen: list[tuple[str, str, bytes]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path, request.content))
+        return httpx.Response(
+            200,
+            json={
+                "name": "sales",
+                "namespace": "bronze",
+                "uuid": "u1",
+                "metadata_location": None,
+                "schema": [],
+            },
+        )
+
+    Tables(_transport(handler)).describe("dev", "bronze.sales", "Key", column="id")
+
+    method, path, body = seen[0]
+    assert (method, path) == (
+        "PUT",
+        "/api/v1/environments/dev/namespaces/bronze/tables/sales/columns/id/description",
+    )
+    assert json.loads(body) == {"description": "Key"}
+
+
 def test_tables_delete_sends_a_delete() -> None:
     """`tables.delete` DELETEs `.../namespaces/{path}/tables/{name}`."""
     seen: dict[str, Any] = {}

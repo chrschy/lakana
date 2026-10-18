@@ -199,7 +199,130 @@ def test_table_get_shows_the_columns(tmp_path: Path) -> None:
         "name": "id",
         "type": "long",
         "nullable": False,
+        "description": None,
+        "description_source": None,
     }
+
+
+def test_table_get_shows_the_description_and_the_columns_descriptions(tmp_path: Path) -> None:
+    """The table's text comes with its source; each column's text is in the schema listing."""
+    api = FakeApi()
+    columns = [
+        {**_COLUMNS[0], "description": "Order id", "description_source": "project"},
+        _COLUMNS[1],
+    ]
+    api.on(
+        "GET",
+        f"{_BASE}/sales",
+        json={
+            **_TABLE,
+            "schema": columns,
+            "description": "All orders",
+            "description_source": "edited",
+        },
+    )
+
+    result = invoke(make_state(tmp_path, api), "table", "get", "bronze.sales", "--env", "dev")
+
+    assert result.exit_code == 0, result.stderr
+    plain = _plain(result.stdout)
+    assert "All orders" in plain
+    assert "edited" in plain
+    assert "Order id" in plain
+
+
+def test_table_describe_sets_the_table_description(tmp_path: Path) -> None:
+    api = FakeApi()
+    api.on(
+        "PATCH",
+        f"{_BASE}/sales",
+        json={**_TABLE, "description": "Hi", "description_source": "edited"},
+    )
+
+    result = invoke(
+        make_state(tmp_path, api),
+        "table",
+        "describe",
+        "bronze.sales",
+        "--text",
+        "Hi",
+        "--env",
+        "dev",
+    )
+
+    assert result.exit_code == 0, result.stderr
+    assert json.loads(api.requests[-1].content) == {"description": "Hi"}
+    assert "bronze.sales" in result.stdout
+
+
+def test_table_describe_with_a_column_sets_the_column_description(tmp_path: Path) -> None:
+    api = FakeApi()
+    api.on("PUT", f"{_BASE}/sales/columns/id/description", json=_TABLE)
+
+    result = invoke(
+        make_state(tmp_path, api),
+        "table",
+        "describe",
+        "bronze.sales",
+        "--column",
+        "id",
+        "--text",
+        "Key",
+        "--env",
+        "dev",
+    )
+
+    assert result.exit_code == 0, result.stderr
+    assert json.loads(api.requests[-1].content) == {"description": "Key"}
+    assert "id" in result.stdout
+
+
+def test_table_describe_reset_sends_null_for_a_table_and_for_a_column(tmp_path: Path) -> None:
+    api = FakeApi()
+    api.on(
+        "PATCH",
+        f"{_BASE}/sales",
+        json={**_TABLE, "description": "From git", "description_source": "project"},
+    )
+    api.on("PUT", f"{_BASE}/sales/columns/id/description", json=_TABLE)
+
+    table = invoke(
+        make_state(tmp_path, api), "table", "describe", "bronze.sales", "--reset", "--env", "dev"
+    )
+    column = invoke(
+        make_state(tmp_path, api),
+        "table",
+        "describe",
+        "bronze.sales",
+        "--column",
+        "id",
+        "--reset",
+        "--env",
+        "dev",
+    )
+
+    assert table.exit_code == 0, table.stderr
+    assert column.exit_code == 0, column.stderr
+    assert [json.loads(r.content) for r in api.requests] == [{"description": None}] * 2
+    assert "project" in table.stdout
+
+
+@pytest.mark.parametrize("flags", [[], ["--text", "a", "--reset"]])
+def test_table_describe_needs_exactly_one_of_text_and_reset(
+    tmp_path: Path, flags: list[str]
+) -> None:
+    api = FakeApi()
+
+    result = invoke(
+        make_state(tmp_path, api), "table", "describe", "bronze.sales", *flags, "--env", "dev"
+    )
+
+    assert result.exit_code != 0
+    assert "--text" in _plain(result.stderr) and "--reset" in _plain(result.stderr)
+    assert api.requests == []
+    assert "--text" in _plain(
+        invoke(make_state(tmp_path, api), "table", "describe", "--help").stdout
+    )
 
 
 def test_table_append_conforms_a_csv_and_streams_it(tmp_path: Path) -> None:

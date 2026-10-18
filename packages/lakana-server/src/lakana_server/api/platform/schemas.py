@@ -540,11 +540,18 @@ class ColumnOut(BaseModel):
         or the Iceberg string for a nested type.
     nullable
         Whether the column accepts nulls.
+    description
+        The column's description: the edit when it has one, else the project's text; `None`
+        when there is none.
+    description_source
+        ``edited`` or ``project``; `None` when there is no description.
     """
 
     name: str
     type: str
     nullable: bool
+    description: str | None = None
+    description_source: Literal["project", "edited"] | None = None
 
 
 class TableReferenceOut(BaseModel):
@@ -597,6 +604,11 @@ class TableOut(BaseModel):
         check, and that no later run has published; ``published`` for everything else.
     state_message
         Why it is not published, naming the check and the run; `None` otherwise.
+    description
+        The table's description: the edit when it has one, else the project's text; `None`
+        when there is none.
+    description_source
+        ``edited`` or ``project``; `None` when there is no description.
     """
 
     name: str
@@ -611,6 +623,21 @@ class TableOut(BaseModel):
     snapshot_id: int | None = None
     state: Literal["published", "not_published", "kept"] = "published"
     state_message: str | None = None
+    description: str | None = None
+    description_source: Literal["project", "edited"] | None = None
+
+
+class DescriptionIn(BaseModel):
+    """Request body that sets or resets a description.
+
+    Parameters
+    ----------
+    description
+        The new text (1 to 4,000 characters, not blank), or `null` to remove the edit so that the
+        project's text shows again. The field must be sent.
+    """
+
+    description: str | None
 
 
 class LineageNodeOut(BaseModel):
