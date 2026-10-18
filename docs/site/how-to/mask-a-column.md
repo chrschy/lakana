@@ -139,9 +139,10 @@ against the table's columns, as they are now, when you create the mask. The rule
 are those of a [row filter](filter-rows.md#an-expression-must-not-fail-on-any-stored-value): both
 sides of one kind, numbers of any kind against each other, a boolean where a condition is needed.
 
-A mask has one more rule: **it must give a value of the masked column's own type.** A mask that
-turns an integer column into text changes the type every reader of the column gets, and breaks
-what depends on it. This is refused (the exit code is 8):
+A mask has one more rule: **it must give a value of the masked column's own type.** When a person
+reads the table, Lakana casts the mask to the column's declared type, so a reader gets exactly the
+type the column has without the mask (a `0` on a `long` column is a `BIGINT`, not an `INTEGER`). It
+accepts a mask only when that cast cannot fail on any value. This is refused (the exit code is 8):
 
 <!-- output -->
 ```text
@@ -152,13 +153,18 @@ and `'***'` is accepted for the same column. Which value keeps the type of which
 
 | Column type | A mask that keeps it |
 |---|---|
-| text (`string`) | `'***'`, `NULL`, `substr(ssn, 1, 2)`, `'x' \|\| ssn`, `md5(ssn)`, `current_user()` |
-| `int`, `long` | `0`, `-1`, `NULL` |
-| `float`, `double`, `decimal` | `0`, `1.5`, `NULL` |
+| text (`string`) | `'***'`, `NULL`, `substr(ssn, 1, 2)`, `'x' \|\| ssn`, `md5(ssn)`, `current_user()`, a text column |
+| `tinyint`, `smallint`, `int`, `long` | `NULL`; a whole number in plain digits within the column's range (`0`, `-1`); an integer column that is not wider |
+| `float`, `double` | `NULL`; a finite number within the type's range (`0`, `1.5`); a `float` column (for a `double` column also a `double` column) |
+| `decimal(p,s)` | `NULL`; a number written without an exponent with at most `s` decimal places and `p - s` digits before the point; a `decimal` column with no more decimal places and no more digits before the point; an integer column whose largest value has no more than `p - s` digits (`int` 10, `long` 19) |
 | `boolean` | `FALSE`, `NULL`, a comparison such as `id = 1`, `has_group('staff')` |
-| `date` | `DATE '1970-01-01'`, `NULL` |
-| `timestamp` | `TIMESTAMP '1970-01-01 00:00:00'`, `NULL` |
-| any other type (a struct, a list, `uuid`, `time`, `binary`, a timestamp with a time zone) | `NULL`, or the column itself |
+| `date` | `DATE '1970-01-01'`, `NULL`, a `date` column |
+| `timestamp` | `TIMESTAMP '1970-01-01 00:00:00'`, `NULL`, a `timestamp` column |
+| any other type (a struct, a list, `uuid`, `time`, `binary`, `timestamptz`) | `NULL`, or a column of the same type |
+
+A number that does not fit is refused, for example `99999999999` on an `int` column, `1.234` on a
+`decimal(10,2)` column, or a `long` column as the mask of an `int` column. An integer column is not
+accepted as the mask of a `float` or `double` column.
 
 How Lakana decides the type of a mask: a literal has its own type (`'x'` is text, `5` is an integer,
 `1.5` a decimal number, `TRUE` a boolean, `DATE '...'` a date), a column has its declared type, and
@@ -166,16 +172,16 @@ these parts have a fixed type:
 
 | Part | Type | It needs |
 |---|---|---|
-| `substr(x, start, length)`, `substring(...)` | text | `x` text; `start` and `length` numbers |
+| `substr(x, start, length)`, `substring(...)` | text | `x` text; `start` and `length` whole-number literals from -2147483648 to 2147483647 (not columns, not `1.5`) |
 | `x \|\| y` | text | both sides text |
 | `md5(x)` | text | `x` text |
 | `current_user()` | text | |
 | `has_group('name')`, a comparison, `AND`, `OR`, `NOT` | boolean | conditions for `AND`, `OR`, `NOT` |
 | `NULL` | the type of any column | |
 
-An integer fits a column of `float`, `double` or `decimal`; a number with a decimal point does not fit
-an `int` or `long` column. A date does not fit a timestamp column, or the other way round. An
-expression whose type Lakana cannot decide is refused, so that nothing unchecked is stored.
+A comparison inside a mask follows the same rules as in a row filter. A date does not fit a
+timestamp column, or the other way round. An expression whose type Lakana cannot decide is refused,
+so that nothing unchecked is stored.
 
 A mask cannot convert a value (`CAST`, `try_cast` and `TRY` are refused). If a mask needs the value
 in another type, store the column in that type, or add a column of that type and mask that one.

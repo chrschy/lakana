@@ -71,10 +71,18 @@ fails every query it covers, on the first value that cannot be converted (GHSA-3
 `lakana_core.policy.expression_types.check_expression_types` refuses that at creation, in the same
 place that checks the columns exist (`_check_columns_exist` in `row_filters.py`,
 `_check_column_exists` in `column_masks.py`), against the schema whose id the policy records, so the
-types checked and the `schema_id` stored are one read. Rules: a comparison needs both sides of one
-kind (numbers among themselves, text, date/timestamp, otherwise the same type), `AND`/`OR`/`NOT`
-and a filter as a whole need booleans, `substr`/`||`/`md5` need text, a mask must have its
-column's own type, and a type the table does not declare in a form the check knows is refused (fail
+types checked and the `schema_id` stored are one read. Rules: a comparison is accepted only when
+DuckDB's implicit cast cannot fail. Both sides are of one kind (text; date/timestamp; otherwise
+the same type; a `timestamptz` only with a `timestamptz` column, because the read does not pin the
+time zone). For numbers, a literal must be exactly representable in the column's type (integer
+range, `decimal(p,s)` places and digits with no exponent, finite and in range for floats), and two
+columns must be integers, `float`/`double`, or decimals of the same precision and scale. A
+comparison with `NULL` is refused. `AND`/`OR`/`NOT` and a filter as a whole need booleans; a minus
+sign goes only before a number literal; `substr` takes whole-number literals in the 32-bit range;
+`||`/`md5` need text. A mask must keep its column's type: `query_rewrite._masked_projection` wraps
+it in `CAST(<mask> AS <type>)`, built with sqlglot, with the type from the recorded schema (the
+field-id read's DuckDB type, else `TableSource.columns`) and never from policy text, and creation
+accepts only values that cast cannot fail on. A type the table does not declare in a form the check knows is refused (fail
 closed, never guessed). The only conversion a policy may contain is a typed `DATE '...'` or
 `TIMESTAMP '...'` literal, which `validate_restricted_expression` accepts only for a string literal
 that is a real date or moment in the exact `YYYY-MM-DD[ HH:MM:SS[.ffffff]]` form; it is a constant, so it

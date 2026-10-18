@@ -4,15 +4,27 @@
 decides whether it can run on the table's stored values without converting one type into
 another, because a conversion that fails on a single value fails every query the policy covers.
 
-The rules, all decided from the table's current schema when the policy is created:
+The rules, all decided from the table's current schema when the policy is created. A comparison
+is accepted only when DuckDB's implicit cast cannot fail:
 
-* A comparison (`=`, `<>`, `<`, `<=`, `>`, `>=`) needs both sides of one kind: numbers with
-  numbers (`int`, `long`, `float`, `double` and `decimal` among themselves, which never fails),
-  text with text, a date or timestamp with a date or timestamp, and `boolean`, `time`, `uuid` and
-  `binary` only with their own kind. `NULL` goes with anything.
+* A comparison (`=`, `<>`, `<`, `<=`, `>`, `>=`) needs both sides of one kind. Text with text;
+  `boolean`, `time`, `uuid` and `binary` only with their own kind; a `date` or `timestamp` with a
+  `date`, a `timestamp` or a typed literal; a `timestamptz` only with a `timestamptz` column,
+  because the read does not fix a time zone and any literal would mean another moment on another
+  host. Comparing with `NULL` is refused (it never matches a row).
+* Numbers, column against literal: the literal must be exactly representable in the column's
+  type. An integer column takes a whole number within the type's range; `decimal(p,s)` takes at
+  most `s` decimal places and `p - s` digits before the point, written without an exponent;
+  `float` and `double` take a finite number within the type's range.
+* Numbers, column against column: integer columns among themselves, `float`/`double` columns among
+  themselves, and two `decimal` columns only when they have the same precision and scale. Any other
+  pair (an integer with a `decimal` or a `double`, two different decimals) is refused.
 * `AND`, `OR`, `NOT` and the filter as a whole need conditions: a boolean.
-* `-` needs a number; `substr`/`substring`, `||` and `md5` need text (and, for `substr`, numbers).
-* A column mask must produce its column's own type.
+* A minus sign goes only in front of a number literal (`-5`): `-id` can overflow.
+* `substr`/`substring` take text and whole-number literals in the 32-bit range as positions;
+  `||` and `md5` take text.
+* A column mask must keep its column's type: the mask is cast to the column's declared type at
+  read time, and is accepted only when that cast cannot fail (the same representability rules).
 * Anything whose type cannot be decided is refused.
 
 The types of the expression's parts (the function table):
@@ -23,14 +35,15 @@ The types of the expression's parts (the function table):
 * text: `'text'`, `current_user()`, `substr(...)`, `substring(...)`, `md5(...)` and the
   concatenation operator;
 * date: `DATE 'YYYY-MM-DD'`; timestamp: `TIMESTAMP 'YYYY-MM-DD HH:MM:SS'`;
-* `NULL`: fits any type;
+* `NULL`: fits any type (as a mask);
 * a column: its declared type.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from decimal import Decimal, InvalidOperation
 from typing import Literal
 
 import sqlglot.expressions as exp
@@ -70,8 +83,27 @@ _FAMILY_BY_NAME: dict[str, str] = {
 }
 """Declared type names (Iceberg's, and the usual SQL spellings of an external table) by family."""
 
+_INTEGER_BITS = {"tinyint": 8, "smallint": 16, "int": 32, "integer": 32, "long": 64, "bigint": 64}
+"""The width of each integer type name."""
+
 _NUMBERS = frozenset({"integer", "fractional"})
-_TEMPORAL = frozenset({"date", "timestamp", "timestamptz"})
+_TEMPORAL = frozenset({"date", "timestamp"})
+
+_DEFAULT_DECIMAL = (18, 3)
+"""DuckDB's `DECIMAL` without parameters."""
+
+_FLOAT_MAX = {
+    "float": Decimal("3.4028234663852886e38"),
+    "double": Decimal("1.7976931348623157e308"),
+}
+_FLOAT_MAX_SHOWN = {"float": "3.4028235e+38", "double": "1.7976931348623157e+308"}
+"""The largest finite value of each float type, and how a message writes it."""
+
+_INT_DIGITS = {8: 3, 16: 5, 32: 10, 64: 19}
+"""The most digits a value of each integer width has."""
+
+_POSITION_BITS = 32
+"""`substr` takes positions of this width."""
 
 
 @dataclass(frozen=True)
@@ -82,14 +114,31 @@ class _Type:
     ----------
     family
         `"boolean"`, `"integer"`, `"fractional"`, `"text"`, `"date"`, `"timestamp"`,
-        `"timestamptz"`, `"time"`, `"uuid"`, `"binary"`, `"null"` (the type of `NULL`, which
-        fits anywhere) or `"unknown"` (a declared type this check has no rule for).
+        `"timestamptz"`, `"time"`, `"uuid"`, `"binary"`, `"null"` (the type of `NULL`) or
+        `"unknown"` (a declared type this check has no rule for).
     name
         How a message names the type: a column's declared type, or a word for a value's.
+    kind
+        For a number: `"int"`, `"float"`, `"double"`, `"decimal"` for a column, `"literal"` for a
+        number written in the expression. Empty otherwise.
+    bits
+        An integer column's width.
+    precision, scale
+        A decimal column's precision and scale.
+    value
+        A number literal's value.
+    plain
+        Whether a number literal is written without an exponent.
     """
 
     family: str
     name: str
+    kind: str = ""
+    bits: int | None = None
+    precision: int | None = None
+    scale: int | None = None
+    value: Decimal | None = None
+    plain: bool = True
 
 
 _NULL = _Type("null", "NULL")
@@ -108,13 +157,33 @@ def _column_type(declared: str) -> _Type:
     Returns
     -------
     _Type
-        Its family, named as declared (`text` for any text type), or the unknown family.
+        Its family and, for a number, its width or precision and scale; named as declared (`text`
+        for any text type), or the unknown family.
     """
     lowered = declared.strip().lower()
-    family = _FAMILY_BY_NAME.get(lowered.split("(", 1)[0].strip())
+    base, _, params = lowered.partition("(")
+    base = base.strip()
+    family = _FAMILY_BY_NAME.get(base)
     if family is None:
         return _Type("unknown", declared)
-    return _Type(family, "text" if family == "text" else lowered)
+    if family == "text":
+        return _Type("text", "text")
+    if family == "integer":
+        return _Type(family, lowered, kind="int", bits=_INTEGER_BITS[base])
+    if family == "fractional":
+        if base in ("float", "real"):
+            return _Type(family, lowered, kind="float")
+        if base == "double":
+            return _Type(family, lowered, kind="double")
+        precision, scale = _DEFAULT_DECIMAL
+        if params:
+            try:
+                first, second = params.rstrip(") ").split(",")
+                precision, scale = int(first), int(second)
+            except ValueError:
+                return _Type("unknown", declared)
+        return _Type(family, lowered, kind="decimal", precision=precision, scale=scale)
+    return _Type(family, lowered)
 
 
 def _group(family: str) -> str:
@@ -128,14 +197,111 @@ def _group(family: str) -> str:
     Returns
     -------
     str
-        `"number"` for the numeric families, `"temporal"` for date and timestamps, otherwise the
-        family itself.
+        `"number"` for the numeric families, `"temporal"` for date and timestamp, otherwise the
+        family itself (a `timestamptz` compares with nothing but itself).
     """
     if family in _NUMBERS:
         return "number"
     if family in _TEMPORAL:
         return "temporal"
     return family
+
+
+def _digits(value: Decimal) -> tuple[int, int]:
+    """Count the digits of a number before and after the decimal point.
+
+    Parameters
+    ----------
+    value
+        A finite number, as written (`1.50` has two decimal places).
+
+    Returns
+    -------
+    tuple of int
+        The digits before the point and the decimal places.
+    """
+    _, digits, exponent = value.as_tuple()
+    if not isinstance(exponent, int):
+        return 0, 0
+    if value == 0:
+        return 0, max(0, -exponent)
+    return max(0, len(digits) + exponent), max(0, -exponent)
+
+
+def _rule_for(target: _Type, literal: _Type) -> str | None:
+    """Say what a number literal must look like to fit a column, if it does not.
+
+    Parameters
+    ----------
+    target
+        The column's type (a number).
+    literal
+        The literal's type, with its value.
+
+    Returns
+    -------
+    str or None
+        The rule the literal breaks, worded to follow "compare it with": `None` when the literal
+        is exactly representable in the column's type, so DuckDB's cast of it cannot fail.
+    """
+    value = literal.value
+    if value is None or not value.is_finite():
+        return "a finite number"
+    if target.kind == "int":
+        bits = target.bits or 64
+        low, high = -(2 ** (bits - 1)), 2 ** (bits - 1) - 1
+        if literal.family != "integer" or not literal.plain:
+            return "a whole number such as 5"
+        if not low <= value <= high:
+            return f"a value from {low} to {high}"
+        return None
+    if target.kind == "decimal":
+        if not literal.plain:
+            return "a number written without an exponent"
+        before, after = _digits(value)
+        precision, scale = target.precision or 0, target.scale or 0
+        if after > scale or before > precision - scale:
+            return (
+                f"a number with at most {scale} decimal places and "
+                f"{precision - scale} digits before the point"
+            )
+        return None
+    limit = _FLOAT_MAX[target.kind]
+    if abs(value) > limit:
+        shown_limit = _FLOAT_MAX_SHOWN[target.kind]
+        return f"a number from -{shown_limit} to {shown_limit}"
+    return None
+
+
+def _column_fits(target: _Type, found: _Type) -> bool:
+    """Say whether every value of one number column fits another under a cast.
+
+    Parameters
+    ----------
+    target
+        The masked column's type.
+    found
+        The type of the column the mask reads.
+
+    Returns
+    -------
+    bool
+        `True` when casting any value of `found` to `target` cannot fail.
+    """
+    if found.family == "integer" and target.kind == "int":
+        return (found.bits or 64) <= (target.bits or 64)
+    if found.kind == "float" and target.kind in ("float", "double"):
+        return True
+    if found.kind == "double" and target.kind == "double":
+        return True
+    if target.kind == "decimal":
+        before_target = (target.precision or 0) - (target.scale or 0)
+        if found.kind == "decimal":
+            before = (found.precision or 0) - (found.scale or 0)
+            return (found.scale or 0) <= (target.scale or 0) and before <= before_target
+        if found.family == "integer":
+            return _INT_DIGITS[found.bits or 64] <= before_target
+    return False
 
 
 _EXAMPLE_VALUE = {
@@ -145,7 +311,6 @@ _EXAMPLE_VALUE = {
     "boolean": "TRUE or FALSE",
     "date": "a date such as DATE '2026-01-01'",
     "timestamp": "a timestamp such as TIMESTAMP '2026-01-01 00:00:00'",
-    "timestamptz": "a timestamp such as TIMESTAMP '2026-01-01 00:00:00'",
 }
 """What to compare a column with, by family, for the message."""
 
@@ -178,7 +343,10 @@ class _Checker:
     ) -> None:
         self._sql_expr = sql_expr
         self._kind = kind
-        self._columns = {spec.name.lower(): spec for spec in reversed(columns)}
+        self._exact = {spec.name: spec for spec in reversed(columns)}
+        self._by_lower: dict[str, list[ColumnSpec]] = {}
+        for spec in columns:
+            self._by_lower.setdefault(spec.name.lower(), []).append(spec)
 
     def refuse(self, detail: str) -> ValidationError:
         """Build the refusal of the expression.
@@ -249,11 +417,7 @@ class _Checker:
         if isinstance(node, exp.Boolean):
             return _BOOLEAN
         if isinstance(node, exp.Literal):
-            if node.is_string:
-                return _TEXT
-            if node.name.isdecimal() and node.name.isascii():
-                return _Type("integer", "a number")
-            return _Type("fractional", "a decimal number")
+            return self._literal_type(node)
         if isinstance(node, exp.Cast):
             return _typed_literal_type(node)
         if isinstance(node, exp.CurrentUser):
@@ -261,21 +425,16 @@ class _Checker:
         if isinstance(node, exp.Anonymous) and node.name.lower() == HAS_GROUP:
             return _BOOLEAN
         if isinstance(node, exp.Column):
-            spec = self._columns.get(node.name.lower())
-            if spec is None:
-                raise self.refuse(
-                    f"the type of `{shown(node.name)}` is not known: the table has no such column."
-                )
-            return _column_type(spec.type)
+            return self._column(node)
         if isinstance(node, exp.Neg):
-            inner = self.type_of(node.this)
-            if inner.family not in _NUMBERS and inner.family != "null":
-                self.require_known(node.this, inner)
+            inner = _unwrap(node.this)
+            if not (isinstance(inner, exp.Literal) and not inner.is_string):
                 raise self.refuse(
-                    f"{self.describe(node.this)} is {inner.name}, not a number; "
-                    "a minus sign needs a number."
+                    f"{self.describe(node.this)} cannot follow a minus sign. A minus sign can "
+                    "only be written in front of a number such as -5."
                 )
-            return inner
+            literal = self.type_of(inner)
+            return replace(literal, value=-(literal.value or Decimal(0)))
         if isinstance(node, (exp.And, exp.Or)):
             self.require_condition(node.this)
             self.require_condition(node.expression)
@@ -293,7 +452,7 @@ class _Checker:
             self.require_family(node.this, "text", "substr")
             for argument in (node.args.get("start"), node.args.get("length")):
                 if argument is not None:
-                    self.require_family(argument, "number", "substr")
+                    self.require_position(argument, node.this)
             return _TEXT
         if isinstance(node, exp.MD5):
             self.require_family(node.this, "text", "md5")
@@ -301,6 +460,66 @@ class _Checker:
         raise self.refuse(
             f"the type of {self.describe(node)} could not be determined, so it cannot be checked."
         )
+
+    def _literal_type(self, node: exp.Literal) -> _Type:
+        """Give the type of a text or number literal.
+
+        Parameters
+        ----------
+        node
+            The literal.
+
+        Returns
+        -------
+        _Type
+            Text; or an integer or decimal number with its value.
+
+        Raises
+        ------
+        ValidationError
+            If the number cannot be read.
+        """
+        if node.is_string:
+            return _TEXT
+        try:
+            value = Decimal(node.name)
+        except InvalidOperation as exc:
+            raise self.refuse(f"the number {shown(node.name)} could not be read.") from exc
+        plain = node.name.replace(".", "", 1).isdecimal() and node.name.isascii()
+        if node.name.isdecimal() and node.name.isascii():
+            return _Type("integer", "a number", kind="literal", value=value, plain=True)
+        return _Type("fractional", "a decimal number", kind="literal", value=value, plain=plain)
+
+    def _column(self, node: exp.Column) -> _Type:
+        """Look up the type of a column the expression reads.
+
+        Parameters
+        ----------
+        node
+            The column reference.
+
+        Returns
+        -------
+        _Type
+            The column's declared type.
+
+        Raises
+        ------
+        ValidationError
+            If the table has no such column, or has several that differ only in letter case.
+        """
+        found = self._by_lower.get(node.name.lower(), [])
+        if not found:
+            raise self.refuse(
+                f"the type of `{shown(node.name)}` is not known: the table has no such column."
+            )
+        if len(found) > 1:
+            names = ", ".join(f"`{shown(spec.name)}`" for spec in found)
+            raise self.refuse(
+                f"the table has columns that differ only in letter case ({names}), so "
+                f"`{shown(node.name)}` is ambiguous."
+            )
+        return _column_type(found[0].type)
 
     def require_known(self, node: exp.Expression, found: _Type) -> None:
         """Refuse an expression whose type this check has no rule for.
@@ -365,7 +584,7 @@ class _Checker:
         node
             The argument.
         wanted
-            `"text"` or `"number"`.
+            `"text"`.
         function
             The function's name, for the message.
 
@@ -378,9 +597,40 @@ class _Checker:
         self.require_known(node, found)
         if found.family == "null" or _group(found.family) == wanted:
             return
-        article = "text" if wanted == "text" else "a number"
         raise self.refuse(
-            f"{self.describe(node)} is {found.name}, not {article}; {function} needs {article}."
+            f"{self.describe(node)} is {found.name}, not text; {function} needs text."
+        )
+
+    def require_position(self, node: exp.Expression, subject: exp.Expression) -> None:
+        """Refuse a `substr` position or length that is not a whole-number literal.
+
+        Parameters
+        ----------
+        node
+            The position or length.
+        subject
+            The text `substr` cuts, for the example in the message.
+
+        Raises
+        ------
+        ValidationError
+            If it is not a whole number written in the expression within the 32-bit range.
+        """
+        inner = _unwrap(node)
+        found = self.type_of(inner) if isinstance(inner, (exp.Literal, exp.Neg)) else None
+        low, high = -(2 ** (_POSITION_BITS - 1)), 2 ** (_POSITION_BITS - 1) - 1
+        if (
+            found is not None
+            and found.family == "integer"
+            and found.plain
+            and found.value is not None
+            and low <= found.value <= high
+        ):
+            return
+        raise self.refuse(
+            f"{self.describe(node)} cannot be a position: substr needs a whole number such as "
+            f"substr({self.describe(subject).strip('`')}, 1, 2), written as a number from "
+            f"{low} to {high}."
         )
 
     def check_concatenation(self, node: exp.DPipe) -> None:
@@ -408,7 +658,7 @@ class _Checker:
         )
 
     def check_comparison(self, node: exp.Expression) -> None:
-        """Refuse a comparison whose sides are not of one kind.
+        """Refuse a comparison whose sides are not of one kind, or whose cast could fail.
 
         Parameters
         ----------
@@ -418,21 +668,119 @@ class _Checker:
         Raises
         ------
         ValidationError
-            If the sides would need an implicit conversion, naming the column, both types and what
-            to write instead.
+            If the sides would need an implicit conversion that can fail, naming the column,
+            both types and what to write instead.
         """
         left, right = node.this, node.expression
         left_type, right_type = self.type_of(left), self.type_of(right)
         self.require_known(left, left_type)
         self.require_known(right, right_type)
         if "null" in (left_type.family, right_type.family):
+            raise self.refuse(
+                "comparing with NULL never matches a row (the result is always NULL). "
+                "`IS NULL` is not supported yet; compare the column with a value instead."
+            )
+        if "timestamptz" in (left_type.family, right_type.family):
+            if left_type.family == right_type.family and all(
+                isinstance(_unwrap(side), exp.Column) for side in (left, right)
+            ):
+                return
+            self._refuse_timestamptz(left, left_type, right, right_type)
+        if _group(left_type.family) != _group(right_type.family):
+            subject, subject_type, other, other_type = left, left_type, right, right_type
+            if isinstance(_unwrap(right), exp.Column) and not isinstance(_unwrap(left), exp.Column):
+                subject, subject_type, other, other_type = right, right_type, left, left_type
+            raise self.refuse(self._mismatch(subject, subject_type, other, other_type))
+        if left_type.family in _NUMBERS:
+            self._check_numbers(left, left_type, right, right_type)
+
+    def _refuse_timestamptz(
+        self, left: exp.Expression, left_type: _Type, right: exp.Expression, right_type: _Type
+    ) -> None:
+        """Refuse a comparison that involves a `timestamptz` and anything but another column.
+
+        Parameters
+        ----------
+        left
+            The left side.
+        left_type
+            Its type.
+        right
+            The right side.
+        right_type
+            Its type.
+
+        Raises
+        ------
+        ValidationError
+            Always: the read does not fix a time zone, so the result would depend on the host.
+        """
+        subject, other = (left, right) if left_type.family == "timestamptz" else (right, left)
+        raise self.refuse(
+            f"{self.describe(subject)} is timestamptz; the read does not fix a time zone, so "
+            f"comparing it with {self.describe(other)} would select different rows on different "
+            "hosts. Compare it only with another timestamptz column, or store the column as a "
+            "timestamp. Time-zone-aware literals are not supported yet."
+        )
+
+    def _check_numbers(
+        self, left: exp.Expression, left_type: _Type, right: exp.Expression, right_type: _Type
+    ) -> None:
+        """Refuse a numeric comparison in which DuckDB's cast can fail.
+
+        Parameters
+        ----------
+        left
+            The left side.
+        left_type
+            Its type.
+        right
+            The right side.
+        right_type
+            Its type.
+
+        Raises
+        ------
+        ValidationError
+            If a literal is not exactly representable in the column's type, or two columns are
+            not of one kind (integers, floats, or decimals of one precision and scale).
+        """
+        left_column = isinstance(_unwrap(left), exp.Column)
+        right_column = isinstance(_unwrap(right), exp.Column)
+        if left_column and right_column:
+            same_kind = (
+                (left_type.family == "integer" and right_type.family == "integer")
+                or (
+                    left_type.kind in ("float", "double") and right_type.kind in ("float", "double")
+                )
+                or (
+                    left_type.kind == "decimal"
+                    and right_type.kind == "decimal"
+                    and (left_type.precision, left_type.scale)
+                    == (right_type.precision, right_type.scale)
+                )
+            )
+            if not same_kind:
+                raise self.refuse(
+                    f"{self.describe(left)} is {left_type.name} but {self.describe(right)} is "
+                    f"{right_type.name}; compare columns of the same kind (whole numbers with "
+                    "whole numbers, float or double with float or double, decimals of the same "
+                    "precision and scale)."
+                )
             return
-        if _group(left_type.family) == _group(right_type.family):
-            return
-        subject, subject_type, other, other_type = left, left_type, right, right_type
-        if isinstance(_unwrap(right), exp.Column) and not isinstance(_unwrap(left), exp.Column):
-            subject, subject_type, other, other_type = right, right_type, left, left_type
-        raise self.refuse(self._mismatch(subject, subject_type, other, other_type))
+        if left_column or right_column:
+            column, column_type, literal, literal_type = (
+                (left, left_type, right, right_type)
+                if left_column
+                else (right, right_type, left, left_type)
+            )
+            rule = _rule_for(column_type, literal_type)
+            if rule is not None:
+                text = shown(_unwrap(literal).sql(dialect="duckdb"))
+                raise self.refuse(
+                    f"{self.describe(column)} is {column_type.name}; compare it with {rule}, "
+                    f"not {text}."
+                )
 
     def _mismatch(
         self, subject: exp.Expression, subject_type: _Type, other: exp.Expression, other_type: _Type
@@ -490,22 +838,26 @@ class _Checker:
         return f"{head}; compare it with {example}, not {shown_other}."
 
     def check_mask(self, node: exp.Expression, column: str | None) -> None:
-        """Refuse a column mask whose value is not of the masked column's type.
+        """Refuse a column mask that does not keep the masked column's type.
+
+        The mask is cast to the column's declared type at read time, so the value must be one
+        the cast cannot fail on.
 
         Parameters
         ----------
         node
             The mask expression.
         column
-            The masked column's name.
+            The masked column's name, matched exactly.
 
         Raises
         ------
         ValidationError
-            If the mask's type differs from the column's, or either cannot be decided.
+            If the mask's type differs from the column's, may not fit it, or either cannot be
+            decided.
         """
         found = self.type_of(node)
-        spec = self._columns.get((column or "").lower())
+        spec = self._exact.get(column or "")
         if spec is None:
             raise self.refuse(
                 f"the type of the masked column `{shown(column or '')}` is not known, "
@@ -522,14 +874,31 @@ class _Checker:
                 f"the type of {name} is {shown(wanted.name)}, which a mask cannot be checked "
                 "against. Use NULL."
             )
-        if found.family == wanted.family or (
-            wanted.family == "fractional" and found.family == "integer"
-        ):
-            return
         suggestion = _MASK_VALUE.get(wanted.family, "NULL").format(column=shown(spec.name))
+        same = found.family == wanted.family
+        widening = wanted.family == "fractional" and found.family == "integer"
+        if not (same or widening):
+            raise self.refuse(
+                f"{name} is {wanted.name}, but the mask is {found.name}. "
+                f"Use a value of its own type: {suggestion}."
+            )
+        if wanted.family not in _NUMBERS:
+            return
+        inner = _unwrap(node)
+        text = shown(inner.sql(dialect="duckdb"))
+        if found.value is not None:
+            rule = _rule_for(wanted, found)
+            if rule is None:
+                return
+            raise self.refuse(
+                f"{name} is {wanted.name}, but the mask {text} may not fit it (it needs {rule}). "
+                f"Use a value of its own type: {suggestion}."
+            )
+        if isinstance(inner, exp.Column) and _column_fits(wanted, found):
+            return
         raise self.refuse(
-            f"{name} is {wanted.name}, but the mask is {found.name}. "
-            f"Use a value of its own type: {suggestion}."
+            f"{name} is {wanted.name}, but the mask {self.describe(node)} is {found.name} and "
+            f"may not fit it. Use a value of its own type: {suggestion}."
         )
 
 
@@ -576,7 +945,7 @@ def check_expression_types(
     columns: Sequence[ColumnSpec],
     masked_column: str | None = None,
 ) -> None:
-    """Refuse a row filter or column mask expression that would need an implicit conversion.
+    """Refuse a row filter or column mask expression that needs a conversion that can fail.
 
     Parameters
     ----------
@@ -587,14 +956,16 @@ def check_expression_types(
     columns
         The table's current columns with their declared types.
     masked_column
-        For a mask, the column it replaces; its type is the type the mask must have.
+        For a mask, the column it replaces (matched exactly); its type is the type the mask must
+        have.
 
     Raises
     ------
     ValidationError
-        If a comparison puts two types against each other, a non-boolean is used as a
-        condition, a function gets the wrong type, a mask has another type than its column, or
-        a type cannot be decided. The message names the column, both types and what to write.
+        If a comparison puts two types against each other or could fail on a stored value, a
+        non-boolean is used as a condition, a function gets the wrong type, a mask has another
+        type than its column or may not fit it, or a type cannot be decided. The message names
+        the column, both types and what to write.
     """
     parsed = validate_restricted_expression(sql_expr, kind=kind)
     checker = _Checker(sql_expr, kind, columns)

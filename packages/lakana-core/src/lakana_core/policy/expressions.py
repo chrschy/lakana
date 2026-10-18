@@ -80,7 +80,8 @@ def _valid_date_text(text: str) -> bool:
         parsed = datetime.strptime(text, "%Y-%m-%d")
     except ValueError:
         return False
-    return len(text) == len(_DATE_FORMAT) and parsed.strftime("%Y-%m-%d") == text
+    written = f"{parsed.year:04d}-{parsed.month:02d}-{parsed.day:02d}"
+    return len(text) == len(_DATE_FORMAT) and written == text
 
 
 def _valid_timestamp_text(text: str) -> bool:
@@ -108,7 +109,11 @@ def _valid_timestamp_text(text: str) -> bool:
         parsed = datetime.strptime(whole, "%Y-%m-%d %H:%M:%S")
     except ValueError:
         return False
-    return parsed.strftime("%Y-%m-%d %H:%M:%S") == whole
+    written = (
+        f"{parsed.year:04d}-{parsed.month:02d}-{parsed.day:02d} "
+        f"{parsed.hour:02d}:{parsed.minute:02d}:{parsed.second:02d}"
+    )
+    return written == whole
 
 
 def _check_typed_literal(node: exp.Cast, sql_expr: str) -> bool:
@@ -166,8 +171,8 @@ def _check_typed_literal(node: exp.Cast, sql_expr: str) -> bool:
         )
     if target.this is exp.DType.TIMESTAMPTZ:
         raise ValidationError(
-            f"{head}a timestamp with a time zone is not supported. Write "
-            f"TIMESTAMP '{_TIMESTAMP_FORMAT}' (UTC) instead."
+            f"{head}a timestamp with a time zone is not supported yet. Write "
+            f"TIMESTAMP '{_TIMESTAMP_FORMAT}' to compare a timestamp column."
         )
     return False
 

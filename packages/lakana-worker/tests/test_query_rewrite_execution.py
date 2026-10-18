@@ -8,6 +8,7 @@ the tests of lakana-core cannot do: they assert on the rewritten SQL text, and t
 
 from __future__ import annotations
 
+from decimal import Decimal
 from pathlib import Path
 
 import duckdb
@@ -702,3 +703,42 @@ def test_a_users_cast_never_reaches_a_row_the_filter_hides(tmp_path: Path, query
     rows_out = _fetch(rewritten)
     assert len(rows_out) == rows // 2
     assert "HIDDEN" not in repr(rows_out)
+
+
+def test_a_column_mask_keeps_the_columns_own_type_for_the_reader(tmp_path: Path) -> None:
+    """A mask is cast to the declared type, so `0` on BIGINT, DOUBLE and DECIMAL stays that type."""
+    probe = tmp_path / "typed.parquet"
+    pq.write_table(
+        pa.table(
+            {
+                "big": pa.array([5], pa.int64()),
+                "dbl": pa.array([1.5], pa.float64()),
+                "dec": pa.array([Decimal("12.34")], pa.decimal128(10, 2)),
+                "txt": pa.array(["secret"], pa.string()),
+                "small": pa.array([7], pa.int32()),
+            }
+        ),
+        probe,
+    )
+    source = TableSource(
+        urls=[str(probe)],
+        file_format="parquet",
+        columns={
+            "big": "BIGINT",
+            "dbl": "DOUBLE",
+            "dec": "DECIMAL(10, 2)",
+            "txt": "VARCHAR",
+            "small": "INTEGER",
+        },
+        column_masks={"big": "0", "dbl": "0", "dec": "0", "txt": "'***'", "small": "NULL"},
+    )
+
+    rewritten = rewrite_query(
+        "SELECT typeof(big), typeof(dbl), typeof(dec), typeof(txt), typeof(small), "
+        "big, dbl, dec, txt, small FROM gold.typed",
+        {"gold.typed": source},
+    )
+    row = _fetch(rewritten)[0]
+
+    assert row[:5] == ("BIGINT", "DOUBLE", "DECIMAL(10,2)", "VARCHAR", "INTEGER")
+    assert row[5:] == (0, 0.0, Decimal("0.00"), "***", None)

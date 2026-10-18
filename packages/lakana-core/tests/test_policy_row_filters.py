@@ -1189,7 +1189,7 @@ def test_create_refuses_an_expression_that_needs_an_implicit_cast(
 
 @pytest.mark.parametrize(
     "expression",
-    ["id = 5", "id < salary", "region = 'EU'", "owner", "owner AND id > 1", "has_group('x')"],
+    ["id = 5", "id < 5", "region = 'EU'", "owner", "owner AND id > 1", "has_group('x')"],
 )
 def test_create_accepts_an_expression_that_compares_like_with_like(
     session: Session, expression: str

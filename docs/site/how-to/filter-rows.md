@@ -101,30 +101,53 @@ Error: 'region = 5' is not a valid filter expression: `region` is text; compare 
 
 and `region = '5'` is accepted.
 
-What Lakana refuses, each with a message that names the column, both types and what to write:
+Lakana accepts a comparison only when the query engine's implicit conversion of the two sides
+cannot fail on any stored value. What it refuses, each with a message that names the column, both
+types and what to write:
 
 - A comparison (`=`, `<>`, `<`, `<=`, `>`, `>=`) whose two sides are not of one kind: a text
   column against a number (`region = 5`), a number column against text (`id = 'x'`), two columns of
   different types (`region = id`), a boolean against a number, a date against text.
+- A number column against a number that does not fit its type exactly:
+  - an integer column (`int`, `long`) takes a whole number written in plain digits, within the
+    type's range (`id = 5`, not `id = 1.5`, `id = 1e3` or a number too large for `int`);
+  - a `decimal(p,s)` column takes at most `s` decimal places and `p - s` digits before the point,
+    written without an exponent (`amount = 1.5` on `decimal(10,2)`, not `amount = 1.234`);
+  - a `float` or `double` column takes any finite number within the type's range.
+- Two number columns of different kinds. Integer columns compare with integer columns, `float` and
+  `double` columns with each other, and two `decimal` columns only when they have the same
+  precision and scale. An integer against a `decimal` or a `double` column, and two different
+  decimals, are refused, because the engine would convert one of them and that conversion can fail.
+- A `timestamptz` column against anything but another `timestamptz` column. The read does not fix
+  a time zone, so a date or timestamp literal would select different rows on different hosts.
+  Time-zone-aware literals are not supported yet; store the column as a `timestamp` to compare it
+  with a literal.
+- A comparison with `NULL` (`region = NULL`): it never matches a row and would hide every row.
+  `IS NULL` is not supported yet.
 - A column or value that is not boolean used as a condition, on its own or beside `AND`, `OR` or
   `NOT`: `region`, `NOT region`, `region AND id > 1`, `1`.
-- A minus sign in front of something that is not a number (`-region`).
+- A minus sign in front of anything but a number such as `-5` (`-id` can overflow).
 - A column whose type Lakana cannot compare (a struct, a list, a map).
 
 What stays accepted:
 
-- Numbers of any kind against each other: `int`, `long`, `float`, `double` and `decimal` never
-  fail to compare (`id = 5`, `id < salary`, `amount > 1.5`).
+- A number column against a number it holds exactly (`id = 5`, `amount > 1.5`, `score < 2.5`), and
+  columns of one kind (`id = small_id`, `score = ratio` for two float columns).
 - Text against text, and `current_user()` against a text column.
 - A date or a timestamp against a typed literal, and a date against a timestamp (`born < seen`).
+  A typed literal is checked when you create the filter and must be written exactly
+  `DATE 'YYYY-MM-DD'` or `TIMESTAMP 'YYYY-MM-DD HH:MM:SS'` (with an optional fraction). The engine
+  also reads `DATETIME '...'` and `TIMESTAMP WITHOUT TIME ZONE '...'` as a timestamp.
 - `TRUE`, `FALSE`, a boolean column on its own, and `has_group('name')`.
-- `NULL` against anything.
 
 A date column is compared with `DATE '2026-01-01'`, a timestamp column with
 `TIMESTAMP '2026-01-01 00:00:00'`; text such as `'2026-01-01'` against a date column is refused,
 because the engine would have to convert it. Lakana cannot convert for you (`CAST`, `try_cast` and
 `TRY` are refused). If a comparison needs the value in another type, store the column in that type,
 or add a column of that type and filter on that one.
+
+If you change a column's type later (for example `decimal(10,2)` to `decimal(38,2)`), a filter made
+earlier is not checked again; read it against the new type.
 
 A filter that already exists is **not** checked again when you upgrade. To find one that compares
 across types, list the filters (`lakana row-filter list`) and read the `expression` of each against

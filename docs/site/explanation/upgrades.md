@@ -130,10 +130,17 @@ Each cell is a summary. The page named in the last column has the detail. The ch
 A row filter or column mask is now checked against the table's columns, as they are when you
 create it, and refused if it would need Lakana to convert a value: a text column compared with a
 number (`code = 5`), two columns of different types, a column that is not boolean used as a
-condition, or a mask whose type differs from its column's (`0` on a text column). The message
-names the column, both types and what to write, for example "`code` is text; compare it with '5',
-not 5." Numbers of any kind still compare with each other. A date or timestamp is written as a
-typed literal (`DATE '2026-01-01'`), which is new and checked at creation. See [Show some people
+condition, a comparison with `NULL`, or a mask whose type differs from its column's (`0` on a text
+column). The message names the column, both types and what to write, for example "`code` is text;
+compare it with '5', not 5." A comparison of numbers is accepted only when the engine's conversion
+cannot fail: a literal must fit the column exactly (an integer column takes whole numbers in its
+range, `decimal(p,s)` at most `s` decimal places and `p - s` digits, `float` and `double` finite
+numbers), and two columns must be both integers, both `float`/`double`, or decimals of one
+precision and scale. A `timestamptz` column compares only with another `timestamptz` column. A
+date or timestamp is written as a typed literal (`DATE '2026-01-01'`), which is new and checked at
+creation. A column mask is now cast to its column's declared type when it is read, so a reader gets
+the column's own type (a `0` on a `long` column is a `BIGINT`), and a mask is accepted only when
+that cast cannot fail. See [Show some people
 only some rows](../how-to/filter-rows.md#an-expression-must-not-fail-on-any-stored-value) and
 [Mask a column for some people](../how-to/mask-a-column.md#an-expression-must-not-fail-on-any-stored-value).
 

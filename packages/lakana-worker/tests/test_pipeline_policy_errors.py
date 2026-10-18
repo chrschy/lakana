@@ -172,8 +172,9 @@ def _filter(
     sql
         The filter expression.
     stored
-        Create the filter with ``id > 0`` and then replace the expression, as `_mask` does;
-        `False` passes `sql` through the service's own validation.
+        Create the filter with ``id > 0`` and then replace the expression, as `_mask` does, so an
+        expression the service refuses can be stored like an old policy; `False` creates the
+        filter with `sql` itself (the two tests that use it pass ``id > 0``).
     """
     RowFilterService(session, AllowAllAuthorization(), catalog).create(
         principal,

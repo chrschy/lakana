@@ -1422,7 +1422,7 @@ def test_a_projected_read_by_field_id_keeps_its_policy() -> None:
     rewritten = rewrite_query("SELECT * FROM gold.t", {"gold.t": source})
 
     assert (
-        'SELECT "id", NULL AS "name" FROM READ_PARQUET(GETVARIABLE(\'v_0_files\'), '
+        'SELECT "id", CAST(NULL AS TEXT) AS "name" FROM READ_PARQUET(GETVARIABLE(\'v_0_files\'), '
         "schema = GETVARIABLE('v_0_schema')) WHERE (id > 1)"
     ) in rewritten.sql
 

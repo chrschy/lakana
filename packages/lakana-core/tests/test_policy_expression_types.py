@@ -20,6 +20,12 @@ COLUMNS = [
         ("born", "date"),
         ("seen", "timestamp"),
         ("Order Total", "double"),
+        ("seen_tz", "timestamptz"),
+        ("small", "smallint"),
+        ("flt", "float"),
+        ("dec38", "decimal(38,0)"),
+        ("amount2", "decimal(10,2)"),
+        ("amount3", "decimal(12,2)"),
         ("ref", "uuid"),
         ("tag", "struct<a: int>"),
     ]
@@ -91,11 +97,70 @@ def _refusal(expression: str, kind: str = "filter", masked: str | None = None) -
         ("NOT code", "`code` is text, not boolean"),
         ("1", "the number 1 is not a condition"),
         ("'a'", "the text 'a' is not a condition"),
-        ("-code = 1", "`code` is text, not a number; a minus sign needs a number."),
+        ("-code = 1", "A minus sign can only be written in front of a number such as -5."),
         ("tag", "the type of `tag` is struct<a: int>, which a policy cannot compare"),
         ("((code))", "`code` is text, not boolean"),
         ("-5 = 'x'", "the number -5 is"),
-        ("-id = TRUE", "-id is long; compare it with a number, not TRUE."),
+        ("-id = 5", "A minus sign can only be written in front of a number such as -5."),
+        ("-5 = TRUE", "the number -5 is a number"),
+        (
+            "id = amount",
+            "`id` is long but `amount` is decimal(10,2); compare columns of the same kind",
+        ),
+        (
+            "amount = score",
+            "`amount` is decimal(10,2) but `score` is double; compare columns of the same kind",
+        ),
+        ("id = score", "`id` is long but `score` is double; compare columns of the same kind"),
+        ("n = flt", "`n` is int but `flt` is float; compare columns of the same kind"),
+        (
+            "amount = amount3",
+            "`amount` is decimal(10,2) but `amount3` is decimal(12,2); compare columns of "
+            "the same kind",
+        ),
+        ("dec38 = amount", "`dec38` is decimal(38,0) but `amount` is decimal(10,2)"),
+        ("id = 1.5", "`id` is long; compare it with a whole number such as 5, not 1.5."),
+        ("id = 1e3", "`id` is long; compare it with a whole number such as 5, not 1e3."),
+        (
+            "n = 99999999999",
+            "`n` is int; compare it with a value from -2147483648 to 2147483647, not 99999999999.",
+        ),
+        ("n = -2147483649", "from -2147483648 to 2147483647"),
+        ("small = 40000", "from -32768 to 32767"),
+        ("id = 99999999999999999999", "from -9223372036854775808 to 9223372036854775807"),
+        (
+            "amount = 1.234",
+            "`amount` is decimal(10,2); compare it with a number with at most 2 decimal "
+            "places and 8 digits before the point, not 1.234.",
+        ),
+        (
+            "amount = 123456789",
+            "a number with at most 2 decimal places and 8 digits before the point",
+        ),
+        ("dec38 = 1.5", "a number with at most 0 decimal places and 38 digits before the point"),
+        (
+            "amount = 1e3",
+            "`amount` is decimal(10,2); compare it with a number written without an "
+            "exponent, not 1e3.",
+        ),
+        (
+            "flt = 1e999",
+            "`flt` is float; compare it with a number from -3.4028235e+38 to "
+            "3.4028235e+38, not 1e999.",
+        ),
+        ("score = 1e999", "from -1.7976931348623157e+308 to 1.7976931348623157e+308"),
+        ("code = NULL", "comparing with NULL never matches a row"),
+        ("NULL = code", "comparing with NULL never matches a row"),
+        ("born = NULL", "comparing with NULL never matches a row"),
+        (
+            "seen_tz > TIMESTAMP '2026-01-01 00:00:00'",
+            "`seen_tz` is timestamptz; the read does not fix a time zone",
+        ),
+        ("seen_tz < DATE '2026-01-01'", "the read does not fix a time zone"),
+        ("born < seen_tz", "the read does not fix a time zone"),
+        ("seen_tz = seen", "the read does not fix a time zone"),
+        ("seen_tz = 5", "`seen_tz` is timestamptz"),
+        ("(seen_tz) = 'x'", "`seen_tz` is timestamptz"),
     ],
 )
 def test_a_row_filter_that_needs_an_implicit_cast_is_refused(
@@ -113,19 +178,32 @@ def test_a_row_filter_that_needs_an_implicit_cast_is_refused(
         "id = 5",
         "id = n",
         "n = id",
-        "id = amount",
-        "amount = score",
+        "amount = amount2",
+        "score = flt",
+        "small = n",
+        "id = small",
+        "seen_tz = seen_tz",
         "score > 1.5",
         "n <= -3",
         "amount <> 0",
-        "id >= 1e3",
+        "n = -2147483648",
+        "n = 2147483647",
+        "small = -32768",
+        "id = 9223372036854775807",
+        "amount = 99999999.99",
+        "amount = 1.5",
+        "amount = -0.01",
+        "amount = 0",
+        "dec38 = 12345678901234567890123456789012345678",
+        "flt = 1e38",
+        "score = 1e300",
+        "score = 5",
+        "flt = 1.5",
+        "born = DATE '0999-01-01'",
         "code = 'x'",
         "code <> current_user()",
         "current_user() = 'alice'",
         "code = ''",
-        "code = NULL",
-        "NULL = code",
-        "born = NULL",
         "born = DATE '2026-01-01'",
         "born >= DATE '2026-01-01' AND born < DATE '2027-01-01'",
         "seen >= TIMESTAMP '2026-01-01 00:00:00'",
@@ -149,7 +227,7 @@ def test_a_row_filter_that_needs_an_implicit_cast_is_refused(
         "id = -5",
         "(id = 1) = (n = 2)",
         '"Order Total" > 10',
-        '"Order Total" > id',
+        '"Order Total" > score',
         "CODE = 'x'",
         "1 = 1",
         "ref = ref",
@@ -230,6 +308,25 @@ def test_no_other_cast_is_allowed(expression: str) -> None:
         ("active", "NOT active"),
         ("tag", "NULL"),
         ("tag", "tag"),
+        ("id", "n"),
+        ("id", "small"),
+        ("n", "small"),
+        ("n", "2147483647"),
+        ("score", "flt"),
+        ("score", "1e300"),
+        ("flt", "1.5"),
+        ("amount", "amount2"),
+        ("amount", "1.25"),
+        ("amount", "99999999.99"),
+        ("amount", "-0.01"),
+        ("amount3", "amount"),
+        ("dec38", "n"),
+        ("seen_tz", "NULL"),
+        ("seen_tz", "seen_tz"),
+        ("ref", "ref"),
+        ("ref", "NULL"),
+        ("born", "born"),
+        ("seen", "seen"),
     ],
 )
 def test_a_mask_of_the_columns_own_type_is_accepted(column: str, expression: str) -> None:
@@ -267,7 +364,41 @@ def test_a_mask_of_the_columns_own_type_is_accepted(column: str, expression: str
         ("tag", "'x'", "the type of `tag` is struct<a: int>, which a mask cannot be checked"),
         ("email", "email || id", "`email` is text but `id` is long; `||` joins text"),
         ("email", "substr(id, 1, 2)", "`id` is long, not text; substr needs text"),
-        ("email", "substr(email, 'a')", "'a' is text, not a number; substr needs a number"),
+        ("email", "substr(email, 'a')", "substr needs a whole number such as substr(email, 1, 2)"),
+        ("email", "substr(email, 1.5)", "substr needs a whole number"),
+        ("email", "substr(email, 1e30)", "substr needs a whole number"),
+        ("email", "substr(email, score)", "substr needs a whole number"),
+        ("email", "substr(email, id)", "substr needs a whole number"),
+        ("email", "substr(email, 1, small)", "substr needs a whole number"),
+        ("email", "substr(email, 99999999999999999999)", "substr needs a whole number"),
+        ("email", "substr(email, 2147483648)", "from -2147483648 to 2147483647"),
+        ("email", "substr(email, 1, -2147483649)", "from -2147483648 to 2147483647"),
+        ("n", "id", "`n` is int, but the mask `id` is long and may not fit"),
+        ("n", "99999999999", "`n` is int, but the mask 99999999999 may not fit"),
+        (
+            "id",
+            "99999999999999999999",
+            "`id` is long, but the mask 99999999999999999999 may not fit",
+        ),
+        ("small", "n", "`small` is smallint, but the mask `n` is int and may not fit"),
+        ("score", "id", "`score` is double, but the mask `id` is long and may not fit"),
+        ("flt", "score", "`flt` is float, but the mask `score` is double and may not fit"),
+        ("amount", "1.234", "`amount` is decimal(10,2), but the mask 1.234 may not fit"),
+        ("amount", "id", "`amount` is decimal(10,2), but the mask `id` is long and may not fit"),
+        (
+            "amount",
+            "amount3",
+            "`amount` is decimal(10,2), but the mask `amount3` is decimal(12,2) and may not fit",
+        ),
+        ("amount", "1e3", "`amount` is decimal(10,2), but the mask 1e3 may not fit"),
+        (
+            "seen_tz",
+            "TIMESTAMP '1900-01-01 00:00:00'",
+            "`seen_tz` is timestamptz, but the mask is timestamp",
+        ),
+        ("seen_tz", "seen", "`seen_tz` is timestamptz, but the mask is timestamp"),
+        ("ref", "'x'", "`ref` is uuid, but the mask is text"),
+        ("ref", "born", "`ref` is uuid, but the mask is date"),
         ("email", "md5(id)", "`id` is long, not text; md5 needs text"),
         ("id", "0 AND 1", "the number 0 is not a condition"),
     ],
@@ -324,7 +455,7 @@ def test_the_type_names_of_an_external_table_are_understood(declared: str, famil
         "fractional": "c > 1.5",
         "text": "c = 'x'",
         "timestamp": "c > TIMESTAMP '2026-01-01 00:00:00'",
-        "timestamptz": "c > TIMESTAMP '2026-01-01 00:00:00'",
+        "timestamptz": "c = c",
         "boolean": "c = TRUE",
     }[family]
     check_expression_types(comparable, kind="filter", columns=columns)
@@ -354,3 +485,23 @@ def test_a_node_without_a_rule_is_refused_not_guessed() -> None:
     checker = _Checker("x", "filter", COLUMNS)
     with pytest.raises(ValidationError, match="could not be determined"):
         checker.type_of(exp.Identifier(this="x"))
+
+
+def test_a_clash_of_column_names_in_letter_case_is_refused_and_a_mask_is_typed_exactly() -> None:
+    """Two columns that differ only in case: a read is ambiguous, a mask finds its own column."""
+    columns = [
+        ColumnSpec(name="Email", type="string", nullable=True),
+        ColumnSpec(name="email", type="long", nullable=True),
+    ]
+    with pytest.raises(ValidationError, match="differ only in letter case"):
+        check_expression_types("email = 'x'", kind="filter", columns=columns)
+    with pytest.raises(ValidationError, match="`email` is long, but the mask is text"):
+        check_expression_types("'***'", kind="mask", columns=columns, masked_column="email")
+    check_expression_types("'***'", kind="mask", columns=columns, masked_column="Email")
+
+
+def test_timestamptz_literals_are_refused_with_the_reason() -> None:
+    """The message says why a time-zone-aware value is not accepted yet."""
+    message = _refusal("seen = TIMESTAMPTZ '2026-01-01 00:00:00+00'")
+    assert "UTC" not in message
+    assert "not supported yet" in message
