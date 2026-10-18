@@ -30,9 +30,6 @@ class Environment:
         refused.
     properties
         Free-form metadata.
-    storage_options_digest
-        A SHA-256 fingerprint of the storage options (of sorted-key, compact JSON), or `None` from a
-        server that does not send it.
     """
 
     name: str
@@ -40,7 +37,6 @@ class Environment:
     storage_secret_ref: str | None
     is_protected: bool
     properties: dict[str, str]
-    storage_options_digest: str | None = None
 
 
 @dataclass(frozen=True)

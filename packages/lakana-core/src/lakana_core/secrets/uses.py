@@ -779,11 +779,13 @@ def require_secret_management_for_storage_change(
     )
 
 
-def storage_endpoint(options: dict[str, str]) -> str | None:
-    """Name the endpoint a storage secret would be presented to, for the audit log.
+def approved_storage_options(options: dict[str, str]) -> dict[str, str]:
+    """Pick the options that say where a storage secret goes, for the audit log.
 
-    Only the endpoint is returned, never another option, because options can carry inline
-    credentials; any user information in the URL is dropped too.
+    Only `s3.endpoint` (without any user information in its URL) and `s3.region` are returned,
+    never another option, because options can carry inline credentials. Other keys that decide
+    the destination, such as a proxy, are not recorded; the list is explicit and small on
+    purpose.
 
     Parameters
     ----------
@@ -792,13 +794,16 @@ def storage_endpoint(options: dict[str, str]) -> str | None:
 
     Returns
     -------
-    str | None
-        The `s3.endpoint` option without user information, or `None` if it is not set.
+    dict
+        The endpoint and region options that are set.
     """
+    picked: dict[str, str] = {}
     endpoint = options.get("s3.endpoint")
-    if endpoint is None:
-        return None
-    parts = urlsplit(endpoint)
-    if "@" not in parts.netloc:
-        return endpoint
-    return parts._replace(netloc=parts.netloc.rsplit("@", 1)[1]).geturl()
+    if endpoint is not None:
+        parts = urlsplit(endpoint)
+        if "@" in parts.netloc:
+            endpoint = parts._replace(netloc=parts.netloc.rsplit("@", 1)[1]).geturl()
+        picked["s3.endpoint"] = endpoint
+    if "s3.region" in options:
+        picked["s3.region"] = options["s3.region"]
+    return picked

@@ -27,12 +27,7 @@ _SECRET = {
 }
 
 
-def _dev(
-    secret_ref: str | None,
-    *,
-    root: str = "s3://lakana/dev",
-    options: dict[str, str] | None = None,
-) -> dict[str, object]:
+def _dev(secret_ref: str | None, *, root: str = "s3://lakana/dev") -> dict[str, object]:
     """Return an environment document for `dev`.
 
     Parameters
@@ -41,8 +36,6 @@ def _dev(
         Its storage secret reference.
     root
         Its storage root.
-    options
-        Its storage options; the bundle's own when omitted.
 
     Returns
     -------
@@ -55,9 +48,6 @@ def _dev(
         "storage_secret_ref": secret_ref,
         "is_protected": False,
         "properties": {},
-        "storage_options_digest": setup._options_digest(
-            setup.OPTIONS if options is None else options
-        ),
     }
 
 
@@ -90,7 +80,10 @@ def test_first_run_creates_dev_then_the_secret_then_binds_it() -> None:
     secret_body = json.loads(api.requests[3].content)
     assert secret_body["name"] == "seaweedfs-s3"
     assert secret_body["values"] == {"s3.access-key-id": "ak", "s3.secret-access-key": "sk"}
-    assert json.loads(api.requests[4].content)["secret_ref"] == "seaweedfs-s3"
+    assert json.loads(api.requests[4].content) == {
+        "options": {"s3.endpoint": "http://seaweedfs:8333"},
+        "secret_ref": "seaweedfs-s3",
+    }
 
 
 _ROTATE_PATH = "/api/v1/environments/dev/secrets/seaweedfs-s3"
@@ -196,6 +189,26 @@ def test_existing_dev_without_secret_gets_secret_and_binding() -> None:
     ]
 
 
+def test_dev_recreated_with_another_endpoint_gets_the_bundles_endpoint_with_the_secret() -> None:
+    """Delete, recreate with other options, restart: one PATCH sets both.
+
+    The secret is never attached on its own, so it cannot end up on the other endpoint.
+    """
+    api = FakeApi()
+    api.on("GET", _ENV_PATH, status=200, json=_dev(None))
+    api.on("GET", _SECRETS_PATH, status=200, json=[_SECRET_2])
+    api.on("PATCH", _STORAGE_PATH, status=200, json=_dev("seaweedfs-s3"))
+    out = io.StringIO()
+
+    setup.run_setup(api.client(), access_key="ak", secret_key="sk", out=out)
+
+    patches = [r for r in api.requests if r.method == "PATCH"]
+    assert [json.loads(r.content) for r in patches] == [
+        {"options": {"s3.endpoint": "http://seaweedfs:8333"}, "secret_ref": "seaweedfs-s3"}
+    ]
+    assert "the storage options of 'dev' to the bundle's" in out.getvalue()
+
+
 def test_secret_exists_but_unbound_only_binds() -> None:
     """Fourth partial state: the secret exists but the bind step never ran.
 
@@ -234,43 +247,6 @@ def test_dev_with_a_different_storage_root_is_left_untouched() -> None:
     assert [r.method for r in api.requests] == ["GET"]
     assert "operator-managed" in out.getvalue()
     assert "file:///data/lake/dev" in out.getvalue()
-
-
-def test_dev_recreated_with_another_endpoint_gets_no_secret() -> None:
-    """Delete, recreate with other options, restart: the secret is never attached there."""
-    api = FakeApi()
-    api.on("GET", _ENV_PATH, status=200, json=_dev(None, options={"s3.endpoint": "https://evil"}))
-    out = io.StringIO()
-
-    setup.run_setup(api.client(), access_key="ak", secret_key="sk", out=out)
-
-    assert [r.method for r in api.requests] == ["GET"]
-    assert "storage options differ from the bundle's" in out.getvalue()
-    assert "'dev'" in out.getvalue()
-    assert "lakana env set-storage dev --secret-ref seaweedfs-s3" in out.getvalue()
-
-
-def test_dev_with_an_extra_option_gets_no_secret() -> None:
-    """The whole options map is compared: an added key counts as a difference."""
-    api = FakeApi()
-    options = {**setup.OPTIONS, "s3.region": "x"}
-    api.on("GET", _ENV_PATH, status=200, json=_dev(None, options=options))
-
-    setup.run_setup(api.client(), access_key="ak", secret_key="sk", out=io.StringIO())
-
-    assert [r.method for r in api.requests] == ["GET"]
-
-
-def test_dev_from_a_server_without_a_digest_gets_no_secret() -> None:
-    """A server that does not send the digest cannot prove the options, so nothing is attached."""
-    api = FakeApi()
-    body = _dev(None)
-    del body["storage_options_digest"]
-    api.on("GET", _ENV_PATH, status=200, json=body)
-
-    setup.run_setup(api.client(), access_key="ak", secret_key="sk", out=io.StringIO())
-
-    assert [r.method for r in api.requests] == ["GET"]
 
 
 def test_dev_with_a_foreign_secret_ref_is_left_untouched() -> None:

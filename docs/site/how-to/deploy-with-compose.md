@@ -164,14 +164,13 @@ and a fresh server container can both take a moment after their own healthchecks
 fails the container if the server never comes up.
 
 It is idempotent: a restart re-runs it and it creates nothing a second time. If `dev` already
-exists with a *different* storage root or different storage options (for example another
-`s3.endpoint`), or its storage secret is already bound to some other
+exists with a *different* storage root, or its storage secret is already bound to some other
 name, `setup` treats it as **operator-managed** and leaves it completely untouched — no
 secret created, no rebind attempted — printing a line saying so instead. This is what lets an
 operator repoint `dev` at their own storage after the first run without `setup` fighting them
-on every subsequent `docker compose up`. With different options, `setup` never attaches the
-storage secret, because the options decide where the secret is sent; it prints the command an
-administrator runs after checking them.
+on every subsequent `docker compose up`. When `dev` is at the bundle's root and has no storage secret yet, `setup` sets its storage options to
+the bundle's and attaches the secret in one request, and prints a line saying so, because the
+options decide where the secret is sent. Options an operator set there are replaced.
 
 ### Python assets
 

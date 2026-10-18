@@ -264,10 +264,14 @@ def test_early_refusals_end_the_transaction_and_release_the_row_lock(session: Se
 
 
 def test_attaching_a_secret_records_the_endpoint_it_approves(session: Session) -> None:
-    """The audit event holds the storage endpoint (no user information), never other options."""
+    """The audit event holds the endpoint (no user information) and region, never other options."""
     _environment(session, secret=None)
     row = session.execute(select(Environment)).scalar_one()
-    row.storage_options = {"s3.endpoint": "https://key:pw@s3.example.org:9000", "s3.x": "private"}
+    row.storage_options = {
+        "s3.endpoint": "https://key:pw@s3.example.org:9000",
+        "s3.region": "eu-west-1",
+        "s3.x": "private",
+    }
     session.commit()
     both = _principal(session, "both", Action.MANAGE_ENVIRONMENT, Action.MANAGE_SECRET)
 
@@ -278,5 +282,8 @@ def test_attaching_a_secret_records_the_endpoint_it_approves(session: Session) -
             AuditEvent.event_type == AuditEventType.ENVIRONMENT_STORAGE_UPDATED
         )
     ).scalar_one()
-    assert event.detail["storage_endpoint"] == "https://s3.example.org:9000"
+    assert event.detail["approved_options"] == {
+        "s3.endpoint": "https://s3.example.org:9000",
+        "s3.region": "eu-west-1",
+    }
     assert "private" not in str(event.detail) and "pw" not in str(event.detail)

@@ -528,13 +528,3 @@ def test_changing_options_of_an_environment_with_a_storage_secret_is_403_and_aud
         ]
     engine.dispose()
     assert "storage_options_move_secret" in reasons
-
-
-def test_environment_responses_carry_a_digest_of_the_options_not_the_options(
-    client: TestClient, tmp_path: Path
-) -> None:
-    """Options can hold inline credentials, so only a fingerprint is returned."""
-    body = _create(client, tmp_path)
-
-    assert "storage_options" not in body
-    assert len(body["storage_options_digest"]) == 64

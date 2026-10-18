@@ -172,9 +172,9 @@ from lakana_core.runs.lockdown import (
 from lakana_core.runs.tasks import Written
 from lakana_core.secrets.uses import (
     SecretBindingRefused,
+    approved_storage_options,
     record_refusal,
     require_secret_management_for_storage_change,
-    storage_endpoint,
 )
 from lakana_core.storage.base import StoredObject
 from lakana_core.storage.resolver import (
@@ -1278,7 +1278,7 @@ class CatalogService:
                 "options_keys": sorted(options.keys()) if options is not None else None,
                 "secret_ref_set": secret_ref is not None,
                 **(
-                    {"storage_endpoint": storage_endpoint(env.storage_options)}
+                    {"approved_options": approved_storage_options(env.storage_options)}
                     if secret_ref is not None
                     else {}
                 ),

@@ -14,7 +14,6 @@ _DEV = {
     "storage_secret_ref": None,
     "is_protected": False,
     "properties": {},
-    "storage_options_digest": None,
 }
 
 

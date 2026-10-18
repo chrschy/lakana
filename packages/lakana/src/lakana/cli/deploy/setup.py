@@ -10,8 +10,6 @@ the one secret Lakana itself created; secrets an operator created are never touc
 
 from __future__ import annotations
 
-import hashlib
-import json
 import os
 import sys
 import time
@@ -43,23 +41,6 @@ _RETRYABLE = (LakanaConnectionError, ServerError)
 _RETRY_DELAY_SECONDS = 2.0
 
 
-def _options_digest(options: dict[str, str]) -> str:
-    """Fingerprint a storage options map as the server does.
-
-    Parameters
-    ----------
-    options
-        The options.
-
-    Returns
-    -------
-    str
-        The SHA-256 of the options as sorted-key, compact JSON, in hex.
-    """
-    canonical = json.dumps(options, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-    return hashlib.sha256(canonical.encode("ascii")).hexdigest()
-
-
 def _is_operator_managed(env: Environment) -> bool:
     """Report whether a pre-existing `dev` belongs to an operator, not this bundle.
 
@@ -71,14 +52,11 @@ def _is_operator_managed(env: Environment) -> bool:
     Returns
     -------
     bool
-        `True` if its storage root differs from `STORAGE["root"]`, its storage options are
-        not exactly `STORAGE["options"]` (or the server does not say), or its storage secret
-        is already bound to a name other than `SECRET_NAME`. The secret is presented to the
-        endpoint in the options, so it is attached only where they are the bundle's own.
+        `True` if its storage root differs from `STORAGE["root"]`, or its
+        storage secret is already bound to a name other than
+        `SECRET_NAME`.
     """
     if env.storage_root != STORAGE["root"]:
-        return True
-    if env.storage_options_digest != _options_digest(OPTIONS):
         return True
     return env.storage_secret_ref is not None and env.storage_secret_ref != SECRET_NAME
 
@@ -111,23 +89,14 @@ def run_setup(
     """
     if out is None:
         out = sys.stdout
+    created = False
     try:
         env = client.environments.get(ENVIRONMENT)
     except NotFound:
+        created = True
         env = client.environments.create(ENVIRONMENT, storage=STORAGE)
         out.write(f"Created environment '{ENVIRONMENT}' at {STORAGE['root']}\n")
     else:
-        if env.storage_root == STORAGE["root"] and env.storage_options_digest != _options_digest(
-            OPTIONS
-        ):
-            out.write(
-                f"environment '{ENVIRONMENT}': its storage options differ from the bundle's, "
-                f"so the storage secret '{SECRET_NAME}' is not attached. An administrator "
-                f"checks the options (they decide where the secret is sent), creates the secret "
-                f"if it is missing (lakana secret create) and attaches it: "
-                f"lakana env set-storage {ENVIRONMENT} --secret-ref {SECRET_NAME}\n"
-            )
-            return
         if _is_operator_managed(env):
             out.write(
                 f"environment '{ENVIRONMENT}' is operator-managed "
@@ -147,8 +116,16 @@ def run_setup(
         client.secrets.rotate(ENVIRONMENT, SECRET_NAME, values)
         out.write(f"Set storage secret '{SECRET_NAME}' again in the current stored format\n")
     if env.storage_secret_ref != SECRET_NAME:
-        client.environments.update_storage(ENVIRONMENT, secret_ref=SECRET_NAME)
-        out.write(f"Bound '{SECRET_NAME}' to '{ENVIRONMENT}'\n")
+        # One request: the secret is presented to the endpoint in the options, so it is
+        # attached together with the bundle's own, never to options someone else set.
+        client.environments.update_storage(ENVIRONMENT, options=OPTIONS, secret_ref=SECRET_NAME)
+        if created:
+            out.write(f"Bound '{SECRET_NAME}' to '{ENVIRONMENT}'\n")
+        else:
+            out.write(
+                f"Set the storage options of '{ENVIRONMENT}' to the bundle's and attached "
+                f"'{SECRET_NAME}'\n"
+            )
 
 
 def _run_with_retry(
