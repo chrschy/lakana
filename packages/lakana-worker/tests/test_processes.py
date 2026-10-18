@@ -21,7 +21,9 @@ import pytest
 from lakana_worker.processes import (
     CappedSink,
     OutputRedactor,
+    UnsafeDirectory,
     is_private_directory,
+    prepare_private_directory,
     remove_private_tree,
     restore_directory_access,
     signal_group,
@@ -1046,3 +1048,73 @@ def test_remove_private_tree_removes_a_sealed_input_copy_and_a_killed_download(
             for directory, _dirs, _files in os.walk(tree):
                 os.chmod(directory, 0o700)
     assert not tree.exists()
+
+
+def test_prepare_private_directory_creates_it_and_its_parents_with_mode_0700(
+    tmp_path: Path,
+) -> None:
+    """A missing directory and the missing parents above it are made private."""
+    target = tmp_path / "cache" / "attempts"
+    prepare_private_directory(target)
+    assert stat.S_IMODE(os.lstat(target).st_mode) == 0o700
+    assert stat.S_IMODE(os.lstat(target.parent).st_mode) == 0o700
+    assert is_private_directory(target, 0o077)
+
+
+def test_prepare_private_directory_tolerates_a_directory_that_exists(tmp_path: Path) -> None:
+    """The second of two workers that start together finds the directory and keeps it."""
+    target = tmp_path / "attempts"
+    prepare_private_directory(target)
+    (target / "attempt-1").mkdir()
+    prepare_private_directory(target)
+    assert (target / "attempt-1").is_dir()
+
+
+def test_prepare_private_directory_tolerates_losing_the_race_to_create_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Another worker creates the directory between the check and the `mkdir`."""
+    target = tmp_path / "attempts"
+    real_mkdir = os.mkdir
+
+    def rival_wins(path: str | os.PathLike[str], mode: int = 0o777) -> None:
+        """Create the directory as the other worker would, then fail as `mkdir` does.
+
+        Parameters
+        ----------
+        path
+            The directory to make.
+        mode
+            Its mode.
+
+        Raises
+        ------
+        FileExistsError
+            Always, after making the directory.
+        """
+        real_mkdir(path, mode)
+        raise FileExistsError(errno.EEXIST, "File exists", str(path))
+
+    monkeypatch.setattr(os, "mkdir", rival_wins)
+    prepare_private_directory(target)
+    assert is_private_directory(target, 0o077)
+
+
+def test_prepare_private_directory_refuses_a_symlink_in_its_place(tmp_path: Path) -> None:
+    """A link to a directory is not the directory; the message names the path and the fix."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir(mode=0o700)
+    target = tmp_path / "attempts"
+    target.symlink_to(elsewhere)
+    with pytest.raises(UnsafeDirectory, match=r"attempts.*real directory.*0700"):
+        prepare_private_directory(target)
+
+
+def test_prepare_private_directory_refuses_a_directory_others_can_use(tmp_path: Path) -> None:
+    """An existing directory with group or other access is refused, not silently changed."""
+    target = tmp_path / "attempts"
+    target.mkdir()
+    target.chmod(0o755)
+    with pytest.raises(UnsafeDirectory):
+        prepare_private_directory(target)
+    assert stat.S_IMODE(os.lstat(target).st_mode) == 0o755

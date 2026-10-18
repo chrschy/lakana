@@ -106,7 +106,12 @@ from lakana_worker.index_credentials import (
     IndexCredentialError,
     resolve_index_access,
 )
-from lakana_worker.processes import CappedSink, is_private_directory, remove_private_tree
+from lakana_worker.processes import (
+    CappedSink,
+    UnsafeDirectory,
+    prepare_private_directory,
+    remove_private_tree,
+)
 from lakana_worker.python_support import CANNOT_RUN, PythonSupport
 from lakana_worker.runners import (
     MAX_ERROR_MESSAGE_CHARS,
@@ -1416,20 +1421,21 @@ class PythonRuntime:
             error); transient if a directory cannot be created.
         """
         try:
-            self.work_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-            if is_private_directory(self.work_dir, 0o077):
-                attempt_dir = Path(
-                    os.path.abspath(tempfile.mkdtemp(prefix="attempt-", dir=self.work_dir))
-                )
-                held = self.sweeper is None
-                try:
-                    if self.sweeper is not None:
-                        self.sweeper.hold(attempt_dir)
-                    held = True
-                finally:
-                    if not held:
-                        remove_private_tree(attempt_dir)
-                return attempt_dir
+            prepare_private_directory(self.work_dir)
+            attempt_dir = Path(
+                os.path.abspath(tempfile.mkdtemp(prefix="attempt-", dir=self.work_dir))
+            )
+            held = self.sweeper is None
+            try:
+                if self.sweeper is not None:
+                    self.sweeper.hold(attempt_dir)
+                held = True
+            finally:
+                if not held:
+                    remove_private_tree(attempt_dir)
+            return attempt_dir
+        except UnsafeDirectory:
+            pass
         except OSError as exc:
             raise TaskFailure(
                 FailureKind.TRANSIENT,

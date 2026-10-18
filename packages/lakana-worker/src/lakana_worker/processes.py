@@ -286,6 +286,43 @@ def is_private_directory(path: Path, forbidden: int = 0o022) -> bool:
     )
 
 
+class UnsafeDirectory(Exception):
+    """A directory the worker needs exists but is not private to it."""
+
+
+def prepare_private_directory(path: Path) -> None:
+    """Create a directory privately, or accept the one that exists, without racing a rival.
+
+    Two workers that share a volume may both run this at the same moment: a directory made by
+    the other one in between is the same outcome. Missing parents are made with mode 0700 too.
+    The result is checked, so a symlink or a directory with group or other access is refused
+    rather than followed or changed.
+
+    Parameters
+    ----------
+    path
+        The directory.
+
+    Raises
+    ------
+    UnsafeDirectory
+        If `path` exists but is not a real directory owned by the worker's user with no group
+        or other access. The message names the path and what an operator does.
+    OSError
+        If a directory cannot be created (a read-only or full file system, no permission).
+    """
+    missing = [p for p in (path, *path.parents) if not os.path.lexists(p)]
+    for p in reversed(missing):
+        with contextlib.suppress(FileExistsError):
+            os.mkdir(p, 0o700)
+    if not is_private_directory(path, 0o077):
+        raise UnsafeDirectory(
+            f"{path} must be a real directory (not a link) owned by the worker's user with "
+            "mode 0700; an operator must fix it, for example by removing it so that the "
+            "worker creates it again"
+        )
+
+
 _MAX_REMOVE_DEPTH = 128
 """Deepest directory nesting `remove_private_tree` follows; each level holds one descriptor."""
 
