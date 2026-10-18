@@ -137,6 +137,15 @@ upgrading from, and run the upgrade again. The migration never rewrites a bindin
 A change of an index's or a repository's URL or credential that races its removal now answers
 "not found" (404) in local mode, as it already did elsewhere, instead of a server error.
 
+### Changing storage options needs the right to manage secrets
+
+While an environment has a storage secret, `lakana env set-storage --option` (the storage options,
+such as `s3.endpoint`) now also needs `MANAGE_SECRET` in that environment, as binding a secret
+does; before, `MANAGE_ENVIRONMENT` was enough, and the secret could be sent to another endpoint.
+This affects someone who holds `MANAGE_ENVIRONMENT` but not `MANAGE_SECRET` (the `ADMIN` role has
+both): the command is now refused and audited, and says who can run it. Environments without a
+storage secret, and options sent unchanged, behave as before.
+
 ## Notes for 0.14.0
 
 ### The project moved to the lakana-labs organisation

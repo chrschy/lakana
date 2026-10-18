@@ -170,6 +170,11 @@ from lakana_core.runs.lockdown import (
     table_target,
 )
 from lakana_core.runs.tasks import Written
+from lakana_core.secrets.uses import (
+    SecretBindingRefused,
+    record_refusal,
+    require_secret_management_for_storage_change,
+)
 from lakana_core.storage.base import StoredObject
 from lakana_core.storage.resolver import (
     ResolvedStorage,
@@ -1220,9 +1225,14 @@ class CatalogService:
         ValidationError
             If the environment is protected.
         PermissionDenied
-            If the principal may not manage environments, or —
-            only when `secret_ref` is given — may not manage secrets in
-            this one.
+            If the principal may not manage environments, or may not manage
+            secrets in this one when `secret_ref` is given.
+        SecretBindingRefused
+            (A `PermissionDenied`.) If `options` would change the options of
+            an environment that has a storage secret and the principal may not
+            manage secrets in it: the options decide where the secret is
+            presented. Unchanged options need no extra right. The refusal is
+            audited as `AUTHORIZATION_DENIED`.
 
         Notes
         -----
@@ -1236,10 +1246,24 @@ class CatalogService:
         self._authz.authorize(p, Action.MANAGE_ENVIRONMENT, Securable.instance_scope())
         if secret_ref is not None:
             self._authz.authorize(p, Action.MANAGE_SECRET, Securable.environment_scope(name))
-        env = self._find_environment(name)
+        env = self._session.execute(
+            select(Environment)
+            .where(Environment.name == name)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).scalar_one_or_none()
+        if env is None:
+            raise NotFoundError(f"No environment named {name!r}.")
         if env.is_protected:
             raise ValidationError(f"Environment {name!r} is protected.")
         if options is not None:
+            if dict(options) != env.storage_options:
+                try:
+                    require_secret_management_for_storage_change(self._authz, p, env)
+                except SecretBindingRefused as refusal:
+                    self._session.rollback()
+                    record_refusal(self._authz, p, refusal)
+                    raise
             env.storage_options = dict(options)
         if secret_ref is not None:
             env.storage_secret_ref = secret_ref

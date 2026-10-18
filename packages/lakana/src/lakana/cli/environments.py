@@ -141,6 +141,10 @@ def set_storage(
 ) -> None:
     """Change environment NAME's storage options or credentials secret.
 
+    While the environment has a storage secret, changing the options also needs the right to
+    manage secrets in it (the ADMIN role), because an option such as `s3.endpoint` decides
+    where the secret is sent.
+
     Parameters
     ----------
     ctx
