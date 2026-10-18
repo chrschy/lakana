@@ -13,7 +13,7 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 from pyiceberg.table.metadata import TableMetadata
 from sqlalchemy import delete, func, select
@@ -213,7 +213,7 @@ def last_maintenance(session: Session, table_id: uuid.UUID) -> LastMaintenance |
         if status is QueryRunStatus.SUCCEEDED or stopped:
             return LastMaintenance(
                 run_id=run_id,
-                finished_at=finished_at,
+                finished_at=cast("datetime", finished_at),
                 status="stopped" if stopped else "complete",
                 snapshots_expired=_count(report, "snapshots_expired"),
                 files_deleted=_count(report, "files_deleted"),

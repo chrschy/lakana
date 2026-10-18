@@ -54,6 +54,7 @@ nav:
       - reference/package-indexes.md
       - reference/checks.md
       - reference/descriptions.md
+      - reference/table-health.md
   - Explanation:
       - explanation/index.md
       - explanation/scope.md

@@ -7,6 +7,7 @@ import json
 import re
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pyarrow as pa
 import pyarrow.ipc
@@ -1352,7 +1353,7 @@ def test_table_get_has_a_state_row_for_every_kind(
     assert _state_row(result.stdout) == expected
 
 
-_HEALTH = {
+_HEALTH: dict[str, Any] = {
     "days": 30,
     "last_maintenance": {
         "run_id": "r1",
@@ -1408,7 +1409,7 @@ _HEALTH = {
 }
 
 
-def _health(tmp_path: Path, body: dict[str, object], *args: str) -> tuple[FakeApi, Result]:
+def _health(tmp_path: Path, body: dict[str, Any], *args: str) -> tuple[FakeApi, Result]:
     """Run `lakana table health bronze.sales` against a canned answer.
 
     Parameters
@@ -1476,7 +1477,7 @@ def test_table_health_says_when_nobody_read_the_table(tmp_path: Path) -> None:
 def test_table_health_marks_a_stopped_maintenance_and_one_tag_or_none(tmp_path: Path) -> None:
     body = {
         **_HEALTH,
-        "last_maintenance": {**_HEALTH["last_maintenance"], "status": "stopped", "tags_removed": 0},  # type: ignore[dict-item]
+        "last_maintenance": {**_HEALTH["last_maintenance"], "status": "stopped", "tags_removed": 0},
     }
     _, result = _health(tmp_path, body)
 
