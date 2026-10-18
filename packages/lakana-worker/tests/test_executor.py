@@ -34,6 +34,7 @@ from lakana_worker.executor import (
     NOT_STARTED_MESSAGE,
     WORKER_STALE_MESSAGE,
     DuckDBInternalError,
+    MemoryStopQuery,
     OutOfMemoryQuery,
     QueryCancelled,
     QueryCancelRequested,
@@ -1090,13 +1091,13 @@ def scripted(monkeypatch: pytest.MonkeyPatch) -> Callable[[str], None]:
         (
             ChildFailed(stop=StopReason.OUT_OF_MEMORY, killed=True, detail="over"),
             False,
-            OutOfMemoryQuery,
+            MemoryStopQuery,
             "over",
         ),
         (
             ChildFailed(stop=StopReason.OUT_OF_MEMORY, killed=True),
             False,
-            OutOfMemoryQuery,
+            MemoryStopQuery,
             "Query failed: the worker ran out of memory and stopped the query.",
         ),
         (

@@ -153,11 +153,11 @@ def _policy(expression: str) -> dict[str, object]:
 def test_a_row_filter_expression_over_the_limit_is_refused(small_client: TestClient) -> None:
     """The row-filter route applies the same limit to its expression."""
     _alice(small_client)
-    long = "id = '" + "a" * (LIMIT - 6) + "'"
+    long = "id = " + "1" * (LIMIT - 4)
     _assert_refused(
         small_client.post("/api/v1/row-filters", headers=AUTH_HEADER, json=_policy(long))
     )
-    short = small_client.post("/api/v1/row-filters", headers=AUTH_HEADER, json=_policy("id = 'EU'"))
+    short = small_client.post("/api/v1/row-filters", headers=AUTH_HEADER, json=_policy("id = 1"))
     assert short.status_code == 201, short.text
 
 

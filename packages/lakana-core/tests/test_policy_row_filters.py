@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from lakana_core.auth import Action, AllowAllAuthorization, PrincipalRef, Securable, SecurableKind
 from lakana_core.catalog.json_schema import ColumnSpec
+from lakana_core.catalog.schema_inference import infer_schema
 from lakana_core.catalog.service import TableDescription
 from lakana_core.errors import (
     ConflictError,
@@ -661,7 +662,7 @@ def _ready(
 
 def test_create_accepts_columns_the_table_has_in_any_letter_case(session: Session) -> None:
     """The database matches a column without regard to case, so the filter does too."""
-    catalog = FakeColumnCatalog(names=["id", "Region"])
+    catalog = FakeColumnCatalog(names=["id", "Region"], types={"id": "long"})
     service, admin = _ready(session, catalog)
     row = service.create(admin, **_filter_args("REGION = 'EU' AND id > 1"))
     assert row.expression == "REGION = 'EU' AND id > 1"
@@ -986,9 +987,9 @@ def _page_quotes() -> list[str]:
     ]
 
 
-def test_the_page_quotes_fourteen_refusals() -> None:
+def test_the_page_quotes_seventeen_refusals() -> None:
     """The table the next tests read has the rows they expect."""
-    assert len(_page_quotes()) == 14
+    assert len(_page_quotes()) == 17
 
 
 def _create_error(session: Session, expression: str = "id > 1", **override: str) -> Exception:
@@ -1121,3 +1122,160 @@ def test_an_expression_that_is_too_long_is_refused_as_the_page_says() -> None:
     message = statement_too_long_message("The row-filter expression", 100_001, 100_000)
     [quoted] = [q for q in _page_quotes() if q.startswith("The row-filter expression is")]
     assert message.startswith(quoted.removesuffix(" ...").rstrip())
+
+
+_TYPED = {"id": "long", "region": "string", "salary": "double", "owner": "boolean"}
+"""The declared types the type-check tests give the fake table's columns."""
+
+
+def _create_filter(
+    session: Session, expression: str, catalog: FakeColumnCatalog | None = None
+) -> RowFilter:
+    """Create a row filter for a service account on a table with typed columns.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    expression
+        The filter's expression.
+    catalog
+        The table's columns; typed ones (`_TYPED`) unless given.
+
+    Returns
+    -------
+    RowFilter
+        The stored filter.
+    """
+    service = RowFilterService(
+        session,
+        AllowAllAuthorization(),
+        catalog or FakeColumnCatalog(types=_TYPED, schema_id=7),
+    )
+    admin = _admin()
+    _persist_actor(session, admin)
+    ensure_table(session, "dev", "gold", "customers")
+    PrincipalService(session, AllowAllAuthorization()).create_principal(
+        admin, name="alice", type=PrincipalType.SERVICE_ACCOUNT
+    )
+    return service.create(
+        admin,
+        principal="alice",
+        environment="dev",
+        namespace="gold",
+        table="customers",
+        expression=expression,
+    )
+
+
+@pytest.mark.parametrize(
+    ("expression", "fragment"),
+    [
+        ("region = 5", "`region` is text; compare it with '5', not 5."),
+        ("region = salary", "`region` is text but `salary` is double; compare columns"),
+        ("region", "`region` is text, not boolean; a condition is needed here."),
+        ("id = 'x'", "`id` is long; compare it with a number, not 'x'."),
+        ("owner = 1", "`owner` is boolean; compare it with TRUE or FALSE, not 1."),
+    ],
+)
+def test_create_refuses_an_expression_that_needs_an_implicit_cast(
+    session: Session, expression: str, fragment: str
+) -> None:
+    """A comparison across types, or a text used as a condition, is refused and not stored."""
+    with pytest.raises(ValidationError) as exc_info:
+        _create_filter(session, expression)
+    assert fragment in str(exc_info.value)
+    assert session.execute(select(RowFilter)).scalars().all() == []
+
+
+@pytest.mark.parametrize(
+    "expression",
+    ["id = 5", "id < 5", "region = 'EU'", "owner", "owner AND id > 1", "has_group('x')"],
+)
+def test_create_accepts_an_expression_that_compares_like_with_like(
+    session: Session, expression: str
+) -> None:
+    """The allowed shapes are stored, with the schema id the check read."""
+    created = _create_filter(session, expression)
+    assert created.expression == expression
+
+
+def test_create_refuses_a_constant_that_is_not_a_condition_without_reading_the_table(
+    session: Session,
+) -> None:
+    """A filter that reads no column is checked on its own, so the table is not read."""
+    catalog = FakeColumnCatalog(types=_TYPED)
+    with pytest.raises(ValidationError, match="the number 1 is not a condition"):
+        _create_filter(session, "1", catalog)
+    assert catalog.calls == []
+
+
+def test_create_names_a_missing_column_before_it_checks_types(session: Session) -> None:
+    """A column the table lacks keeps its own message."""
+    with pytest.raises(ValidationError, match="has no column 'ghost'"):
+        _create_filter(session, "ghost = 5")
+
+
+def test_a_comparison_across_types_is_refused_as_the_page_says(session: Session) -> None:
+    """Row `'region = 5' is not a valid filter expression ...`: the text is the code's."""
+    with pytest.raises(ValidationError) as caught:
+        _create_filter(session, "region = 5")
+    assert str(caught.value) in _page_quotes()
+
+
+def test_a_column_used_as_a_condition_is_refused_as_the_page_says(session: Session) -> None:
+    """Row `'region' is not a valid filter expression ...`: the code's first words."""
+    with pytest.raises(ValidationError) as caught:
+        _create_filter(session, "region")
+    [quoted] = [q for q in _page_quotes() if q.startswith("'region' is not a valid filter")]
+    assert str(caught.value).startswith(quoted.removesuffix(" ...").rstrip())
+
+
+def test_a_bad_typed_date_is_refused_as_the_page_says(session: Session) -> None:
+    """Row `'born = DATE '2026-13-01'' is not a valid expression ...`: the code's first words."""
+    with pytest.raises(ValidationError) as caught:
+        _create_filter(session, "born = DATE '2026-13-01'")
+    [quoted] = [q for q in _page_quotes() if q.startswith("'born = DATE '2026-13-01''")]
+    assert str(caught.value).startswith(quoted.removesuffix(" ...").rstrip())
+
+
+@pytest.mark.parametrize("file_format", ["csv", "json"])
+@pytest.mark.parametrize("expression", ["id = 5", "id = 'x'", "region = 5", "region"])
+def test_a_filter_on_a_csv_or_json_table_is_checked_only_against_the_subset(
+    session: Session, file_format: str, expression: str
+) -> None:
+    """The stored types of such a table are a guess; DuckDB reads its own, so no type check."""
+    catalog = FakeColumnCatalog(types={"id": "int64"}, file_format=file_format)
+    assert _create_filter(session, expression, catalog).expression == expression
+
+
+def test_a_filter_on_a_parquet_table_is_type_checked(session: Session) -> None:
+    """A Parquet file carries its schema, so the stored types are the ones the engine reads."""
+    catalog = FakeColumnCatalog(types={"id": "int64"}, file_format="parquet")
+    assert _create_filter(session, "id = 5", catalog).expression == "id = 5"
+
+
+def test_a_filter_on_a_parquet_table_keeps_the_strict_check(session: Session) -> None:
+    """A mismatch on a Parquet column is refused with the stored type named."""
+    catalog = FakeColumnCatalog(types={"id": "int64"}, file_format="parquet")
+    with pytest.raises(ValidationError, match="`id` is int64; compare it with a number"):
+        _create_filter(session, "id = 'x'", catalog)
+
+
+@pytest.mark.parametrize(
+    ("file_format", "sample", "expression"),
+    [
+        ("csv", b"id,ts\n007,2026-01-01 10:00:00\n008,2026-01-02 10:00:00\n", "id = 7"),
+        ("csv", b"id,ts\n1,2026-01-01 10:00:00\n", "ts > TIMESTAMP '2026-01-01 00:00:00'"),
+        ("json", b'{"u": "550e8400-e29b-41d4-a716-446655440000", "t": "10:00:00"}\n', "u = 'x'"),
+        ("json", b'{"u": "550e8400-e29b-41d4-a716-446655440000", "t": "10:00:00"}\n', "t = 'x'"),
+    ],
+)
+def test_a_filter_on_the_types_infer_schema_really_stores_is_not_refused(
+    session: Session, file_format: str, sample: bytes, expression: str
+) -> None:
+    """The cases where the stored guess and the engine's own reading differ are not checked."""
+    stored = infer_schema(sample, file_format)
+    catalog = FakeColumnCatalog(names=list(stored), types=stored, file_format=file_format)
+
+    assert _create_filter(session, expression, catalog).expression == expression

@@ -1024,6 +1024,11 @@ class FakeColumnCatalog:
         Raised by `describe_table` instead, when set.
     schema_id
         The id of the current schema every table reports.
+    types
+        The declared type of a column by name; a column not listed is `string`.
+    file_format
+        When set, the tables are external (raw-zone) tables of this format (`"parquet"`,
+        `"csv"`, `"json"`); `None` for Iceberg tables.
     calls
         Each `describe_table` call, as (principal, reference).
     """
@@ -1031,6 +1036,8 @@ class FakeColumnCatalog:
     names: list[str] = field(default_factory=lambda: list(COMMON_MASK_COLUMNS))
     error: Exception | None = None
     schema_id: int | None = None
+    types: dict[str, str] = field(default_factory=dict)
+    file_format: str | None = None
     calls: list[tuple[PrincipalRef, TableRef]] = field(default_factory=list)
 
     def describe_table(self, p: PrincipalRef, ref: TableRef) -> TableDescription:
@@ -1046,7 +1053,7 @@ class FakeColumnCatalog:
         Returns
         -------
         TableDescription
-            A description with `names` as string columns.
+            A description with `names` as columns, `string` unless `types` says otherwise.
 
         Raises
         ------
@@ -1059,10 +1066,14 @@ class FakeColumnCatalog:
         return TableDescription(
             ref=ref,
             id=uuid.uuid4(),
-            kind="TABLE",
+            kind="TABLE" if self.file_format is None else "EXTERNAL",
             metadata_location=None,
-            columns=[ColumnSpec(name=n, type="string", nullable=True) for n in self.names],
+            columns=[
+                ColumnSpec(name=n, type=self.types.get(n, "string"), nullable=True)
+                for n in self.names
+            ],
             schema_id=self.schema_id,
+            file_format=self.file_format,
         )
 
 

@@ -64,6 +64,38 @@ deeply", permanent for a SQL task. Every string from sqlglot is cut to 2,000 cha
 is processed and the module uses no regular expression, because a running pattern is not
 interrupted by the query timeout; the message is at most 300 printable characters.
 
+## Policy expressions are type-checked when they are created
+
+A row filter or column mask runs on every stored value, so one that needs an implicit conversion
+fails every query it covers, on the first value that cannot be converted (GHSA-32q2-rpmr-586j).
+`lakana_core.policy.expression_types.check_expression_types` refuses that at creation, in the same
+place that checks the columns exist (`_check_columns_exist` in `row_filters.py`,
+`_check_column_exists` in `column_masks.py`), against the schema whose id the policy records, so the
+types checked and the `schema_id` stored are one read. Rules: a comparison is accepted only when
+DuckDB's implicit cast cannot fail. Both sides are of one kind (text; date/timestamp; otherwise
+the same type; a `timestamptz` only with a `timestamptz` column, because the read does not pin the
+time zone). For numbers, a literal must be exactly representable in the column's type (integer
+range, `decimal(p,s)` places and digits with no exponent, finite and in range for floats), and two
+columns must be integers, `float`/`double`, or decimals of the same precision and scale. A
+comparison with `NULL` is refused. `AND`/`OR`/`NOT` and a filter as a whole need booleans; a minus
+sign goes only before a number literal; `substr` takes whole-number literals in the 32-bit range;
+`||`/`md5` need text. A mask must keep its column's type: `query_rewrite._masked_projection` wraps
+it in `TRY_CAST(<mask> AS <type>)` when the mask row has `type_checked` (set on every mask created
+since migration 0036; false for older ones, which a read leaves as written). The target is a
+structured `sqlglot` `DataType` from `lakana_core.policy.cast_types`: for an Iceberg table from
+the column's `pyiceberg` type, for a raw-zone table from the stored Arrow type name through a
+closed list of the exact names pyarrow prints (decimals from two integers). It is never parsed
+from a type string, because a raw-zone struct's field name is free text. A column of any other
+type (struct, list, map, nanosecond timestamp, unknown) has no cast, and creation allows only
+`NULL` or the column itself as its mask. Creation accepts only values that cast cannot fail on. The check and the cast apply to Iceberg and Parquet tables only (`policy.columns.type_checks_apply`, from `TableDescription.file_format`): a CSV or JSON table has no stored schema, DuckDB infers its own types at read time, so its filters are checked against the subset only and its masks are stored with `type_checked` false. A type the table does not declare in a form the check knows is refused (fail
+closed, never guessed). The only conversion a policy may contain is a typed `DATE '...'` or
+`TIMESTAMP '...'` literal, which `validate_restricted_expression` accepts only for a string literal
+that is a real date or moment in the exact `YYYY-MM-DD[ HH:MM:SS[.ffffff]]` form; it is a constant, so it
+cannot fail on a stored value. Any other `CAST`, `TRY_CAST` or `::` stays outside the subset. A new
+node type added to the subset needs a rule in `_Checker.type_of`; one without a rule is refused
+(`its type could not be determined`). Existing policies are not re-checked; the read path is
+unchanged and still replaces the engine's text with a fixed message.
+
 ## Names in log lines and in CLI output
 
 A table, namespace, artifact, environment, asset or file name can hold a line break or an escape
@@ -2309,13 +2341,12 @@ work.
 - **No stored value in an error on a policy-bound read.** A row filter or column mask
   expression runs on every stored value, hidden ones included, and the query engine's text for a
   failure quotes the value. When a query reads at least one table with a filter or mask applied
-  to the reader, a failure of the query engine keeps its text only for the kinds known to carry no
-  stored value (Binder, Catalog, Parser); every other one is replaced, in full, by the fixed message of `lakana_core.policy.read_errors.policy_read_failure` (it names the
+  to the reader, a failure of the query engine, of any class (Parser, Binder, Catalog, Conversion, Out of
+  Range, ...), is replaced, in full, by the fixed message of `lakana_core.policy.read_errors.policy_read_failure` (it names the
   table when exactly one has a policy). The parent does it, in `_without_the_value` of
   `lakana_worker/pipeline.py`, from the error document's text, so the query child knows nothing of
   policies; it covers ad-hoc queries, asset runs, checks and views alike, and the stored
-  `error_message` and a check's `error` hold the fixed text. An internal engine failure gets its own fixed text and stays an internal error (the worker's log
-  keeps the details). Cancellation, timeout, transient and memory errors keep their handling. A
+  `error_message` and a check's `error` hold the fixed text. An internal, transient (storage, network) or out-of-memory engine failure gets the fixed text and keeps its class (the worker's log keeps the details); the out-of-memory one adds the memory advice, and the memory watchdog's own stop (`MemoryStopQuery`, told apart by class, never by text) keeps its wording. The query child's wording for a file that stores a column in another type is replaced too, because a reader's own SQL can write it, and so is the view diagnosis (`_diagnose_views` is skipped on a policy-bound read). Cancellation, timeout, a stale lease and a process ended from outside keep Lakana's own wording. A
   query that reads no policy-bound table keeps the engine's text. A new error path on a policy-bound
   read goes through the same function.
 - **A read at the snapshot of a check shows only the columns the table has now.**

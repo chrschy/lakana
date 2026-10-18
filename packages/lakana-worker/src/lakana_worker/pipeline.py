@@ -65,6 +65,7 @@ from typing import TYPE_CHECKING, Literal, NoReturn
 
 import pyarrow as pa
 import pyarrow.ipc
+import sqlglot.expressions as exp
 from sqlalchemy import ColumnElement, and_, or_, select, update
 from sqlalchemy.orm import Session
 
@@ -122,6 +123,7 @@ from lakana_core.models import (
     TableType,
     WriteMode,
 )
+from lakana_core.policy.cast_types import arrow_cast_type, iceberg_cast_type
 from lakana_core.policy.expressions import columns_of
 from lakana_core.policy.read_errors import policy_read_failure
 from lakana_core.policy.renames import policy_column_renamed_message, renamed_policy_column
@@ -163,6 +165,8 @@ from lakana_core.storage.resolver import (
 from lakana_worker.activity import ACTIVITY
 from lakana_worker.executor import (
     INTERNAL_ADVICE,
+    KILLED_FROM_OUTSIDE_MESSAGE,
+    MEMORY_LIMIT_ADVICE,
     DuckDBInternalError,
     OutOfMemoryQuery,
     QueryCancelled,
@@ -334,26 +338,21 @@ def _redact(message: str, locations: Sequence[str]) -> str:
     return message
 
 
-_KEEPS_ITS_TEXT = re.compile(
-    r"^Query failed: (?:(?:Binder|Catalog|Parser) Error"
-    r"|a file of a table this query reads stores column )"
-)
-"""The start of the engine's text for a failure that carries no stored value, as a query child
-words it: a name or a statement the reader wrote that the engine cannot resolve or parse, and the
-child's own fixed text for a file that stores a column in another type."""
+_OUTSIDE_PREFIX = KILLED_FROM_OUTSIDE_MESSAGE.split("{signal}", 1)[0]
+"""The start of Lakana's own text for a query process ended from outside (no engine text)."""
 
 
 def _without_the_value(failure: LakanaError, restricted: frozenset[str]) -> LakanaError:
     """Replace the engine's text for a failure, on a read under a row filter or column mask.
 
-    A row filter or column mask expression runs on every stored value, also on the ones the
-    policy hides, and the engine's text for a failure can quote a value. A query that reads a
-    table under such a policy therefore keeps that text only for the kinds known to carry no
-    stored value (binder, catalog and parser errors, see `_KEEPS_ITS_TEXT`); every other
-    failure of the engine gets one fixed message: an invalid query as before, and an internal error
-    with its own fixed text and kind. What is
-    not the engine's text (a cancel, a timeout, a transient or memory error, the worker's own
-    wording) is returned as it is.
+    Errors on a read under a row filter or column mask always show one fixed message, whatever
+    the class of the error (parser, binder, catalog, conversion, out of range, I/O, memory, ...)
+    and whatever the wording the query process gave it: the engine's text can quote the rewritten
+    SQL or a stored value, the policy's expressions run on every row, also on the ones it hides,
+    and the reader's own SQL can write any wording itself. The class is kept (an internal, a
+    transient or an out-of-memory error stays one, so retries and the memory handling are as
+    before). What Lakana words itself (a cancel, a timeout, a stale lease, a query process ended
+    from outside) is returned as it is.
 
     Parameters
     ----------
@@ -370,18 +369,23 @@ def _without_the_value(failure: LakanaError, restricted: frozenset[str]) -> Laka
         The fixed message as a `ValidationError` when `failure` is such a failure of a
         query that reads a table under a policy, otherwise `failure` itself.
     """
-    if restricted and isinstance(failure, DuckDBInternalError):
+    if not restricted:
+        return failure
+    only = next(iter(restricted)) if len(restricted) == 1 else None
+    if isinstance(failure, DuckDBInternalError):
         # The engine's internal errors can format a value too; the type stays, so the cause and
         # a retry are as before, and the worker's log keeps the details.
         return DuckDBInternalError(
             f"Query failed: the query engine failed on its own. {INTERNAL_ADVICE}"
         )
-    if not restricted or type(failure) is not ValidationError:
+    kind = type(failure)
+    if kind is OutOfMemoryQuery:
+        # The database's own out-of-memory error: fixed message plus the advice, no engine text.
+        return OutOfMemoryQuery(f"{policy_read_failure(only)} {MEMORY_LIMIT_ADVICE}")
+    if kind is TransientQueryError and not str(failure).startswith(_OUTSIDE_PREFIX):
+        return TransientQueryError(policy_read_failure(only))
+    if kind is not ValidationError or not str(failure).startswith("Query failed: "):
         return failure
-    text = str(failure)
-    if not text.startswith("Query failed: ") or _KEEPS_ITS_TEXT.match(text) is not None:
-        return failure
-    only = next(iter(restricted)) if len(restricted) == 1 else None
     return ValidationError(policy_read_failure(only))
 
 
@@ -641,6 +645,7 @@ def _resolve_sources(
     for dotted in dotted_refs:
         declared_columns_only = False
         field_ids: tuple[ReadField, ...] = ()
+        mask_types: dict[str, exp.DataType] = {}
         # For the one table read at a check: the result, and the names (lower-cased, as the
         # database compares them) of the columns that are the same column, by field id, in
         # the checked snapshot and in the table now.
@@ -681,6 +686,11 @@ def _resolve_sources(
             location_pattern = row.external_config["location_pattern"]
             file_format = row.external_config["format"]
             columns = dict(row.external_config.get("schema", {}))
+            mask_types = {
+                name: target
+                for name, stored in columns.items()
+                if (target := arrow_cast_type(stored)) is not None
+            }
             # Re-parsed rather than trusted as already-confined: a row
             # created before the id binding may hold a pattern outside
             # `raw/<dir...>/<glob>`, and this must fail the query rather
@@ -835,6 +845,11 @@ def _resolve_sources(
             # renamed, re-added or widened since a file was written reads as that schema says.
             read = [column for column in fields if column.name in columns]
             field_ids = read_fields(dotted, read)
+            mask_types = {
+                column.name: target
+                for column in read
+                if (target := iceberg_cast_type(column.field_type)) is not None
+            }
             if snapshot_id is not None:
                 refuse_changed_nested_fields(dotted, metadata, snapshot_id, read)
             if pins is not None:
@@ -902,6 +917,8 @@ def _resolve_sources(
             column_masks=column_masks,
             declared_columns_only=declared_columns_only,
             field_ids=field_ids,
+            mask_types=mask_types,
+            typed_masks=resolved_policy.typed_masks,
         )
     if checked is not None and not read_at_check:
         # Every table the query names was resolved (and its read authorized), and none is
@@ -2484,6 +2501,7 @@ def _run_one(
         elif (
             prepared is not None
             and prepared.views
+            and not prepared.restricted
             and run.check_result_id is None
             and isinstance(exc, ValidationError)
             and not isinstance(

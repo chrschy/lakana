@@ -1848,3 +1848,55 @@ def test_0035_secret_use_check_on_postgres() -> None:
         with engine.begin() as conn:
             insert(conn, "PACKAGE_INDEX", None)
         engine.dispose()
+
+
+def test_0036_on_postgres() -> None:
+    """0036 adds `column_masks.type_checked`, false for existing masks; the downgrade drops it."""
+    revision_0035 = "a3d7c9e1f502"
+    revision_0036 = "b5e2d8f1a7c3"
+    mask_id = uuid.uuid4()
+    now = datetime.now(UTC)
+    with PostgresContainer("postgres:16", driver="pg8000") as pg:
+        url = pg.get_connection_url()
+        migrate.upgrade(url, revision_0035)
+        engine = sqlalchemy.create_engine(url)
+        with engine.begin() as conn:
+            conn.execute(sqlalchemy.text("SET LOCAL session_replication_role = replica"))
+            conn.execute(
+                sqlalchemy.text(
+                    "INSERT INTO column_masks (id, principal_id, environment, namespace, "
+                    '"table", "column", expression, created_by, created_at) VALUES '
+                    "(:id, :who, 'dev', 'gold', 'x', 'ssn', 'NULL', :who, :now)"
+                ),
+                {"id": mask_id, "who": uuid.uuid4(), "now": now},
+            )
+
+        migrate.upgrade(url, revision_0036)
+        assert _alembic_version(engine) == revision_0036
+        column = next(
+            c
+            for c in sqlalchemy.inspect(engine).get_columns("column_masks")
+            if c["name"] == "type_checked"
+        )
+        assert type(column["type"]).__name__ == "BOOLEAN"
+        assert column["nullable"] is False
+        with engine.connect() as conn:
+            checked = conn.execute(
+                sqlalchemy.text("SELECT type_checked FROM column_masks WHERE id = :id"),
+                {"id": mask_id},
+            ).scalar()
+        assert checked is False
+
+        migrate.downgrade(url, revision_0035)
+        assert _alembic_version(engine) == revision_0035
+        assert "type_checked" not in {
+            c["name"] for c in sqlalchemy.inspect(engine).get_columns("column_masks")
+        }
+        with engine.connect() as conn:
+            kept = conn.execute(
+                sqlalchemy.text("SELECT count(*) FROM column_masks WHERE id = :id"), {"id": mask_id}
+            ).scalar()
+        assert kept == 1
+        migrate.upgrade(url, revision_0036)
+        assert _alembic_version(engine) == revision_0036
+        engine.dispose()

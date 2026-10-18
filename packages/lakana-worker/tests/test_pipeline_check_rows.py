@@ -73,6 +73,7 @@ from lakana_core.models import (
     WriteMode,
 )
 from lakana_core.policy.column_masks import ColumnMaskService
+from lakana_core.policy.read_errors import policy_read_failure
 from lakana_core.policy.renames import policy_column_renamed_message
 from lakana_core.policy.row_filters import RowFilterService
 from lakana_core.projects.checks import CheckSpec
@@ -2678,10 +2679,13 @@ def test_a_column_added_without_a_write_reads_as_null_under_a_policy(
     assert (run.status, rows) == (QueryRunStatus.SUCCEEDED, expected)
 
 
-def test_a_reader_who_wrote_a_missing_column_gets_the_databases_text_and_no_hint(
+def test_a_reader_who_wrote_a_missing_column_gets_the_fixed_message_and_no_hint(
     session: Session, admin: PrincipalRef, tmp_path: Path
 ) -> None:
-    """`SELECT tier FROM (SELECT id FROM gold.orders)` is the reader's own mistake."""
+    """`SELECT tier FROM (SELECT id FROM gold.orders)` is the reader's own mistake.
+
+    Errors on reads under a row filter or column mask always show the fixed message.
+    """
     _write(session, admin, _GOOD, WriteMode.CREATE)
     _add_a_column_without_writing(session, admin)
     ana = _reader(session, admin, "ana", "orders")
@@ -2692,8 +2696,7 @@ def test_a_reader_who_wrote_a_missing_column_gets_the_databases_text_and_no_hint
     run, rows = _run(session, tmp_path, run_id)
 
     assert (run.status, rows) == (QueryRunStatus.FAILED, [])
-    assert run.error_message is not None
-    assert run.error_message.startswith(_NOT_FOUND_LINE)
+    assert run.error_message == policy_read_failure("gold.orders")
     assert "older data files" not in run.error_message
 
 

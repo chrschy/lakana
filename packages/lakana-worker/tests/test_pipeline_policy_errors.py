@@ -9,10 +9,13 @@ read through a field-id map, and that a query with no policy keeps the engine's 
 from __future__ import annotations
 
 import logging
+import threading
 import uuid
 from pathlib import Path
 
+import duckdb
 import pyarrow as pa
+import pyarrow.ipc
 import pytest
 from sqlalchemy import update
 from sqlalchemy.orm import Session
@@ -20,7 +23,8 @@ from sqlalchemy.orm import Session
 from lakana_core.auth import AllowAllAuthorization, PrincipalRef
 from lakana_core.catalog.query_service import QueryService, WriteTarget
 from lakana_core.catalog.service import CatalogService
-from lakana_core.config import StorageConfig
+from lakana_core.config import QueryLimitsConfig, StorageConfig
+from lakana_core.errors import ValidationError
 from lakana_core.identifiers import NamespacePath, TableRef
 from lakana_core.models import (
     ColumnMask,
@@ -35,8 +39,19 @@ from lakana_core.policy.column_masks import ColumnMaskService
 from lakana_core.policy.read_errors import policy_read_failure
 from lakana_core.policy.row_filters import RowFilterService
 from lakana_core.storage.resolver import StorageResolver
-from lakana_worker.executor import INTERNAL_ADVICE, DuckDBInternalError
+from lakana_worker import executor as executor_module
+from lakana_worker import query_child
+from lakana_worker.executor import (
+    _KINDS,
+    INTERNAL_ADVICE,
+    KILLED_FROM_OUTSIDE_MESSAGE,
+    DuckDBInternalError,
+    OutOfMemoryQuery,
+    TransientQueryError,
+)
 from lakana_worker.pipeline import _without_the_value, failure_cause, run_one
+from lakana_worker.query_process import ChildFailed, StopReason
+from lakana_worker.query_protocol import MEMORY_LIMIT_ADVICE
 
 _SECRET = "HIDDEN-X"
 _BIG = 2_000_000_000
@@ -172,8 +187,9 @@ def _filter(
     sql
         The filter expression.
     stored
-        Create the filter with ``id > 0`` and then replace the expression, as `_mask` does;
-        `False` passes `sql` through the service's own validation.
+        Create the filter with ``id > 0`` and then replace the expression, as `_mask` does, so an
+        expression the service refuses can be stored like an old policy; `False` creates the
+        filter with `sql` itself (the two tests that use it pass ``id > 0``).
     """
     RowFilterService(session, AllowAllAuthorization(), catalog).create(
         principal,
@@ -276,30 +292,26 @@ def test_a_failing_row_filter_shows_the_fixed_message(
 
 
 @pytest.mark.parametrize("expression", ["code = 5", "code = num", "code", "NOT code", "-low > 0"])
-def test_a_row_filter_the_service_accepts_can_fail_on_a_stored_value(
+def test_a_row_filter_stored_before_the_type_check_can_fail_on_a_stored_value(
     session: Session, principal: PrincipalRef, catalog: CatalogService, expression: str
 ) -> None:
-    """A text column compared with a number, or used as a condition, fails on the value."""
-    _filter(session, principal, catalog, "people", expression, stored=False)
+    """A text column compared with a number, or used as a condition, fails on the value.
+
+    The service refuses these now (#126); a filter made by an earlier release is not checked
+    again, so the test stores the expression as the database would hold it.
+    """
+    _filter(session, principal, catalog, "people", expression)
 
     run = _query(session, principal, "SELECT id FROM gold.people")
 
     _assert_fixed(run, "gold.people", "")
 
 
-def test_a_column_mask_the_service_accepts_can_fail_on_a_stored_value(
+def test_a_column_mask_stored_before_the_type_check_can_fail_on_a_stored_value(
     session: Session, principal: PrincipalRef, catalog: CatalogService
 ) -> None:
     """A mask that compares a text column with a number fails on the stored value."""
-    ColumnMaskService(session, AllowAllAuthorization(), catalog).create(
-        principal,
-        principal="admin",
-        environment="dev",
-        namespace="gold",
-        table="people",
-        column="secret",
-        expression='"secret" = "num"',
-    )
+    _mask(session, principal, catalog, "secret", '"secret" = "num"')
 
     run = _query(session, principal, "SELECT secret FROM gold.people")
 
@@ -310,7 +322,7 @@ def test_an_asset_run_under_a_failing_filter_records_the_fixed_message(
     session: Session, principal: PrincipalRef, catalog: CatalogService
 ) -> None:
     """A write that reads a policy-bound table records the same message."""
-    _filter(session, principal, catalog, "people", "code = 5", stored=False)
+    _filter(session, principal, catalog, "people", "code = 5")
     run = QueryService(session, AllowAllAuthorization()).submit_write(
         principal,
         "dev",
@@ -365,41 +377,138 @@ def test_a_conversion_error_on_a_table_without_a_policy_keeps_the_text_of_the_fi
     assert run.error_message.startswith("Query failed: a value could not be converted")
 
 
-def test_a_binder_error_under_a_policy_keeps_its_message(
+def test_a_binder_error_under_a_policy_shows_the_fixed_message(
     session: Session, principal: PrincipalRef, catalog: CatalogService
 ) -> None:
-    """A binder error names no stored value, so its text stays."""
+    """Errors on reads under a row filter or column mask always show the fixed message."""
     _mask(session, principal, catalog, "secret", "NULL")
 
     run = _query(session, principal, "SELECT nope FROM gold.people")
 
-    assert run.status == QueryRunStatus.FAILED
-    assert run.error_message is not None
-    assert run.error_message.startswith("Query failed: Binder Error")
-    assert "The query failed on a value" not in run.error_message
-
-
-def test_a_failure_of_a_kind_that_is_not_listed_is_replaced_under_a_policy(
-    session: Session, principal: PrincipalRef, catalog: CatalogService
-) -> None:
-    """Only binder, catalog and parser errors keep their text; any other kind is replaced."""
-    _mask(session, principal, catalog, "secret", "NULL")
-
-    run = _query(session, principal, "SELECT timezone('HIDDEN-X', now()) FROM gold.people")
-
     _assert_fixed(run, "gold.people", "")
+    assert "Binder" not in (run.error_message or "")
 
 
-def test_a_catalog_error_under_a_policy_keeps_its_message(
+def test_a_catalog_error_under_a_policy_shows_the_fixed_message(
     session: Session, principal: PrincipalRef, catalog: CatalogService
 ) -> None:
-    """A function that does not exist is a catalog error: its text stays."""
+    """A function that does not exist is told the same way."""
     _mask(session, principal, catalog, "secret", "NULL")
 
     run = _query(session, principal, "SELECT no_such_function(id) FROM gold.people")
 
-    assert run.error_message is not None
-    assert run.error_message.startswith("Query failed: Catalog Error")
+    _assert_fixed(run, "gold.people", "")
+
+
+_ENGINE_TEXTS = [
+    'Parser Error: syntax error at or near "x"\n\nLINE 1: SELECT HIDDEN-X FROM t',
+    'Binder Error: Referenced column "HIDDEN-X" not found\n\nLINE 1: SELECT 1',
+    "Catalog Error: Scalar Function with name HIDDEN-X does not exist!",
+    "Conversion Error: Could not convert string 'HIDDEN-X' to INT32",
+    "Out of Range Error: Overflow in addition of INT32 (HIDDEN-X)",
+    "Invalid Input Error: HIDDEN-X",
+    "Constraint Error: HIDDEN-X",
+    "Not implemented Error: HIDDEN-X",
+    "Invalid Error: HIDDEN-X",
+    "Mismatch Type Error: HIDDEN-X",
+    "Something else entirely: HIDDEN-X",
+]
+
+
+@pytest.mark.parametrize("engine_text", _ENGINE_TEXTS)
+def test_every_class_of_engine_error_under_a_policy_gets_the_fixed_message(
+    engine_text: str,
+) -> None:
+    """No class of the engine's text escapes the fixed message on a read under a policy."""
+    raw = ValidationError(f"Query failed: {engine_text}")
+
+    replaced = _without_the_value(raw, frozenset({"gold.people"}))
+    several = _without_the_value(raw, frozenset({"gold.people", "gold.plain"}))
+    untouched = _without_the_value(raw, frozenset())
+
+    assert str(replaced) == policy_read_failure("gold.people")
+    assert str(several) == policy_read_failure(None)
+    assert "HIDDEN-X" not in str(replaced) + str(several)
+    assert untouched is raw
+
+
+def test_the_wording_for_a_file_that_stores_another_type_is_replaced_under_a_policy() -> None:
+    """A reader can write this wording from their own SQL, so a policy read never shows it."""
+    raw = ValidationError(
+        'Query failed: a file of a table this query reads stores column "SECRET-VALUE" as a, '
+        "which cannot be read as b. Ask the owner of that table to write its rows again."
+    )
+
+    replaced = _without_the_value(raw, frozenset({"gold.people"}))
+
+    assert str(replaced) == policy_read_failure("gold.people")
+    assert "SECRET-VALUE" not in str(replaced)
+    assert _without_the_value(raw, frozenset()) is raw
+
+
+def test_a_forged_cast_report_in_the_readers_own_query_gets_the_fixed_message(
+    session: Session, principal: PrincipalRef, catalog: CatalogService
+) -> None:
+    """An `error(...)` text shaped like the read's cast report shows nothing of itself."""
+    _mask(session, principal, catalog, "secret", "NULL")
+
+    run = _query(
+        session,
+        principal,
+        "SELECT error('failed to cast column \"SECRET-VALUE\" from type a to b: :') "
+        "FROM gold.people",
+    )
+
+    _assert_fixed(run, "gold.people", "")
+    assert "SECRET-VALUE" not in (run.error_message or "")
+
+
+def _through_the_child(exc: BaseException) -> ValidationError:
+    """Classify an engine failure in the query child and build the pipeline's error from it.
+
+    Parameters
+    ----------
+    exc
+        The failure DuckDB raised.
+
+    Returns
+    -------
+    ValidationError
+        The error the parent receives, of the type the document's kind maps to.
+    """
+    connection = duckdb.connect(":memory:")
+    document = query_child.failure(connection, exc, None, threading.Event())
+    return _KINDS[document.kind](document.message)
+
+
+@pytest.mark.parametrize(
+    ("exc", "kind"),
+    [
+        (duckdb.IOException("IO Error: HIDDEN-X"), TransientQueryError),
+        (OSError("HTTP Error: HTTP GET error on 'HIDDEN-X' (HTTP 503)"), TransientQueryError),
+        (OSError("connection reset by HIDDEN-X"), TransientQueryError),
+    ],
+)
+def test_a_transient_or_memory_error_under_a_policy_keeps_its_class_and_shows_the_fixed_message(
+    exc: BaseException, kind: type[ValidationError]
+) -> None:
+    """The class decides retries and memory handling; the text is the fixed message."""
+    raw = _through_the_child(exc)
+    assert type(raw) is kind
+
+    replaced = _without_the_value(raw, frozenset({"gold.people"}))
+
+    assert type(replaced) is kind
+    assert str(replaced) == policy_read_failure("gold.people")
+    assert failure_cause(replaced) == failure_cause(raw)
+    assert _without_the_value(raw, frozenset()) is raw
+
+
+def test_the_workers_own_text_for_a_killed_query_stays_under_a_policy() -> None:
+    """A query process ended from outside has Lakana's wording, with no engine text in it."""
+    raw = TransientQueryError(KILLED_FROM_OUTSIDE_MESSAGE.format(signal=9))
+
+    assert _without_the_value(raw, frozenset({"gold.people"})) is raw
 
 
 def test_an_internal_failure_under_a_policy_gets_a_fixed_text_and_stays_internal() -> None:
@@ -415,3 +524,86 @@ def test_an_internal_failure_under_a_policy_gets_a_fixed_text_and_stays_internal
     assert str(replaced) == f"Query failed: the query engine failed on its own. {INTERNAL_ADVICE}"
     assert failure_cause(replaced) == failure_cause(raw)
     assert untouched is raw
+
+
+def _typeof_id(session: Session, principal: PrincipalRef, tmp_path: Path) -> object:
+    """Run a query that reports the type the reader gets for `gold.people.id`.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    principal
+        The caller.
+    tmp_path
+        The environment's storage root.
+
+    Returns
+    -------
+    object
+        The type name DuckDB reports.
+    """
+    run = _query(session, principal, "SELECT typeof(id) AS t FROM gold.people")
+    assert run.result_location is not None, run.error_message
+    with pyarrow.ipc.open_file(tmp_path / run.result_location) as reader:
+        return reader.read_all().column("t")[0].as_py()
+
+
+def test_a_mask_created_now_is_cast_to_the_columns_type_when_read(
+    session: Session, principal: PrincipalRef, catalog: CatalogService, tmp_path: Path
+) -> None:
+    """`0` on the BIGINT column `id` reaches the reader as a BIGINT."""
+    ColumnMaskService(session, AllowAllAuthorization(), catalog).create(
+        principal,
+        principal="admin",
+        environment="dev",
+        namespace="gold",
+        table="people",
+        column="id",
+        expression="0",
+    )
+
+    assert _typeof_id(session, principal, tmp_path) == "BIGINT"
+
+
+def test_a_mask_stored_before_the_type_check_reads_as_it_always_did(
+    session: Session, principal: PrincipalRef, catalog: CatalogService, tmp_path: Path
+) -> None:
+    """The same mask with `type_checked` false is used as written: an INTEGER."""
+    ColumnMaskService(session, AllowAllAuthorization(), catalog).create(
+        principal,
+        principal="admin",
+        environment="dev",
+        namespace="gold",
+        table="people",
+        column="id",
+        expression="0",
+    )
+    session.execute(update(ColumnMask).values(type_checked=False))
+    session.commit()
+
+    assert _typeof_id(session, principal, tmp_path) == "INTEGER"
+
+
+def test_a_database_out_of_memory_error_under_a_policy_keeps_the_advice_and_no_engine_text() -> (
+    None
+):
+    """The class stays; the text is the fixed message plus the advice, none of the engine's."""
+    raw = _through_the_child(duckdb.OutOfMemoryException("Out of Memory Error: HIDDEN-X"))
+    assert type(raw) is OutOfMemoryQuery
+
+    replaced = _without_the_value(raw, frozenset({"gold.people"}))
+
+    assert type(replaced) is OutOfMemoryQuery
+    assert str(replaced) == f"{policy_read_failure('gold.people')} {MEMORY_LIMIT_ADVICE}"
+    assert "HIDDEN-X" not in str(replaced)
+    assert failure_cause(replaced) == failure_cause(raw)
+
+
+def test_the_memory_watchdogs_own_text_stays_under_a_policy() -> None:
+    """The watchdog's stop is Lakana's wording, built with no engine output."""
+    failed = ChildFailed(stop=StopReason.OUT_OF_MEMORY, killed=True, detail="Query failed: over")
+    raw = executor_module._translate(failed, QueryLimitsConfig(), False)
+    assert isinstance(raw, OutOfMemoryQuery)
+
+    assert _without_the_value(raw, frozenset({"gold.people"})) is raw

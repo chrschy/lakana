@@ -56,7 +56,23 @@ def test_create_a_column_mask_and_list_it_for_the_principal(client: TestClient) 
 def test_create_accepts_the_broader_mask_grammar(client: TestClient) -> None:
     """substr/||/md5 are accepted for a mask expression, matching the broader mask grammar."""
     create_environment(client)
-    create_table(client, "dev", "gold", "customers")
+    made = client.post(
+        "/v1/dev/namespaces/gold/tables",
+        headers=AUTH_HEADER,
+        json={
+            "name": "customers",
+            "schema": {
+                "type": "struct",
+                "schema-id": 0,
+                "fields": [
+                    {"id": 1, "name": "id", "type": "long", "required": True},
+                    {"id": 2, "name": "ssn", "type": "string", "required": False},
+                ],
+            },
+            "properties": {},
+        },
+    )
+    assert made.status_code == 200, made.text
     client.post("/api/v1/principals", headers=AUTH_HEADER, json={"name": "alice", "type": "USER"})
     response = client.post(
         "/api/v1/column-masks",
@@ -66,8 +82,8 @@ def test_create_accepts_the_broader_mask_grammar(client: TestClient) -> None:
             "environment": "dev",
             "namespace": "gold",
             "table": "customers",
-            "column": "id",
-            "expression": "substr(id, 1, 3) || '***'",
+            "column": "ssn",
+            "expression": "substr(ssn, 1, 3) || '***'",
         },
     )
     assert response.status_code == 201, response.text
@@ -314,3 +330,27 @@ def test_create_rejects_a_column_the_table_does_not_have(client: TestClient) -> 
         "/api/v1/column-masks", headers=AUTH_HEADER, params={"principal_name": "alice"}
     )
     assert listed.json() == []
+
+
+def test_create_refuses_a_mask_of_another_type_than_its_column(client: TestClient) -> None:
+    """A text mask on a long column is a 422 that names both types and a value that fits."""
+    create_environment(client)
+    create_table(client, "dev", "gold", "customers")
+    client.post("/api/v1/principals", headers=AUTH_HEADER, json={"name": "alice", "type": "USER"})
+    response = client.post(
+        "/api/v1/column-masks",
+        headers=AUTH_HEADER,
+        json={
+            "principal": "alice",
+            "environment": "dev",
+            "namespace": "gold",
+            "table": "customers",
+            "column": "id",
+            "expression": "'***'",
+        },
+    )
+    assert response.status_code == 422, response.text
+    assert (
+        "`id` is long, but the mask is text. Use a value of its own type: 0 or NULL."
+        in response.json()["detail"]
+    )

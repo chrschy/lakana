@@ -416,6 +416,41 @@ def test_a_view_whose_reference_lost_a_column_fails_naming_the_view(
     )
 
 
+def test_a_broken_view_over_a_policy_bound_table_shows_the_fixed_message(
+    session: Session, admin: PrincipalRef, catalog: CatalogService, tmp_path: Path
+) -> None:
+    """The diagnosis of a view quotes the engine; under a row filter the fixed message stands."""
+    _view(session, admin, "gold.v", "SELECT id, region FROM bronze.orders")
+    bob = _principal(session, "bob")
+    _grant_read(session, admin, "bob", "gold.v")
+    _grant_read(session, admin, "bob", "bronze.orders")
+    RowFilterService(session, AllowAllAuthorization(), catalog).create(
+        admin,
+        principal="bob",
+        environment="dev",
+        namespace="bronze",
+        table="orders",
+        expression="id > 1",
+    )
+    narrowed = pa.table({"id": pa.array([1], pa.int64())})
+    catalog.write_batches(
+        admin,
+        TableRef.from_dotted("dev", "bronze.orders"),
+        mode=WriteMode.REPLACE,
+        schema=narrowed.schema,
+        batches=narrowed.to_batches(),
+        evolve_schema=True,
+    )
+
+    read, _ = _query(session, bob, tmp_path, "SELECT id FROM gold.v")
+
+    assert read.status == QueryRunStatus.FAILED
+    assert read.error_message is not None
+    assert read.error_message.startswith("The query failed on a value it could not convert")
+    assert "no longer plans" not in read.error_message
+    assert "Binder" not in read.error_message and "Catalog" not in read.error_message
+
+
 def test_a_view_is_never_resolved_as_a_table(
     session: Session, admin: PrincipalRef, catalog: CatalogService
 ) -> None:

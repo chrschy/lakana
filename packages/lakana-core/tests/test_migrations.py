@@ -3139,3 +3139,65 @@ def test_secret_model_and_migrations_agree_on_the_use_check(
     assert "ck_secrets_use_consistent" in {
         c.name for c in Base.metadata.tables["secrets"].constraints
     }
+
+
+_REVISION_0036 = "b5e2d8f1a7c3"
+
+
+def test_0036_marks_existing_column_masks_as_not_type_checked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revision `0036`: `column_masks.type_checked`, false for every mask that already exists.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    """
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, _REVISION_0035)
+    engine = create_engine(f"sqlite:///{db_path}")
+    mask_id = uuid.uuid4().hex
+    try:
+        assert "type_checked" not in {
+            c["name"] for c in inspect(engine).get_columns("column_masks")
+        }
+        with engine.begin() as connection:
+            connection.execute(sa.text("PRAGMA foreign_keys=OFF"))
+            connection.execute(
+                sa.text(
+                    "INSERT INTO column_masks (id, principal_id, environment, namespace, "
+                    '"table", "column", expression, created_by, created_at) VALUES '
+                    "(:id, :who, 'dev', 'gold', 'x', 'ssn', '''***''', :who, "
+                    "'2026-10-18 00:00:00')"
+                ),
+                {"id": mask_id, "who": uuid.uuid4().hex},
+            )
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, _REVISION_0036)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        found = {c["name"]: c for c in inspect(engine).get_columns("column_masks")}
+        assert found["type_checked"]["nullable"] is False
+        with engine.connect() as connection:
+            row = connection.execute(
+                sa.text("SELECT type_checked FROM column_masks WHERE id = :id"), {"id": mask_id}
+            ).one()
+        assert not row[0]  # a mask of an earlier release was never type-checked
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, _REVISION_0035)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        assert "type_checked" not in {
+            c["name"] for c in inspect(engine).get_columns("column_masks")
+        }
+    finally:
+        engine.dispose()

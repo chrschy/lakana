@@ -906,9 +906,9 @@ def _page_quotes() -> list[str]:
     ]
 
 
-def test_the_page_quotes_thirteen_refusals() -> None:
+def test_the_page_quotes_fifteen_refusals() -> None:
     """The table the next tests read has the rows they expect."""
-    assert len(_page_quotes()) == 13
+    assert len(_page_quotes()) == 15
 
 
 def test_a_qualified_mask_expression_is_refused_as_the_page_says(session: Session) -> None:
@@ -1008,3 +1008,148 @@ def test_a_mask_expression_that_qualifies_a_column_is_refused(session: Session) 
         "the table it is set on."
     )
     assert session.execute(select(ColumnMask)).scalars().all() == []
+
+
+_TYPED = {"id": "long", "ssn": "string", "salary": "double", "owner": "boolean", "c": "date"}
+"""The declared types the type-check tests give the fake table's columns."""
+
+
+def _create_mask(
+    session: Session, column: str, expression: str, catalog: FakeColumnCatalog | None = None
+) -> ColumnMask:
+    """Create a column mask for a service account on a table with typed columns.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    column
+        The masked column.
+    expression
+        The mask's expression.
+    catalog
+        The table's columns; typed ones (`_TYPED`) unless given.
+
+    Returns
+    -------
+    ColumnMask
+        The stored mask.
+    """
+    service = ColumnMaskService(
+        session,
+        AllowAllAuthorization(),
+        catalog or FakeColumnCatalog(types=_TYPED, schema_id=7),
+    )
+    admin = _admin()
+    _persist_actor(session, admin)
+    ensure_table(session, "dev", "gold", "customers")
+    PrincipalService(session, AllowAllAuthorization()).create_principal(
+        admin, name="alice", type=PrincipalType.SERVICE_ACCOUNT
+    )
+    return service.create(
+        admin,
+        principal="alice",
+        environment="dev",
+        namespace="gold",
+        table="customers",
+        column=column,
+        expression=expression,
+    )
+
+
+@pytest.mark.parametrize(
+    ("column", "expression"),
+    [
+        ("id", "0"),
+        ("id", "NULL"),
+        ("ssn", "'***'"),
+        ("ssn", "substr(ssn, 1, 3) || '***'"),
+        ("salary", "0"),
+        ("owner", "FALSE"),
+        ("c", "DATE '1900-01-01'"),
+    ],
+)
+def test_create_accepts_a_mask_of_the_columns_own_type(
+    session: Session, column: str, expression: str
+) -> None:
+    """INTEGER, TEXT, DOUBLE, BOOLEAN and DATE columns keep their type under a mask."""
+    assert _create_mask(session, column, expression).expression == expression
+
+
+@pytest.mark.parametrize(
+    ("column", "expression", "fragment"),
+    [
+        (
+            "id",
+            "'***'",
+            "`id` is long, but the mask is text. Use a value of its own type: 0 or NULL.",
+        ),
+        ("ssn", "0", "`ssn` is text, but the mask is a number. Use a value of its own type: '***'"),
+        ("c", "'1900-01-01'", "`c` is date, but the mask is text."),
+        ("owner", "0", "`owner` is boolean, but the mask is a number."),
+        ("ssn", "id = 1 AND ssn = 5", "`ssn` is text; compare it with '5', not 5."),
+    ],
+)
+def test_create_refuses_a_mask_of_another_type(
+    session: Session, column: str, expression: str, fragment: str
+) -> None:
+    """A mask that changes the column's type names both types and a value that keeps it."""
+    with pytest.raises(ValidationError) as exc_info:
+        _create_mask(session, column, expression)
+    assert fragment in str(exc_info.value)
+    assert session.execute(select(ColumnMask)).scalars().all() == []
+
+
+def test_a_mask_of_another_type_is_refused_as_the_page_says(session: Session) -> None:
+    """Row `'0' is not a valid mask expression ...`: the code's first words."""
+    with pytest.raises(ValidationError) as caught:
+        _create_mask(session, "ssn", "0")
+    [quoted] = [q for q in _page_quotes() if q.startswith("'0' is not a valid mask")]
+    assert str(caught.value).startswith(quoted.removesuffix(" ...").rstrip())
+
+
+def test_a_comparison_across_types_in_a_mask_is_refused_as_the_page_says(
+    session: Session,
+) -> None:
+    """Row `'ssn = 5' is not a valid mask expression ...`: the text is the code's."""
+    with pytest.raises(ValidationError) as caught:
+        _create_mask(session, "owner", "ssn = 5")
+    assert str(caught.value) in _page_quotes()
+
+
+def test_create_records_that_the_mask_was_type_checked(session: Session) -> None:
+    """A mask created now is marked, so a read casts it to the column's type."""
+    assert _create_mask(session, "ssn", "'***'").type_checked is True
+
+
+@pytest.mark.parametrize("file_format", ["csv", "json"])
+def test_a_mask_on_a_csv_or_json_table_is_not_type_checked(
+    session: Session, file_format: str
+) -> None:
+    """Such a mask is stored like an earlier release's: unchecked and never cast on a read."""
+    catalog = FakeColumnCatalog(types={"id": "int64"}, file_format=file_format)
+    created = _create_mask(session, "id", "'***'", catalog)
+    assert created.expression == "'***'"
+    assert created.type_checked is False
+
+
+def test_a_mask_on_a_parquet_table_is_type_checked(session: Session) -> None:
+    """A Parquet mask keeps the check and is marked, so a read casts it."""
+    catalog = FakeColumnCatalog(types={"id": "int64"}, file_format="parquet")
+    assert _create_mask(session, "id", "0", catalog).type_checked is True
+
+
+def test_a_mask_of_another_type_on_a_parquet_table_is_refused(session: Session) -> None:
+    """A text mask on an `int64` Parquet column is refused with the stored type named."""
+    catalog = FakeColumnCatalog(types={"id": "int64"}, file_format="parquet")
+    with pytest.raises(ValidationError, match="`id` is int64, but the mask is text"):
+        _create_mask(session, "id", "'***'", catalog)
+
+
+def test_a_mask_on_a_nanosecond_parquet_timestamp_is_stored_as_not_type_checked(
+    session: Session,
+) -> None:
+    """DuckDB reads it as TIMESTAMP_NS, which has no cast target: the mask is used as written."""
+    catalog = FakeColumnCatalog(names=["c"], types={"c": "timestamp[ns]"}, file_format="parquet")
+    created = _create_mask(session, "c", "TIMESTAMP '1970-01-01 00:00:00'", catalog)
+    assert created.type_checked is False
