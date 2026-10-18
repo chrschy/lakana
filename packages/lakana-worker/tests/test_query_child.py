@@ -1054,7 +1054,7 @@ class _Real:
 
     def __exit__(self, *exc: object) -> None:
         """Kill the group and reap, whatever the test did."""
-        with contextlib.suppress(ProcessLookupError):
+        with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(self.process.pid, signal.SIGKILL)
         self.process.wait(timeout=20)
         for pipe in (self.process.stdout, self.process.stderr):
@@ -1470,7 +1470,7 @@ def test_the_child_dies_when_its_worker_is_killed() -> None:
         process.kill()
         process.wait(timeout=10)
         process.stdout.close()
-        with contextlib.suppress(ProcessLookupError):
+        with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(child_pid, signal.SIGKILL)
 
 
