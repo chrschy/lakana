@@ -152,6 +152,17 @@ storage secret therefore gets its storage options set to the bundle's when the s
 the set-up prints a line saying so. Change them again afterwards with `lakana env set-storage`
 (which then needs `MANAGE_SECRET`, see above).
 
+### A commit's manifests are limited to 64 MiB
+
+No migration. The check that every data file of an Iceberg REST catalog commit has field ids
+reads the commit's manifest list and manifests whole. It now refuses a commit one of whose
+manifest files is larger than 64 MiB, before reading it, and the reading counts towards the same
+60 seconds as the footers
+([the refusal](../reference/checks.md#when-a-commit-through-the-iceberg-rest-catalog-is-refused)).
+Split such a commit into smaller ones, so that each manifest lists fewer data files; a manifest of
+64 MiB lists far more than the 2,000 files a commit may add. The database connection is also given
+back while the files are checked, so several large commits no longer hold up other writers.
+
 ## Notes for 0.14.0
 
 ### The project moved to the lakana-labs organisation

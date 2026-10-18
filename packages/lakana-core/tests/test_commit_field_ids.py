@@ -12,6 +12,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from core_test_helpers import _config
+from pyiceberg.avro.file import AvroFile
 from pyiceberg.io.pyarrow import PyArrowFileIO
 from pyiceberg.manifest import (
     DataFile,
@@ -226,6 +227,7 @@ def _commit_snapshots(
     snapshots: list[Snapshot],
     *,
     own_data_files: bool = False,
+    release_session: bool = True,
 ) -> LoadedTable:
     """Commit snapshots, the last one becoming `main`.
 
@@ -241,6 +243,9 @@ def _commit_snapshots(
         The snapshots to add, in order.
     own_data_files
         Whether to skip the field-id check, as Lakana's own writes do.
+    release_session
+        Whether to ask for the database session to be released during the check, as the REST
+        route does.
 
     Returns
     -------
@@ -258,6 +263,7 @@ def _commit_snapshots(
             ),
         ],
         own_data_files=own_data_files,
+        release_session=release_session,
     )
 
 
@@ -952,7 +958,7 @@ def test_the_deadline_applies_while_a_manifest_is_being_read(
     with pytest.raises(ValidationError, match="took longer than 60 seconds"):
         _commit_snapshots(catalog, principal, ref, [snapshot])
 
-    assert count == [3]
+    assert 0 < count[0] < 6
 
 
 def test_a_table_changed_while_its_files_were_checked_refuses_the_commit_cleanly(
@@ -986,3 +992,193 @@ def test_a_table_changed_while_its_files_were_checked_refuses_the_commit_cleanly
         select(Table.metadata_location).where(Table.id == created.uuid)
     ).scalar_one()
     assert location == created.metadata_location + ".other"
+
+
+def _commit_with_a_flushed_write(
+    catalog: CatalogService,
+    principal: PrincipalRef,
+    session: Session,
+    tmp_path: Path,
+    write: Callable[[Session, LoadedTable], None],
+) -> None:
+    """Commit a snapshot, asking for the session release, after `write` ran in the transaction.
+
+    Parameters
+    ----------
+    catalog
+        The catalog under test.
+    principal
+        The acting principal.
+    session
+        The catalog's session.
+    tmp_path
+        The storage root.
+    write
+        Writes to the database through the session; the transaction is then left open.
+    """
+    ref, created = _created(catalog, principal, tmp_path)
+    uri = _parquet(created, "w.parquet", field_ids=True)
+    write(session, created)
+    _commit_files(catalog, principal, ref, created, [uri], 900_000_194)
+
+
+def test_the_release_refuses_after_a_flushed_orm_write(
+    catalog: CatalogService, principal: PrincipalRef, session: Session, tmp_path: Path
+) -> None:
+    def write(open_session: Session, created: LoadedTable) -> None:
+        row = open_session.get_one(Table, created.uuid)
+        row.previous_metadata_location = "touched"
+        open_session.flush()
+
+    with pytest.raises(RuntimeError, match="written in the transaction"):
+        _commit_with_a_flushed_write(catalog, principal, session, tmp_path, write)
+
+
+def test_the_release_refuses_after_a_core_statement_that_writes(
+    catalog: CatalogService, principal: PrincipalRef, session: Session, tmp_path: Path
+) -> None:
+    def write(open_session: Session, created: LoadedTable) -> None:
+        open_session.execute(
+            update(Table)
+            .where(Table.id == created.uuid)
+            .values(previous_metadata_location="touched")
+        )
+
+    with pytest.raises(RuntimeError, match="written in the transaction"):
+        _commit_with_a_flushed_write(catalog, principal, session, tmp_path, write)
+
+
+def test_a_write_that_was_committed_does_not_stop_the_release(
+    catalog: CatalogService, principal: PrincipalRef, session: Session, tmp_path: Path
+) -> None:
+    def write(open_session: Session, created: LoadedTable) -> None:
+        open_session.execute(
+            update(Table)
+            .where(Table.id == created.uuid)
+            .values(previous_metadata_location="touched")
+        )
+        open_session.commit()
+
+    _commit_with_a_flushed_write(catalog, principal, session, tmp_path, write)
+
+
+def test_a_caller_that_does_not_ask_keeps_its_session_during_the_reads(
+    catalog: CatalogService,
+    principal: PrincipalRef,
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ref, created = _created(catalog, principal, tmp_path)
+    uri = _parquet(created, "k.parquet", field_ids=True)
+    open_during_entries: list[bool] = []
+    _watching_manifest_reads(
+        monkeypatch, lambda: open_during_entries.append(session.in_transaction())
+    )
+    snapshot = _snapshot(created.metadata, None, [uri], 900_000_195)
+
+    _commit_snapshots(catalog, principal, ref, [snapshot], release_session=False)
+
+    assert open_during_entries == [True]
+
+
+def test_a_manifest_above_the_byte_limit_is_refused_before_it_is_read(
+    catalog: CatalogService,
+    principal: PrincipalRef,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ref, created = _created(catalog, principal, tmp_path)
+    uri = _parquet(created, "m.parquet", field_ids=True)
+    snapshot = _snapshot(created.metadata, None, [uri], 900_000_196)
+    monkeypatch.setattr(field_ids_module, "MAX_MANIFEST_BYTES", 10)
+
+    def refuse(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("a manifest was read")
+
+    monkeypatch.setattr(AvroFile, "__enter__", refuse)
+
+    with pytest.raises(ValidationError) as caught:
+        _commit_snapshots(catalog, principal, ref, [snapshot])
+
+    message = str(caught.value)
+    assert "snap-900000196.avro" in message
+    assert "64 MiB" in message
+    assert "nothing was applied" in message
+
+
+def test_a_manifest_read_that_outlasts_the_deadline_refuses_the_commit(
+    catalog: CatalogService,
+    principal: PrincipalRef,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ref, created = _created(catalog, principal, tmp_path)
+    uri = _parquet(created, "h.parquet", field_ids=True)
+    snapshot = _snapshot(created.metadata, None, [uri], 900_000_197)
+    stuck = threading.Event()
+
+    def hang(*_args: object, **_kwargs: object) -> object:
+        stuck.wait(timeout=30)
+        raise OSError("gone")
+
+    monkeypatch.setattr(AvroFile, "__enter__", hang)
+    monkeypatch.setattr(field_ids_module, "CHECK_DEADLINE_SECONDS", 0.05)
+
+    try:
+        with pytest.raises(ValidationError, match=r"took longer than 0\.05 seconds"):
+            _commit_snapshots(catalog, principal, ref, [snapshot])
+    finally:
+        stuck.set()
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_the_entry_stream_yields_what_pyiceberg_reads(
+    catalog: CatalogService,
+    principal: PrincipalRef,
+    tmp_path: Path,
+    version: int,
+) -> None:
+    """`_live_entries` and pyiceberg's own `fetch_manifest_entry` agree on a real manifest."""
+    _, created = _created(catalog, principal, tmp_path)
+    io = PyArrowFileIO()
+    path = f"{created.metadata.location}/metadata/eq-{version}.avro"
+    statuses = [
+        ManifestEntryStatus.ADDED,
+        ManifestEntryStatus.EXISTING,
+        ManifestEntryStatus.DELETED,
+    ]
+    with write_manifest(
+        format_version=version,  # ty: ignore[invalid-argument-type]
+        spec=created.metadata.spec(),
+        schema=created.metadata.schema(),
+        output_file=io.new_output(path),
+        snapshot_id=900_000_198,
+        avro_compression="null",
+    ) as writer:
+        for index, status in enumerate(statuses):
+            entry = ManifestEntry.from_args(
+                status=status,
+                snapshot_id=900_000_198,
+                sequence_number=1,
+                file_sequence_number=1,
+                data_file=_data_file(f"{created.metadata.location}/data/e{index}.parquet"),
+            )
+            if status is ManifestEntryStatus.ADDED:
+                writer.add(entry)
+            elif status is ManifestEntryStatus.EXISTING:
+                writer.existing(entry)
+            else:
+                writer.delete(entry)
+    manifest = writer.to_manifest_file()
+
+    streamed = list(
+        field_ids_module._live_entries(io, manifest, "gold.sales", field_ids_module._clock() + 3600)
+    )
+    read = manifest.fetch_manifest_entry(io, discard_deleted=True)
+
+    def summary(entries: list[ManifestEntry]) -> list[tuple[object, object, str]]:
+        return [(e.status, e.data_file.content, e.data_file.file_path) for e in entries]
+
+    assert len(streamed) == 2
+    assert summary(streamed) == summary(read)

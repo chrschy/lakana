@@ -16,30 +16,32 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Generator, Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
-from contextlib import closing
-from typing import cast
+from typing import TypeVar
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 from pyiceberg.avro.file import AvroFile
-from pyiceberg.io import FileIO
+from pyiceberg.io import FileIO, InputFile
 from pyiceberg.manifest import (
     DEFAULT_READ_VERSION,
     MANIFEST_ENTRY_SCHEMAS,
+    MANIFEST_LIST_FILE_SCHEMAS,
     DataFile,
     DataFileContent,
     FileFormat,
+    ManifestContent,
     ManifestEntry,
     ManifestEntryStatus,
     ManifestFile,
-    read_manifest_list,
+    PartitionFieldSummary,
 )
 from pyiceberg.schema import Schema, index_name_by_id
 from pyiceberg.table.metadata import TableMetadata
 from pyiceberg.table.snapshots import Snapshot
+from pyiceberg.typedef import StructProtocol
 from pyiceberg.types import (
     BinaryType,
     BooleanType,
@@ -68,6 +70,8 @@ from lakana_core.query_rewrite import ReadField
 from lakana_core.storage.resolver import is_within_location
 
 logger = logging.getLogger(__name__)
+
+_Record = TypeVar("_Record", bound=StructProtocol)
 
 _PRIMITIVES: dict[type[IcebergType], str] = {
     BooleanType: "BOOLEAN",
@@ -299,6 +303,10 @@ CHECK_DEADLINE_SECONDS = 60.0
 MAX_FOOTER_BYTES = 16 * 1024 * 1024
 """The largest Parquet footer the check reads; the trailer names its size before it is read."""
 
+MAX_MANIFEST_BYTES = 64 * 1024 * 1024
+"""The largest manifest or manifest list the check reads; pyiceberg reads such a file whole, so
+its size is checked, from storage, before it is opened."""
+
 _clock = time.monotonic
 """The clock the deadline runs on; a test replaces it instead of waiting."""
 
@@ -319,6 +327,11 @@ _NOT_PARQUET = (
 _UNREADABLE_MANIFEST = (
     "A manifest of the commit's snapshot for `{table}` could not be read, so nothing was "
     "applied. Write the manifests and the manifest list before the commit."
+)
+_MANIFEST_TOO_LARGE = (
+    "The commit's snapshot for `{table}` names `{file}`, a manifest file of {size:,} bytes, "
+    "which is larger than the 64 MiB Lakana reads, so nothing was applied. Split the "
+    "commit into smaller ones, so that each manifest lists fewer data files."
 )
 _TOO_MANY_FILES = (
     "The commit adds more than {limit:,} data files to `{table}`; Lakana checks at most "
@@ -452,10 +465,74 @@ def _timed_out(table: str) -> str:
     return _TIMED_OUT.format(table=shown(table), seconds=CHECK_DEADLINE_SECONDS)
 
 
+def _open_avro(
+    file_io: FileIO,
+    path: str,
+    table: str,
+    deadline: float,
+    make: Callable[[InputFile], AvroFile[_Record]],
+) -> AvroFile[_Record]:
+    """Open a manifest or a manifest list: check its size, then read it within the deadline.
+
+    pyiceberg reads such a file whole when it is opened, and decodes it entry by entry
+    afterwards. The size is therefore checked before the open, and the open runs in its own
+    thread and is abandoned, like a footer read, when the deadline passes.
+
+    Parameters
+    ----------
+    file_io
+        Reads the table's storage.
+    path
+        The file's URI.
+    table
+        The table's dotted name, for the message.
+    deadline
+        When the check's time is up, on the clock `_clock` reads.
+    make
+        Opens the file as a pyiceberg `AvroFile`.
+
+    Returns
+    -------
+    AvroFile
+        The opened file, whose bytes are in memory; the caller closes it.
+
+    Raises
+    ------
+    ValidationError
+        If the file is larger than `MAX_MANIFEST_BYTES`, or the deadline passes before it was
+        read.
+    """
+    remaining = deadline - _clock()
+    if remaining <= 0:
+        raise ValidationError(_timed_out(table))
+
+    def read() -> AvroFile[_Record]:
+        input_file = file_io.new_input(path)
+        size = len(input_file)
+        if size > MAX_MANIFEST_BYTES:
+            raise ValidationError(
+                _MANIFEST_TOO_LARGE.format(
+                    table=shown(table),
+                    file=shown(path),
+                    size=size,
+                )
+            )
+        return make(input_file)
+
+    pool = ThreadPoolExecutor(max_workers=1)
+    try:
+        return pool.submit(read).result(timeout=remaining)
+    except FutureTimeout:
+        raise ValidationError(_timed_out(table)) from None
+    finally:
+        # A read that is stuck is not waited for: the commit is refused now.
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
 def _listed_manifests(
     file_io: FileIO, manifest_list: str, table: str, deadline: float
 ) -> Iterator[ManifestFile]:
-    """Stream the manifests of a manifest list, checking the deadline before each.
+    """List the manifests of a manifest list, checking the deadline before each.
 
     Parameters
     ----------
@@ -471,27 +548,40 @@ def _listed_manifests(
     Yields
     ------
     ManifestFile
-        Each manifest of the list, in order; the list is never held whole.
+        Each manifest of the list, in order. The list file is read whole (at most
+        `MAX_MANIFEST_BYTES`, within the deadline) and decoded as it is consumed.
 
     Raises
     ------
     ValidationError
-        If the deadline has passed before the list is opened or before an entry is yielded.
+        If the list is too large, or the deadline has passed before it was read or before a
+        manifest is yielded.
     """
-    if _clock() >= deadline:
-        raise ValidationError(_timed_out(table))
-    reader = cast("Generator[ManifestFile]", read_manifest_list(file_io.new_input(manifest_list)))
-    with closing(reader) as listed:
-        for manifest in listed:
+    reader = _open_avro(
+        file_io,
+        manifest_list,
+        table,
+        deadline,
+        lambda input_file: AvroFile[ManifestFile](
+            input_file,
+            MANIFEST_LIST_FILE_SCHEMAS[DEFAULT_READ_VERSION],
+            read_types={-1: ManifestFile, 508: PartitionFieldSummary},
+            read_enums={517: ManifestContent},
+        ).__enter__(),
+    )
+    try:
+        for manifest in reader:
             if _clock() >= deadline:
                 raise ValidationError(_timed_out(table))
             yield manifest
+    finally:
+        reader.__exit__(None, None, None)
 
 
 def _live_entries(
     file_io: FileIO, manifest: ManifestFile, table: str, deadline: float
 ) -> Iterator[ManifestEntry]:
-    """Stream the live entries of a manifest, checking the deadline before each.
+    """List the live entries of a manifest, checking the deadline before each.
 
     Parameters
     ----------
@@ -507,25 +597,35 @@ def _live_entries(
     Yields
     ------
     ManifestEntry
-        Each entry that is not `DELETED`, in order; the manifest is never held whole.
+        Each entry that is not `DELETED`, in order. The manifest file is read whole (at most
+        `MAX_MANIFEST_BYTES`, within the deadline) and decoded as it is consumed.
 
     Raises
     ------
     ValidationError
-        If the deadline has passed before an entry is yielded.
+        If the manifest is too large, or the deadline has passed before it was read or before
+        an entry is yielded.
     """
-    input_file = file_io.new_input(manifest.manifest_path)
-    with AvroFile[ManifestEntry](
-        input_file,
-        MANIFEST_ENTRY_SCHEMAS[DEFAULT_READ_VERSION],
-        read_types={-1: ManifestEntry, 2: DataFile},
-        read_enums={0: ManifestEntryStatus, 101: FileFormat, 134: DataFileContent},
-    ) as reader:
+    reader = _open_avro(
+        file_io,
+        manifest.manifest_path,
+        table,
+        deadline,
+        lambda input_file: AvroFile[ManifestEntry](
+            input_file,
+            MANIFEST_ENTRY_SCHEMAS[DEFAULT_READ_VERSION],
+            read_types={-1: ManifestEntry, 2: DataFile},
+            read_enums={0: ManifestEntryStatus, 101: FileFormat, 134: DataFileContent},
+        ).__enter__(),
+    )
+    try:
         for entry in reader:
             if _clock() >= deadline:
                 raise ValidationError(_timed_out(table))
             if entry.status != ManifestEntryStatus.DELETED:
                 yield entry
+    finally:
+        reader.__exit__(None, None, None)
 
 
 def _added_data_files(

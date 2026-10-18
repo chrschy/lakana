@@ -45,9 +45,9 @@ from pyiceberg.table.update import (
     TableUpdate,
 )
 from pyiceberg.types import NestedField
-from sqlalchemy import delete, or_, select, text, update
+from sqlalchemy import delete, event, or_, select, text, update
 from sqlalchemy.exc import DBAPIError, IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import ORMExecuteState, Session, SessionTransaction
 
 from lakana_core.artifacts.store import current_version, version_row
 from lakana_core.audit.service import AuditService
@@ -187,6 +187,12 @@ from lakana_core.storage.resolver import (
 )
 
 logger = logging.getLogger(__name__)
+
+_TRACKED_KEY = "lakana.catalog.tracks_writes"
+"""`Session.info` key: the session carries the write tracker of `CatalogService._track_writes`."""
+
+_WROTE_KEY = "lakana.catalog.transaction_wrote"
+"""`Session.info` key: the session's transaction flushed or executed a write."""
 
 WRITE_OUTCOME_UNKNOWN_MESSAGE = (
     "The write to {table} may or may not have been committed: the database did not confirm it, "
@@ -955,6 +961,7 @@ class CatalogService:
         self._authz = authz
         self._guard = ProtectedWriteGuard(session, authz)
         self._commit_sent = False
+        self._track_writes()
 
     def create_environment(
         self,
@@ -2183,14 +2190,51 @@ class CatalogService:
     def _release_session(self) -> None:
         """Give the session's database connection back to the pool before slow storage reads.
 
-        Nothing is released while the session holds a change of its own that a rollback would
-        lose; the connection then stays, as before. Otherwise the transaction, which held only
-        reads, ends: the next statement begins a new one, and objects loaded earlier are
-        reloaded on use.
+        The transaction must have held only reads: a rollback would drop a write silently.
+        The session's write tracker (`_track_writes`) says whether anything was flushed or
+        executed as a statement that writes since the transaction began, and any change still
+        pending counts too.
+
+        Raises
+        ------
+        RuntimeError
+            If the transaction wrote. That is a bug in the caller, which must commit its
+            writes before it asks for the release; nothing is rolled back.
         """
-        if self._session.new or self._session.dirty or self._session.deleted:
+        session = self._session
+        if session.info.get(_WROTE_KEY) or session.new or session.dirty or session.deleted:
+            raise RuntimeError(
+                "The database session was released for a slow storage read, but something was "
+                "written in the transaction and a rollback would lose it. Commit the write "
+                "before the call, or do not ask for the release."
+            )
+        session.rollback()
+
+    def _track_writes(self) -> None:
+        """Note on the session whether its transaction has written, once per session.
+
+        Flushes and statements that write (Core `insert`, `update`, `delete`) set the note;
+        the end of the session's outermost transaction clears it.
+        """
+        info = self._session.info
+        if _TRACKED_KEY in info:
             return
-        self._session.rollback()
+        info[_TRACKED_KEY] = True
+
+        def flushed(_session: Session, _context: object) -> None:
+            info[_WROTE_KEY] = True
+
+        def executed(state: ORMExecuteState) -> None:
+            if state.statement.is_dml:
+                info[_WROTE_KEY] = True
+
+        def ended(_session: Session, transaction: SessionTransaction) -> None:
+            if transaction.parent is None:
+                info[_WROTE_KEY] = False
+
+        event.listen(self._session, "after_flush", flushed)
+        event.listen(self._session, "do_orm_execute", executed)
+        event.listen(self._session, "after_transaction_end", ended)
 
     def _find_table(self, ref: TableRef) -> tuple[Namespace, Table]:
         """Resolve a table row from a reference, without authorizing.
@@ -2876,6 +2920,7 @@ class CatalogService:
         internal_rollback: bool = False,
         after_swap: Callable[[], None] | None = None,
         own_data_files: bool = False,
+        release_session: bool = False,
     ) -> LoadedTable:
         """Apply Iceberg updates to a table and publish them atomically.
 
@@ -2951,6 +2996,11 @@ class CatalogService:
             Only `CatalogService.append` and `write_batches` pass `True`: this service wrote
             the commit's data files through pyiceberg, which always writes field ids, so their
             footers are not read again. No request, route or token reaches this parameter.
+        release_session
+            Only the Iceberg REST commit route passes `True`: the database transaction is
+            ended before the field-id check reads manifests and footers, so that no pooled
+            connection sits idle for up to a minute. The session must not have written anything
+            in its transaction (see `_release_session`).
 
         Returns
         -------
@@ -2985,6 +3035,9 @@ class CatalogService:
             maintenance exemption is structural).
         StorageUnavailableError
             If storage failed while the field-id check read a manifest or a footer.
+        RuntimeError
+            If `release_session` is set and the session wrote in its transaction: a programming
+            error, nothing is released and nothing applied.
         ConflictError
             If a requirement fails, or another writer committed first.
         PermissionDenied
@@ -3113,8 +3166,12 @@ class CatalogService:
             if added_snapshots:
                 # The reads can take a minute: no pooled connection sits idle in a transaction
                 # meanwhile. The pointer swap below compares against `expected`, so a table
-                # that changed meanwhile fails it like any concurrent commit.
-                self._release_session()
+                # that changed meanwhile fails it like any concurrent commit. (It does not
+                # compare `unpublished_run_id`, which the set-back of a first build without
+                # rows clears without moving the pointer; that window existed before, and
+                # such a table has no earlier snapshot for a ref to be pointed at.)
+                if release_session:
+                    self._release_session()
                 check_added_files_have_field_ids(
                     added_snapshots, current, resolved.file_io, ref.dotted()
                 )
