@@ -109,7 +109,7 @@ def test_signal_group_says_when_the_group_is_already_gone() -> None:
 def test_signal_group_treats_a_group_of_exited_processes_as_gone(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """macOS refuses to signal a group whose members have all exited but are not yet reaped."""
+    """On macOS, signalling a group whose members have all exited but are not yet reaped fails."""
     process = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
     process.wait(timeout=10)
     process.returncode = None

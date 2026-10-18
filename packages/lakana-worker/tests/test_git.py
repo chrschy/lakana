@@ -1191,7 +1191,7 @@ def test_killing_a_reaped_process_group_is_skipped(
 def test_killing_a_group_of_exited_processes_is_not_an_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """macOS refuses to signal a group whose members have all exited but are not yet reaped."""
+    """On macOS, signalling a group whose members have all exited but are not yet reaped fails."""
     process = subprocess.Popen(["true"], start_new_session=True)
     process.wait()
     process.returncode = None
