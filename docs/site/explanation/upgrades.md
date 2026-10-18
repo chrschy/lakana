@@ -604,18 +604,20 @@ docker compose logs server
 ```
 
    The server creates the restored principal, or reactivates it, gives it the `ADMIN` role,
-   revokes its earlier tokens and issues one new token. Its log then has one of two lines, both
-   at the level WARNING (the name is the one you configured):
+   revokes its earlier tokens and issues one new token. What you see depends on where the token
+   comes from (the name is the one you configured):
 
-   - `Minted a bootstrap PAT for 'admin'`, followed by the new token. The server prints it this
-     once. This is the line of an instance that was set up with the bundle.
-   - `Restored the bootstrap PAT for 'admin' using the configured key id`, without a token. The
-     server prints this when the database never held a token with the key id in
-     `LAKANA_BOOTSTRAP_PAT_KEY_ID`. The token that works is then the one made of the two values
-     in `.env`: `lakana_pat_<LAKANA_BOOTSTRAP_PAT_KEY_ID>_<LAKANA_BOOTSTRAP_PAT_SECRET>`.
+   - A token the server made up: its log has `Minted a bootstrap PAT for 'admin'` at the level
+     WARNING, followed by the new token. The server prints it this once. This is the line of an
+     instance that was set up with the bundle.
+   - The token made of the values in `.env`, when the database never held a token with the key id
+     in `LAKANA_BOOTSTRAP_PAT_KEY_ID`: the server prints no token, and only a DEBUG line (set
+     `LAKANA_LOG__LEVEL` to `DEBUG` to see it) says it was restored. The token that works is
+     the one made of the two values in `.env`:
+     `lakana_pat_<LAKANA_BOOTSTRAP_PAT_KEY_ID>_<LAKANA_BOOTSTRAP_PAT_SECRET>`.
 
    Before the restart, make sure the server's `LAKANA_LOG__LEVEL` is not `ERROR`: at that level
-   neither line is printed, and a token the server made up is lost.
+   the line with the token is not printed, and a token the server made up is lost.
 
    Sign in with the token, as in
    [Revoking the bootstrap credential](../how-to/deploy-with-compose.md#revoking-the-bootstrap-credential),

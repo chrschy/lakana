@@ -423,7 +423,7 @@ def test_bootstrap_logs_only_the_key_id_when_a_supplied_credential_is_honoured(
     """
     with (
         _app_logger_enabled(),
-        caplog.at_level(logging.WARNING),
+        caplog.at_level(logging.DEBUG),
         TestClient(create_app(settings)),
     ):
         pass
@@ -432,6 +432,24 @@ def test_bootstrap_logs_only_the_key_id_when_a_supplied_credential_is_honoured(
     assert any("testkey" in message for message in messages)
     assert not any("testsecret" in message for message in messages)
     assert not any("lakana_pat_testkey_testsecret" in message for message in messages)
+
+
+def test_a_normal_start_with_a_supplied_credential_logs_nothing_above_debug(
+    settings: Settings, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The credential the caller supplied is restored quietly: no WARNING or INFO line.
+
+    Every fresh `lakana server start --local` takes this path, so a newcomer would see the
+    line on every first start; it names nothing they can act on.
+    """
+    with (
+        _app_logger_enabled(),
+        caplog.at_level(logging.INFO),
+        TestClient(create_app(settings)),
+    ):
+        pass
+
+    assert [r.getMessage() for r in caplog.records if "bootstrap" in r.getMessage()] == []
 
 
 def test_the_server_warns_at_start_up_only_when_old_format_secrets_are_accepted(
