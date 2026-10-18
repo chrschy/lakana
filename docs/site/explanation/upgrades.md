@@ -114,6 +114,7 @@ Each cell is a summary. The page named in the last column has the detail. The ch
 
 | Release | What it asks | Where |
 |---|---|---|
+| 0.15.0 | Migration `0035` (a database check on a secret's use; it stops and names any inconsistent secret). While an environment has a storage secret, changing its storage options needs `MANAGE_SECRET` there as well as `MANAGE_ENVIRONMENT`; the Compose set-up attaches its storage secret to `dev` only together with the bundle's own options. A commit through the Iceberg REST catalog is refused when one of its manifest files is over 64 MiB. | [Notes for 0.15.0](#notes-for-0150) |
 | 0.14.0 | Migration `0034` (binds each secret to one use). New images are `ghcr.io/lakana-labs/lakana`: change `LAKANA_IMAGE` in a bundle's `.env` before you pull. Replace the bundle's `compose.yaml`: SeaweedFS runs as two containers behind an S3 gateway, and `docker compose down` must come before `up`. A secret has one use (a package index, a repository, or its own environment) and is refused for any other; a secret the migration could not bind is bound by an administrator with `lakana secret bind`. | [Notes for 0.14.0](#notes-for-0140) |
 | 0.13.0 | Migration `0033` (adds `schema_id` to row filters and column masks). Iceberg tables are read by field id: a renamed column keeps its data; a column dropped and added again, also by a type change with `evolve_schema`, is a new column whose older rows read as NULL; reads of a table whose nested fields were renamed or re-added, that has a column type Lakana cannot read, or whose column names differ only in letter case are refused. A commit through the Iceberg REST catalog that adds a data file without field ids is refused, as is one of more than 2,000 data files or one whose check takes over 60 seconds; files committed earlier without field ids read as NULL. A read under a row filter or column mask is refused when a column the policy uses was renamed or replaced since the policy was created: create the policy again for its column, then revoke the old one. A query that changes data is refused wherever the statement sits. Errors on reads under a row filter or column mask show a fixed message. | [Notes for 0.13.0](#notes-for-0130) |
 | 0.12.1 | No migration. Columns qualified with the table's name work, also under a row filter or column mask. | [Notes for 0.12.1](#notes-for-0121) |
@@ -122,7 +123,7 @@ Each cell is a summary. The page named in the last column has the detail. The ch
 | 0.10.0 | A package index URL with a query string is refused; move a `uv.toml` into `pyproject.toml`; lineage and failure causes changed. | This row |
 | 0.9.0 | Upgrade every worker before you deploy Python assets; rewrite `asset(deps=...)` as `asset(inputs=...)`; move helper modules out of `assets/`; an older bundle needs three additions. | [Upgrading](../how-to/deploy-with-compose.md#upgrading), [Projects and deploys](../how-to/projects.md) |
 
-## Notes for the next release
+## Notes for 0.15.0
 
 ### A database check on a secret's use
 
