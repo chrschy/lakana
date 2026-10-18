@@ -1406,7 +1406,8 @@ def test_a_process_that_left_the_group_cannot_hold_the_worker(
         assert time.monotonic() - started < 30
     finally:
         if escaped:
-            os.kill(escaped, signal.SIGKILL)
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(escaped, signal.SIGKILL)
 
 
 def test_a_child_that_already_ended_is_passed_over_for_the_next_largest() -> None:
