@@ -33,6 +33,7 @@ from lakana_core.models import (
     Repository,
     RepositoryKind,
     Table,
+    TableType,
 )
 from lakana_core.projects.dag import build_graph
 from lakana_core.projects.frontmatter import AssetMetadata
@@ -465,3 +466,41 @@ def test_a_missing_table_is_not_told_apart_from_a_refusal(
     )
     with pytest.raises(NotFoundError):
         manager.set_table_description(stranger, _ORDERS, "No")
+
+
+def test_a_project_description_is_not_written_onto_an_artifact(
+    session: Session, catalog_with_orders: CatalogService, principal: PrincipalRef
+) -> None:
+    """An artifact has no description: a deploy that names it leaves the row alone."""
+    row = session.scalars(select(Table)).one()
+    row.table_type = TableType.ARTIFACT
+    session.commit()
+    sync_project_descriptions(session, _env_id(session), _manifest())
+    session.commit()
+    assert session.scalars(select(Table)).one().description_project is None
+    assert session.scalars(select(ColumnDescription)).all() == []
+
+
+def test_a_manifest_name_that_is_not_dotted_is_skipped(
+    session: Session, catalog_with_orders: CatalogService, principal: PrincipalRef
+) -> None:
+    """A damaged manifest entry does not stop the others from being published."""
+    manifest = _manifest()
+    manifest["assets"].insert(0, {"table": "nodots", "metadata": {"description": "lost"}})
+    sync_project_descriptions(session, _env_id(session), manifest)
+    session.commit()
+    assert _described(catalog_with_orders, principal).description == "From the project"
+
+
+def test_resetting_a_column_that_has_no_description_changes_nothing(
+    session: Session, catalog_with_orders: CatalogService, principal: PrincipalRef
+) -> None:
+    """A reset of a column with no row writes no row and audits zero lengths."""
+    catalog_with_orders.set_column_description(principal, _ORDERS, "id", None)
+    assert session.scalars(select(ColumnDescription)).all() == []
+    event = _events(session, AuditEventType.COLUMN_DESCRIBED)[-1]
+    assert (event.detail["old_length"], event.detail["new_length"], event.detail["reset"]) == (
+        0,
+        0,
+        True,
+    )
