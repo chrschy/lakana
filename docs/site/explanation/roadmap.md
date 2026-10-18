@@ -68,10 +68,9 @@ and the [upgrade notes](upgrades.md#notifications-for-jobs). The next element is
 The public beta comes before the web interface. The beta's purpose is that
 real users try Lakana and its documentation early, and what they report should shape the
 interface, which is the project's first front-end code and the least certain piece of work. The
-first testers are people at home in a terminal. The beta also comes before
-ingestion (M6): beta users load data with a Python asset and the SDK as it is today, and the
-helpers and named connections of M6 follow as ordinary 0.x releases during the beta. Task
-isolation (M7b) stays before the beta.
+first testers are people at home in a terminal. Ingestion (M6) and task isolation (M7b) come
+before the beta: a new team's first job is getting its data in, so the beta ships with the
+ingestion helpers and named connections.
 
 1. **M5d, triggers, data quality checks and notifications (built).** Runs start by hand, on a schedule
    or through an API call. A check, a SQL file that must return no rows, can block, keep or
@@ -91,16 +90,7 @@ isolation (M7b) stays before the beta.
    environment, its memory and CPU limits are enforced by the container runtime, and a stopped
    task leaves no process behind. It comes before the public beta so that the first public
    release can isolate one project's code from another's.
-4. **M7c, public beta.** The repository is open and the packages are on PyPI as a pre-beta from
-   0.12.0; the beta is the 0.x release that says it is ready to try.
-   The beta is the CLI, the SDK and the REST API; it has no web interface yet, and the README and
-   these pages say so. Sign-in is by token: an administrator issues a token for each further
-   user with the CLI. The API may still change. Done when a stranger can install it from PyPI and
-   follow the documentation to a working instance, and a second person can be given access with
-   the documented token steps. The documentation carries one worked example of a Python asset
-   that loads from a SQL database or a JSON API with the SDK as it is today; M6 replaces it with
-   its helpers.
-5. **M6, ingestion, during the beta.** Python helpers in `lakana[assets]` for files, SQL
+4. **M6, ingestion.** Python helpers in `lakana[assets]` for files, SQL
    databases and JSON REST APIs, plus `lakana load` for a local file, which stays as a
    convenience for exploration and tests. Named connections (#85): an administrator registers a source's address and
    credentials once under a name, and a Python asset or `lakana load` uses the name. They are
@@ -108,6 +98,14 @@ isolation (M7b) stays before the beta.
    connection is only a name for an address and a secret: Lakana runs no connectors, and the
    asset's helper does the reading. Done when a new team loads data from each kind of source with
    a short asset, or loads a local file with `lakana load`.
+5. **M7c, public beta.** The repository is open and the packages are on PyPI as a pre-beta from
+   0.12.0; the beta is the 0.x release that says it is ready to try.
+   The beta is the CLI, the SDK and the REST API; it has no web interface yet, and the README and
+   these pages say so. Sign-in is by token: an administrator issues a token for each further
+   user with the CLI. The API may still change. Done when a stranger can install it from PyPI and
+   follow the documentation to a working instance, and a second person can be given access with
+   the documented token steps, and a new team can load data from a file, a SQL database and a
+   JSON API with the M6 helpers.
 6. **M7, web interface and sign-in.** Designed with what beta users report; the design (#66)
    happens before or right after the beta, so that M7 starts with feedback in hand. A web
    interface with OIDC sign-in, or an invite link and a passkey for teams without an identity
