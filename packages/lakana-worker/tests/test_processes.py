@@ -851,11 +851,18 @@ def test_without_o_path_a_directory_swapped_for_a_link_before_the_chmod_is_not_f
     assert _modes(outside) == before
 
 
-@pytest.mark.usefixtures("without_o_path")
-def test_without_o_path_a_locked_directory_of_another_owner_is_not_chmoded(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("o_path", [True, False], ids=["o-path", "without-o-path"])
+def test_a_locked_directory_of_another_owner_is_not_chmoded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+    o_path: bool,
 ) -> None:
-    """Only a directory of the worker's own user is made accessible again."""
+    """Only a directory of the worker's own user is made accessible again, on either branch."""
+    if o_path and not hasattr(os, "O_PATH"):
+        pytest.skip("O_PATH is Linux-only")
+    if not o_path:
+        request.getfixturevalue("without_o_path")
     tree = _locked_tree(tmp_path)
     monkeypatch.setattr("lakana_worker.processes.os.geteuid", lambda: os.getuid() + 4242)
     try:
@@ -933,13 +940,13 @@ def test_where_no_safe_chmod_exists_a_locked_directory_is_left_and_the_reason_lo
     try:
         with caplog.at_level(logging.WARNING):
             assert remove_private_tree(tree) is False
+            assert remove_private_tree(tree) is False  # a second sweep says it no more
         assert stat.S_IMODE((tree / "sub").lstat().st_mode) == 0
     finally:
         (tree / "sub").chmod(0o700)
-    assert any(
-        "sub" in message and "cannot be made accessible safely on this platform" in message
-        for message in caplog.messages
-    )
+    refusals = [m for m in caplog.messages if "cannot be made accessible safely" in m]
+    assert len(refusals) == 1
+    assert str(tree / "sub") in refusals[0]
 
 
 @pytest.mark.parametrize("o_path", [True, False], ids=["o-path", "without-o-path"])
@@ -954,7 +961,7 @@ def test_restoring_a_directory_that_is_gone_says_so(
     parent = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
     try:
         with pytest.raises(FileNotFoundError):
-            restore_directory_access("gone", parent)
+            restore_directory_access("gone", parent, tmp_path / "gone")
     finally:
         os.close(parent)
 

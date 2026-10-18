@@ -402,7 +402,7 @@ def test_a_directory_that_vanishes_during_the_restore_is_skipped(
     gone = _attempt(work, "attempt-abcd1234", _MAX_AGE * 5)
     gone.chmod(0)
 
-    def vanish(name: str, parent_fd: int) -> bool:
+    def vanish(name: str, parent_fd: int, path: Path) -> bool:
         raise FileNotFoundError(name)
 
     monkeypatch.setattr("lakana_worker.attempt_sweep.restore_directory_access", vanish)

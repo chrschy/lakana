@@ -94,7 +94,7 @@ def _open_attempt(path: Path) -> int | None:
     except OSError:
         return None
     try:
-        if not restore_directory_access(path.name, parent):
+        if not restore_directory_access(path.name, parent, path):
             return None
         try:
             return os.open(path.name, _OPEN_FLAGS, dir_fd=parent)

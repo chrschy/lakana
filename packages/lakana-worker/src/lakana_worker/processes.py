@@ -316,7 +316,11 @@ def _is_own_directory(info: os.stat_result) -> bool:
     return stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid()
 
 
-def restore_directory_access(name: str, parent_fd: int) -> bool:
+_REFUSALS_LOGGED: set[str] = set()
+"""Directories whose refused restore was logged already; each is named once per process."""
+
+
+def restore_directory_access(name: str, parent_fd: int, path: Path) -> bool:
     """Set a directory the task locked back to mode 0700, never through a symlink.
 
     User code can set its own directories to mode 000, which keeps their owner, the
@@ -325,7 +329,8 @@ def restore_directory_access(name: str, parent_fd: int) -> bool:
     descriptor, so a rename that swaps in a link cannot redirect the chmod. Where it has
     not (macOS), the chmod is relative to `parent_fd` and does not follow a link. Where
     neither exists, nothing is chmod-ed by path: the directory is left and the reason
-    logged.
+    logged, once per directory and process. A directory of another user is never chmod-ed;
+    a root worker meets one only where root is squashed (NFS), and leaves it.
 
     Parameters
     ----------
@@ -333,6 +338,8 @@ def restore_directory_access(name: str, parent_fd: int) -> bool:
         The directory's name in its parent.
     parent_fd
         A descriptor of the parent directory.
+    path
+        The directory's full path, only to name it in a message.
 
     Returns
     -------
@@ -348,12 +355,14 @@ def restore_directory_access(name: str, parent_fd: int) -> bool:
     if hasattr(os, "O_PATH"):
         return _restore_through_a_path_descriptor(name, parent_fd)
     if not _CHMOD_AT_WITHOUT_FOLLOWING:
-        logger.warning(
-            "The locked directory %s cannot be made accessible safely on this platform: it has "
-            "neither O_PATH nor a chmod that refuses to follow a symlink, so it is left in "
-            "place. Restore its access by hand (chmod u+rwx) and remove it.",
-            shown(name),
-        )
+        if str(path) not in _REFUSALS_LOGGED:
+            _REFUSALS_LOGGED.add(str(path))
+            logger.warning(
+                "The locked directory %s cannot be made accessible safely on this platform: it "
+                "has neither O_PATH nor a chmod that refuses to follow a symlink, so it is left "
+                "in place. Restore its access by hand (chmod u+rwx) and remove it.",
+                shown(str(path)),
+            )
         return False
     return _restore_relative_to_the_parent(name, parent_fd)
 
@@ -438,7 +447,7 @@ def _restore_relative_to_the_parent(name: str, parent_fd: int) -> bool:
     return True
 
 
-def _open_directory(name: str, parent_fd: int) -> int | None:
+def _open_directory(name: str, parent_fd: int, path: Path) -> int | None:
     """Open a real directory below `parent_fd`, making it readable first if its mode forbids that.
 
     Never follows a symlink: the open uses ``O_NOFOLLOW``, and a locked directory is
@@ -450,6 +459,8 @@ def _open_directory(name: str, parent_fd: int) -> int | None:
         The entry's name in the parent.
     parent_fd
         A descriptor of the parent directory.
+    path
+        The entry's full path, only to name it in a message.
 
     Returns
     -------
@@ -464,14 +475,14 @@ def _open_directory(name: str, parent_fd: int) -> int | None:
     except OSError:
         return None
     try:
-        if not restore_directory_access(name, parent_fd):
+        if not restore_directory_access(name, parent_fd, path):
             return None
         return os.open(name, flags, dir_fd=parent_fd)
     except OSError:
         return None
 
 
-def _clear_directory(root_fd: int) -> bool:
+def _clear_directory(root_fd: int, root: Path) -> bool:
     """Remove everything below an open directory, never following a link.
 
     Iterative, so a directory chain deeper than the interpreter's recursion
@@ -482,6 +493,8 @@ def _clear_directory(root_fd: int) -> bool:
     ----------
     root_fd
         A descriptor of a real directory.
+    root
+        Its path, only to name a directory in a message.
 
     Returns
     -------
@@ -490,9 +503,9 @@ def _clear_directory(root_fd: int) -> bool:
     """
     complete = True
     os.fchmod(root_fd, 0o700)
-    stack: list[tuple[int, str, list[str]]] = [(root_fd, "", os.listdir(root_fd))]
+    stack: list[tuple[int, str, list[str], Path]] = [(root_fd, "", os.listdir(root_fd), root)]
     while stack:
-        fd, entry, pending = stack[-1]
+        fd, entry, pending, where = stack[-1]
         if not pending:
             stack.pop()
             if stack:
@@ -514,13 +527,13 @@ def _clear_directory(root_fd: int) -> bool:
             except OSError:
                 complete = False
             continue
-        child = None if len(stack) >= _MAX_REMOVE_DEPTH else _open_directory(name, fd)
+        child = None if len(stack) >= _MAX_REMOVE_DEPTH else _open_directory(name, fd, where / name)
         if child is None:
             complete = False
             continue
         try:
             os.fchmod(child, 0o700)
-            stack.append((child, name, os.listdir(child)))
+            stack.append((child, name, os.listdir(child), where / name))
         except OSError:
             os.close(child)
             complete = False
@@ -559,7 +572,7 @@ def remove_private_tree(path: Path) -> bool:
         parent_fd = None
     if parent_fd is not None:
         try:
-            removed = _remove_entry(path.name, parent_fd)
+            removed = _remove_entry(path.name, parent_fd, path)
         except OSError:
             removed = False
         finally:
@@ -569,7 +582,7 @@ def remove_private_tree(path: Path) -> bool:
     return removed
 
 
-def _remove_entry(name: str, parent_fd: int) -> bool:
+def _remove_entry(name: str, parent_fd: int, path: Path) -> bool:
     """Remove one entry below a directory descriptor.
 
     Parameters
@@ -578,6 +591,8 @@ def _remove_entry(name: str, parent_fd: int) -> bool:
         The entry's name.
     parent_fd
         A descriptor of its parent.
+    path
+        The entry's full path, only to name it in a message.
 
     Returns
     -------
@@ -591,11 +606,11 @@ def _remove_entry(name: str, parent_fd: int) -> bool:
     if not stat.S_ISDIR(info.st_mode):
         os.unlink(name, dir_fd=parent_fd)
         return True
-    root = _open_directory(name, parent_fd)
+    root = _open_directory(name, parent_fd, path)
     if root is None:
         return False
     try:
-        complete = _clear_directory(root)
+        complete = _clear_directory(root, path)
     finally:
         os.close(root)
     if complete:
