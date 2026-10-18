@@ -1356,12 +1356,12 @@ def test_the_macos_job_runs_the_unit_suite_and_the_getting_started_example() -> 
 
     macOS users run local mode, so the job runs what they use: the unit suite, and the tutorial's
     example (which ends with ``lakana server reset --local``). It is pinned to GitHub's runner,
-    never the ``CI_RUNNER`` switch, and it is not a required check. Until the suite passes on
-    macOS (#153) a failure does not fail the run.
+    never the ``CI_RUNNER`` switch, and it is not a required check yet. Since the suite passes on
+    macOS (#153) a failure fails the run like any other job's.
     """
     job = _jobs("ci.yml")[MACOS_JOB]
     assert job["name"] == "test (macos)"
-    assert job["continue-on-error"] is True  # remove with #153
+    assert "continue-on-error" not in job
     assert job["runs-on"] == "macos-latest"
     assert "CI_RUNNER" not in str(job)
     assert job["timeout-minutes"] <= 45
