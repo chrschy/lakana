@@ -123,9 +123,7 @@ def write_lock_owner(path: Path, pid: int) -> None:
 
     `lakana server stop` reads it to find the supervisor to signal: the server and worker
     pidfiles name the children, not the process that watches them. The lock itself is held on
-    a different descriptor; this only writes the file's content. Best effort on Windows, where
-    a locked byte cannot be written: nothing is recorded there (the stop is not supported
-    there either).
+    a different descriptor; this only writes the file's content.
 
     Parameters
     ----------
@@ -133,14 +131,17 @@ def write_lock_owner(path: Path, pid: int) -> None:
         The lock file; it must already exist.
     pid
         The holder's process id.
+
+    Raises
+    ------
+    OSError
+        If the file can't be written (on Windows a locked byte can't be, so callers skip it
+        there).
     """
     flags = os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        fd = os.open(path, flags)
-        with os.fdopen(fd, "w") as handle:
-            handle.write(f"{pid}\n")
-    except OSError:
-        return
+    fd = os.open(path, flags)
+    with os.fdopen(fd, "w") as handle:
+        handle.write(f"{pid}\n")
 
 
 def clear_lock_owner(path: Path) -> None:

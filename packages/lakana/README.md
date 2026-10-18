@@ -494,14 +494,14 @@ filesystem for storage, no Docker and no Postgres.
 
 ```bash
 pip install "lakana[server]"
-lakana server start --local          # runs in the foreground; prints warnings and errors only
+lakana server start --local          # runs in the foreground; no line per request
 lakana sql "SELECT 42"               # in another terminal, once it's ready
 lakana server status                 # exit 0 if running, 1 otherwise
 lakana server stop                   # same as Ctrl-C in the instance's terminal
 ```
 
-`--log-requests` on `start` prints a line for every request; `LAKANA_LOG__LEVEL` (default `WARNING`
-here) sets the level for the server and the worker. `lakana server stop` asks the instance in the
+`--log-requests` on `start` prints a line for every request (local mode sets `LAKANA_LOG__ACCESS=false`
+otherwise); `LAKANA_LOG__LEVEL` sets the level for the server and the worker as before. `lakana server stop` asks the instance in the
 data directory (`--data-dir DIR` for another one) to shut down and waits up to 30 seconds; nothing
 running is not an error, it exits non-zero when the instance is still there after the wait (it never
 kills it), and it is refused for a remote or Compose instance (`docker compose down` stops those).

@@ -443,9 +443,9 @@ def _child_env(
     secret
         The bootstrap credential's secret; `None` after the first run.
     log_requests
-        Keep the request log. Without it the children log warnings and errors only
-        (`LAKANA_LOG__LEVEL=WARNING`), so the ready line is not scrolled away by one line per
-        request; a `LAKANA_LOG__LEVEL` already in the environment wins either way.
+        Keep the server's request log. Without it the server is told to print no line per
+        request (`LAKANA_LOG__ACCESS=false`), so the ready line is not scrolled away; every other
+        log line is unchanged, and a `LAKANA_LOG__ACCESS` already in the environment wins.
 
     Returns
     -------
@@ -478,7 +478,7 @@ def _child_env(
         for name in _BOOTSTRAP_ENV_VARS:
             env.pop(name, None)
     if not log_requests:
-        env.setdefault("LAKANA_LOG__LEVEL", "WARNING")
+        env.setdefault("LAKANA_LOG__ACCESS", "false")
     env.setdefault("LAKANA_RUN__SERVER_URL", f"http://127.0.0.1:{port}")
     env.setdefault("LAKANA_REPO_ROOTS", json.dumps([os.path.realpath(Path.home())]))
     return env
@@ -707,8 +707,7 @@ def start(
         bool,
         typer.Option(
             "--log-requests",
-            help="Print a line for every request the server answers (default: warnings and "
-            "errors only).",
+            help="Print a line for every request the server answers (default: none).",
         ),
     ] = False,
 ) -> None:
@@ -759,11 +758,57 @@ def start(
         if not acquired:
             _raise_already_running(root)
         _refuse_lockless_instance(root)
-        write_lock_owner(root.lock_path, os.getpid())
+        # Empty first: a supervisor that was killed left its pid here, and until ours is
+        # written, no `stop` may trust it (the pid may belong to an unrelated process by now).
+        clear_lock_owner(root.lock_path)
         try:
+            _record_lock_owner(root)
             _run_locked(state, root, port, log_requests)
         finally:
             clear_lock_owner(root.lock_path)
+
+
+def _record_lock_owner(root: DataDir) -> None:
+    """Write this process's PID into the lock file, so `lakana server stop` can find it.
+
+    A failure is reported on stderr and start-up goes on: the instance runs, and `stop` then
+    refuses with the Ctrl-C hint instead of guessing.
+
+    Parameters
+    ----------
+    root
+        The data directory.
+    """
+    if os.name == "nt":
+        return
+    try:
+        write_lock_owner(root.lock_path, os.getpid())
+    except OSError as exc:
+        sys.stderr.write(
+            f"Warning: couldn't record this instance's process in {root.lock_path} ({exc}); "
+            "'lakana server stop' will not work for it, stop it with Ctrl-C.\n"
+        )
+
+
+def _process_cmdline(pid: int) -> str | None:
+    """Read the command line of a process, where the platform exposes it.
+
+    Parameters
+    ----------
+    pid
+        The process id.
+
+    Returns
+    -------
+    str or None
+        The command line with its arguments joined by spaces; `None` when `/proc/<pid>` does
+        not exist (no `/proc` on this platform, or no such process).
+    """
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return None
+    return raw.replace(b"\0", b" ").decode(errors="replace")
 
 
 def _run_locked(state: CliState, root: DataDir, port: int, log_requests: bool = False) -> None:
@@ -1009,6 +1054,18 @@ def stop(
             "process to stop (it was started by an older lakana)",
             hint="stop it with Ctrl-C in its terminal",
         )
+    if not pid_alive(owner):
+        raise CliError(
+            f"Lakana is running from {root.root}, but the process {owner} recorded for it is gone",
+            hint="stop it with Ctrl-C in its terminal",
+        )
+    cmdline = _process_cmdline(owner)
+    if cmdline is not None and "lakana" not in cmdline:
+        raise CliError(
+            f"Process {owner}, recorded as the one running from {root.root}, is not a Lakana "
+            "process; nothing was signalled",
+            hint="stop the instance with Ctrl-C in its terminal",
+        )
     try:
         os.kill(owner, signal.SIGTERM)
     except OSError as exc:
@@ -1161,6 +1218,8 @@ def reset(
         return
     root = DataDir(root_path)
     with try_locked(root.lock_path) as acquired:
+        if acquired:
+            clear_lock_owner(root.lock_path)
         if not acquired:
             raise CliError(
                 f"Lakana is running from {root.root}; nothing was deleted",

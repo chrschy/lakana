@@ -259,3 +259,124 @@ def test_start_records_its_pid_in_the_lock_file_and_clears_it(
     assert result.exit_code == 0, result.stderr
     assert seen == [os.getpid()]
     assert read_lock_owner(root.lock_path) is None
+
+
+def test_a_stale_owner_in_an_unheld_lock_file_is_never_signalled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A killed supervisor leaves its pid behind; with no lock holder nothing is signalled."""
+    from lakana.cli.local._pidfile import write_lock_owner
+
+    root = prepare_data_dir(tmp_path / "data")
+    root.lock_path.touch()
+    write_lock_owner(root.lock_path, os.getpid())
+
+    def fail(pid: int, sig: int) -> None:
+        """Fail the test if anything is signalled.
+
+        Parameters
+        ----------
+        pid
+            The target.
+        sig
+            The signal.
+
+        Raises
+        ------
+        AssertionError
+            Always.
+        """
+        raise AssertionError(f"signalled {pid}")
+
+    monkeypatch.setattr(server.os, "kill", fail)
+
+    result = _stop(tmp_path, tmp_path / "data")
+
+    assert result.exit_code == 0, result.output
+    assert "No local instance is running" in result.stdout
+
+
+def test_a_recorded_pid_that_is_not_lakana_is_not_signalled(
+    tmp_path: Path, holder: Holder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Lock held, but the recorded pid's command line is another program: refuse, name the pid."""
+    proc = holder()
+    monkeypatch.setattr(server, "_process_cmdline", lambda pid: "/usr/bin/vim notes.txt")
+
+    result = _stop(tmp_path, tmp_path / "data")
+
+    assert result.exit_code == 2
+    assert str(proc.pid) in result.output
+    assert "Ctrl-C" in result.output
+    assert proc.poll() is None
+
+
+def test_a_failed_owner_write_is_reported_and_leaves_no_stale_pid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`start` says it could not record itself; a stale pid from before is already gone."""
+    from test_server_cmd import FakeSupervisor, _install_fake_supervisor, _stub_environment
+
+    from lakana.cli.local._pidfile import read_lock_owner, write_lock_owner
+
+    _stub_environment(monkeypatch)
+    monkeypatch.setattr(server, "pid_alive", lambda pid: False)
+    root = prepare_data_dir(tmp_path / "data")
+    root.lock_path.touch()
+    write_lock_owner(root.lock_path, 99999)
+    seen: list[int | None] = []
+
+    def boom(path: Path, pid: int) -> None:
+        """Fail like a full disk.
+
+        Parameters
+        ----------
+        path
+            The lock file.
+        pid
+            The pid to record.
+
+        Raises
+        ------
+        OSError
+            Always.
+        """
+        raise OSError("disk full")
+
+    class Spy(FakeSupervisor):
+        """Reads the lock owner while `watch` runs."""
+
+        def watch(self) -> int:
+            """Record the owner in the lock file.
+
+            Returns
+            -------
+            int
+                `0`, a clean exit.
+            """
+            seen.append(read_lock_owner(root.lock_path))
+            return 0
+
+    monkeypatch.setattr(server, "write_lock_owner", boom)
+    _install_fake_supervisor(monkeypatch, Spy())
+    api = FakeApi()
+    api.on(
+        "POST",
+        "/api/v1/environments",
+        status=201,
+        json={
+            "name": "dev",
+            "storage_root": "file:///d",
+            "storage_secret_ref": None,
+            "is_protected": False,
+            "properties": {},
+        },
+    )
+    result = invoke(
+        make_state(tmp_path, api),
+        *("server", "start", "--local", "--data-dir", str(tmp_path / "data"), "--port", "8765"),
+    )
+
+    assert result.exit_code == 0, result.stderr
+    assert "disk full" in result.stderr and "Ctrl-C" in result.stderr
+    assert seen == [None]

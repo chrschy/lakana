@@ -49,8 +49,8 @@ queries and builds, and a place to keep tables. Start it:
 lakana server start --local
 ```
 
-The instance stays in the foreground and keeps this terminal. It prints only warnings and
-errors, so the line that says it is ready is the last one you see. When it is ready, it prints a
+The instance stays in the foreground and keeps this terminal. It prints no line per request, so
+the line that says it is ready is the last one you see. When it is ready, it prints a
 line like this one:
 
 <!-- output -->
@@ -59,8 +59,8 @@ Lakana is running at http://127.0.0.1:8765 — profile 'local', environment 'dev
 ```
 
 To see a line for every request the server answers, start with the option `--log-requests`. To
-see even more, or less, set `LAKANA_LOG__LEVEL` (for example to `DEBUG`) in front of the command;
-local mode passes it to the server and the worker.
+see more or fewer of the other lines, set `LAKANA_LOG__LEVEL` (for example to `DEBUG`) in front of
+the command; local mode passes it to the server and the worker.
 
 The worker has a memory limit, 4 GB by default (`LAKANA_WORKER__MEMORY_LIMIT`; `off` turns it
 off). It covers the worker and the tasks and queries it started. On Linux, a worker that goes over it ends the

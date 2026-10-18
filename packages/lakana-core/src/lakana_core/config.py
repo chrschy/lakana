@@ -1132,9 +1132,14 @@ class LogConfig(BaseModel):
         from WARNING. Above INFO the denials over the audit rate leave no line in the log (only
         the summary row in the audit table); uvicorn's access log, one line per request, is
         printed at INFO and DEBUG only.
+    access
+        Whether the server prints uvicorn's access log, one line per request (`LAKANA_LOG__ACCESS`).
+        On by default; ``lakana server start --local`` turns it off unless asked with
+        ``--log-requests``. Nothing else in the log changes.
     """
 
     level: str = "INFO"
+    access: bool = True
 
     @field_validator("level")
     @classmethod

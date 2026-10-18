@@ -43,7 +43,9 @@ _ALL_LEVELS = (
 _RANK = {"debug": 0, "info": 1, "warning": 2, "error": 3}
 
 
-def _child(code: str, tmp_path: Path, level: str | None = None) -> subprocess.CompletedProcess[str]:
+def _child(
+    code: str, tmp_path: Path, level: str | None = None, access: str | None = None
+) -> subprocess.CompletedProcess[str]:
     """Run `code` in a fresh interpreter, where no test fixture has touched logging.
 
     Parameters
@@ -54,6 +56,8 @@ def _child(code: str, tmp_path: Path, level: str | None = None) -> subprocess.Co
         Pytest's per-test directory (the child's database).
     level
         The value of `LAKANA_LOG__LEVEL` in the child, or `None` for the default.
+    access
+        The value of `LAKANA_LOG__ACCESS` in the child, or `None` for the default.
 
     Returns
     -------
@@ -62,6 +66,9 @@ def _child(code: str, tmp_path: Path, level: str | None = None) -> subprocess.Co
     """
     env = {**os.environ, "LAKANA_DATABASE__URL": f"sqlite:///{tmp_path}/lakana.db"}
     env.pop("LAKANA_LOG__LEVEL", None)
+    env.pop("LAKANA_LOG__ACCESS", None)
+    if access is not None:
+        env["LAKANA_LOG__ACCESS"] = access
     if level is not None:
         env["LAKANA_LOG__LEVEL"] = level
     return subprocess.run(
@@ -137,3 +144,20 @@ def test_each_level_prints_each_line_once_with_uvicorns_real_logging_configurati
     access = [p for p in printed if "GET /x" in p]
     assert len(access) == (1 if floor <= _RANK["info"] else 0), printed
     assert not any("library info" in p for p in printed), printed
+
+
+_ACCESS_FLAG = (
+    "import lakana_server.__main__ as m\n"
+    "m.uvicorn.run = lambda app, **kw: print('access_log', kw['access_log'])\n"
+    "m.main([])\n"
+)
+
+
+@pytest.mark.parametrize(("setting", "expected"), [(None, "True"), ("false", "False")])
+def test_the_access_log_follows_lakana_log_access(
+    tmp_path: Path, setting: str | None, expected: str
+) -> None:
+    """The request log is on by default; `LAKANA_LOG__ACCESS=false` turns off only that."""
+    done = _child(_ACCESS_FLAG, tmp_path, access=setting)
+    assert done.returncode == 0, done.stderr
+    assert f"access_log {expected}" in done.stdout

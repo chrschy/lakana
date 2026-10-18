@@ -1900,29 +1900,33 @@ def test_child_env_tells_the_worker_where_the_server_is(
     assert given["LAKANA_RUN__SERVER_URL"] == "http://elsewhere:9000"
 
 
-def test_child_env_quiets_the_request_log_unless_asked(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Local mode logs warnings and errors only; `log_requests` and a user's level win."""
+def test_child_env_turns_off_the_request_log_unless_asked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Local mode drops the per-request line only; the log level is left alone."""
     from typing import cast
 
     data_dir = cast("DataDir", SimpleNamespace(database_url="sqlite:///x.db"))
     monkeypatch.delenv("LAKANA_LOG__LEVEL", raising=False)
+    monkeypatch.delenv("LAKANA_LOG__ACCESS", raising=False)
     quiet = server._child_env(data_dir, 8765, "k", key_id=None, secret=None)
-    assert quiet["LAKANA_LOG__LEVEL"] == "WARNING"
+    assert quiet["LAKANA_LOG__ACCESS"] == "false"
+    assert "LAKANA_LOG__LEVEL" not in quiet
     loud = server._child_env(data_dir, 8765, "k", key_id=None, secret=None, log_requests=True)
-    assert "LAKANA_LOG__LEVEL" not in loud
-    monkeypatch.setenv("LAKANA_LOG__LEVEL", "debug")
+    assert "LAKANA_LOG__ACCESS" not in loud
+    monkeypatch.setenv("LAKANA_LOG__ACCESS", "true")
     given = server._child_env(data_dir, 8765, "k", key_id=None, secret=None)
-    assert given["LAKANA_LOG__LEVEL"] == "debug"
+    assert given["LAKANA_LOG__ACCESS"] == "true"
 
 
 def test_start_passes_the_request_log_choice_to_the_children(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`--log-requests` leaves the log level alone; without it the children log warnings."""
+    """`--log-requests` leaves the request log on; without it the children are told it is off."""
     _stub_environment(monkeypatch)
     monkeypatch.setattr(server, "pid_alive", lambda pid: False)
-    monkeypatch.delenv("LAKANA_LOG__LEVEL", raising=False)
-    levels = []
+    monkeypatch.delenv("LAKANA_LOG__ACCESS", raising=False)
+    values = []
     for extra in ((), ("--log-requests",)):
         fake = FakeSupervisor()
         _install_fake_supervisor(monkeypatch, fake)
@@ -1932,8 +1936,8 @@ def test_start_passes_the_request_log_choice_to_the_children(
         result = invoke(state, *_start_args(tmp_path / f"data{len(extra)}"), *extra)
         assert result.exit_code == 0, result.stderr
         assert fake.config is not None
-        levels.append(fake.config.env.get("LAKANA_LOG__LEVEL"))
-    assert levels == ["WARNING", None]
+        values.append(fake.config.env.get("LAKANA_LOG__ACCESS"))
+    assert values == ["false", None]
 
 
 def test_the_ready_line_is_the_last_thing_start_prints(

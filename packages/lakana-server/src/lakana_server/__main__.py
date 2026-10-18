@@ -33,7 +33,8 @@ def main(argv: list[str] | None = None) -> None:
     name, like the worker, so the INFO lines of `lakana_*` loggers reach
     `docker compose logs server`. Uvicorn keeps its own handlers, with formatters that escape
     control characters like the root handler's (`lakana_server.log_config`), and gets the same
-    level, so its access log (one line per request) is printed at INFO and DEBUG only.
+    level, so its access log (one line per request) is printed at INFO and DEBUG only, and not
+    at all with `LAKANA_LOG__ACCESS=false`.
     """
     parser = argparse.ArgumentParser(prog="lakana-server", description="Run the Lakana API server.")
     parser.add_argument("command", nargs="?", choices=["migrate"], help="migrate: apply migrations")
@@ -49,6 +50,7 @@ def main(argv: list[str] | None = None) -> None:
         port=settings.port,
         log_level=settings.log.level.lower(),
         log_config=uvicorn_log_config(),
+        access_log=settings.log.access,
     )
 
 
