@@ -239,6 +239,94 @@ def test_grant_create_on_the_instance(tmp_path: Path) -> None:
     assert result.stdout.strip() == "Created grant g8 (ADMIN on the instance) to alice"
 
 
+def test_grant_create_on_a_namespace(tmp_path: Path) -> None:
+    """A namespace grant names the namespace and the environment."""
+    api = FakeApi()
+    api.on(
+        "POST",
+        "/api/v1/grants",
+        status=201,
+        json=_grant("g9", role="VIEWER", kind="NAMESPACE", namespace="gold.sales"),
+    )
+
+    result = invoke(
+        make_state(tmp_path, api),
+        "grant",
+        "create",
+        "--principal",
+        "alice",
+        "--role",
+        "viewer",
+        "--kind",
+        "namespace",
+        "--env",
+        "dev",
+        "--ns",
+        "gold.sales",
+    )
+
+    assert result.exit_code == 0, result.stderr
+    assert result.stdout.strip() == (
+        "Created grant g9 (VIEWER on namespace gold.sales in environment dev) to alice"
+    )
+
+
+def test_grant_list_stops_looking_once_every_name_is_found(tmp_path: Path) -> None:
+    """With only alice's grant listed, the remaining principals are never asked about."""
+    api = _api()
+    api.routes["GET", "/api/v1/grants"] = lambda request: httpx.Response(
+        200,
+        json=[_GRANTS[0]]
+        if "principal_name" not in request.url.params
+        else ([_GRANTS[0]] if request.url.params["principal_name"] == "alice" else []),
+    )
+
+    result = invoke(make_state(tmp_path, api), "grant", "list")
+
+    assert result.exit_code == 0, result.stderr
+    assert "user alice" in result.stdout
+    asked = [
+        r.url.params["principal_name"] for r in api.requests if "principal_name" in r.url.params
+    ]
+    assert asked == ["admin", "alice"]
+
+
+def test_grant_list_stops_looking_through_groups_once_the_name_is_found(tmp_path: Path) -> None:
+    """Groups are asked in order until the grant's group is named; later ones are skipped."""
+    other = "11111111-2222-4333-8444-555555555555"
+
+    def grants(request: httpx.Request) -> httpx.Response:
+        params = request.url.params
+        if "principal_name" in params:
+            return httpx.Response(200, json=[])
+        if params.get("group_name") == "ops":
+            return httpx.Response(200, json=[_grant("g-ops", principal_id=None, group_id=other)])
+        if params.get("group_name") == "analysts":
+            return httpx.Response(200, json=[_GRANTS[2]])
+        return httpx.Response(200, json=[_GRANTS[2]])
+
+    api = FakeApi()
+    api.routes["GET", "/api/v1/grants"] = grants
+    api.on("GET", "/api/v1/principals", json=_PRINCIPALS)
+    api.on("GET", "/api/v1/groups", json=[{"name": "ops"}, {"name": "analysts"}, {"name": "late"}])
+
+    result = invoke(make_state(tmp_path, api), "grant", "list")
+
+    assert result.exit_code == 0, result.stderr
+    assert "group analysts" in result.stdout
+    asked = [r.url.params["group_name"] for r in api.requests if "group_name" in r.url.params]
+    assert asked == ["ops", "analysts"]
+
+
+def test_grant_list_with_a_group_filter_names_the_group_without_lookups(tmp_path: Path) -> None:
+    """The name is known when `--group` is given; no principal or group listing is read."""
+    result = invoke(make_state(tmp_path, _api()), "grant", "list", "--group", "analysts")
+
+    assert result.exit_code == 0, result.stderr
+    assert "group analysts" in result.stdout
+    assert _GROUP_ID not in result.stdout
+
+
 def test_grant_list_names_who_each_grant_is_for(tmp_path: Path) -> None:
     """Users, service accounts and groups appear by name, with the kind of subject."""
     result = invoke(make_state(tmp_path, _api()), "grant", "list", "--env", "dev")

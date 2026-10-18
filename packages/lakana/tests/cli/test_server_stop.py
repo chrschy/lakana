@@ -380,3 +380,90 @@ def test_a_failed_owner_write_is_reported_and_leaves_no_stale_pid(
     assert result.exit_code == 0, result.stderr
     assert "disk full" in result.stderr and "Ctrl-C" in result.stderr
     assert seen == [None]
+
+
+def test_a_recorded_owner_that_is_gone_is_not_signalled(
+    tmp_path: Path, holder: Holder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Lock held, but the recorded process is not alive: refuse, name the pid."""
+    proc = holder()
+    monkeypatch.setattr(server, "pid_alive", lambda pid: False)
+
+    result = _stop(tmp_path, tmp_path / "data")
+
+    assert result.exit_code == 2
+    assert str(proc.pid) in result.output and "is gone" in result.output
+    assert "Ctrl-C" in result.output
+    assert proc.poll() is None
+
+
+def test_a_refused_signal_is_reported_with_the_next_step(
+    tmp_path: Path, holder: Holder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A holder owned by another user cannot be signalled: say so and point to Ctrl-C."""
+    proc = holder()
+
+    def deny(pid: int, sig: int) -> None:
+        """Refuse like the kernel does for another user's process.
+
+        Parameters
+        ----------
+        pid
+            The target.
+        sig
+            The signal.
+
+        Raises
+        ------
+        PermissionError
+            Always.
+        """
+        raise PermissionError("Operation not permitted")
+
+    monkeypatch.setattr(server.os, "kill", deny)
+
+    result = _stop(tmp_path, tmp_path / "data")
+
+    assert result.exit_code == 2
+    assert f"Can't signal process {proc.pid}" in result.output
+    assert "Operation not permitted" in result.output
+    assert "Ctrl-C" in result.output
+
+
+def test_a_live_instance_without_a_lock_owner_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No lock, but the pidfile's instance answers its health check: an older lakana."""
+    root = prepare_data_dir(tmp_path / "data")
+    write_pidfile(root.server_pid, os.getpid(), 8765)
+    monkeypatch.setattr(server, "_probe_health", lambda url: True)
+
+    result = _stop(tmp_path, tmp_path / "data")
+
+    assert result.exit_code == 2
+    assert "http://127.0.0.1:8765" in result.output
+    assert "did not record which process to stop" in result.output
+    assert "Ctrl-C" in result.output
+
+
+def test_record_lock_owner_does_nothing_on_windows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Where there are no POSIX signals the lock file is left without an owner."""
+    root = prepare_data_dir(tmp_path / "data")
+    written: list[int] = []
+    monkeypatch.setattr(server, "write_lock_owner", lambda path, pid: written.append(pid))
+    with monkeypatch.context() as scoped:
+        scoped.setattr(os, "name", "nt")
+        server._record_lock_owner(root)
+
+    assert written == []
+
+
+def test_process_cmdline_reads_a_live_process_and_none_for_a_missing_one() -> None:
+    """The command line of this process contains its interpreter; a missing pid has none."""
+    if not Path("/proc/self/cmdline").exists():
+        pytest.skip("no /proc on this platform")
+
+    assert "python" in (server._process_cmdline(os.getpid()) or "").lower()
+    assert server._process_cmdline(2**31 - 2) is None

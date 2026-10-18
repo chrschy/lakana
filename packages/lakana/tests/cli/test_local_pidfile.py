@@ -175,3 +175,12 @@ def test_garbage_in_the_lock_file_reads_as_no_owner(tmp_path: Path) -> None:
     for text in ("hello", "-5", "0", "1 2"):
         lock.write_text(text)
         assert _pidfile.read_lock_owner(lock) is None
+
+
+def test_clearing_a_lock_file_that_is_gone_is_not_an_error(tmp_path: Path) -> None:
+    """The holder may leave after the file was removed; clearing it then does nothing."""
+    lock = tmp_path / "missing-lock"
+
+    _pidfile.clear_lock_owner(lock)
+
+    assert not lock.exists()
