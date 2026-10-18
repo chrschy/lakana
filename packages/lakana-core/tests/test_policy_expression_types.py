@@ -2,6 +2,7 @@
 
 from decimal import Decimal
 
+import pyarrow as pa
 import pytest
 import sqlglot.expressions as exp
 
@@ -444,6 +445,104 @@ def test_a_column_missing_from_the_table_is_not_this_checks_business() -> None:
     assert "the type of `ghost` is not known" in message
 
 
+def _stored(arrow_type: pa.DataType) -> str:
+    """Spell an Arrow type the way `infer_schema` stores it.
+
+    Parameters
+    ----------
+    arrow_type
+        A real pyarrow type.
+
+    Returns
+    -------
+    str
+        `str(arrow_type)`, which is what an external table's schema holds.
+    """
+    return str(arrow_type)
+
+
+_ARROW_FILTERS = [
+    (pa.int8(), "c = 5"),
+    (pa.int16(), "c = 5"),
+    (pa.int32(), "c = 5"),
+    (pa.int64(), "c = 5"),
+    (pa.float32(), "c > 1.5"),
+    (pa.float64(), "c > 1.5"),
+    (pa.decimal128(10, 2), "c > 1.5"),
+    (pa.string(), "c = 'x'"),
+    (pa.large_string(), "c = 'x'"),
+    (pa.bool_(), "c = TRUE"),
+    (pa.date32(), "c > DATE '2026-01-01'"),
+    (pa.timestamp("us"), "c > TIMESTAMP '2026-01-01 00:00:00'"),
+    (pa.timestamp("us", tz="UTC"), "c = c"),
+]
+
+
+@pytest.mark.parametrize(("arrow_type", "expression"), _ARROW_FILTERS)
+def test_the_types_an_external_table_stores_are_understood_in_a_filter(
+    arrow_type: pa.DataType, expression: str
+) -> None:
+    """The names `infer_schema` really stores (`int64`, `date32[day]`, ...) type-check."""
+    columns = [ColumnSpec(name="c", type=_stored(arrow_type), nullable=True)]
+    check_expression_types(expression, kind="filter", columns=columns)
+
+
+@pytest.mark.parametrize(
+    ("arrow_type", "expression", "fragment"),
+    [
+        (pa.int64(), "c = 'x'", "`c` is int64; compare it with a number, not 'x'."),
+        (pa.large_string(), "c = 5", "`c` is text; compare it with '5', not 5."),
+        (pa.date32(), "c = 5", "`c` is date32[day]; compare it with a date such as DATE"),
+        (pa.decimal128(10, 2), "c = 1.234", "`c` is decimal128(10, 2); compare it with a number"),
+        (pa.int64(), "c = 99999999999999999999", "from -9223372036854775808"),
+    ],
+)
+def test_a_mismatch_on_an_external_table_names_the_stored_type(
+    arrow_type: pa.DataType, expression: str, fragment: str
+) -> None:
+    """The message names a type the user can see in the table's schema."""
+    columns = [ColumnSpec(name="c", type=_stored(arrow_type), nullable=True)]
+    with pytest.raises(ValidationError) as caught:
+        check_expression_types(expression, kind="filter", columns=columns)
+    assert fragment in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("arrow_type", "mask"),
+    [
+        (pa.int64(), "0"),
+        (pa.decimal128(10, 2), "1.25"),
+        (pa.large_string(), "'***'"),
+        (pa.date32(), "DATE '1970-01-01'"),
+        (pa.timestamp("us"), "TIMESTAMP '1970-01-01 00:00:00'"),
+        (pa.bool_(), "FALSE"),
+    ],
+)
+def test_a_constant_mask_of_the_columns_own_type_is_accepted_on_an_external_table(
+    arrow_type: pa.DataType, mask: str
+) -> None:
+    """The mask page promises constants work on external tables too."""
+    columns = [ColumnSpec(name="c", type=_stored(arrow_type), nullable=True)]
+    check_expression_types(mask, kind="mask", columns=columns, masked_column="c")
+
+
+@pytest.mark.parametrize(
+    "arrow_type",
+    [pa.timestamp("s"), pa.timestamp("ms"), pa.timestamp("ns"), pa.uint8(), pa.uint64()],
+)
+def test_an_arrow_type_the_check_has_no_rule_for_names_the_cause(arrow_type: pa.DataType) -> None:
+    """Fail closed, and say which stored types are not supported yet."""
+    columns = [ColumnSpec(name="c", type=_stored(arrow_type), nullable=True)]
+    with pytest.raises(ValidationError) as caught:
+        check_expression_types("c = 5", kind="filter", columns=columns)
+    message = str(caught.value)
+    assert f"the type of `c` is {arrow_type}, which a policy cannot compare" in message
+    assert "Unsigned integers" in message
+    check_expression_types("NULL", kind="mask", columns=columns, masked_column="c")
+    with pytest.raises(ValidationError, match="which a mask cannot be checked against"):
+        check_expression_types("0", kind="mask", columns=columns, masked_column="c")
+
+
 @pytest.mark.parametrize(
     ("declared", "family"),
     [
@@ -461,8 +560,8 @@ def test_a_column_missing_from_the_table_is_not_this_checks_business() -> None:
         ("bool", "boolean"),
     ],
 )
-def test_the_type_names_of_an_external_table_are_understood(declared: str, family: str) -> None:
-    """An external table's inferred type names are read like Iceberg's."""
+def test_sql_spellings_of_a_type_are_understood_too(declared: str, family: str) -> None:
+    """Iceberg and SQL type names type-check as before."""
     columns = [ColumnSpec(name="c", type=declared, nullable=True)]
     comparable = {
         "integer": "c = 1",
@@ -521,19 +620,6 @@ def test_timestamptz_literals_are_refused_with_the_reason() -> None:
     assert "not supported yet" in message
 
 
-@pytest.mark.parametrize(
-    "stored", ["date32[day]", "large_string", "timestamp[us]", "decimal128(10, 2)", "int64"]
-)
-def test_a_raw_zone_column_of_an_arrow_type_name_takes_only_null_or_itself(stored: str) -> None:
-    """These columns have no type rule, so their mask is `NULL` or the column; nothing is cast."""
-    columns = [ColumnSpec(name="c", type=stored, nullable=True)]
-    check_expression_types("NULL", kind="mask", columns=columns, masked_column="c")
-    check_expression_types("c", kind="mask", columns=columns, masked_column="c")
-    for expression in ("'***'", "0", "DATE '1970-01-01'"):
-        with pytest.raises(ValidationError, match="which a mask cannot be checked against"):
-            check_expression_types(expression, kind="mask", columns=columns, masked_column="c")
-
-
 def test_a_decimal_without_parameters_has_duckdbs_default_precision_and_scale() -> None:
     """`decimal` alone is DECIMAL(18,3): three decimal places, fifteen digits before the point."""
     columns = [ColumnSpec(name="d", type="DECIMAL", nullable=True)]
@@ -563,3 +649,9 @@ def test_a_number_literal_that_cannot_be_read_is_refused() -> None:
     checker = _Checker("x", "filter", COLUMNS)
     with pytest.raises(ValidationError, match="the number abc could not be read"):
         checker.type_of(exp.Literal.number("abc"))
+
+
+def test_a_mask_that_is_a_column_of_an_unknown_type_names_that_column_and_its_type() -> None:
+    """When only the mask's own type is unknown, the message names it, not the known column."""
+    message = _refusal("tag", kind="mask", masked="n")
+    assert "the type of `tag` is struct<a: int>, which a mask cannot be checked against" in message

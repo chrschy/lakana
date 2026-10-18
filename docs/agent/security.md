@@ -80,7 +80,7 @@ columns must be integers, `float`/`double`, or decimals of the same precision an
 comparison with `NULL` is refused. `AND`/`OR`/`NOT` and a filter as a whole need booleans; a minus
 sign goes only before a number literal; `substr` takes whole-number literals in the 32-bit range;
 `||`/`md5` need text. A mask must keep its column's type: `query_rewrite._masked_projection` wraps
-it in `CAST(<mask> AS <type>)` when the mask row has `type_checked` (set on every mask created
+it in `TRY_CAST(<mask> AS <type>)` when the mask row has `type_checked` (set on every mask created
 since migration 0036; false for older ones, which a read leaves as written). The target is a
 structured `sqlglot` `DataType` from `lakana_core.policy.cast_types`: for an Iceberg table from
 the column's `pyiceberg` type, for a raw-zone table from the stored Arrow type name through a

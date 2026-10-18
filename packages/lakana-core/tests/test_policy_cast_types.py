@@ -1,6 +1,7 @@
 """Tests for the structured CAST targets of column masks."""
 
 import pytest
+import sqlglot.expressions as exp
 from pyiceberg.types import (
     BinaryType,
     BooleanType,
@@ -122,3 +123,13 @@ def test_a_stored_arrow_type_name_maps_through_a_closed_list(stored: str, render
 def test_any_other_stored_arrow_type_name_has_no_cast(stored: str) -> None:
     """A type outside the list, or free text, is never turned into a cast."""
     assert arrow_cast_type(stored) is None
+
+
+def test_the_checker_and_the_cast_share_one_list_of_arrow_names() -> None:
+    """Every name the cast accepts has a type for the check, and the same parameters."""
+    from lakana_core.policy.cast_types import arrow_type
+
+    assert arrow_type("decimal128(10, 2)") == (exp.DType.DECIMAL, (10, 2))
+    assert arrow_type("int64") == (exp.DType.BIGINT, ())
+    assert arrow_type("timestamp[us, tz=UTC]") == (exp.DType.TIMESTAMPTZ, ())
+    assert arrow_type("timestamp[s]") is None

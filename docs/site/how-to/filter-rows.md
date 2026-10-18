@@ -142,8 +142,8 @@ What stays accepted:
 
 A date column is compared with `DATE '2026-01-01'`, a timestamp column with
 `TIMESTAMP '2026-01-01 00:00:00'`; text such as `'2026-01-01'` against a date column is refused,
-because the engine would have to convert it. Lakana cannot convert for you (`CAST`, `try_cast` and
-`TRY` are refused). If a comparison needs the value in another type, store the column in that type,
+because the engine would have to convert it. Lakana cannot convert for you (`CAST`, `try_cast` and `TRY` are refused; the typed
+literals above are the exception, also when written as `CAST('...' AS DATE)`). If a comparison needs the value in another type, store the column in that type,
 or add a column of that type and filter on that one.
 
 If you change a column's type later (for example `decimal(10,2)` to `decimal(38,2)`), a filter made

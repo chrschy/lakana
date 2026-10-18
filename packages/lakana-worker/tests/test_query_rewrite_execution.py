@@ -868,3 +868,31 @@ def test_a_crafted_struct_field_name_cannot_reach_the_cast(tmp_path: Path) -> No
 
     assert "SELECT 42" not in rewritten.sql
     assert _fetch(rewritten) == [(None,)]
+
+
+def test_a_type_checked_mask_that_reads_a_widened_column_shows_null_for_a_value_that_no_longer_fits(
+    tmp_path: Path,
+) -> None:
+    """`a` is INTEGER and its mask reads `b`, widened from INTEGER to BIGINT after the check."""
+    path = tmp_path / "widened.parquet"
+    pq.write_table(
+        pa.table(
+            {
+                "a": pa.array([1, 2], pa.int32()),
+                "b": pa.array([7, 3_000_000_000], pa.int64()),
+            }
+        ),
+        path,
+    )
+    source = TableSource(
+        urls=[str(path)],
+        file_format="parquet",
+        columns={"a": "INTEGER", "b": "BIGINT"},
+        column_masks={"a": "b"},
+        mask_types={"a": _target(IntegerType())},
+        typed_masks=frozenset({"a"}),
+    )
+
+    rewritten = rewrite_query("SELECT typeof(a), a FROM gold.w ORDER BY b", {"gold.w": source})
+
+    assert _fetch(rewritten) == [("INTEGER", 7), ("INTEGER", None)]

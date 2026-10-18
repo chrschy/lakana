@@ -137,12 +137,16 @@ example because it compares a text column with a number, it fails on the first v
 converted, and then every query the mask covers fails. So Lakana checks the types of the expression
 against the table's columns, as they are now, when you create the mask. The rules for a comparison
 are those of a [row filter](filter-rows.md#an-expression-must-not-fail-on-any-stored-value): both
-sides of one kind, numbers of any kind against each other, a boolean where a condition is needed.
+sides of one kind (a number column against a number it holds exactly, columns of one kind), a
+boolean where a condition is needed.
 
 A mask has one more rule: **it must give a value of the masked column's own type.** When a person
 reads the table, Lakana casts the mask to the column's declared type, so a reader gets exactly the
 type the column has without the mask (a `0` on a `long` column is a `BIGINT`, not an `INTEGER`). It
-accepts a mask only when that cast cannot fail on any value. This is refused (the exit code is 8):
+accepts a mask only when every value of the column it reads fits the masked column's type. If a
+value stops fitting later (a mask `b` on an `int` column `a`, and `b` is widened from `int` to
+`long`), the reader sees `NULL` for that value, and the column keeps its type; the read does not
+fail. This is refused (the exit code is 8):
 
 <!-- output -->
 ```text
@@ -183,7 +187,9 @@ A comparison inside a mask follows the same rules as in a row filter. A date doe
 timestamp column, or the other way round. An expression whose type Lakana cannot decide is refused,
 so that nothing unchecked is stored.
 
-A mask cannot convert a value (`CAST`, `try_cast` and `TRY` are refused). If a mask needs the value
+A mask cannot convert a value (`CAST`, `try_cast` and `TRY` are refused; the typed literals
+`DATE '...'` and `TIMESTAMP '...'`, which Lakana checks when you create the mask, are the exception,
+also when they are written as `CAST('...' AS DATE)`). If a mask needs the value
 in another type, store the column in that type, or add a column of that type and mask that one.
 
 A mask that already exists is **not** checked again when you upgrade, and is not cast: it reads

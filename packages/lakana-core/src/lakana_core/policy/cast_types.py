@@ -114,6 +114,42 @@ def iceberg_cast_type(field_type: IcebergType) -> exp.DataType | None:
     return None if kind is None else exp.DataType(this=kind)
 
 
+def arrow_type(stored: str) -> tuple[exp.DType, tuple[int, ...]] | None:
+    """Read a stored Arrow type name through the closed list.
+
+    The one list of Arrow names: the cast target and the type check of a policy both read it.
+
+    Parameters
+    ----------
+    stored
+        The type as `schema_inference.infer_schema` stored it (pyarrow's printed name).
+
+    Returns
+    -------
+    tuple or None
+        The DuckDB type and its integer parameters (precision and scale for a decimal), or
+        `None` unless `stored` is exactly one of the supported names.
+    """
+    kind = _ARROW.get(stored)
+    if kind is not None:
+        return kind, ()
+    prefix = "timestamp[us, tz="
+    if stored.startswith(prefix) and stored.endswith("]"):
+        zone = stored[len(prefix) : -1]
+        if zone and all(character in _TZ_CHARACTERS for character in zone):
+            return exp.DType.TIMESTAMPTZ, ()
+        return None
+    head = "decimal128("
+    if stored.startswith(head) and stored.endswith(")"):
+        first, comma, second = stored[len(head) : -1].partition(", ")
+        if comma and all(part.isascii() and part.isdecimal() for part in (first, second)):
+            precision, scale = int(first), int(second)
+            valid = 1 <= precision <= _MAX_PRECISION and 0 <= scale <= precision
+            if valid and stored == f"decimal128({precision}, {scale})":
+                return exp.DType.DECIMAL, (precision, scale)
+    return None
+
+
 def arrow_cast_type(stored: str) -> exp.DataType | None:
     """Give the cast target of a raw-zone column from its stored Arrow type name.
 
@@ -127,21 +163,10 @@ def arrow_cast_type(stored: str) -> exp.DataType | None:
     sqlglot.expressions.DataType or None
         The type, or `None` unless `stored` is exactly one of the supported names.
     """
-    kind = _ARROW.get(stored)
-    if kind is not None:
-        return exp.DataType(this=kind)
-    prefix = "timestamp[us, tz="
-    if stored.startswith(prefix) and stored.endswith("]"):
-        zone = stored[len(prefix) : -1]
-        if zone and all(character in _TZ_CHARACTERS for character in zone):
-            return exp.DataType(this=exp.DType.TIMESTAMPTZ)
+    found = arrow_type(stored)
+    if found is None:
         return None
-    head = "decimal128("
-    if stored.startswith(head) and stored.endswith(")"):
-        first, comma, second = stored[len(head) : -1].partition(", ")
-        if comma and all(part.isascii() and part.isdecimal() for part in (first, second)):
-            precision, scale = int(first), int(second)
-            valid = 1 <= precision <= _MAX_PRECISION and 0 <= scale <= precision
-            if valid and stored == f"decimal128({precision}, {scale})":
-                return _decimal(precision, scale)
-    return None
+    kind, params = found
+    if kind is exp.DType.DECIMAL:
+        return _decimal(*params)
+    return exp.DataType(this=kind)

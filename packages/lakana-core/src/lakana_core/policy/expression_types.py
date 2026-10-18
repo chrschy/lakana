@@ -51,6 +51,7 @@ import sqlglot.expressions as exp
 from lakana_core.catalog.json_schema import ColumnSpec
 from lakana_core.errors import ValidationError
 from lakana_core.identifiers import shown
+from lakana_core.policy.cast_types import arrow_type
 from lakana_core.policy.expressions import HAS_GROUP, validate_restricted_expression
 
 _COMPARISONS: tuple[type[exp.Expression], ...] = (exp.EQ, exp.NEQ, exp.GT, exp.LT, exp.GTE, exp.LTE)
@@ -146,6 +147,46 @@ _BOOLEAN = _Type("boolean", "boolean")
 _TEXT = _Type("text", "text")
 
 
+_ARROW_FAMILIES: dict[exp.DType, tuple[str, str, int | None]] = {
+    exp.DType.TINYINT: ("integer", "int", 8),
+    exp.DType.SMALLINT: ("integer", "int", 16),
+    exp.DType.INT: ("integer", "int", 32),
+    exp.DType.BIGINT: ("integer", "int", 64),
+    exp.DType.FLOAT: ("fractional", "float", None),
+    exp.DType.DOUBLE: ("fractional", "double", None),
+    exp.DType.BOOLEAN: ("boolean", "", None),
+    exp.DType.VARCHAR: ("text", "", None),
+    exp.DType.VARBINARY: ("binary", "", None),
+    exp.DType.DATE: ("date", "", None),
+    exp.DType.TIMESTAMP: ("timestamp", "", None),
+    exp.DType.TIMESTAMPTZ: ("timestamptz", "", None),
+}
+"""The family, number kind and integer width of each DuckDB type a stored Arrow name maps to."""
+
+
+def _arrow_column_type(declared: str, kind: exp.DType, params: tuple[int, ...]) -> _Type:
+    """Type a column whose declared type is a stored Arrow name.
+
+    Parameters
+    ----------
+    declared
+        The stored name (`int64`, `date32[day]`, `decimal128(10, 2)`), kept for messages.
+    kind
+        The DuckDB type `lakana_core.policy.cast_types.arrow_type` read from it.
+    params
+        Its integer parameters: precision and scale of a decimal.
+
+    Returns
+    -------
+    _Type
+        The column's type; the name is the stored one, `text` for any text type.
+    """
+    if kind is exp.DType.DECIMAL:
+        return _Type("fractional", declared, kind="decimal", precision=params[0], scale=params[1])
+    family, number, bits = _ARROW_FAMILIES[kind]
+    return _Type(family, "text" if family == "text" else declared, kind=number, bits=bits)
+
+
 def _column_type(declared: str) -> _Type:
     """Read a column's declared type name.
 
@@ -160,6 +201,9 @@ def _column_type(declared: str) -> _Type:
         Its family and, for a number, its width or precision and scale; named as declared (`text`
         for any text type), or the unknown family.
     """
+    stored = arrow_type(declared)
+    if stored is not None:
+        return _arrow_column_type(declared, *stored)
     lowered = declared.strip().lower()
     base, _, params = lowered.partition("(")
     base = base.strip()
@@ -171,10 +215,8 @@ def _column_type(declared: str) -> _Type:
     if family == "integer":
         return _Type(family, lowered, kind="int", bits=_INTEGER_BITS[base])
     if family == "fractional":
-        if base in ("float", "real"):
+        if base == "real":  # `float` and `double` are read through the Arrow names
             return _Type(family, lowered, kind="float")
-        if base == "double":
-            return _Type(family, lowered, kind="double")
         precision, scale = _DEFAULT_DECIMAL
         if params:
             try:
@@ -539,7 +581,8 @@ class _Checker:
             raise self.refuse(
                 f"the type of {self.describe(node)} is {shown(found.name)}, which a policy "
                 "cannot compare. Use only columns of a simple type (text, number, boolean, "
-                "date or timestamp)."
+                "date or timestamp). Unsigned integers, timestamps in seconds, milliseconds or "
+                "nanoseconds, and nested types are not supported yet."
             )
 
     def require_condition(self, node: exp.Expression) -> None:
@@ -867,11 +910,16 @@ class _Checker:
         if found.family == "null":
             return
         if wanted.family == "unknown" or found.family == "unknown":
+            # The declared strings are compared exactly: Iceberg spells a type one way only, so
+            # "the column itself" always matches itself; a differently spelled type is refused.
             if wanted == found:
                 return
+            blamed, blamed_type = (
+                (name, wanted) if wanted.family == "unknown" else (self.describe(node), found)
+            )
             raise self.refuse(
-                f"the type of {name} is {shown(wanted.name)}, which a mask cannot be checked "
-                "against. Use NULL."
+                f"the type of {blamed} is {shown(blamed_type.name)}, which a mask cannot be "
+                "checked against. Use NULL."
             )
         suggestion = _MASK_VALUE.get(wanted.family, "NULL").format(column=shown(spec.name))
         same = found.family == wanted.family

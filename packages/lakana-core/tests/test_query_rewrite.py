@@ -1513,7 +1513,7 @@ def test_only_a_type_checked_mask_is_cast_to_the_columns_structured_type() -> No
     )
 
     assert (
-        'CAST(0 AS BIGINT) AS "id", \'***\' AS "ssn"'
+        'TRY_CAST(0 AS BIGINT) AS "id", \'***\' AS "ssn"'
         in rewrite_query("SELECT * FROM gold.t", {"gold.t": checked}).sql
     )
     assert (

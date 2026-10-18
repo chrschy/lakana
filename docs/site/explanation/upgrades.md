@@ -140,7 +140,9 @@ precision and scale. A `timestamptz` column compares only with another `timestam
 date or timestamp is written as a typed literal (`DATE '2026-01-01'`), which is new and checked at
 creation. A column mask is now cast to its column's declared type when it is read, so a reader gets
 the column's own type (a `0` on a `long` column is a `BIGINT`), and a mask is accepted only when
-that cast cannot fail. See [Show some people
+every value fits; a value that stops fitting later (the column the mask reads was widened) reads
+as `NULL`. Row filters and masks on external (raw-zone) tables are checked against the types
+stored for the table (`int64`, `date32[day]`, `decimal128(10, 2)`, `large_string`, ...). See [Show some people
 only some rows](../how-to/filter-rows.md#an-expression-must-not-fail-on-any-stored-value) and
 [Mask a column for some people](../how-to/mask-a-column.md#an-expression-must-not-fail-on-any-stored-value).
 

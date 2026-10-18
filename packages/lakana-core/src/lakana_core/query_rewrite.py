@@ -1115,7 +1115,9 @@ def _masked_projection(mask: str, name: str, target: exp.DataType | None, dialec
     """Render a column mask as a projection, cast to the column's type when it was checked.
 
     A type-checked mask is cast to the column's DuckDB type so a reader gets exactly the type the
-    column has without the mask. Creating the mask checked that the cast cannot fail. The target
+    column has without the mask. Creating the mask checked that every value fits; a value that
+    no longer fits (the column the mask reads was widened since) becomes `NULL` through
+    `TRY_CAST` instead of failing the read. The target
     is a structured `DataType` built from the column's Iceberg type or a stored Arrow type name
     (`lakana_core.policy.cast_types`), never parsed from a type string. Without a target, a mask
     that was never type-checked, or a column of a type that has no cast, the mask is used as it
@@ -1135,12 +1137,12 @@ def _masked_projection(mask: str, name: str, target: exp.DataType | None, dialec
     Returns
     -------
     str
-        `CAST(<mask> AS <type>) AS "<name>"`, or `<mask> AS "<name>"`.
+        `TRY_CAST(<mask> AS <type>) AS "<name>"`, or `<mask> AS "<name>"`.
     """
     alias = _quoted_identifier(name, dialect)
     if target is None:
         return f"{mask} AS {alias}"
-    value = exp.cast(sqlglot.parse_one(mask, dialect=dialect), target.copy(), dialect=dialect)
+    value = exp.TryCast(this=sqlglot.parse_one(mask, dialect=dialect), to=target.copy())
     return f"{value.sql(dialect=dialect)} AS {alias}"
 
 
