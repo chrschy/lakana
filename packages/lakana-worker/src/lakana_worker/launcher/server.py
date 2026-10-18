@@ -25,6 +25,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 from lakana_worker.launcher.engine import EngineError
 from lakana_worker.launcher.requests import (
@@ -122,7 +123,16 @@ def _watch(connection: socket.socket, done: threading.Event, on_gone: Callable[[
 class _Handler(socketserver.StreamRequestHandler):
     """Serves one connection."""
 
-    server: LauncherServer
+    @property
+    def _owner(self) -> LauncherServer:
+        """The server this connection came to (the base class types it as ``BaseServer``).
+
+        Returns
+        -------
+        LauncherServer
+            The launcher's socket server.
+        """
+        return cast("LauncherServer", self.server)
 
     def _send(self, answer: dict[str, object]) -> None:
         """Write one answer line.
@@ -198,12 +208,12 @@ class _Handler(socketserver.StreamRequestHandler):
 
     def _serve(self) -> None:
         """Parse, supervise, answer."""
-        launcher = self.server.launcher
+        launcher = self._owner.launcher
         raw = self._read_line()
         if raw is None:
             return
         try:
-            request = parse_request(raw, token=self.server.token, settings=launcher.settings)
+            request = parse_request(raw, token=self._owner.token, settings=launcher.settings)
         except Refused as exc:
             logger.warning("Refused a request: %s", exc)
             self._try_send({"refused": str(exc)})
@@ -243,15 +253,15 @@ class _Handler(socketserver.StreamRequestHandler):
             The parsed request.
         """
         try:
-            result = self.server.launcher.handle(request, self._send)
+            result = self._owner.launcher.handle(request, self._send)
         except _CallerGone:
             return  # the run is cleaned up already
         except Refused as exc:
-            self._try_send({"refused": self.server.launcher.redact(str(exc))})
+            self._try_send({"refused": self._owner.launcher.redact(str(exc))})
             return
         except EngineError as exc:
             logger.error("Docker failed: %s", exc)
-            self._try_send({"error": self.server.launcher.redact(str(exc))})
+            self._try_send({"error": self._owner.launcher.redact(str(exc))})
             return
         except Exception:
             logger.exception("The launcher failed while serving a request")

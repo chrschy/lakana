@@ -12,6 +12,7 @@ import zipfile
 from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import cast
 
 USERNAME = "builder"
 PASSWORD = "s3cr3t-Pa55word-XYZ"  # nosec B105 -- a test credential of a loopback fixture
@@ -108,8 +109,6 @@ class _Server(http.server.ThreadingHTTPServer):
 class _Handler(http.server.BaseHTTPRequestHandler):
     """Serve ``<prefix>/simple/<project>/`` and ``<prefix>/files/<name>``; record every request."""
 
-    server: _Server
-
     def log_message(self, format: str, *args: object) -> None:
         """Stay silent.
 
@@ -145,7 +144,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         """Record the request, check its credential, and serve an index page or a file."""
-        server = self.server
+        server = cast("_Server", self.server)  # the base class types it as BaseServer
         given = self.headers.get("Authorization")
         server.seen.append((self.path, given))
         wanted = next(
