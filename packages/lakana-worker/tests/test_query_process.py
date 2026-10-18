@@ -519,15 +519,19 @@ def test_a_stream_cut_where_its_last_bytes_equal_the_marker_is_refused_by_the_st
 
 
 def test_a_clean_exit_is_not_enough_without_the_real_end_of_the_pipe(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """A holder of the pipe outside the group keeps it open: the end was never seen."""
     monkeypatch.setattr(query_process, "_DRAIN_SECONDS", 0.3)
+    release = tmp_path / "release"  # the holder lives until this file exists, however slow the run
     escaped = 0
     try:
         with (
             pytest.raises(ChildFailed) as caught,
-            _child("clean_exit_with_a_pipe_holder") as child,
+            _child(
+                "clean_exit_with_a_pipe_holder",
+                argv=[sys.executable, str(SCRIPT), "clean_exit_with_a_pipe_holder", str(release)],
+            ) as child,
         ):
             try:
                 _rows(child)
@@ -538,8 +542,10 @@ def test_a_clean_exit_is_not_enough_without_the_real_end_of_the_pipe(
                 ]
         assert (caught.value.stop, caught.value.returncode) == (None, 0)
     finally:
+        release.touch()
         if escaped:
-            os.kill(escaped, signal.SIGKILL)
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(escaped, signal.SIGKILL)
 
 
 def test_after_the_ask_the_worker_keeps_reading_so_a_child_blocked_on_a_full_pipe_can_stop() -> (
