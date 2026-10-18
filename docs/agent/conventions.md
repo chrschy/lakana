@@ -155,6 +155,21 @@ that bumps the pin and fixes whatever it flags differently, never a side effect 
 unrelated change. The same discipline applies to `ruff`: a version bump is its own commit
 so a lint-rule change is never hidden inside a feature diff.
 
+## Duplicated code
+
+CI's `lint` job fails when a change adds copied code to `packages/*/src` (see "The duplication
+ratchet" in `docs/agent/testing.md`). The message lists the new blocks as
+`file:start-end ↔ file:start-end`. Handle a finding in this order:
+
+1. **Extract** the shared code into one function (or class) in the lowest package both copies may
+   import (`lakana-core` for the server and the worker), and call it from both places.
+2. **Justify** a copy that has to stay (two packages that must not import each other, a block that
+   mirrors a wire format): wrap it in `# jscpd:ignore-start` and `# jscpd:ignore-end`, with a
+   comment beside them that says why. Ignored blocks are not counted; the reason is reviewed in
+   the pull request.
+3. **Never** raise `scripts/duplication-baseline.json` by hand. If duplication fell, lower it in
+   the same pull request: `uv run python scripts/duplication_ratchet.py --update`.
+
 ## Upper bounds on the deeply used dependencies
 
 `sqlglot` and `pyiceberg` (`lakana-core`) and `duckdb` (`lakana-worker`) carry an upper bound:

@@ -1,0 +1,182 @@
+{
+  "duplicated_lines": 1433,
+  "clones": 74,
+  "pairs": {
+    "lakana/_artifact_manifest.py ↔ lakana_core/artifacts/manifest.py": {
+      "clones": 1,
+      "lines": 159
+    },
+    "lakana/_http.py ↔ lakana/_http.py": {
+      "clones": 1,
+      "lines": 22
+    },
+    "lakana/_models.py ↔ lakana_core/jobs/service.py": {
+      "clones": 2,
+      "lines": 46
+    },
+    "lakana/_models.py ↔ lakana_core/runs/waiting.py": {
+      "clones": 1,
+      "lines": 15
+    },
+    "lakana/_models.py ↔ lakana_server/api/platform/schemas.py": {
+      "clones": 13,
+      "lines": 264
+    },
+    "lakana/cli/indexes.py ↔ lakana/cli/repos.py": {
+      "clones": 1,
+      "lines": 14
+    },
+    "lakana/cli/tables.py ↔ lakana/cli/tables.py": {
+      "clones": 1,
+      "lines": 12
+    },
+    "lakana/resources/audit_events.py ↔ lakana_server/api/platform/audit_events.py": {
+      "clones": 1,
+      "lines": 14
+    },
+    "lakana/resources/column_masks.py ↔ lakana/resources/row_filters.py": {
+      "clones": 1,
+      "lines": 17
+    },
+    "lakana/resources/column_masks.py ↔ lakana_server/api/platform/schemas.py": {
+      "clones": 1,
+      "lines": 16
+    },
+    "lakana/resources/grants.py ↔ lakana_server/api/platform/schemas.py": {
+      "clones": 1,
+      "lines": 14
+    },
+    "lakana/resources/row_filters.py ↔ lakana_server/api/platform/schemas.py": {
+      "clones": 1,
+      "lines": 15
+    },
+    "lakana/runner.py ↔ lakana_core/projects/python_assets.py": {
+      "clones": 1,
+      "lines": 14
+    },
+    "lakana_core/artifacts/store.py ↔ lakana_core/artifacts/store.py": {
+      "clones": 1,
+      "lines": 12
+    },
+    "lakana_core/config.py ↔ lakana_core/config.py": {
+      "clones": 2,
+      "lines": 38
+    },
+    "lakana_core/config.py ↔ lakana_server/settings.py": {
+      "clones": 1,
+      "lines": 18
+    },
+    "lakana_core/grants/service.py ↔ lakana_core/identity/groups.py": {
+      "clones": 2,
+      "lines": 44
+    },
+    "lakana_core/grants/service.py ↔ lakana_core/identity/pats.py": {
+      "clones": 1,
+      "lines": 32
+    },
+    "lakana_core/grants/service.py ↔ lakana_core/policy/column_masks.py": {
+      "clones": 1,
+      "lines": 49
+    },
+    "lakana_core/migrations/versions/0008_row_filters_and_column_masks.py ↔ lakana_core/migrations/versions/0008_row_filters_and_column_masks.py": {
+      "clones": 2,
+      "lines": 17
+    },
+    "lakana_core/migrations/versions/0008_row_filters_and_column_masks.py ↔ lakana_core/migrations/versions/0009_secrets.py": {
+      "clones": 1,
+      "lines": 6
+    },
+    "lakana_core/migrations/versions/0011_m3f_security.py ↔ lakana_core/migrations/versions/0011_m3f_security.py": {
+      "clones": 1,
+      "lines": 8
+    },
+    "lakana_core/migrations/versions/0013_m5b_projects_deploy.py ↔ lakana_core/migrations/versions/0014_m5c1_run_engine.py": {
+      "clones": 1,
+      "lines": 8
+    },
+    "lakana_core/migrations/versions/0013_m5b_projects_deploy.py ↔ lakana_core/migrations/versions/0020_package_indexes.py": {
+      "clones": 1,
+      "lines": 8
+    },
+    "lakana_core/models/column_mask.py ↔ lakana_core/models/grant.py": {
+      "clones": 1,
+      "lines": 11
+    },
+    "lakana_core/models/column_mask.py ↔ lakana_core/models/row_filter.py": {
+      "clones": 2,
+      "lines": 30
+    },
+    "lakana_core/notifications/views.py ↔ lakana_server/api/platform/schemas.py": {
+      "clones": 1,
+      "lines": 11
+    },
+    "lakana_core/policy/column_masks.py ↔ lakana_core/policy/row_filters.py": {
+      "clones": 8,
+      "lines": 173
+    },
+    "lakana_core/projects/checks.py ↔ lakana_core/projects/discovery.py": {
+      "clones": 1,
+      "lines": 14
+    },
+    "lakana_core/projects/package_indexes.py ↔ lakana_core/projects/repositories.py": {
+      "clones": 1,
+      "lines": 12
+    },
+    "lakana_core/runs/checks.py ↔ lakana_core/runs/kept.py": {
+      "clones": 1,
+      "lines": 11
+    },
+    "lakana_core/runs/checks.py ↔ lakana_server/api/platform/schemas.py": {
+      "clones": 1,
+      "lines": 27
+    },
+    "lakana_core/runs/service.py ↔ lakana_core/runs/service.py": {
+      "clones": 2,
+      "lines": 48
+    },
+    "lakana_core/secrets/keys.py ↔ lakana_core/secrets/keys.py": {
+      "clones": 1,
+      "lines": 20
+    },
+    "lakana_core/secrets/service.py ↔ lakana_core/secrets/service.py": {
+      "clones": 1,
+      "lines": 10
+    },
+    "lakana_server/api/platform/column_masks.py ↔ lakana_server/api/platform/row_filters.py": {
+      "clones": 3,
+      "lines": 75
+    },
+    "lakana_server/api/platform/tables.py ↔ lakana_server/api/platform/tables.py": {
+      "clones": 3,
+      "lines": 31
+    },
+    "lakana_worker/git.py ↔ lakana_worker/processes.py": {
+      "clones": 1,
+      "lines": 19
+    },
+    "lakana_worker/launcher/engine.py ↔ lakana_worker/launcher/engine.py": {
+      "clones": 1,
+      "lines": 17
+    },
+    "lakana_worker/pipeline.py ↔ lakana_worker/pipeline.py": {
+      "clones": 2,
+      "lines": 26
+    },
+    "lakana_worker/poller.py ↔ lakana_worker/poller.py": {
+      "clones": 1,
+      "lines": 13
+    },
+    "lakana_worker/python_tasks.py ↔ lakana_worker/task_checks.py": {
+      "clones": 1,
+      "lines": 8
+    },
+    "lakana_worker/python_tasks.py ↔ lakana_worker/tasks.py": {
+      "clones": 1,
+      "lines": 9
+    },
+    "lakana_worker/task_checks.py ↔ lakana_worker/tasks.py": {
+      "clones": 1,
+      "lines": 6
+    }
+  }
+}

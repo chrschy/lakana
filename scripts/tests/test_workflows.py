@@ -332,7 +332,7 @@ def test_dependabot_groups_its_updates_and_keeps_the_pinned_tools_apart() -> Non
     """One pull request per ecosystem and week; ruff and ty upgrade in their own."""
     config = yaml.safe_load((ROOT / ".github" / "dependabot.yml").read_text())
     updates = {entry["package-ecosystem"]: entry for entry in config["updates"]}
-    assert set(updates) == {"uv", "github-actions", "docker", "pip"}
+    assert set(updates) == {"uv", "github-actions", "docker", "pip", "npm"}
     for ecosystem, entry in updates.items():
         groups = entry["groups"]
         assert len(groups) == 1, ecosystem
@@ -340,6 +340,54 @@ def test_dependabot_groups_its_updates_and_keeps_the_pinned_tools_apart() -> Non
         assert group["patterns"] == ["*"], ecosystem
     (python,) = updates["uv"]["groups"].values()
     assert python["exclude-patterns"] == ["ruff", "ty"]
+
+
+def test_dependabot_watches_the_pinned_jscpd() -> None:
+    """The lockfile of the duplication check is updated by Dependabot, as a hidden `ci` change."""
+    config = yaml.safe_load((ROOT / ".github" / "dependabot.yml").read_text())
+    (npm,) = (entry for entry in config["updates"] if entry["package-ecosystem"] == "npm")
+    assert npm["directory"] == "/tools/jscpd"
+    assert npm["commit-message"]["prefix"] == "ci"
+    assert (ROOT / "tools" / "jscpd" / "package-lock.json").is_file()
+
+
+def test_jscpd_is_pinned_to_one_exact_version() -> None:
+    """No range and no bare `npx jscpd`: the version CI runs is the one in the lock."""
+    package = json.loads((ROOT / "tools" / "jscpd" / "package.json").read_text())
+    assert re.fullmatch(r"\d+\.\d+\.\d+", package["devDependencies"]["jscpd"])
+    assert set(package["devDependencies"]) == {"jscpd"}
+
+
+def test_lint_measures_duplication_in_the_sources_and_runs_the_ratchet() -> None:
+    """`lint` installs the locked jscpd, scans the packages' source and ratchets the report.
+
+    Tests are not scanned (they repeat their setup on purpose), the report is JSON, and the
+    ratchet runs after jscpd so that it never reads a stale report.
+    """
+    steps = _jobs("ci.yml")["lint"]["steps"]
+    commands = [command for step in steps for command in _commands(step)]
+    install = next(i for i, c in enumerate(commands) if c.startswith("npm ci"))
+    scan = next(i for i, c in enumerate(commands) if "node_modules/.bin/jscpd" in c)
+    ratchet = next(i for i, c in enumerate(commands) if "scripts/duplication_ratchet.py" in c)
+    assert install < scan < ratchet
+    assert "--prefix tools/jscpd" in commands[install]
+    assert "--ignore-scripts" in commands[install]
+    assert "packages/*/src" in commands[scan]
+    assert "tests" not in commands[scan]
+    assert "--min-tokens 70" in commands[scan]
+    assert "--reporters json" in commands[scan]
+    assert commands[scan].startswith("tools/jscpd/node_modules/.bin/jscpd")
+    node = next(
+        step for step in steps if str(step.get("uses", "")).startswith("actions/setup-node")
+    )
+    assert steps.index(node) < next(i for i, s in enumerate(steps) if "npm ci" in str(s.get("run")))
+
+
+def test_lint_keeps_the_read_only_token_while_it_runs_jscpd() -> None:
+    """`lint` declares no permissions of its own, so it keeps the read-only top level."""
+    workflow = yaml.safe_load((WORKFLOWS / "ci.yml").read_text())
+    assert workflow["permissions"] == {"contents": "read"}
+    assert "permissions" not in workflow["jobs"]["lint"]
 
 
 def _test_steps() -> dict[str, dict]:
