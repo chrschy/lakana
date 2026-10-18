@@ -5,8 +5,8 @@ body:
   - type: markdown
     attributes:
       value: |
-        Check [Scope and philosophy](https://github.com/chrschy/lakana/blob/main/docs/site/explanation/scope.md)
-        and the [Roadmap](https://github.com/chrschy/lakana/blob/main/docs/site/explanation/roadmap.md) first:
+        Check [Scope and philosophy](https://github.com/lakana-labs/lakana/blob/main/docs/site/explanation/scope.md)
+        and the [Roadmap](https://github.com/lakana-labs/lakana/blob/main/docs/site/explanation/roadmap.md) first:
         they say what Lakana leaves out and what is planned.
   - type: textarea
     id: problem

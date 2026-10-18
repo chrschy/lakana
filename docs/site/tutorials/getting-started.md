@@ -28,7 +28,7 @@ repository instead. You need [`uv`](https://docs.astral.sh/uv/), a Python packag
 
 <!-- not tested: installs from a checkout -->
 ```bash
-git clone https://github.com/chrschy/lakana.git
+git clone https://github.com/lakana-labs/lakana.git
 cd lakana
 uv sync --all-packages
 source .venv/bin/activate

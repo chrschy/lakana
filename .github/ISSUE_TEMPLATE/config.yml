@@ -1,5 +1,5 @@
 blank_issues_enabled: false
 contact_links:
   - name: Report a security vulnerability
-    url: https://github.com/chrschy/lakana/security/advisories/new
+    url: https://github.com/lakana-labs/lakana/security/advisories/new
     about: Use private vulnerability reporting. Do not open a public issue; see SECURITY.md.

@@ -13,7 +13,7 @@ from pathlib import Path
 import lakana
 from lakana.cli._state import CliError
 
-IMAGE_REPOSITORY = "ghcr.io/chrschy/lakana"
+IMAGE_REPOSITORY = "ghcr.io/lakana-labs/lakana"
 TEMPLATE_NAME = "compose.yaml"
 WORKER_MEMORY = "4g"
 """Default hard memory limit of each worker container (`mem_limit`, no swap). The worker reads
@@ -58,7 +58,7 @@ def default_image(version: str) -> str:
     Returns
     -------
     str
-        `ghcr.io/chrschy/lakana:<version>`.
+        `ghcr.io/lakana-labs/lakana:<version>`.
 
     Raises
     ------

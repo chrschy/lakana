@@ -19,7 +19,7 @@ promises and does not promise, see [Support](support.md).
 ## Where a breaking change is announced
 
 - **The changelog.** Each release in
-  [`CHANGELOG.md`](https://github.com/chrschy/lakana/blob/main/CHANGELOG.md) has a section
+  [`CHANGELOG.md`](https://github.com/lakana-labs/lakana/blob/main/CHANGELOG.md) has a section
   "BREAKING CHANGES" when it breaks something. Each entry says what changed and how to migrate.
   Read it before you upgrade, for every release between yours and the new one.
 - **A how-to page, when a release needs steps.** A short entry cannot carry an order of steps and
@@ -62,7 +62,7 @@ A project with only SQL assets is not affected. A patch release does not ask for
 steps, with the commands, are in
 [Upgrade to the release with artifacts](../how-to/upgrade-to-artifacts.md#the-order), step 5.
 
-This step is a known cost. [Issue 73](https://github.com/chrschy/lakana/issues/73) looks at
+This step is a known cost. [Issue 73](https://github.com/lakana-labs/lakana/issues/73) looks at
 reducing it. From v1.0.0 the check only requires the major versions to match.
 
 ## When a dependency's new release breaks Lakana
@@ -82,14 +82,14 @@ unexpected argument, for example), pin that package to the version before the on
 ```bash
 pip install "lakana[server]==0.13.0" "sqlglot==30.21.0"
 
-uv pip install "lakana[server]==0.13.0" "sqlglot==30.21.0"
+uv pip install "lakana[server]==0.13.0" "sqlglot==30.21.0"   # inside the virtual environment, or add --system
 
 echo "sqlglot==30.21.0" > constraints.txt
 pip install -c constraints.txt "lakana[server]==0.13.0"
 ```
 
 Replace the versions with yours: `pip freeze` lists what is installed, and the package's page on
-PyPI lists its earlier releases. Then [open an issue](https://github.com/chrschy/lakana/issues)
+PyPI lists its earlier releases. Then [open an issue](https://github.com/lakana-labs/lakana/issues)
 with the package, the version that broke and the error. A release of Lakana that is already
 published cannot be repaired, so the fix comes in a new release, and you can remove the pin then.
 
@@ -122,6 +122,18 @@ Each cell is a summary. The page named in the last column has the detail. The ch
 | 0.9.0 | Upgrade every worker before you deploy Python assets; rewrite `asset(deps=...)` as `asset(inputs=...)`; move helper modules out of `assets/`; an older bundle needs three additions. | [Upgrading](../how-to/deploy-with-compose.md#upgrading), [Projects and deploys](../how-to/projects.md) |
 
 ## Notes for the next release
+
+### The project moved to the lakana-labs organisation
+
+The repository is now `https://github.com/lakana-labs/lakana`, and new images are published as
+`ghcr.io/lakana-labs/lakana`. Old links to `github.com/chrschy/lakana` still lead to the new place.
+The old images under `ghcr.io/chrschy/lakana` stay where they are but get no new versions.
+
+A Compose bundle that an earlier `lakana deploy init` wrote names the old image in its `.env`
+(`LAKANA_IMAGE=ghcr.io/chrschy/lakana:<version>`). Before you pull, change it to
+`LAKANA_IMAGE=ghcr.io/lakana-labs/lakana:<new version>` and upgrade as in
+[Upgrading](../how-to/deploy-with-compose.md#upgrading). A bundle
+that this release writes already names the new image.
 
 ### Compose bundle: SeaweedFS moves behind an S3 gateway
 
@@ -520,7 +532,7 @@ See [Check your data](../how-to/check-your-data.md#look-at-the-rows-that-failed)
 
 ### The image runs Python 3.14
 
-The Lakana image (`ghcr.io/chrschy/lakana`, used by the Compose bundle) moved from Python 3.13
+The Lakana image (`ghcr.io/lakana-labs/lakana`, used by the Compose bundle) moved from Python 3.13
 to Python 3.14. A worker deploys a project with Python assets only when the project's
 `requires-python` admits the worker's Python, so a project locked for 3.13 alone
 (`requires-python = "==3.13.*"`, or `<3.14`) is refused with `uv.lock: requires-python '…' does
@@ -848,14 +860,14 @@ and [Why is my query or task waiting?](../how-to/why-is-it-waiting.md#a-queued-q
    older `lakana` package does not know the two codes and shows their sentence.
 7. **Limits that stay.**
    - A queued deploy shows no reason why it waits, also when no worker takes pipeline work
-     ([issue 92](https://github.com/chrschy/lakana/issues/92)). Look at the `takes` column of
+     ([issue 92](https://github.com/lakana-labs/lakana/issues/92)). Look at the `takes` column of
      `lakana worker list`.
    - The limit per user is exact on PostgreSQL's default isolation level, which Lakana does not
      change.
    - Each worker applies its own value of the limit. Give the server and every worker the same
      one.
    - A worker still runs one query at a time. Several queries per worker are not part of this
-     release ([issue 81](https://github.com/chrschy/lakana/issues/81)).
+     release ([issue 81](https://github.com/lakana-labs/lakana/issues/81)).
 
 ### Data quality checks
 

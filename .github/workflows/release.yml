@@ -64,7 +64,7 @@ jobs:
           path: dist/
 
   # Signs what `build` produced: a build provenance attestation (Sigstore, keyless) for every
-  # wheel and sdist, which `gh attestation verify <file> --repo chrschy/lakana` checks (see
+  # wheel and sdist, which `gh attestation verify <file> --repo lakana-labs/lakana` checks (see
   # docs/agent/release.md). It runs next to the publish jobs, so a failure here never leaves a
   # half-published release; the bundle goes to the release page from `provenance-release`.
   attest-dist:
@@ -204,7 +204,7 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ghcr.io/chrschy/lakana:${{ steps.version.outputs.version }}
+          tags: ghcr.io/lakana-labs/lakana:${{ steps.version.outputs.version }}
 
   # Signs the pushed image by digest. Its own job: `publish-image` runs several third-party
   # actions, and any step of a job with `id-token: write` could ask for a signing certificate.
@@ -220,7 +220,7 @@ jobs:
     steps:
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
         with:
-          subject-name: ghcr.io/chrschy/lakana
+          subject-name: ghcr.io/lakana-labs/lakana
           subject-digest: ${{ needs.publish-image.outputs.digest }}
           push-to-registry: false
 
@@ -280,7 +280,7 @@ jobs:
         run: echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
         env: {TAG: "${{ needs.release-please.outputs.tag }}"}
       - run: |
-          uv run --locked bash scripts/compose_smoke_test.sh "ghcr.io/chrschy/lakana:${{ steps.version.outputs.version }}"
+          uv run --locked bash scripts/compose_smoke_test.sh "ghcr.io/lakana-labs/lakana:${{ steps.version.outputs.version }}"
 
   sbom:
     needs: release-please

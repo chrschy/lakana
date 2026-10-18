@@ -214,7 +214,7 @@ every missing output of it means "run everything".
   branch protection changes. Workflow permissions are `read-all`; its job adds only
   `security-events: write` (the SARIF upload to code scanning) and `id-token: write` (publishing
   the score that the README badge shows). Its results are at
-  <https://scorecard.dev/viewer/?uri=github.com/chrschy/lakana>. Findings are fixed one at a
+  <https://scorecard.dev/viewer/?uri=github.com/lakana-labs/lakana>. Findings are fixed one at a
   time, when it reports them, never in bulk. `scripts/tests/test_workflows.py` pins the
   permissions, the triggers and its runner; another test there pins every action of every workflow
   by commit SHA.

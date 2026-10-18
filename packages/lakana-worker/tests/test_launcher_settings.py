@@ -14,7 +14,7 @@ from lakana_worker.launcher.settings import (
     load_settings,
 )
 
-_IMAGES = '{"3.13": "ghcr.io/chrschy/lakana-task:0.14.0-py3.13"}'
+_IMAGES = '{"3.13": "ghcr.io/lakana-labs/lakana-task:0.14.0-py3.13"}'
 
 
 def test_the_two_required_settings_and_the_defaults() -> None:
@@ -25,7 +25,7 @@ def test_the_two_required_settings_and_the_defaults() -> None:
 
     assert settings == LauncherSettings(
         stack="lakana",
-        images={"3.13": "ghcr.io/chrschy/lakana-task:0.14.0-py3.13"},
+        images={"3.13": "ghcr.io/lakana-labs/lakana-task:0.14.0-py3.13"},
         work_volume="lakana-task-work",
     )
     assert settings.socket == Path("/run/lakana-launcher/launcher.sock")

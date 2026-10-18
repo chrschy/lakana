@@ -3452,7 +3452,7 @@ matter for an operator deciding where to run it:
   server's public API (the bootstrap admin token and the SeaweedFS S3 keys, both from
   `.env`) — it holds no direct database or storage credential of its own, consistent with
   "The REST API is the only way in" above.
-- **The image is public.** `ghcr.io/chrschy/lakana` needs no login to pull. Its package visibility
+- **The image is public.** `ghcr.io/lakana-labs/lakana` needs no login to pull. Its package visibility
   is a setting of the GitHub package, not of the repository: check it when the image name changes.
 - **Worker shutdown (closed by M5c3b).** `SIGTERM` stops claiming; a running task run is
   released after `LAKANA_RUN__DRAIN_GRACE_SECONDS` (the bundle waits 45 s before `SIGKILL`), and a
@@ -3498,4 +3498,4 @@ feature touching auth, policy, secrets, or the query path should also get a `/se
 pass before merge. Semgrep runs weekly (`security-deep.yml`); CodeQL (`codeql.yml`) runs on every
 pull request, every push to `main` and weekly; both upload SARIF to code scanning. OpenSSF Scorecard (`scorecard.yml`) runs on every push to `main`,
 weekly and on a branch-protection change, and publishes its score for the README badge; read the
-results at <https://scorecard.dev/viewer/?uri=github.com/chrschy/lakana>.
+results at <https://scorecard.dev/viewer/?uri=github.com/lakana-labs/lakana>.

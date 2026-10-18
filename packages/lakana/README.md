@@ -2,7 +2,7 @@
 
 > **Pre-beta.** Lakana is published as a 0.x pre-beta: the API and the data layout may change
 > between releases, and it is not ready for production data yet. See the
-> [project README](https://github.com/chrschy/lakana#readme).
+> [project README](https://github.com/lakana-labs/lakana#readme).
 
 A typed Python client for the Lakana platform API. `lakana` never imports `lakana-core`,
 `lakana-server`, or `lakana-worker` — it only speaks HTTP to a running Lakana server, over the

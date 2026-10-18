@@ -23,7 +23,7 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
     "Topic :: Database",
 ]
-urls = { Homepage = "https://github.com/chrschy/lakana", Documentation = "https://github.com/chrschy/lakana/tree/main/docs/site", Repository = "https://github.com/chrschy/lakana", Issues = "https://github.com/chrschy/lakana/issues", Changelog = "https://github.com/chrschy/lakana/blob/main/CHANGELOG.md" }
+urls = { Homepage = "https://github.com/lakana-labs/lakana", Documentation = "https://github.com/lakana-labs/lakana/tree/main/docs/site", Repository = "https://github.com/lakana-labs/lakana", Issues = "https://github.com/lakana-labs/lakana/issues", Changelog = "https://github.com/lakana-labs/lakana/blob/main/CHANGELOG.md" }
 dynamic = ["version", "dependencies"]
 
 [project.scripts]

@@ -1175,7 +1175,7 @@ def test_every_published_artefact_gets_a_build_provenance_attestation() -> None:
     assert any(".intoto.jsonl" in c for s in release["steps"] for c in _commands(s))
     (image,) = attest(jobs["attest-image"])
     assert image["with"]["push-to-registry"] is False
-    assert image["with"]["subject-name"] == "ghcr.io/chrschy/lakana"
+    assert image["with"]["subject-name"] == "ghcr.io/lakana-labs/lakana"
     assert image["with"]["subject-digest"] == "${{ needs.publish-image.outputs.digest }}"
     for name, job in jobs.items():
         if name not in attesting:

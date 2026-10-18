@@ -12,23 +12,23 @@ This is the "team" deployment path; for a single user on their own laptop, see l
 - `pip install lakana` — the `lakana` CLI generates the bundle and is also the client you use
   against it afterwards. Lakana is pre-beta: the API and the data layout may change between 0.x
   releases.
-- The image `ghcr.io/chrschy/lakana` is public; pulling it needs no login.
+- The image `ghcr.io/lakana-labs/lakana` is public; pulling it needs no login.
 
 ## Verify a download
 
 Every release after 0.13.0 carries a signed build provenance attestation, made by Lakana's
 release workflow, for each wheel, each sdist and the image. It proves that the file or image
-you hold was built by the `chrschy/lakana` repository from the tagged commit. Checking it is
+you hold was built by the `lakana-labs/lakana` repository from the tagged commit. Checking it is
 optional. You need the [GitHub CLI](https://cli.github.com/) (`gh`). Download a wheel and verify
 it, or verify the image you pulled:
 
 <!-- not tested: needs a published release and the GitHub CLI -->
 ```bash
 pip download "lakana==<version>" --no-deps
-gh attestation verify lakana-<version>-py3-none-any.whl --repo chrschy/lakana \
-  --signer-workflow chrschy/lakana/.github/workflows/release.yml
-gh attestation verify oci://ghcr.io/chrschy/lakana:<version> --repo chrschy/lakana \
-  --signer-workflow chrschy/lakana/.github/workflows/release.yml
+gh attestation verify lakana-<version>-py3-none-any.whl --repo lakana-labs/lakana \
+  --signer-workflow lakana-labs/lakana/.github/workflows/release.yml
+gh attestation verify oci://ghcr.io/lakana-labs/lakana:<version> --repo lakana-labs/lakana \
+  --signer-workflow lakana-labs/lakana/.github/workflows/release.yml
 ```
 
 `--signer-workflow` ties the check to Lakana's release workflow, not to any workflow of the
@@ -72,7 +72,7 @@ state is deployed. Remote repositories (`https`, `ssh`) need no mount.
 
 | Key | Purpose |
 |---|---|
-| `LAKANA_IMAGE` | The Lakana image reference (`ghcr.io/chrschy/lakana:<version>` by default — see "Upgrading" and "`--image`" below). |
+| `LAKANA_IMAGE` | The Lakana image reference (`ghcr.io/lakana-labs/lakana:<version>` by default — see "Upgrading" and "`--image`" below). |
 | `LAKANA_BIND` | The host address the server's port is published on (see "Exposing it" below). |
 | `LAKANA_PORT` | The host port the server is published on. |
 | `LAKANA_WORKERS` | Worker replica count, used by `deploy: {replicas: ${LAKANA_WORKERS}}`. |
@@ -106,7 +106,7 @@ to the target directory is the one you see.
 `$`, `#`, or whitespace, is refused (exit 2) before it can corrupt either generated file. A
 development or local build of the CLI (a version `hatch-vcs` derives as a dev snapshot, not a
 tagged release) has no matching published image, so `--image` is required for it; a release
-build defaults to `ghcr.io/chrschy/lakana:<its own version>`.
+build defaults to `ghcr.io/lakana-labs/lakana:<its own version>`.
 
 ### Secrets settings
 
@@ -741,7 +741,7 @@ Two things to check before editing `.env`:
 
    <!-- not tested: moved as is; sorted in the second pull request -->
    ```bash
-   docker pull ghcr.io/chrschy/lakana:<new version>
+   docker pull ghcr.io/lakana-labs/lakana:<new version>
    ```
 
 2. **`compose.yaml` is a static file `init` wrote once, with the CLI version that ran it —
@@ -751,7 +751,7 @@ Two things to check before editing `.env`:
 
    <!-- not tested: moved as is; sorted in the second pull request -->
    ```bash
-   lakana --profile upgrade-check bundle init /tmp/lakana-upgrade-check --image ghcr.io/chrschy/lakana:<new version>
+   lakana --profile upgrade-check bundle init /tmp/lakana-upgrade-check --image ghcr.io/lakana-labs/lakana:<new version>
    diff lakana-deploy/compose.yaml /tmp/lakana-upgrade-check/compose.yaml
    rm -rf /tmp/lakana-upgrade-check
    lakana profile remove upgrade-check --yes
@@ -964,7 +964,7 @@ digest; for the whole digest use `lakana --output json artifact versions list <n
   thing that protects its files: if you remove it, the next sweep removes those files, and that
   cannot be undone. Ask whether a task or a person stored or read version `<n>` after your backup
   was taken (their messages say `Stored <env>/<name> version <n>`). If so, Lakana has no command
-  to bring the version back yet ([issue 68](https://github.com/chrschy/lakana/issues/68)).
+  to bring the version back yet ([issue 68](https://github.com/lakana-labs/lakana/issues/68)).
 - **It names a file that a broken version is missing: remove it, unless somebody needs its
   version.** A broken version is one whose download fails with `is missing from storage` (see
   "Versions whose files are gone"). Look up each `sha256` of the object as
@@ -1106,20 +1106,20 @@ list --env <env>` shows the runs: wait until none of the asset is queued or runn
 **Stop sign 1: an object the catalog does not know names a missing file, and somebody needs its
 version.** Keep the object, its files and every broken version of the artifact. While the object
 exists the missing file's record stays, and the asset cannot store the file again. Lakana has no
-command to bring such a version back yet ([issue 68](https://github.com/chrschy/lakana/issues/68)).
+command to bring such a version back yet ([issue 68](https://github.com/lakana-labs/lakana/issues/68)).
 What keeps everything: copy the missing file back from a storage backup (first case above). If you
 decide later that nobody needs the version, remove the object as step 2 says and go on at step 3.
 
 **Stop sign 2: the sweep leaves the artifact whole, or step 2 found more than 20 objects or an
 unreadable one.** Keep everything of the artifact: the sweep removes nothing of it and the asset
 cannot get a working version. What keeps everything: copy the missing file back from a storage
-backup (first case above). Or wait for [issue 68](https://github.com/chrschy/lakana/issues/68).
+backup (first case above). Or wait for [issue 68](https://github.com/lakana-labs/lakana/issues/68).
 Or reduce the objects yourself, each removal being a decision of step 2 (copy first): get to at
 most 20 objects that are all readable, then go on at step 3.
 
 **Stop sign 3: the second round failed too.** Keep what is left and do not run the asset again:
 each run stores another broken version. Report it in [issue
-68](https://github.com/chrschy/lakana/issues/68) with the output of `lakana --output json
+68](https://github.com/lakana-labs/lakana/issues/68) with the output of `lakana --output json
 artifact versions list` and the worker's log lines of the sweep.
 
 ## Revoking the bootstrap credential

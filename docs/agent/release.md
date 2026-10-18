@@ -85,7 +85,7 @@ starts no workflow runs. The repository setting "Allow GitHub Actions to create 
 pull requests" is therefore **off**, and `release.yml` passes a fine-grained personal access
 token to the action as `token: ${{ secrets.RELEASE_PLEASE_TOKEN }}`.
 
-- Scope: only the repository `chrschy/lakana`, with the repository permissions *Contents:
+- Scope: only the repository `lakana-labs/lakana`, with the repository permissions *Contents:
   read and write*, *Pull requests: read and write* and *Issues: read and write* (release-please
   creates its `autorelease` labels), nothing else.
 - Create the token and store it as the Actions secret `RELEASE_PLEASE_TOKEN` **before the first
@@ -143,7 +143,7 @@ With one workflow (`release.yml`) publishing all four packages, the environment 
 axis left to disambiguate, so each package needs its own. The jobs publish to production PyPI
 (the action's default repository); there is no TestPyPI path in the workflow.
 
-The trusted publisher of each project on pypi.org is: owner `chrschy`, repository `lakana`,
+The trusted publisher of each project on pypi.org is: owner `lakana-labs`, repository `lakana`,
 workflow `release.yml`, and the environment of that package from the list above.
 
 **Adding a package is two steps, and the YAML is only the first.** A new package publishes
@@ -222,7 +222,7 @@ bad release never advances past the point that would have caught it:
   matching `latest` container. It regenerates
   `dist/requirements.txt` (the shared `dist` artifact only carries wheels/sdists) and builds
   **multi-arch** (`linux/amd64,linux/arm64`, via `docker/setup-qemu-action` +
-  `docker/setup-buildx-action`), pushing `ghcr.io/chrschy/lakana:<version>` — a public package.
+  `docker/setup-buildx-action`), pushing `ghcr.io/lakana-labs/lakana:<version>` — a public package.
 - **`compose-smoke-release`** needs `publish-image` and runs
   `scripts/compose_smoke_test.sh` against the just-pushed tag: `lakana bundle init` → `docker
   compose up -d --wait` → create/append/query → `docker compose down` → `up` again (proving
@@ -293,10 +293,10 @@ this repository's `release.yml` from the tagged commit.
 How a user verifies (also in the user documentation, "Verify a download" in the Compose how-to):
 
 ```bash
-gh attestation verify lakana-<version>-py3-none-any.whl --repo chrschy/lakana \
-  --signer-workflow chrschy/lakana/.github/workflows/release.yml
-gh attestation verify oci://ghcr.io/chrschy/lakana:<version> --repo chrschy/lakana \
-  --signer-workflow chrschy/lakana/.github/workflows/release.yml
+gh attestation verify lakana-<version>-py3-none-any.whl --repo lakana-labs/lakana \
+  --signer-workflow lakana-labs/lakana/.github/workflows/release.yml
+gh attestation verify oci://ghcr.io/lakana-labs/lakana:<version> --repo lakana-labs/lakana \
+  --signer-workflow lakana-labs/lakana/.github/workflows/release.yml
 ```
 
 Check it after each release: the first release that has attestations is the first one cut after
