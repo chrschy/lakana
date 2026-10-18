@@ -83,7 +83,8 @@ ingestion helpers and named connections.
    migration, not a milestone; it is tracked in #96. DuckDB 1.5 will reach its end of life
    ([release calendar](https://duckdb.org/release_calendar)). On a 2.0 development build, reading Parquet over HTTP was 2 to 14
    times faster in the way Lakana queries it, and about equal on local files. Until the move the
-   worker requires `duckdb<2`.
+   worker requires `duckdb<2`. If DuckDB 2.0 comes out too late, the beta ships on DuckDB 1.5.6 and the move
+   follows right after the beta, before the web interface (M7).
 3. **M7b, task isolation.** A Docker runner executes each Python task in its own container. A
    short design trial comes first: how the worker reaches a container runtime without gaining
    root on the host. Done when a task cannot read the worker's credentials or another project's

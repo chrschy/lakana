@@ -36,8 +36,9 @@ when you use it, and where to go with a question or a problem.
 - **Python** 3.11 or newer; on macOS: Python 3.13 or newer.
 - **Linux** is the platform the automated tests run on, with Python 3.11 and 3.14, and with the
   Compose bundle.
-- **macOS** is expected to work. It is not part of the automated tests. It needs Python 3.13 or
-  newer: with an older one, `lakana server start --local` stops before it starts anything, and a
+- **macOS** is tested too: every change runs the unit tests and the getting-started tutorial on
+  macOS (Apple silicon, Python 3.14). The Compose bundle is not tested there. It needs Python 3.13
+  or newer: with an older one, `lakana server start --local` stops before it starts anything, and a
   worker started by hand stops at start, each with a message that says so.
 - **Windows** is planned through WSL 2, the Linux environment built into Windows (issue #62).
   It has not been verified yet. Native Windows is not supported.
