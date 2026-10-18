@@ -500,12 +500,14 @@ def signal_group(process: subprocess.Popen[bytes], signum: int) -> bool:
     -------
     bool
         Whether the group received the signal; `False` when the leader was already
-        reaped or the group was already gone.
+        reaped or the group was already gone (or, on macOS, only exited processes).
     """
     if process.returncode is not None:
         return False
     try:
         os.killpg(process.pid, signum)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
+        # macOS refuses (EPERM) to signal a group whose members have all exited but
+        # are not yet reaped; the group is gone either way.
         return False
     return True

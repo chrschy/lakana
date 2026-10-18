@@ -106,6 +106,36 @@ def test_signal_group_says_when_the_group_is_already_gone() -> None:
     process.returncode = 0
 
 
+def test_signal_group_treats_a_group_of_exited_processes_as_gone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """macOS refuses to signal a group whose members have all exited but are not yet reaped."""
+    process = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+    process.wait(timeout=10)
+    process.returncode = None
+
+    def refuse(pgid: int, signum: int) -> None:
+        """Fail as macOS's killpg does for a group of zombies.
+
+        Parameters
+        ----------
+        pgid
+            The process group.
+        signum
+            The signal.
+
+        Raises
+        ------
+        PermissionError
+            Always.
+        """
+        raise PermissionError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr(os, "killpg", refuse)
+    assert signal_group(process, signal.SIGKILL) is False
+    process.returncode = 0
+
+
 _SECRET = "hunter2secret"
 
 

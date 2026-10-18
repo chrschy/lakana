@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import errno
 import io
 import os
 import resource
@@ -1185,6 +1186,36 @@ def test_killing_a_reaped_process_group_is_skipped(
     monkeypatch.setattr(os, "killpg", lambda pgid, sig: calls.append(pgid))
     module._kill_group(process)
     assert calls == []
+
+
+def test_killing_a_group_of_exited_processes_is_not_an_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """macOS refuses to signal a group whose members have all exited but are not yet reaped."""
+    process = subprocess.Popen(["true"], start_new_session=True)
+    process.wait()
+    process.returncode = None
+
+    def refuse(pgid: int, signum: int) -> None:
+        """Fail as macOS's killpg does for a group of zombies.
+
+        Parameters
+        ----------
+        pgid
+            The process group.
+        signum
+            The signal.
+
+        Raises
+        ------
+        PermissionError
+            Always.
+        """
+        raise PermissionError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr(os, "killpg", refuse)
+    module._kill_group(process)
+    process.returncode = 0
 
 
 @pytest.mark.parametrize(

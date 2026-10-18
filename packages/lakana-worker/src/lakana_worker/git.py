@@ -456,7 +456,9 @@ def _kill_group(process: subprocess.Popen[str] | subprocess.Popen[bytes]) -> Non
     """
     if process.returncode is not None:
         return
-    with contextlib.suppress(ProcessLookupError):
+    # macOS refuses (EPERM) to signal a group whose members have all exited but are
+    # not yet reaped; the group is gone either way.
+    with contextlib.suppress(ProcessLookupError, PermissionError):
         os.killpg(process.pid, signal.SIGKILL)
 
 
