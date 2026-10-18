@@ -426,9 +426,10 @@ def test_a_refused_signal_is_reported_with_the_next_step(
     result = _stop(tmp_path, tmp_path / "data")
 
     assert result.exit_code == 2
-    assert f"Can't signal process {proc.pid}" in result.output
-    assert "Operation not permitted" in result.output
-    assert "Ctrl-C" in result.output
+    output = " ".join(result.output.split())  # a long data directory path wraps the message
+    assert f"Can't signal process {proc.pid}" in output
+    assert "Operation not permitted" in output
+    assert "Ctrl-C" in output
 
 
 def test_a_live_instance_without_a_lock_owner_is_refused(
