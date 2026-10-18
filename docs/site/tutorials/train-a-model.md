@@ -573,7 +573,7 @@ lakana table lineage gold.spend_predictions --env dev
 
 ## Stop the instance
 
-Go to the terminal where the instance runs and press Ctrl-C. The instance shuts down. Your tables
+Go to the terminal where the instance runs and press Ctrl-C, or run `lakana server stop` from any terminal. The instance shuts down. Your tables
 and your model stay where they are, and `lakana server start --local` brings the instance back with
 them.
 

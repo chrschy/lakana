@@ -116,3 +116,70 @@ def remove_pidfile(path: Path) -> None:
         The pidfile.
     """
     path.unlink(missing_ok=True)
+
+
+def write_lock_owner(path: Path, pid: int) -> None:
+    """Record, in the lock file, the PID of the process that holds the lock.
+
+    `lakana server stop` reads it to find the supervisor to signal: the server and worker
+    pidfiles name the children, not the process that watches them. The lock itself is held on
+    a different descriptor; this only writes the file's content. Best effort on Windows, where
+    a locked byte cannot be written: nothing is recorded there (the stop is not supported
+    there either).
+
+    Parameters
+    ----------
+    path
+        The lock file; it must already exist.
+    pid
+        The holder's process id.
+    """
+    flags = os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+        with os.fdopen(fd, "w") as handle:
+            handle.write(f"{pid}\n")
+    except OSError:
+        return
+
+
+def clear_lock_owner(path: Path) -> None:
+    """Empty the lock file's content, once its holder is leaving.
+
+    Parameters
+    ----------
+    path
+        The lock file.
+    """
+    flags = os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        os.close(os.open(path, flags))
+    except OSError:
+        return
+
+
+def read_lock_owner(path: Path) -> int | None:
+    """Read the PID recorded by `write_lock_owner`.
+
+    Parameters
+    ----------
+    path
+        The lock file.
+
+    Returns
+    -------
+    int or None
+        The PID, or `None` if the file is missing, empty or does not hold exactly one positive
+        integer (an older lakana recorded none).
+    """
+    try:
+        values = path.read_text().split()
+    except OSError:
+        return None
+    if len(values) != 1:
+        return None
+    try:
+        pid = int(values[0])
+    except ValueError:
+        return None
+    return pid if pid > 0 else None

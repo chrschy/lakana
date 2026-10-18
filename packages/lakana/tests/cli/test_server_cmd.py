@@ -1898,3 +1898,59 @@ def test_child_env_tells_the_worker_where_the_server_is(
     monkeypatch.setenv("LAKANA_RUN__SERVER_URL", "http://elsewhere:9000")
     given = server._child_env(data_dir, 8765, "k", key_id=None, secret=None)
     assert given["LAKANA_RUN__SERVER_URL"] == "http://elsewhere:9000"
+
+
+def test_child_env_quiets_the_request_log_unless_asked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Local mode logs warnings and errors only; `log_requests` and a user's level win."""
+    from typing import cast
+
+    data_dir = cast("DataDir", SimpleNamespace(database_url="sqlite:///x.db"))
+    monkeypatch.delenv("LAKANA_LOG__LEVEL", raising=False)
+    quiet = server._child_env(data_dir, 8765, "k", key_id=None, secret=None)
+    assert quiet["LAKANA_LOG__LEVEL"] == "WARNING"
+    loud = server._child_env(data_dir, 8765, "k", key_id=None, secret=None, log_requests=True)
+    assert "LAKANA_LOG__LEVEL" not in loud
+    monkeypatch.setenv("LAKANA_LOG__LEVEL", "debug")
+    given = server._child_env(data_dir, 8765, "k", key_id=None, secret=None)
+    assert given["LAKANA_LOG__LEVEL"] == "debug"
+
+
+def test_start_passes_the_request_log_choice_to_the_children(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--log-requests` leaves the log level alone; without it the children log warnings."""
+    _stub_environment(monkeypatch)
+    monkeypatch.setattr(server, "pid_alive", lambda pid: False)
+    monkeypatch.delenv("LAKANA_LOG__LEVEL", raising=False)
+    levels = []
+    for extra in ((), ("--log-requests",)):
+        fake = FakeSupervisor()
+        _install_fake_supervisor(monkeypatch, fake)
+        api = FakeApi()
+        api.on("POST", "/api/v1/environments", status=201, json=_DEV)
+        state = make_state(tmp_path, api)
+        result = invoke(state, *_start_args(tmp_path / f"data{len(extra)}"), *extra)
+        assert result.exit_code == 0, result.stderr
+        assert fake.config is not None
+        levels.append(fake.config.env.get("LAKANA_LOG__LEVEL"))
+    assert levels == ["WARNING", None]
+
+
+def test_the_ready_line_is_the_last_thing_start_prints(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing is written to stdout after the ready line, so it stays at the bottom."""
+    _stub_environment(monkeypatch)
+    monkeypatch.setattr(server, "pid_alive", lambda pid: False)
+    fake_stdout = _RecordingStdout()
+    monkeypatch.setattr(server, "sys", SimpleNamespace(stdout=fake_stdout, stderr=sys.stderr))
+    _install_fake_supervisor(monkeypatch, FakeSupervisor())
+    api = FakeApi()
+    api.on("POST", "/api/v1/environments", status=201, json=_DEV)
+    state = make_state(tmp_path, api)
+
+    result = invoke(state, *_start_args(tmp_path / "data"))
+
+    assert result.exit_code == 0, result.stderr
+    writes = [call for call in fake_stdout.calls if call.startswith("write:")]
+    assert writes[-1].startswith("write:Lakana is running at")
