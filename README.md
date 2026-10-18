@@ -15,6 +15,8 @@
   <a href="https://scorecard.dev/viewer/?uri=github.com/lakana-labs/lakana"><img alt="OpenSSF Scorecard" src="https://api.scorecard.dev/projects/github.com/lakana-labs/lakana/badge"></a>
 </p>
 
+**Documentation: [https://lakana-labs.github.io/lakana/](https://lakana-labs.github.io/lakana/)**
+
 Lakana is an open-source data lakehouse for small and medium teams: governed and reproducible
 by default, simple enough to run on one machine, professional enough to run an organisation's
 data platform. It covers analytics, data science and ML in SQL and Python, with code in git and

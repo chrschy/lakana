@@ -268,6 +268,29 @@ write token. The workflow's own `permissions` is `{}`; every
 job names what it needs, and `release-please` needs nothing from `GITHUB_TOKEN` because it uses
 `RELEASE_PLEASE_TOKEN`. `scripts/tests/test_workflows.py` pins this by effective permissions.
 
+## The documentation site on GitHub Pages
+
+The site is served at <https://lakana-labs.github.io/lakana/> (repository setting: Pages, source
+"GitHub Actions"; the `github-pages` environment). Two jobs of `release.yml` publish it, and
+only for a release (`released == 'true'`); the workflow has no manual trigger.
+
+- `pages` checks out the **release tag** (`persist-credentials: false`), builds with the commands
+  of CI's `docs` job (`docs_blocks.py`, `zensical build --strict`,
+  `scripts/check_built_site.py site-build`) and uploads `site-build` with
+  `actions/upload-pages-artifact`. It has `contents: read` only.
+- `pages-deploy` runs `actions/deploy-pages` in the `github-pages` environment and holds only
+  `pages: write` and `id-token: write`; it builds nothing.
+
+So the site always describes the latest **release**: a documentation change merged to `main`
+appears with the next release, not at once. Every page is under `/lakana/`, so `site_url` in
+`mkdocs.yml` must stay `https://lakana-labs.github.io/lakana/`, and the built-site check refuses
+a `href` or `src` that starts at the host root (`/assets/...`) outside that path.
+
+To publish again (a failed deployment, a Pages outage), open the release's run of the `Release`
+workflow in the Actions tab and choose "Re-run failed jobs" or "Re-run all jobs": the tag is the
+same, so the site is the same. `scripts/tests/test_workflows.py` pins the trigger, the checkout
+ref, the commands, the two jobs' permissions and the environment.
+
 ## Build provenance attestations
 
 Every release is signed with GitHub's build provenance attestations (Sigstore, keyless:

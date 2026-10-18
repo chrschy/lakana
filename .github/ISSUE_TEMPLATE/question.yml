@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Please look in the [documentation](https://github.com/lakana-labs/lakana/tree/main/docs/site) first.
+        Please look in the [documentation](https://lakana-labs.github.io/lakana/) first.
         Support is best effort; see [SUPPORT.md](https://github.com/lakana-labs/lakana/blob/main/.github/SUPPORT.md).
   - type: textarea
     id: question

@@ -237,7 +237,8 @@ every missing output of it means "run everything".
 - **Token permissions.** No workflow has a write permission at its top level: each job names its
   own (`cla.yml` and `security-deep.yml` included). `scripts/tests/test_workflows.py` fails on one.
 - **`release.yml`** is described in `docs/agent/release.md`; it also attaches the SBOM to each
-  GitHub release.
+  GitHub release, and publishes the documentation site on GitHub Pages (`pages` and
+  `pages-deploy`; see "The documentation site on GitHub Pages" there).
 
 ## The documentation site
 
@@ -383,7 +384,7 @@ A change under `docs/examples/` is not a documentation-only change, so CI runs t
 uv sync --locked --all-packages --group docs
 uv run python scripts/docs_blocks.py            # check every block; add --fix to rewrite synced ones
 uv run --group docs zensical build --strict     # build into site-build/ (a traceback after the message is normal on failure)
-uv run python scripts/check_built_site.py site-build   # external resources and missing files in the build
+uv run python scripts/check_built_site.py site-build   # external resources, missing files and URLs outside /lakana/
 uv run --group docs zensical serve              # preview on http://localhost:8000
 uv run bash scripts/run_docs_examples.sh        # every example, or name one: ... getting-started
 uv run pytest scripts/tests                     # the tests that read the site and the workflows

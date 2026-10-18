@@ -23,7 +23,7 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
     "Topic :: Database",
 ]
-urls = { Homepage = "https://github.com/lakana-labs/lakana", Documentation = "https://github.com/lakana-labs/lakana/tree/main/docs/site", Repository = "https://github.com/lakana-labs/lakana", Issues = "https://github.com/lakana-labs/lakana/issues", Changelog = "https://github.com/lakana-labs/lakana/blob/main/CHANGELOG.md" }
+urls = { Homepage = "https://github.com/lakana-labs/lakana", Documentation = "https://lakana-labs.github.io/lakana/", Repository = "https://github.com/lakana-labs/lakana", Issues = "https://github.com/lakana-labs/lakana/issues", Changelog = "https://github.com/lakana-labs/lakana/blob/main/CHANGELOG.md" }
 dynamic = ["version", "optional-dependencies"]
 dependencies = ["httpx>=0.28,<1", "pyarrow>=26.0.0", "pyyaml>=6.0.3", "rich>=13.8", "typer>=0.27,<1"]
 
