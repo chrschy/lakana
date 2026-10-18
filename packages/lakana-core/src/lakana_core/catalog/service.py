@@ -1158,18 +1158,7 @@ class CatalogService:
             If the principal may not manage environments.
         """
         self._authz.authorize(p, Action.MANAGE_ENVIRONMENT, Securable.environment_scope(name))
-        env = self._session.execute(
-            select(Environment)
-            .where(Environment.name == name)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        ).scalar_one_or_none()
-        if env is None:
-            self._session.rollback()
-            raise NotFoundError(f"No environment named {name!r}.")
-        if env.is_protected:
-            self._session.rollback()
-            raise ValidationError(f"Environment {name!r} is protected.")
+        env = self._lock_unprotected_environment(name)
         deployed = self._session.scalars(
             select(Repository.name)
             .join(EnvironmentDeployment, EnvironmentDeployment.repository_id == Repository.id)
@@ -1254,18 +1243,7 @@ class CatalogService:
         self._authz.authorize(p, Action.MANAGE_ENVIRONMENT, Securable.instance_scope())
         if secret_ref is not None:
             self._authz.authorize(p, Action.MANAGE_SECRET, Securable.environment_scope(name))
-        env = self._session.execute(
-            select(Environment)
-            .where(Environment.name == name)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        ).scalar_one_or_none()
-        if env is None:
-            self._session.rollback()
-            raise NotFoundError(f"No environment named {name!r}.")
-        if env.is_protected:
-            self._session.rollback()
-            raise ValidationError(f"Environment {name!r} is protected.")
+        env = self._lock_unprotected_environment(name)
         if options is not None:
             if dict(options) != env.storage_options:
                 try:
@@ -2186,6 +2164,40 @@ class CatalogService:
         return self._session.execute(
             select(Table).where(Table.namespace_id == ns.id, Table.name == name)
         ).scalar_one_or_none()
+
+    def _lock_unprotected_environment(self, name: str) -> Environment:
+        """Lock an environment's row for a change and refuse a protected one.
+
+        Parameters
+        ----------
+        name
+            The environment's name.
+
+        Returns
+        -------
+        Environment
+            The locked row, refreshed from the database.
+
+        Raises
+        ------
+        NotFoundError
+            If no environment has that name (also when a concurrent delete wins the row lock).
+        ValidationError
+            If the environment is protected.
+        """
+        env = self._session.execute(
+            select(Environment)
+            .where(Environment.name == name)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).scalar_one_or_none()
+        if env is None:
+            self._session.rollback()
+            raise NotFoundError(f"No environment named {name!r}.")
+        if env.is_protected:
+            self._session.rollback()
+            raise ValidationError(f"Environment {name!r} is protected.")
+        return env
 
     def _release_session(self) -> None:
         """Give the session's database connection back to the pool before slow storage reads.

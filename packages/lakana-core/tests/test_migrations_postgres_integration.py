@@ -1827,14 +1827,21 @@ def test_0035_secret_use_check_on_postgres() -> None:
         target = uuid.uuid4()
         with engine.begin() as conn:
             insert(conn, None, None)
-            insert(conn, "ENVIRONMENT", None)
+            insert(conn, "PACKAGE_INDEX", target)
             insert(conn, "REPOSITORY", target)
+            insert(conn, "ENVIRONMENT", None)
         for kind, bound in (
             ("PACKAGE_INDEX", None),
+            ("REPOSITORY", None),
             (None, target),
             ("ENVIRONMENT", target),
         ):
-            with pytest.raises(IntegrityError), engine.begin() as conn:
+            # The driver reports a violated CHECK as a `ProgrammingError` (code 23514), not an
+            # `IntegrityError`; the constraint's name tells which rule refused the row.
+            with (
+                pytest.raises(DBAPIError, match="ck_secrets_use_consistent"),
+                engine.begin() as conn,
+            ):
                 insert(conn, kind, bound)
 
         migrate.downgrade(url, revision_0034)

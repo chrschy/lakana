@@ -1102,7 +1102,7 @@ def test_a_manifest_above_the_byte_limit_is_refused_before_it_is_read(
         _commit_snapshots(catalog, principal, ref, [snapshot])
 
     message = str(caught.value)
-    assert "snap-900000196.avro" in message
+    assert shown(snapshot.manifest_list) in message
     assert "64 MiB" in message
     assert "nothing was applied" in message
 
