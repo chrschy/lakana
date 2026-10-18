@@ -202,9 +202,11 @@ every missing output of it means "run everything".
   `coreutils` and puts a small Python `setsid` in front of the path. The job always runs on
   GitHub's runner, never the `CI_RUNNER` switch (see "CI runners"); a pull request runs it only if
   it changes `packages/`, the root `pyproject.toml`, `uv.lock`, `docs/examples/` or the files the job runs, and it skips a
-  draft and a documentation-only change like the other heavy jobs. It is **not a required check
-  yet**; the maintainer makes it one after a week of green runs (#148). A failure that only macOS
-  shows is fixed or filed as an issue.
+  draft and a documentation-only change like the other heavy jobs. It is **informational for
+  now** (`continue-on-error: true`): the first runs found 50 failures, collected in #153, and the
+  PR that closes #153 removes the flag. It is **not a required check yet**; the maintainer makes
+  it one after a week of green runs (#148). A failure that only macOS shows is fixed or filed as
+  an issue.
 
 ### Scorecard, Semgrep and the release workflow
 

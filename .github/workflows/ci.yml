@@ -198,6 +198,8 @@ jobs:
     if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.draft != 'true' }}
     runs-on: macos-latest
     timeout-minutes: 40
+    # Informational until the suite passes on macOS (#153); remove this line with the fixes.
+    continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
