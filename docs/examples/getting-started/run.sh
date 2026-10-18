@@ -45,7 +45,16 @@ grep -Fq 'lakana sql "SELECT * FROM gold.station_ranking ORDER BY warmth_rank"' 
 grep -Fxq 'Then the two commands that build the sample:' "$captured"
 grep -Eq "^  lakana run --env dev$" "$captured"
 grep -Eq "^  lakana deploy --env dev$" "$captured"
-grep -Fq "If 'git commit' says it does not know who you are" "$captured"
+# The hint appears exactly when git cannot name the author (git guesses one from the host name on
+# some machines, macOS runners among them).
+if git var GIT_AUTHOR_IDENT > /dev/null 2>&1 && git var GIT_COMMITTER_IDENT > /dev/null 2>&1; then
+  if grep -Fq "If 'git commit' says it does not know who you are" "$captured"; then
+    echo "lakana init printed the git identity hint although git knows the author" >&2
+    exit 1
+  fi
+else
+  grep -Fq "If 'git commit' says it does not know who you are" "$captured"
+fi
 test -f lakana.yaml
 
 # `lakana init` wrote the sample the tutorial shows by its own paths: the files under project/
