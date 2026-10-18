@@ -351,6 +351,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             "`uv run --group docs zensical build --strict`."
         )
         return 1
+    if not args.config.is_file():
+        print(
+            f"{args.config} does not exist; pass the site's configuration with --config "
+            "(its site_url decides which absolute URLs are legal)."
+        )
+        return 1
     problems = check_site(args.site, site_base_path(args.config))
     for problem in problems:
         print(problem)

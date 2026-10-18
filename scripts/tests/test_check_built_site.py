@@ -277,3 +277,18 @@ def test_main_reads_the_base_path_from_the_config(tmp_path: Path) -> None:
     assert main([str(site), "--config", str(config)]) == 0
     config.write_text("site_name: x\n", encoding="utf-8")
     assert main([str(site), "--config", str(config)]) == 1
+
+
+def test_main_refuses_a_missing_config(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """A missing config would silently turn the root-absolute check off, so it is an error.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the built site.
+    capsys
+        Captures what the checker prints.
+    """
+    site = _site(tmp_path, {"index.html": _page('<img src="/assets/a.png">')})
+    assert main([str(site), "--config", str(tmp_path / "missing.yml")]) == 1
+    assert "missing.yml" in capsys.readouterr().out

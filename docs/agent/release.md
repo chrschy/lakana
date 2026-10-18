@@ -286,9 +286,13 @@ appears with the next release, not at once. Every page is under `/lakana/`, so `
 `mkdocs.yml` must stay `https://lakana-labs.github.io/lakana/`, and the built-site check refuses
 a `href` or `src` that starts at the host root (`/assets/...`) outside that path.
 
-To publish again (a failed deployment, a Pages outage), open the release's run of the `Release`
-workflow in the Actions tab and choose "Re-run failed jobs" or "Re-run all jobs": the tag is the
-same, so the site is the same. `scripts/tests/test_workflows.py` pins the trigger, the checkout
+To publish again (a failed deployment, a Pages outage), open the run of the `Release` workflow
+for the **latest** release in the Actions tab, open its `pages` job and choose "Re-run this job"
+(GitHub re-runs `pages-deploy`, which depends on it). Never choose "Re-run all jobs": it re-runs
+release-please, which finds the release already made, so both Pages jobs are skipped and the run
+turns green without deploying. "Re-run failed jobs" on `pages-deploy` alone works only while the
+uploaded site is kept (one day). Re-running the run of an **older** release puts that older site
+back. `scripts/tests/test_workflows.py` pins the trigger, the checkout
 ref, the commands, the two jobs' permissions and the environment.
 
 ## Build provenance attestations
