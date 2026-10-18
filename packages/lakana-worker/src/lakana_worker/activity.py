@@ -3,6 +3,13 @@
 The watchdog runs in its own thread and must never wait for the main thread, so this
 registry takes no lock: `dict` assignment and deletion are atomic, and a snapshot is a
 single `tuple(...)` call.
+
+Once the worker is stopping, nothing leaves the registry. The watchdog marks the worker
+stopping, kills its children and only then records what was in flight; a thread whose child
+died leaves its block in between without recording anything (it sees `Activity.stopping`), and
+without this the recording would not find its task, which would stay ``running`` until the
+lease ran out (#154). An entry that stays although its thread recorded its outcome itself is
+harmless: the recording is conditional on the run still being ``RUNNING`` under that claim.
 """
 
 from __future__ import annotations
@@ -38,9 +45,42 @@ class Activity:
     def __init__(self) -> None:
         self._queries: dict[uuid.UUID, None] = {}
         self._tasks: dict[TaskClaim, None] = {}
-        self.stopping = False
-        """Set by the watchdog before it kills the worker's children: the process is about to
-        exit and the watchdog owns the outcome, so the main thread records nothing more."""
+        self._left_queries: dict[uuid.UUID, None] = {}
+        self._left_tasks: dict[TaskClaim, None] = {}
+        self._stopping = False
+
+    @property
+    def stopping(self) -> bool:
+        """Set by the watchdog before it kills the worker's children.
+
+        The process is about to exit and the watchdog owns the outcome, so the main thread
+        records nothing more, and what leaves the registry from then on stays in its snapshot.
+        Clearing it (a new process, in tests) drops what left while it was set.
+
+        Returns
+        -------
+        bool
+            Whether the worker is stopping.
+        """
+        return self._stopping
+
+    @stopping.setter
+    def stopping(self, value: bool) -> None:
+        """Mark the worker stopping, or start afresh.
+
+        Parameters
+        ----------
+        value
+            Whether the worker is stopping.
+        """
+        self._stopping = value
+        if not value:
+            for query_run_id in tuple(self._left_queries):
+                self._queries.pop(query_run_id, None)
+            for claim in tuple(self._left_tasks):
+                self._tasks.pop(claim, None)
+            self._left_queries.clear()
+            self._left_tasks.clear()
 
     @contextmanager
     def query(self, query_run_id: uuid.UUID) -> Generator[None, None, None]:
@@ -60,7 +100,10 @@ class Activity:
         try:
             yield
         finally:
-            self._queries.pop(query_run_id, None)
+            if self._stopping:
+                self._left_queries[query_run_id] = None
+            else:
+                self._queries.pop(query_run_id, None)
 
     @contextmanager
     def task(self, claim: TaskClaim) -> Generator[None, None, None]:
@@ -80,7 +123,10 @@ class Activity:
         try:
             yield
         finally:
-            self._tasks.pop(claim, None)
+            if self._stopping:
+                self._left_tasks[claim] = None
+            else:
+                self._tasks.pop(claim, None)
 
     def snapshot(self) -> tuple[tuple[uuid.UUID, ...], tuple[TaskClaim, ...]]:
         """Return what is in flight.

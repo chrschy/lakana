@@ -1579,9 +1579,14 @@ def test_a_worker_stopped_for_memory_while_it_counts_a_check_leaves_the_task_to_
     exits: list[int] = []
 
     def kill_children() -> None:
-        """Kill every query child's process group, as the worker's stop does."""
+        """Kill every query child's process group, as the worker's stop does, and let it end.
+
+        The worker's thread wakes when its child dies, sees the stop and leaves its task; here
+        it does so before the recording begins, the order that left the task running in #154.
+        """
         for pid in REGISTRY.pids():
             os.killpg(pid, signal.SIGKILL)
+        thread.join(30)
 
     memory_module.stop_worker(
         5 * 1024**3,
