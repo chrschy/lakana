@@ -279,9 +279,27 @@ def test_ambient_aws_credentials_are_cleared_in_local_mode_too(
     )
 
     assert result.column("key_id").to_pylist() == [""]
+
+
+_READS_PROC = pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason="reads /proc/<pid>/environ, which macOS lacks; the child's environment is checked "
+    "from inside the child there by test_query_process::"
+    "test_the_child_gets_the_request_a_scrubbed_environment_and_only_its_pipes",
+)
+
+
+@_READS_PROC
+def test_ambient_aws_credentials_never_reach_a_local_mode_childs_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Seen from outside the running child: no `AWS_*` variable survives the scrub."""
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIAFAKEFAKEFAKEFAKE")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "fakesecretfakesecret")
     assert not [name for name in _environment_of_a_running_child() if name.startswith("AWS_")]
 
 
+@_READS_PROC
 def test_the_child_sees_nothing_of_the_workers_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

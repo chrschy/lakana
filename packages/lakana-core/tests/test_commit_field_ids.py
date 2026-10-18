@@ -36,7 +36,7 @@ from lakana_core.auth import PrincipalRef
 from lakana_core.catalog import field_ids as field_ids_module
 from lakana_core.catalog.service import CatalogService, LoadedTable
 from lakana_core.errors import StorageUnavailableError, ValidationError
-from lakana_core.identifiers import NamespacePath, TableRef
+from lakana_core.identifiers import NamespacePath, TableRef, shown
 from lakana_core.models import WriteMode
 
 _SCHEMA = Schema(
@@ -316,7 +316,8 @@ def _no_field_ids(uri: str) -> str:
     Parameters
     ----------
     uri
-        The file.
+        The file; it appears as messages show it, escaped and cut at 200 characters, which
+        a long temporary directory (macOS's) reaches.
 
     Returns
     -------
@@ -324,9 +325,9 @@ def _no_field_ids(uri: str) -> str:
         The message.
     """
     return (
-        f"The commit adds `{uri}` to `gold.sales`, which has no Iceberg field ids. Lakana reads "
-        "Iceberg data by field id, as the Iceberg specification requires. Write the file with a "
-        "client that sets field ids."
+        f"The commit adds `{shown(uri)}` to `gold.sales`, which has no Iceberg field ids. "
+        "Lakana reads Iceberg data by field id, as the Iceberg specification requires. Write "
+        "the file with a client that sets field ids."
     )
 
 
@@ -433,9 +434,9 @@ def test_a_file_that_is_not_parquet_is_refused_without_the_readers_error_text(
         _commit_files(catalog, principal, ref, created, [uri], snapshot_id=900_000_020)
 
     assert str(caught.value) == (
-        f"The commit adds `{uri}` to `gold.sales`, which could not be read as a Parquet file, so "
-        "nothing was applied. Write the data file before the commit, as Parquet with Iceberg "
-        "field ids."
+        f"The commit adds `{shown(uri)}` to `gold.sales`, which could not be read as a Parquet "
+        "file, so nothing was applied. Write the data file before the commit, as Parquet with "
+        "Iceberg field ids."
     )
     assert "magic" not in str(caught.value).lower()
 
@@ -497,8 +498,8 @@ def test_an_orc_file_is_refused(
         )
 
     assert str(caught.value) == (
-        f"The commit adds `{uri}` to `gold.sales` as ORC, so nothing was applied. Lakana reads "
-        "Parquet data files only; write the file as Parquet."
+        f"The commit adds `{shown(uri)}` to `gold.sales` as ORC, so nothing was applied. "
+        "Lakana reads Parquet data files only; write the file as Parquet."
     )
 
 
@@ -527,7 +528,7 @@ def test_a_missing_data_file_is_refused(
         _commit_files(catalog, principal, ref, created, [uri], 900_000_070)
 
     assert "could not be read as a Parquet file" in str(caught.value)
-    assert uri in str(caught.value)
+    assert shown(uri) in str(caught.value)
 
 
 def test_a_file_name_with_a_line_break_is_escaped_in_the_refusal(
@@ -541,7 +542,7 @@ def test_a_file_name_with_a_line_break_is_escaped_in_the_refusal(
         _commit_files(catalog, principal, ref, created, [uri], 900_000_071)
 
     assert "\n" not in str(caught.value)
-    assert "a\\nb.parquet" in str(caught.value)
+    assert shown(uri) in str(caught.value)
 
 
 def test_a_commit_of_too_many_files_is_refused_before_any_footer_is_read(
@@ -602,8 +603,8 @@ def test_a_footer_above_the_limit_is_refused(
         _commit_files(catalog, principal, ref, created, [uri], 900_000_100)
 
     assert str(caught.value) == (
-        f"The commit adds `{uri}` to `gold.sales`, whose Parquet footer is larger than 16 MiB, "
-        "so nothing was applied. Write the file with fewer columns and row groups."
+        f"The commit adds `{shown(uri)}` to `gold.sales`, whose Parquet footer is larger than "
+        "16 MiB, so nothing was applied. Write the file with fewer columns and row groups."
     )
 
 
@@ -787,7 +788,7 @@ def test_a_garbled_footer_is_the_files_fault_not_a_storage_failure(
         _commit_files(catalog, principal, ref, created, [uri], 900_000_160)
 
     assert "could not be read as a Parquet file" in str(caught.value)
-    assert uri in str(caught.value)
+    assert shown(uri) in str(caught.value)
 
 
 def test_collecting_stops_once_the_cap_is_passed(

@@ -514,6 +514,7 @@ def test_a_bind_mount_of_the_same_filesystem_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Same `st_dev`, but mountinfo lists it: a bind mount in the lake stops the reset."""
+    monkeypatch.setattr(reset_module.sys, "platform", "linux")  # the table is Linux's
     root = _instance(tmp_path)
     (root.lake / "dev" / "mnt").mkdir()
     real = root.root.resolve()
@@ -530,6 +531,7 @@ def test_an_escaped_mount_path_is_unescaped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     r"""The kernel writes a space as `\040`; a mount at such a path is still found."""
+    monkeypatch.setattr(reset_module.sys, "platform", "linux")  # the table is Linux's
     base = tmp_path / "my data"
     root = prepare_data_dir(base / "instance")
     (root.lake / "dev").mkdir()

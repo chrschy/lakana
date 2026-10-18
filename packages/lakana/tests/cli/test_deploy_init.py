@@ -593,7 +593,9 @@ def test_next_steps_do_not_ask_for_a_registry_login(tmp_path: Path, released: No
     result = invoke(state, "bundle", "init", str(tmp_path / "b"))
     assert result.exit_code == 0, result.stderr
     assert "docker login" not in result.stdout
-    assert "private" not in result.stdout
+    # The bundle's own path may say "private" (macOS's /var is /private/var); the steps may not.
+    steps = result.stdout.replace(str(tmp_path.resolve()), "").replace(str(tmp_path), "")
+    assert "private" not in steps
 
 
 _VAR_RE = re.compile(r"\$\{(\w+)(?::-[^}]*)?\}")

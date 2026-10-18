@@ -404,6 +404,16 @@ def test_a_megabyte_on_standard_error_neither_blocks_the_child_nor_is_kept() -> 
         assert len(child.stderr) <= query_process._MAX_STDERR_BYTES
 
 
+_ADDED_BY_THE_CHILD_ITSELF = {"LC_CTYPE"} | (
+    {"__CF_USER_TEXT_ENCODING"} if sys.platform == "darwin" else set()
+)
+"""Variables the child's own runtime sets after `exec`, none of them from the worker.
+
+The interpreter adds ``LC_CTYPE`` when the locale is C (PEP 538); macOS's libSystem adds
+``__CF_USER_TEXT_ENCODING`` (the user's id and text encoding) to every process that lacks it.
+"""
+
+
 def test_the_child_gets_the_request_a_scrubbed_environment_and_only_its_pipes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -422,8 +432,7 @@ def test_the_child_gets_the_request_a_scrubbed_environment_and_only_its_pipes(
         os.close(read_end)
         os.close(write_end)
     seen = json.loads(lines[0])
-    # The interpreter adds LC_CTYPE to its own environment when the locale is C (PEP 538).
-    assert set(seen["env"]) - {"LC_CTYPE"} == {
+    assert set(seen["env"]) - _ADDED_BY_THE_CHILD_ITSELF == {
         "PATH",
         "HOME",
         "TMPDIR",
