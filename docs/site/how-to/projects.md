@@ -1088,7 +1088,7 @@ settings and check only the format.
 lakana undeploy analytics --env dev --yes
 ```
 
-Removes the deployment pointer and the run principal binding (needs `DEPLOY`); refused while a run
+Removes the deployment pointer and the identity its runs use (needs `DEPLOY`); refused while a run
 of the repository is queued or running there. Data is untouched: the repository's tables become
 orphans (`lakana orphans`), and its project versions stay as history.
 

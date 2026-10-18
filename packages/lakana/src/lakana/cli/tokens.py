@@ -1,4 +1,4 @@
-"""`lakana token *` (PATs) and `lakana task-token *`."""
+"""`lakana token *` (personal access tokens) and `lakana task-token *`."""
 
 from __future__ import annotations
 
@@ -17,16 +17,16 @@ _YES = Annotated[bool, typer.Option("--yes", help="Don't ask for confirmation.")
 
 @token_app.command("issue")
 def issue(ctx: typer.Context, principal: str, name: str) -> None:
-    """Issue a PAT named NAME for PRINCIPAL; the token is shown once.
+    """Issue a personal access token named NAME for PRINCIPAL; the token is shown once.
 
     Parameters
     ----------
     ctx
         The Typer context.
     principal
-        The principal the PAT authenticates as.
+        The principal the token authenticates as.
     name
-        A label for the PAT.
+        A label for the token.
     """
     state = state_of(ctx)
     issued = state.client().tokens.issue(principal, name)
@@ -48,7 +48,7 @@ def issue(ctx: typer.Context, principal: str, name: str) -> None:
 
 @token_app.command("list")
 def list_tokens(ctx: typer.Context, principal: str) -> None:
-    """List PRINCIPAL's PATs (never their secrets).
+    """List PRINCIPAL's tokens (never their secrets).
 
     Parameters
     ----------
@@ -63,7 +63,7 @@ def list_tokens(ctx: typer.Context, principal: str) -> None:
 
 @token_app.command("revoke")
 def revoke(ctx: typer.Context, principal: str, key_id: str, yes: _YES = False) -> None:
-    """Revoke PRINCIPAL's PAT KEY_ID.
+    """Revoke PRINCIPAL's token KEY_ID.
 
     Parameters
     ----------
@@ -72,7 +72,7 @@ def revoke(ctx: typer.Context, principal: str, key_id: str, yes: _YES = False) -
     principal
         The principal.
     key_id
-        The PAT's key id.
+        The token's key id.
     yes
         Skip the confirmation prompt.
     """

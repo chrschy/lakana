@@ -26,7 +26,7 @@ _MOVED_HINT = "'lakana deploy init' is now 'lakana bundle init'"
 
 deploys_app = typer.Typer(help="Deploy history.", no_args_is_help=True)
 deployments_app = typer.Typer(
-    help="Current deployments and their run principals.", invoke_without_command=True
+    help="Current deployments and the identity each one runs as.", invoke_without_command=True
 )
 project_version_app = typer.Typer(help="Immutable project versions.", no_args_is_help=True)
 
@@ -395,7 +395,7 @@ def show_deploy(ctx: typer.Context, deploy_id: str, env: _ENV = None) -> None:
 
 
 def _list_deployments(ctx: typer.Context, env: str | None) -> None:
-    """Print the current project version and run principal per repository.
+    """Print the current project version and the identity it runs as, per repository.
 
     Parameters
     ----------
@@ -453,7 +453,9 @@ def set_run_as(
     principal: Annotated[
         str | None, typer.Option("--principal", help="An active service account.")
     ] = None,
-    clear: Annotated[bool, typer.Option("--clear", help="Remove the binding.")] = False,
+    clear: Annotated[
+        bool, typer.Option("--clear", help="Stop using a fixed identity for the runs.")
+    ] = False,
 ) -> None:
     """Bind (or with --clear remove) the service account REPO's runs write as.
 
@@ -468,7 +470,7 @@ def set_run_as(
     principal
         The service account.
     clear
-        Remove the binding instead.
+        Stop using a fixed identity instead.
 
     Raises
     ------
@@ -489,7 +491,7 @@ def set_run_as(
 
 
 def undeploy(ctx: typer.Context, repo: _REPO = None, env: _ENV = None, yes: _YES = False) -> None:
-    """Remove REPO's deployment and run principal binding; tables and history stay.
+    """Remove REPO's deployment and the identity its runs use; tables and history stay.
 
     Parameters
     ----------

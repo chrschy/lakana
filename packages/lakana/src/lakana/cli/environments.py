@@ -174,8 +174,8 @@ def protect(ctx: typer.Context, name: str) -> None:
 
     A protected environment refuses every write outside runs of the deployed
     code (SQL, SDK, CLI and Iceberg REST clients alike) whatever the caller's
-    grants; bind a run principal with `lakana deployments set-run-as`. A holder
-    of MANAGE_ENVIRONMENT can make one audited write with `--break-glass
+    grants; choose the identity a deployed job runs as with `lakana deployments set-run-as`. A
+    holder of MANAGE_ENVIRONMENT can make one audited write with `--break-glass
     --reason`. It also refuses deletion and storage changes.
 
     Parameters
