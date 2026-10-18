@@ -2346,8 +2346,7 @@ work.
   table when exactly one has a policy). The parent does it, in `_without_the_value` of
   `lakana_worker/pipeline.py`, from the error document's text, so the query child knows nothing of
   policies; it covers ad-hoc queries, asset runs, checks and views alike, and the stored
-  `error_message` and a check's `error` hold the fixed text. An internal engine failure gets its own fixed text and stays an internal error (the worker's log
-  keeps the details). Cancellation, timeout, transient and memory errors keep their handling. A
+  `error_message` and a check's `error` hold the fixed text. An internal, transient (storage, network) or out-of-memory engine failure gets the fixed text and keeps its class (the worker's log keeps the details). The query child's wording for a file that stores a column in another type is replaced too, because a reader's own SQL can write it, and so is the view diagnosis (`_diagnose_views` is skipped on a policy-bound read). Cancellation, timeout, a stale lease and a process ended from outside keep Lakana's own wording. A
   query that reads no policy-bound table keeps the engine's text. A new error path on a policy-bound
   read goes through the same function.
 - **A read at the snapshot of a check shows only the columns the table has now.**

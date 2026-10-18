@@ -170,7 +170,7 @@ creation, with the message above; fix the expression there.
 
 ### Errors on reads under a row filter or column mask
 
-Errors on reads under a row filter or column mask always show the fixed message, whatever the class of the database's error. Binder, catalog and parser errors, which used to keep their text, now show it too. A misspelled column or function in your own query on such a table is told the same way: run the query against a table that has no filter or mask, or check the names with `lakana table get`.
+Errors on reads under a row filter or column mask always show the fixed message, whatever the class of the database's error. Binder, catalog and parser errors, which used to keep their text, now show it too, and so do storage, network and memory errors (they keep their kind, so a retry and the memory handling are unchanged), the wording for a file that stores a column in another type, and the diagnosis of a view that no longer plans. Cancellations, time limits and a query process ended from outside keep Lakana's own wording. A misspelled column or function in your own query on such a table is told the same way: run the query against a table that has no filter or mask, or check the names with `lakana table get`.
 
 ## Notes for 0.15.0
 

@@ -9,9 +9,11 @@ read through a field-id map, and that a query with no policy keeps the engine's 
 from __future__ import annotations
 
 import logging
+import threading
 import uuid
 from pathlib import Path
 
+import duckdb
 import pyarrow as pa
 import pyarrow.ipc
 import pytest
@@ -37,7 +39,15 @@ from lakana_core.policy.column_masks import ColumnMaskService
 from lakana_core.policy.read_errors import policy_read_failure
 from lakana_core.policy.row_filters import RowFilterService
 from lakana_core.storage.resolver import StorageResolver
-from lakana_worker.executor import INTERNAL_ADVICE, DuckDBInternalError
+from lakana_worker import query_child
+from lakana_worker.executor import (
+    _KINDS,
+    INTERNAL_ADVICE,
+    KILLED_FROM_OUTSIDE_MESSAGE,
+    DuckDBInternalError,
+    OutOfMemoryQuery,
+    TransientQueryError,
+)
 from lakana_worker.pipeline import _without_the_value, failure_cause, run_one
 
 _SECRET = "HIDDEN-X"
@@ -398,7 +408,6 @@ _ENGINE_TEXTS = [
     "Not implemented Error: HIDDEN-X",
     "Invalid Error: HIDDEN-X",
     "Mismatch Type Error: HIDDEN-X",
-    "IO Error: HIDDEN-X",
     "Something else entirely: HIDDEN-X",
 ]
 
@@ -420,9 +429,82 @@ def test_every_class_of_engine_error_under_a_policy_gets_the_fixed_message(
     assert untouched is raw
 
 
-def test_the_workers_own_text_for_a_file_that_stores_another_type_stays() -> None:
-    """The query process's fixed wording names a column, no value, and is not the engine's."""
-    raw = ValidationError("Query failed: a file of a table this query reads stores column x")
+def test_the_wording_for_a_file_that_stores_another_type_is_replaced_under_a_policy() -> None:
+    """A reader can write this wording from their own SQL, so a policy read never shows it."""
+    raw = ValidationError(
+        'Query failed: a file of a table this query reads stores column "SECRET-VALUE" as a, '
+        "which cannot be read as b. Ask the owner of that table to write its rows again."
+    )
+
+    replaced = _without_the_value(raw, frozenset({"gold.people"}))
+
+    assert str(replaced) == policy_read_failure("gold.people")
+    assert "SECRET-VALUE" not in str(replaced)
+    assert _without_the_value(raw, frozenset()) is raw
+
+
+def test_a_forged_cast_report_in_the_readers_own_query_gets_the_fixed_message(
+    session: Session, principal: PrincipalRef, catalog: CatalogService
+) -> None:
+    """An `error(...)` text shaped like the read's cast report shows nothing of itself."""
+    _mask(session, principal, catalog, "secret", "NULL")
+
+    run = _query(
+        session,
+        principal,
+        "SELECT error('failed to cast column \"SECRET-VALUE\" from type a to b: :') "
+        "FROM gold.people",
+    )
+
+    _assert_fixed(run, "gold.people", "")
+    assert "SECRET-VALUE" not in (run.error_message or "")
+
+
+def _through_the_child(exc: BaseException) -> ValidationError:
+    """Classify an engine failure in the query child and build the pipeline's error from it.
+
+    Parameters
+    ----------
+    exc
+        The failure DuckDB raised.
+
+    Returns
+    -------
+    ValidationError
+        The error the parent receives, of the type the document's kind maps to.
+    """
+    connection = duckdb.connect(":memory:")
+    document = query_child.failure(connection, exc, None, threading.Event())
+    return _KINDS[document.kind](document.message)
+
+
+@pytest.mark.parametrize(
+    ("exc", "kind"),
+    [
+        (duckdb.IOException("IO Error: HIDDEN-X"), TransientQueryError),
+        (OSError("HTTP Error: HTTP GET error on 'HIDDEN-X' (HTTP 503)"), TransientQueryError),
+        (OSError("connection reset by HIDDEN-X"), TransientQueryError),
+        (duckdb.OutOfMemoryException("Out of Memory Error: HIDDEN-X"), OutOfMemoryQuery),
+    ],
+)
+def test_a_transient_or_memory_error_under_a_policy_keeps_its_class_and_shows_the_fixed_message(
+    exc: BaseException, kind: type[ValidationError]
+) -> None:
+    """The class decides retries and memory handling; the text is the fixed message."""
+    raw = _through_the_child(exc)
+    assert type(raw) is kind
+
+    replaced = _without_the_value(raw, frozenset({"gold.people"}))
+
+    assert type(replaced) is kind
+    assert str(replaced) == policy_read_failure("gold.people")
+    assert failure_cause(replaced) == failure_cause(raw)
+    assert _without_the_value(raw, frozenset()) is raw
+
+
+def test_the_workers_own_text_for_a_killed_query_stays_under_a_policy() -> None:
+    """A query process ended from outside has Lakana's wording, with no engine text in it."""
+    raw = TransientQueryError(KILLED_FROM_OUTSIDE_MESSAGE.format(signal=9))
 
     assert _without_the_value(raw, frozenset({"gold.people"})) is raw
 

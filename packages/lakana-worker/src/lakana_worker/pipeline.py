@@ -165,6 +165,7 @@ from lakana_core.storage.resolver import (
 from lakana_worker.activity import ACTIVITY
 from lakana_worker.executor import (
     INTERNAL_ADVICE,
+    KILLED_FROM_OUTSIDE_MESSAGE,
     DuckDBInternalError,
     OutOfMemoryQuery,
     QueryCancelled,
@@ -336,21 +337,21 @@ def _redact(message: str, locations: Sequence[str]) -> str:
     return message
 
 
-_KEEPS_ITS_TEXT = re.compile(r"^Query failed: a file of a table this query reads stores column ")
-"""The start of the query child's own fixed text for a file that stores a column in another
-type. It is the worker's wording and names a column, not a value, so it is kept; every text of the
-engine itself is replaced on a read under a row filter or column mask."""
+_OUTSIDE_PREFIX = KILLED_FROM_OUTSIDE_MESSAGE.split("{signal}", 1)[0]
+"""The start of Lakana's own text for a query process ended from outside (no engine text)."""
 
 
 def _without_the_value(failure: LakanaError, restricted: frozenset[str]) -> LakanaError:
     """Replace the engine's text for a failure, on a read under a row filter or column mask.
 
     Errors on a read under a row filter or column mask always show one fixed message, whatever
-    the class of the engine's error (parser, binder, catalog, conversion, out of range, ...): the
-    engine's text can quote the rewritten SQL or a stored value, and the policy's expressions run
-    on every row, also on the ones it hides. An internal error gets its own fixed text and keeps
-    its kind. What is not the engine's text (a cancel, a timeout, a transient or memory error, the
-    worker's own wording) is returned as it is.
+    the class of the error (parser, binder, catalog, conversion, out of range, I/O, memory, ...)
+    and whatever the wording the query process gave it: the engine's text can quote the rewritten
+    SQL or a stored value, the policy's expressions run on every row, also on the ones it hides,
+    and the reader's own SQL can write any wording itself. The class is kept (an internal, a
+    transient or an out-of-memory error stays one, so retries and the memory handling are as
+    before). What Lakana words itself (a cancel, a timeout, a stale lease, a query process ended
+    from outside) is returned as it is.
 
     Parameters
     ----------
@@ -367,18 +368,22 @@ def _without_the_value(failure: LakanaError, restricted: frozenset[str]) -> Laka
         The fixed message as a `ValidationError` when `failure` is such a failure of a
         query that reads a table under a policy, otherwise `failure` itself.
     """
-    if restricted and isinstance(failure, DuckDBInternalError):
+    if not restricted:
+        return failure
+    only = next(iter(restricted)) if len(restricted) == 1 else None
+    if isinstance(failure, DuckDBInternalError):
         # The engine's internal errors can format a value too; the type stays, so the cause and
         # a retry are as before, and the worker's log keeps the details.
         return DuckDBInternalError(
             f"Query failed: the query engine failed on its own. {INTERNAL_ADVICE}"
         )
-    if not restricted or type(failure) is not ValidationError:
+    kind = type(failure)
+    if kind is OutOfMemoryQuery:
+        return OutOfMemoryQuery(policy_read_failure(only))
+    if kind is TransientQueryError and not str(failure).startswith(_OUTSIDE_PREFIX):
+        return TransientQueryError(policy_read_failure(only))
+    if kind is not ValidationError or not str(failure).startswith("Query failed: "):
         return failure
-    text = str(failure)
-    if not text.startswith("Query failed: ") or _KEEPS_ITS_TEXT.match(text) is not None:
-        return failure
-    only = next(iter(restricted)) if len(restricted) == 1 else None
     return ValidationError(policy_read_failure(only))
 
 
@@ -2494,6 +2499,7 @@ def _run_one(
         elif (
             prepared is not None
             and prepared.views
+            and not prepared.restricted
             and run.check_result_id is None
             and isinstance(exc, ValidationError)
             and not isinstance(
