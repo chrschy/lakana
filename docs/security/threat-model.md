@@ -761,7 +761,6 @@ code above:
   requests get no Actions secrets and could never pass it, so the maintainer confirms a
   signature before merging an outside contribution.
 - **Weekly**, a deep scan runs semgrep against the full codebase (`.github/workflows/security-deep.yml`),
-  uploading its SARIF output as a build artifact. The CodeQL job in the same workflow is
-  committed but commented out, and the semgrep SARIF upload to GitHub's code scanning UI is
-  disabled; semgrep findings are retained as a downloadable build artifact rather than surfaced
-  in the UI. Both can be switched on now that the repository is public.
+  uploading its SARIF output to GitHub's code scanning UI and keeping it as a build artifact.
+  CodeQL analyses the Python code on every pull request, on every push to `main` and weekly
+  (`.github/workflows/codeql.yml`); its findings are in the same UI.

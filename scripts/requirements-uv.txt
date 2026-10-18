@@ -1,0 +1,9 @@
+# uv for scripts/five_minute_test.sh, installed with `pip install --require-hashes -r`.
+# One hash per Linux wheel the script can meet (glibc and musl, x86_64 and aarch64); a pip
+# that picks another wheel refuses it. Dependabot (the `pip` entry for /scripts) bumps the
+# version and the hashes together.
+uv==0.13.1 \
+    --hash=sha256:696dcf6d807d85da978f4db8472da81dccc1254b18b52cbd1367c4d923c421e0 \
+    --hash=sha256:6f1f391756385e2cd1521fe4a198e0ca764ef498dd677cb214b95a69a7ce3608 \
+    --hash=sha256:f2518450da2f6d0ea8a943c9f402abda63d5a66acc9999216c2792115b922ba4 \
+    --hash=sha256:ccbe233d4bce39865af7c30ec1fb28b0cc353f9d51711629f54fca71b8db7382

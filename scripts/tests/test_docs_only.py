@@ -12,7 +12,14 @@ ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = ROOT / ".github" / "workflows"
 
 SKIPPED_JOBS = {
-    "ci.yml": ("lint", "integration", "five-minute", "compose-smoke", "docs-examples"),
+    "ci.yml": (
+        "lint",
+        "integration",
+        "five-minute",
+        "compose-smoke",
+        "docs-examples",
+        "test-macos",
+    ),
     "security.yml": ("static",),
 }
 ALWAYS_RUN = {"ci.yml": ("changes", "test", "docs"), "security.yml": ("changes", "secrets")}

@@ -3495,8 +3495,7 @@ test needs its shape (e.g. the SDK's masking tests, which need a secret with und
 dashes). gitleaks scans every commit in a PR, so a false positive in any earlier commit needs an
 allowlist entry even after the line has changed. Any
 feature touching auth, policy, secrets, or the query path should also get a `/security-review`
-pass before merge. Semgrep runs weekly (`security-deep.yml`); CodeQL is wired but disabled
-until someone switches it on in the repository's code-scanning settings; the repository is public,
-so SARIF upload is possible. OpenSSF Scorecard (`scorecard.yml`) runs on every push to `main`,
+pass before merge. Semgrep runs weekly (`security-deep.yml`); CodeQL (`codeql.yml`) runs on every
+pull request, every push to `main` and weekly; both upload SARIF to code scanning. OpenSSF Scorecard (`scorecard.yml`) runs on every push to `main`,
 weekly and on a branch-protection change, and publishes its score for the README badge; read the
 results at <https://scorecard.dev/viewer/?uri=github.com/chrschy/lakana>.

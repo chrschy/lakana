@@ -148,10 +148,10 @@ every missing output of it means "run everything".
 | Event | Runs |
 |---|---|
 | Pull request, **draft** | `lint`, `docs`, `docs-examples`, `test (3.14)` (with coverage and the ratchet) |
-| Pull request, **ready for review** (also the moment it leaves draft) | everything: the above plus `test (3.11)`, `integration`, `five-minute`, `compose-smoke` |
+| Pull request, **ready for review** (also the moment it leaves draft) | everything: the above plus `test (3.11)`, `test (macos)` (only if the pull request touches `packages/`), `integration`, `five-minute`, `compose-smoke` |
 | Dependabot's pull requests | everything (they are never drafts) |
 | Documentation-only pull request | see the section above; a draft also lacks `test (3.11)` |
-| Push to `main`: the squash merge of an up-to-date pull request whose last run was complete | `lint`, `docs` (the rest was just tested on the same tree) |
+| Push to `main`: the squash merge of an up-to-date pull request whose last run was complete | `lint`, `docs` (the rest was just tested on the same tree), `test (macos)` |
 | Push to `main`: anything else (a direct push, a draft's last run, a re-run that failed, any doubt) | everything |
 
 - **Drafts.** A draft skips `integration`, `five-minute`, `compose-smoke` and the 3.11 leg of
@@ -189,6 +189,24 @@ every missing output of it means "run everything".
   `packages/*/src/` as well as for the bundle, packaging and script files in the filter of its
   "Did the bundle change?" step. `test` has a 30-minute timeout.
 - **Coverage** is measured on 3.14 only (see the coverage ratchet below).
+- **`test (macos)`** (job `test-macos`) is the macOS check: Lakana's local mode supports macOS
+  (Python 3.13 and later), and this job runs what a macOS user runs, on GitHub's `macos-latest`
+  (Apple Silicon, 3 cores, 7 GB) with Python 3.14. It runs the `packages/` unit suite (not
+  `scripts/`, which is Linux tooling whose tests need GNU tools) with
+  `pytest packages -m "not integration" -n 2`, without coverage (the ratchet stays on the Linux 3.14 job), and
+  `scripts/run_docs_examples.sh getting-started`, which ends with `lakana server reset --local`.
+  Docker-based tests (`integration`, `five-minute`, `compose-smoke`) do not run: macOS runners
+  have no Docker. `scripts/pytest_memory_limit.py` needs `/proc`, so on macOS it does nothing and
+  the limit's 6 GB default (below the runner's 7 GB) is not enforced; two workers fit. The example
+  runner needs GNU `timeout` and `setsid` and bash 4, so the job installs Homebrew's `bash` and
+  `coreutils` and puts a small Python `setsid` in front of the path. The job always runs on
+  GitHub's runner, never the `CI_RUNNER` switch (see "CI runners"); a pull request runs it only if
+  it changes `packages/`, the root `pyproject.toml`, `uv.lock`, `docs/examples/` or the files the job runs, and it skips a
+  draft and a documentation-only change like the other heavy jobs. It is **informational for
+  now** (`continue-on-error: true`): the first runs found 50 failures, collected in #153, and the
+  PR that closes #153 removes the flag. It is **not a required check yet**; the maintainer makes
+  it one after a week of green runs (#148). A failure that only macOS shows is fixed or filed as
+  an issue.
 
 ### Scorecard, Semgrep and the release workflow
 
@@ -200,7 +218,16 @@ every missing output of it means "run everything".
   time, when it reports them, never in bulk. `scripts/tests/test_workflows.py` pins the
   permissions, the triggers and its runner; another test there pins every action of every workflow
   by commit SHA.
-- **`security-deep.yml`** runs semgrep weekly.
+- **`security-deep.yml`** runs semgrep and Trivy weekly. The semgrep scan (a pinned image, no write
+  scope, no token in the workspace) keeps its SARIF as an artifact; `semgrep-upload` alone has
+  `security-events: write` and does nothing but upload it to code scanning. Dependabot does not
+  read a workflow's `container:` image: bump the semgrep version and digest by hand.
+- **`codeql.yml`** runs CodeQL for Python on pull requests, on a push to `main` and weekly, on a
+  GitHub-hosted runner, with `security-events: write` on its one job. It is CodeQL's *advanced*
+  setup: switching on *default setup* in the repository's code-scanning settings would make its
+  uploads fail, so leave that toggle off.
+- **Token permissions.** No workflow has a write permission at its top level: each job names its
+  own (`cla.yml` and `security-deep.yml` included). `scripts/tests/test_workflows.py` fails on one.
 - **`release.yml`** is described in `docs/agent/release.md`; it also attaches the SBOM to each
   GitHub release.
 
@@ -253,7 +280,7 @@ the strict build fails on a broken link or anchor.
   says which. The private package index page rose it from 45 to 48: three command blocks of
   `private-package-index.md` need a package index that asks for a password or the id of a
   deployed project version, which the docs-examples job cannot reach without a new service; the integration tests of the
-  "Private package indexes" paragraph below are the proof. The upgrade note of the next release rose it from 48 to 52 (two blocks with placeholders for names and ids, and the recovery `SELECT` and `UPDATE` of "Delegation needs the ADMIN role" in `upgrades.md`, which read and change a real database); its other commands run in `getting-started/run.sh`. "Why is my query or task waiting?" (M5c3b) rose it from 53 to 54 for `lakana query status QUERY_ID`, which needs the id of a query that is still queued; the tests of the wait line in `test_queries.py` assert the line the page shows. The upgrade note "A secret is bound to one use" rose it from 52 to 53 (placeholders for names; the commands run in `bind-a-secret/run.sh`). Lowering the ceiling when blocks become tested is still the expected direction.
+  "Private package indexes" paragraph below are the proof. The upgrade note of the next release rose it from 48 to 52 (two blocks with placeholders for names and ids, and the recovery `SELECT` and `UPDATE` of "Delegation needs the ADMIN role" in `upgrades.md`, which read and change a real database); its other commands run in `getting-started/run.sh`. "Why is my query or task waiting?" (M5c3b) rose it from 53 to 54 for `lakana query status QUERY_ID`, which needs the id of a query that is still queued; the tests of the wait line in `test_queries.py` assert the line the page shows. The upgrade note "A secret is bound to one use" rose it from 52 to 53 (placeholders for names; the commands run in `bind-a-secret/run.sh`). "Verify a download" in `deploy-with-compose.md` rose it from 53 to 54 (#130): its `pip download` and `gh attestation verify` need the network, the GitHub CLI and a published, attested release, which the example harness cannot provide. Lowering the ceiling when blocks become tested is still the expected direction.
 
 ### Code blocks and their markers
 
@@ -385,7 +412,8 @@ maintainer who wants to run CI on a runner of their own.
 - **What moves:** every job of `ci.yml`, `security.yml`, `conventional.yml`, `mutation.yml` and
   `security-deep.yml`, and the `release-please` job of `release.yml`, which only opens and merges
   the release pull request.
-- **What never moves:** every job that builds or publishes a release. What users install is
+- **What never moves:** `test (macos)` (macOS runs only on GitHub's own runners) and every job
+  that builds or publishes a release. What users install is
   built on GitHub's runners, not on someone's machine.
 - **A pull request from a fork always uses GitHub's runner.** The `runs-on` expression honours
   `CI_RUNNER` only for a push, a schedule, a manual run, or a pull request whose head branch is in
