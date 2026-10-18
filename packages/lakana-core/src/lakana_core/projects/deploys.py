@@ -25,6 +25,7 @@ from sqlglot import exp
 
 from lakana_core.audit.service import AuditService
 from lakana_core.auth import Action, AuthorizationService, PrincipalRef, Securable
+from lakana_core.catalog.descriptions import sync_project_descriptions
 from lakana_core.catalog.identity import resolve_table_id
 from lakana_core.db import db_now
 from lakana_core.errors import ConflictError, NotFoundError, ValidationError
@@ -2589,6 +2590,7 @@ class DeployService:
             manifest,
             db_now(self._session),
         )
+        sync_project_descriptions(self._session, environment_id, manifest)
         run.job_version_id = version.id
         run.diff_json = diff.to_json()
         run.checks_json = dict(checks) if checks else None
@@ -2723,6 +2725,7 @@ class DeployService:
             target.manifest_json,
             db_now(self._session),
         )
+        sync_project_descriptions(self._session, environment_id, target.manifest_json)
         run.resolved_sha = target.commit_sha
         run.job_version_id = target.id
         run.diff_json = diff.to_json()

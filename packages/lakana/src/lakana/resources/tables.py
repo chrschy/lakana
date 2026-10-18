@@ -124,7 +124,13 @@ def _table_from_json(data: dict[str, Any]) -> Table:
         uuid=data["uuid"],
         metadata_location=data.get("metadata_location"),
         columns=[
-            Column(name=c["name"], type=c["type"], nullable=c["nullable"])
+            Column(
+                name=c["name"],
+                type=c["type"],
+                nullable=c["nullable"],
+                description=c.get("description"),
+                description_source=c.get("description_source"),
+            )
             for c in data.get("schema", [])
         ],
         kind=data.get("kind", "TABLE"),
@@ -136,6 +142,8 @@ def _table_from_json(data: dict[str, Any]) -> Table:
         snapshot_id=data.get("snapshot_id"),
         state=data.get("state", "published"),
         state_message=data.get("state_message"),
+        description=data.get("description"),
+        description_source=data.get("description_source"),
     )
 
 
@@ -379,6 +387,57 @@ class Tables:
         namespace, name = _split_namespace_table(qualified_name)
         response = self._transport.request(
             ROUTES["tables.get"], path_params={"env": environment, "path": namespace, "name": name}
+        )
+        return _table_from_json(response.json())
+
+    def describe(
+        self,
+        environment: str,
+        qualified_name: str,
+        description: str | None,
+        *,
+        column: str | None = None,
+    ) -> Table:
+        """Set the description of a table or one of its columns, or reset it.
+
+        The text set here is shown instead of the one a deploy publishes from the asset header,
+        and a deploy never replaces it. Resetting removes it, so the asset header's text shows
+        again. Needs to own the table or hold `DROP_TABLE` on it.
+
+        Parameters
+        ----------
+        environment
+            The environment name.
+        qualified_name
+            Dot-joined `"namespace.table"` name.
+        description
+            The new text (1 to 4,000 characters, not blank), or `None` to reset.
+        column
+            A column of the table to describe instead of the table.
+
+        Returns
+        -------
+        Table
+            The table, with the descriptions it shows now.
+
+        Raises
+        ------
+        lakana.errors.NotFound
+            If the table, or the column, does not exist.
+        lakana.errors.PermissionDenied
+            Without the right to describe the table.
+        lakana.errors.ValidationError
+            If the text is blank or over 4,000 characters.
+        """
+        namespace, name = _split_namespace_table(qualified_name)
+        path_params = {"env": environment, "path": namespace, "name": name}
+        if column is None:
+            route = ROUTES["tables.describe"]
+        else:
+            route = ROUTES["tables.describe_column"]
+            path_params["column"] = column
+        response = self._transport.request(
+            route, path_params=path_params, json={"description": description}
         )
         return _table_from_json(response.json())
 

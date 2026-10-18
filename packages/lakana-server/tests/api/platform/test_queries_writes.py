@@ -139,7 +139,15 @@ def test_a_view_is_listed_with_its_kind_sql_and_references(client: TestClient) -
     assert body["metadata_location"] is None
     assert body["sql"] == "SELECT id FROM bronze.src"
     assert [reference["name"] for reference in body["references"]] == ["bronze.src"]
-    assert body["schema"] == [{"name": "id", "type": "long", "nullable": True}]
+    assert body["schema"] == [
+        {
+            "name": "id",
+            "type": "long",
+            "nullable": True,
+            "description": None,
+            "description_source": None,
+        }
+    ]
     assert {(t["name"], t["kind"]) for t in listed.json()} == {("daily", "TABLE"), ("v", "VIEW")}
 
 
@@ -202,7 +210,7 @@ def test_a_view_reader_who_cant_read_a_reference_gets_no_sql_or_references(
     assert body["sql"] is None
     assert body["references"] == []
     assert body["hidden_references"] == 1
-    assert body["schema"] == [{"name": "id", "type": "long", "nullable": True}]
+    assert [c["name"] for c in body["schema"]] == ["id"]
     assert listed.json()[0]["hidden_references"] == 1
     assert "bronze.src" not in restricted.text
     assert full.json()["sql"] == "SELECT id FROM bronze.src"

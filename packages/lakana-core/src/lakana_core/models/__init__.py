@@ -1,6 +1,7 @@
 """SQLAlchemy models for the Lakana metadata schema."""
 
 from lakana_core.models.base import Base, TimestampMixin  # ruff: ignore[unsorted-imports]
+from lakana_core.models.column_description import ColumnDescription
 from lakana_core.models.column_mask import ColumnMask
 from lakana_core.models.credential import PersonalAccessToken, TaskToken
 from lakana_core.models.environment import Environment
@@ -56,6 +57,7 @@ __all__ = [
     "Base",
     "CheckOutcome",
     "CheckResult",
+    "ColumnDescription",
     "ColumnMask",
     "DeployKind",
     "DeployRun",

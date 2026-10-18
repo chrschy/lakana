@@ -863,6 +863,8 @@ _NOTHING_OF_A_KEPT_TABLE = {
     ),
     "describe_table": "the state `kept`, the schema and snapshot ids; no rows, no file locations",
     "can_read_table": "a boolean about a grant",
+    "set_table_description": "a write of text; it returns nothing of the table",
+    "set_column_description": "a write of text; it returns nothing of the table",
     "commit_answer": (
         "the answer to the caller's own commit or create: the whole metadata only where "
         "`load_table` would hand it out (`_may_see_history` asks `_require_published` and "

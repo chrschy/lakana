@@ -1,0 +1,520 @@
+"""Descriptions of tables and columns: the project's text, an edit, and which one is shown."""
+
+from __future__ import annotations
+
+import uuid
+from pathlib import Path
+
+import pytest
+from core_test_helpers import ActionAllowList, _prepared_catalog
+from pyiceberg.schema import Schema
+from pyiceberg.types import LongType, NestedField, StringType
+from sqlalchemy import select, update
+from sqlalchemy.orm import Session
+from test_projects_dag import make_asset
+
+from lakana_core.auth import Action, AllowAllAuthorization, PrincipalRef
+from lakana_core.catalog.descriptions import (
+    MAX_DESCRIPTION_LENGTH,
+    sync_project_descriptions,
+)
+from lakana_core.catalog.service import CatalogService, TableDescription
+from lakana_core.errors import NotFoundError, PermissionDenied, ValidationError
+from lakana_core.identifiers import NamespacePath, TableRef
+from lakana_core.models import (
+    AuditEvent,
+    AuditEventType,
+    ColumnDescription,
+    Environment,
+    EnvironmentDeployment,
+    JobVersion,
+    Principal,
+    PrincipalType,
+    Repository,
+    RepositoryKind,
+    Table,
+    TableType,
+)
+from lakana_core.projects.dag import build_graph
+from lakana_core.projects.frontmatter import AssetMetadata
+from lakana_core.projects.manifest import build_manifest
+from lakana_core.projects.project_config import ResolvedProjectConfig
+
+_SILVER = NamespacePath.from_parts(["silver"])
+_ORDERS = TableRef("dev", _SILVER, "orders")
+_SCHEMA = Schema(
+    NestedField(1, "id", LongType(), required=True),
+    NestedField(2, "status", StringType(), required=False),
+)
+
+
+def _manifest(
+    table: str = "silver.orders",
+    description: str | None = "From the project",
+    columns: dict[str, str] | None = None,
+) -> dict:
+    """Build a manifest with one asset that carries a description and column texts.
+
+    Parameters
+    ----------
+    table
+        The asset's dotted table name.
+    description
+        Its `description:`.
+    columns
+        Its `columns:` map; `{"id": "Order id", "status": "Where it stands"}` when `None`.
+
+    Returns
+    -------
+    dict
+        The manifest.
+    """
+    asset = make_asset(
+        table,
+        metadata=AssetMetadata(
+            materialize="table",
+            description=description,
+            columns=columns if columns is not None else {"id": "Order id", "status": "Stage"},
+        ),
+    )
+    return build_manifest([asset], build_graph([asset]), ResolvedProjectConfig())
+
+
+def _person(session: Session, name: str) -> PrincipalRef:
+    """Persist a principal.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    name
+        Its name.
+
+    Returns
+    -------
+    PrincipalRef
+        A reference to the row.
+    """
+    ref = PrincipalRef(id=uuid.uuid4(), name=name, type=PrincipalType.USER)
+    session.add(Principal(id=ref.id, type=ref.type, name=name, is_active=True))
+    session.commit()
+    return ref
+
+
+@pytest.fixture
+def catalog_with_orders(
+    session: Session, tmp_path: Path, principal: PrincipalRef
+) -> CatalogService:
+    """Provide an allow-all catalog with `dev` and the table `silver.orders` (id, status).
+
+    Parameters
+    ----------
+    session
+        Database session.
+    tmp_path
+        Storage root.
+    principal
+        The creator, who becomes the table's owner.
+
+    Returns
+    -------
+    CatalogService
+        The catalog.
+    """
+    catalog = _prepared_catalog(session, tmp_path, AllowAllAuthorization(), namespaces=[_SILVER])
+    catalog.create_table(principal, _ORDERS, schema=_SCHEMA)
+    return catalog
+
+
+def _described(catalog: CatalogService, principal: PrincipalRef) -> TableDescription:
+    """Describe `silver.orders`.
+
+    Parameters
+    ----------
+    catalog
+        The catalog.
+    principal
+        The reader.
+
+    Returns
+    -------
+    TableDescription
+        What the platform API would show.
+    """
+    return catalog.describe_table(principal, _ORDERS)
+
+
+def test_a_table_with_no_description_shows_none(
+    catalog_with_orders: CatalogService, principal: PrincipalRef
+) -> None:
+    """No project text and no edit: no description, no source."""
+    shown = _described(catalog_with_orders, principal)
+    assert (shown.description, shown.description_source) == (None, None)
+    assert shown.column_descriptions == {}
+
+
+def test_a_deploy_publishes_the_projects_descriptions(
+    session: Session, catalog_with_orders: CatalogService, principal: PrincipalRef
+) -> None:
+    """The asset header's text is the table's and the columns' description, from the project."""
+    sync_project_descriptions(session, _env_id(session), _manifest())
+    session.commit()
+    shown = _described(catalog_with_orders, principal)
+    assert (shown.description, shown.description_source) == ("From the project", "project")
+    assert {name: (d.text, d.source) for name, d in shown.column_descriptions.items()} == {
+        "id": ("Order id", "project"),
+        "status": ("Stage", "project"),
+    }
+
+
+def _env_id(session: Session) -> uuid.UUID:
+    """Find the id of the `dev` environment.
+
+    Parameters
+    ----------
+    session
+        Database session.
+
+    Returns
+    -------
+    uuid.UUID
+        Its id.
+    """
+    return session.scalars(select(Environment.id).where(Environment.name == "dev")).one()
+
+
+def test_an_edit_is_shown_instead_of_the_projects_text_and_survives_a_redeploy(
+    session: Session, catalog_with_orders: CatalogService, principal: PrincipalRef
+) -> None:
+    """A deploy writes only the project's text; the edit stays on top."""
+    catalog = catalog_with_orders
+    sync_project_descriptions(session, _env_id(session), _manifest())
+    catalog.set_table_description(principal, _ORDERS, "Edited in the API")
+    catalog.set_column_description(principal, _ORDERS, "id", "Edited id")
+
+    sync_project_descriptions(
+        session, _env_id(session), _manifest(description="Changed in git", columns={"id": "New"})
+    )
+    session.commit()
+
+    shown = _described(catalog, principal)
+    assert (shown.description, shown.description_source) == ("Edited in the API", "edited")
+    assert (shown.column_descriptions["id"].text, shown.column_descriptions["id"].source) == (
+        "Edited id",
+        "edited",
+    )
+    row = session.scalars(select(Table)).one()
+    assert row.description_project == "Changed in git"
+    assert row.description_edited == "Edited in the API"
+
+
+def test_a_reset_goes_back_to_the_projects_text(
+    session: Session, catalog_with_orders: CatalogService, principal: PrincipalRef
+) -> None:
+    """`None` clears the edit; the project's text shows again, then none when it has none."""
+    catalog = catalog_with_orders
+    sync_project_descriptions(session, _env_id(session), _manifest())
+    catalog.set_table_description(principal, _ORDERS, "Mine")
+    catalog.set_column_description(principal, _ORDERS, "status", "Mine too")
+
+    catalog.set_table_description(principal, _ORDERS, None)
+    catalog.set_column_description(principal, _ORDERS, "status", None)
+
+    shown = _described(catalog, principal)
+    assert (shown.description, shown.description_source) == ("From the project", "project")
+    assert shown.column_descriptions["status"].text == "Stage"
+    assert shown.column_descriptions["status"].source == "project"
+
+
+def test_a_reset_without_a_project_text_shows_none(
+    catalog_with_orders: CatalogService, principal: PrincipalRef
+) -> None:
+    """An edit, then a reset, on a table the project never described."""
+    catalog_with_orders.set_table_description(principal, _ORDERS, "Mine")
+    assert _described(catalog_with_orders, principal).description_source == "edited"
+    catalog_with_orders.set_table_description(principal, _ORDERS, None)
+    shown = _described(catalog_with_orders, principal)
+    assert (shown.description, shown.description_source) == (None, None)
+
+
+def test_a_description_over_the_limit_is_refused_with_the_next_step(
+    catalog_with_orders: CatalogService, principal: PrincipalRef
+) -> None:
+    """4,000 characters pass; 4,001 do not, for a table and for a column."""
+    catalog = catalog_with_orders
+    catalog.set_table_description(principal, _ORDERS, "x" * MAX_DESCRIPTION_LENGTH)
+    with pytest.raises(ValidationError, match="4,000") as table_error:
+        catalog.set_table_description(principal, _ORDERS, "x" * (MAX_DESCRIPTION_LENGTH + 1))
+    assert "shorter" in str(table_error.value)
+    with pytest.raises(ValidationError, match="4,000"):
+        catalog.set_column_description(principal, _ORDERS, "id", "x" * (MAX_DESCRIPTION_LENGTH + 1))
+
+
+def test_a_blank_description_is_refused(
+    catalog_with_orders: CatalogService, principal: PrincipalRef
+) -> None:
+    """Blank text is not a description; the message points to the reset."""
+    with pytest.raises(ValidationError, match="reset"):
+        catalog_with_orders.set_table_description(principal, _ORDERS, "   ")
+
+
+def test_a_column_the_table_does_not_have_cannot_be_described(
+    catalog_with_orders: CatalogService, principal: PrincipalRef
+) -> None:
+    """The message names the table's columns."""
+    with pytest.raises(NotFoundError, match="id, status"):
+        catalog_with_orders.set_column_description(principal, _ORDERS, "nope", "text")
+
+
+def test_a_description_of_a_column_that_is_gone_is_kept_but_not_shown(
+    session: Session, catalog_with_orders: CatalogService, principal: PrincipalRef
+) -> None:
+    """The row of a dropped column stays; the table does not show it."""
+    sync_project_descriptions(
+        session, _env_id(session), _manifest(columns={"id": "Order id", "gone": "Old column"})
+    )
+    session.commit()
+    shown = _described(catalog_with_orders, principal)
+    assert set(shown.column_descriptions) == {"id"}
+    assert {row.column for row in session.scalars(select(ColumnDescription))} == {"id", "gone"}
+
+
+def test_a_column_removed_from_the_header_loses_its_project_text_only(
+    session: Session, catalog_with_orders: CatalogService, principal: PrincipalRef
+) -> None:
+    """A later deploy without the column's text clears the project text and keeps the edit."""
+    sync_project_descriptions(session, _env_id(session), _manifest())
+    catalog_with_orders.set_column_description(principal, _ORDERS, "id", "Edited")
+    sync_project_descriptions(session, _env_id(session), _manifest(columns={"status": "Stage"}))
+    session.commit()
+    shown = _described(catalog_with_orders, principal)
+    assert shown.column_descriptions["id"].source == "edited"
+    assert shown.column_descriptions["status"].text == "Stage"
+    session.execute(update(ColumnDescription).values(description_edited=None))
+    session.commit()
+    assert "id" not in _described(catalog_with_orders, principal).column_descriptions
+
+
+def test_a_deploy_leaves_a_table_that_does_not_exist_yet_alone(
+    session: Session, catalog_with_orders: CatalogService
+) -> None:
+    """Tables a run has not created yet get their text when they are created."""
+    sync_project_descriptions(session, _env_id(session), _manifest(table="silver.later"))
+    session.commit()
+    assert session.scalars(select(Table)).one().description_project is None
+
+
+def test_a_table_created_after_the_deploy_gets_the_projects_text(
+    session: Session, tmp_path: Path, principal: PrincipalRef
+) -> None:
+    """A run creates the table after the deploy; its first read shows the project's text."""
+    catalog = _prepared_catalog(session, tmp_path, AllowAllAuthorization(), namespaces=[_SILVER])
+    repo = Repository(id=uuid.uuid4(), name="r", kind=RepositoryKind.HTTPS, url="https://h/r")
+    session.add(repo)
+    session.commit()
+    env_id = _env_id(session)
+    version = JobVersion(
+        id=uuid.uuid4(),
+        repository_id=repo.id,
+        environment_id=env_id,
+        commit_sha="a" * 40,
+        manifest_json=_manifest(),
+        code_uri="file:///x",
+        code_sha256="0" * 64,
+        deployed_by=principal.id,
+    )
+    session.add(version)
+    session.commit()
+    session.add(
+        EnvironmentDeployment(
+            environment_id=env_id, repository_id=repo.id, current_job_version_id=version.id
+        )
+    )
+    session.commit()
+
+    catalog.create_table(principal, _ORDERS, schema=_SCHEMA)
+
+    shown = _described(catalog, principal)
+    assert (shown.description, shown.description_source) == ("From the project", "project")
+    assert shown.column_descriptions["id"].text == "Order id"
+
+
+def _events(session: Session, kind: AuditEventType) -> list[AuditEvent]:
+    """List the audit events of one type.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    kind
+        The event type.
+
+    Returns
+    -------
+    list of AuditEvent
+        The events, oldest first.
+    """
+    return list(
+        session.scalars(
+            select(AuditEvent).where(AuditEvent.event_type == kind).order_by(AuditEvent.occurred_at)
+        )
+    )
+
+
+def test_every_change_is_audited_with_lengths_and_not_the_text(
+    session: Session, catalog_with_orders: CatalogService, principal: PrincipalRef
+) -> None:
+    """Set, change and reset each write one event naming the table, the column and the lengths."""
+    catalog = catalog_with_orders
+    catalog.set_table_description(principal, _ORDERS, "secret-looking text")
+    catalog.set_table_description(principal, _ORDERS, "abc")
+    catalog.set_table_description(principal, _ORDERS, None)
+    catalog.set_column_description(principal, _ORDERS, "id", "four")
+
+    table_events = _events(session, AuditEventType.TABLE_DESCRIBED)
+    assert [e.detail for e in table_events] == [
+        {"table": "silver.orders", "old_length": 0, "new_length": 19, "reset": False},
+        {"table": "silver.orders", "old_length": 19, "new_length": 3, "reset": False},
+        {"table": "silver.orders", "old_length": 3, "new_length": 0, "reset": True},
+    ]
+    assert table_events[0].securable_table == "orders"
+    column_events = _events(session, AuditEventType.COLUMN_DESCRIBED)
+    assert [e.detail for e in column_events] == [
+        {
+            "table": "silver.orders",
+            "column": "id",
+            "old_length": 0,
+            "new_length": 4,
+            "reset": False,
+        }
+    ]
+    assert "secret-looking" not in str([e.detail for e in table_events + column_events])
+
+
+def test_the_owner_may_describe_without_any_grant(
+    session: Session, tmp_path: Path, principal: PrincipalRef
+) -> None:
+    """A table's owner edits its description; a column edit also needs to read the table."""
+    owner = _person(session, "owner")
+    setup = _prepared_catalog(session, tmp_path, AllowAllAuthorization(), namespaces=[_SILVER])
+    setup.create_table(owner, _ORDERS, schema=_SCHEMA)
+    catalog = _prepared_catalog(session, tmp_path, ActionAllowList(Action.READ_TABLE))
+    catalog.set_table_description(owner, _ORDERS, "Mine")
+    catalog.set_column_description(owner, _ORDERS, "id", "Mine")
+    assert catalog.describe_table(owner, _ORDERS).description == "Mine"
+
+
+def test_a_manager_may_describe_and_a_reader_may_not(
+    session: Session, tmp_path: Path, principal: PrincipalRef
+) -> None:
+    """Without ownership, the right to drop the table (the manager's right) is needed."""
+    owner = _person(session, "owner")
+    setup = _prepared_catalog(session, tmp_path, AllowAllAuthorization(), namespaces=[_SILVER])
+    setup.create_table(owner, _ORDERS, schema=_SCHEMA)
+    reader = _person(session, "reader")
+    manager = _person(session, "manager")
+
+    as_reader = _prepared_catalog(session, tmp_path, ActionAllowList(Action.READ_TABLE))
+    with pytest.raises(PermissionDenied):
+        as_reader.set_table_description(reader, _ORDERS, "No")
+    with pytest.raises(PermissionDenied):
+        as_reader.set_column_description(reader, _ORDERS, "id", "No")
+
+    as_manager = _prepared_catalog(
+        session, tmp_path, ActionAllowList(Action.READ_TABLE, Action.DROP_TABLE)
+    )
+    as_manager.set_table_description(manager, _ORDERS, "Yes")
+    as_manager.set_column_description(manager, _ORDERS, "id", "Yes")
+    assert as_manager.describe_table(manager, _ORDERS).description == "Yes"
+    assert _events(session, AuditEventType.TABLE_DESCRIBED)[-1].principal_id == manager.id
+    assert len(_events(session, AuditEventType.TABLE_DESCRIBED)) == 1
+
+
+def test_a_refused_change_writes_nothing(
+    session: Session, tmp_path: Path, principal: PrincipalRef
+) -> None:
+    """A refusal leaves the description and the audit log of changes alone."""
+    owner = _person(session, "owner")
+    setup = _prepared_catalog(session, tmp_path, AllowAllAuthorization(), namespaces=[_SILVER])
+    setup.create_table(owner, _ORDERS, schema=_SCHEMA)
+    stranger = _person(session, "stranger")
+    catalog = _prepared_catalog(session, tmp_path, ActionAllowList(Action.READ_TABLE))
+    with pytest.raises(PermissionDenied):
+        catalog.set_table_description(stranger, _ORDERS, "No")
+    assert session.scalars(select(Table)).one().description_edited is None
+    assert _events(session, AuditEventType.TABLE_DESCRIBED) == []
+
+
+def test_a_table_created_through_the_catalog_records_its_creator_as_owner(
+    session: Session, catalog_with_orders: CatalogService, principal: PrincipalRef
+) -> None:
+    """The creator owns the table, which is what lets them describe it."""
+    assert session.scalars(select(Table)).one().owner_id == principal.id
+
+
+def test_a_missing_table_is_not_told_apart_from_a_refusal(
+    session: Session, tmp_path: Path, principal: PrincipalRef
+) -> None:
+    """Someone who may not describe tables is refused whether or not the name exists."""
+    _prepared_catalog(session, tmp_path, AllowAllAuthorization(), namespaces=[_SILVER])
+    stranger = _person(session, "stranger")
+    catalog = _prepared_catalog(session, tmp_path, ActionAllowList(Action.READ_TABLE))
+    with pytest.raises(PermissionDenied):
+        catalog.set_table_description(stranger, _ORDERS, "No")
+    manager = _prepared_catalog(
+        session, tmp_path, ActionAllowList(Action.READ_TABLE, Action.DROP_TABLE)
+    )
+    with pytest.raises(NotFoundError):
+        manager.set_table_description(stranger, _ORDERS, "No")
+
+
+def test_a_project_description_is_not_written_onto_an_artifact(
+    session: Session, catalog_with_orders: CatalogService, principal: PrincipalRef
+) -> None:
+    """An artifact has no description: a deploy that names it leaves the row alone."""
+    row = session.scalars(select(Table)).one()
+    row.table_type = TableType.ARTIFACT
+    session.commit()
+    sync_project_descriptions(session, _env_id(session), _manifest())
+    session.commit()
+    assert session.scalars(select(Table)).one().description_project is None
+    assert session.scalars(select(ColumnDescription)).all() == []
+
+
+def test_a_manifest_name_that_is_not_dotted_is_skipped(
+    session: Session, catalog_with_orders: CatalogService, principal: PrincipalRef
+) -> None:
+    """A damaged manifest entry does not stop the others from being published."""
+    manifest = _manifest()
+    manifest["assets"].insert(0, {"table": "nodots", "metadata": {"description": "lost"}})
+    sync_project_descriptions(session, _env_id(session), manifest)
+    session.commit()
+    assert _described(catalog_with_orders, principal).description == "From the project"
+
+
+def test_resetting_a_column_that_has_no_description_changes_nothing(
+    session: Session, catalog_with_orders: CatalogService, principal: PrincipalRef
+) -> None:
+    """A reset of a column with no row writes no row and audits zero lengths."""
+    catalog_with_orders.set_column_description(principal, _ORDERS, "id", None)
+    assert session.scalars(select(ColumnDescription)).all() == []
+    event = _events(session, AuditEventType.COLUMN_DESCRIBED)[-1]
+    assert (event.detail["old_length"], event.detail["new_length"], event.detail["reset"]) == (
+        0,
+        0,
+        True,
+    )
+
+
+def test_a_description_needs_the_right_to_read_the_table_and_writes_nothing_without_it(
+    session: Session, tmp_path: Path, principal: PrincipalRef
+) -> None:
+    """An owner without READ_TABLE is refused before the edit is stored or audited."""
+    owner = _person(session, "owner")
+    setup = _prepared_catalog(session, tmp_path, AllowAllAuthorization(), namespaces=[_SILVER])
+    setup.create_table(owner, _ORDERS, schema=_SCHEMA)
+    catalog = _prepared_catalog(session, tmp_path, ActionAllowList(Action.DROP_TABLE))
+    with pytest.raises(PermissionDenied, match="READ_TABLE"):
+        catalog.set_table_description(owner, _ORDERS, "No")
+    assert session.scalars(select(Table)).one().description_edited is None
+    assert _events(session, AuditEventType.TABLE_DESCRIBED) == []

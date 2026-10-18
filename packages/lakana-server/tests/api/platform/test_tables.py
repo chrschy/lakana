@@ -170,7 +170,10 @@ def test_get_table_reports_its_schema(client: TestClient) -> None:
     )
 
     assert response.status_code == 200, response.text
-    assert response.json()["schema"] == [
+    assert [
+        {k: v for k, v in column.items() if k in ("name", "type", "nullable")}
+        for column in response.json()["schema"]
+    ] == [
         {"name": "id", "type": "long", "nullable": False},
         {"name": "amount", "type": "decimal(10,2)", "nullable": True},
     ]

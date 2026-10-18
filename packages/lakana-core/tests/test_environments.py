@@ -540,7 +540,9 @@ def test_every_public_catalog_method_calls_authorize() -> None:
     `self._authz.authorize` directly; `check_can_append` is itself a public
     method this same loop checks independently, and does call it. `replace`
     delegates to `check_can_replace` for the same reason. `commit_answer` asks
-    `_may_see_state`, which calls `permits` for READ_TABLE.
+    `_may_see_state`, which calls `permits` for READ_TABLE. `set_table_description` and
+    `set_column_description` ask `_find_table_to_describe`, which authorizes (the owner, or
+    `DROP_TABLE`) before it says anything.
     """
     for name, fn in inspect.getmembers(CatalogService, inspect.isfunction):
         if name.startswith("_"):
@@ -552,6 +554,7 @@ def test_every_public_catalog_method_calls_authorize() -> None:
             or "self.check_can_append(" in source
             or "self.check_can_replace(" in source
             or "self._may_see_state(" in source
+            or "self._find_table_to_describe(" in source
         ), name
 
 

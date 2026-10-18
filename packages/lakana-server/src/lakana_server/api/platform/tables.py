@@ -46,6 +46,7 @@ from lakana_core.identifiers import NamespacePath, TableRef
 from lakana_server.api.platform.schemas import (
     AppendOut,
     ColumnOut,
+    DescriptionIn,
     ExternalTableCreate,
     ExternalTableOut,
     LineageEdgeOut,
@@ -539,6 +540,31 @@ def _to_out(namespace: str, loaded: LoadedTable) -> TableOut:
     )
 
 
+def _column_out(column: ColumnSpec, description: TableDescription) -> ColumnOut:
+    """Build one column of a response body, with its description.
+
+    Parameters
+    ----------
+    column
+        The column.
+    description
+        From `CatalogService.describe_table`, which holds the columns' descriptions.
+
+    Returns
+    -------
+    ColumnOut
+        The column.
+    """
+    text = description.column_descriptions.get(column.name)
+    return ColumnOut(
+        name=column.name,
+        type=column.type,
+        nullable=column.nullable,
+        description=None if text is None else text.text,
+        description_source=None if text is None else text.source,
+    )
+
+
 def _describe_out(namespace: str, description: TableDescription) -> TableOut:
     """Build a response body from any kind of table.
 
@@ -560,9 +586,7 @@ def _describe_out(namespace: str, description: TableDescription) -> TableOut:
         uuid=str(description.id),
         kind=description.kind,  # ty: ignore[invalid-argument-type]
         metadata_location=description.metadata_location,
-        columns=[
-            ColumnOut(name=c.name, type=c.type, nullable=c.nullable) for c in description.columns
-        ],
+        columns=[_column_out(c, description) for c in description.columns],
         sql=description.sql,
         references=None
         if description.kind != "VIEW"
@@ -571,6 +595,8 @@ def _describe_out(namespace: str, description: TableDescription) -> TableOut:
         snapshot_id=description.snapshot_id,
         state=description.state,
         state_message=description.state_message,
+        description=description.description,
+        description_source=description.description_source,
     )
 
 
@@ -893,6 +919,103 @@ def get_table(
     """
     ns = NamespacePath.from_parts(path.split("."))
     ref = TableRef(environment=env, namespace=ns, name=name)
+    return _describe_out(path, catalog.describe_table(principal, ref))
+
+
+@router.patch("/{name}", response_model=TableOut)
+def describe_table(
+    env: str,
+    path: str,
+    name: str,
+    body: DescriptionIn,
+    principal: PrincipalRef = Depends(get_principal),
+    catalog: CatalogService = Depends(get_catalog),
+) -> TableOut:
+    """Set a table's description, or reset it to the project's text.
+
+    The text set here is shown instead of the one a deploy publishes from the asset header, and
+    a deploy never replaces it. `null` removes it.
+
+    Parameters
+    ----------
+    env
+        Environment name.
+    path
+        Dot-joined namespace path.
+    name
+        Table name.
+    body
+        The new `description`, or `null`.
+    principal
+        The authenticated caller.
+    catalog
+        The catalog service for this request.
+
+    Returns
+    -------
+    TableOut
+        The table, with the description it shows now.
+
+    Raises
+    ------
+    lakana_core.errors.NotFoundError
+        Mapped to 404.
+    lakana_core.errors.PermissionDenied
+        Mapped to 403, unless the caller owns the table or holds `DROP_TABLE` on it.
+    lakana_core.errors.ValidationError
+        Mapped to 422 for a blank text or one over 4,000 characters.
+    """
+    ref = TableRef(environment=env, namespace=NamespacePath.from_parts(path.split(".")), name=name)
+    catalog.set_table_description(principal, ref, body.description)
+    return _describe_out(path, catalog.describe_table(principal, ref))
+
+
+@router.put("/{name}/columns/{column}/description", response_model=TableOut)
+def describe_column(
+    env: str,
+    path: str,
+    name: str,
+    column: str,
+    body: DescriptionIn,
+    principal: PrincipalRef = Depends(get_principal),
+    catalog: CatalogService = Depends(get_catalog),
+) -> TableOut:
+    """Set a column's description, or reset it to the project's text.
+
+    Parameters
+    ----------
+    env
+        Environment name.
+    path
+        Dot-joined namespace path.
+    name
+        Table name.
+    column
+        The column's name; it must be in the table's schema.
+    body
+        The new `description`, or `null`.
+    principal
+        The authenticated caller.
+    catalog
+        The catalog service for this request.
+
+    Returns
+    -------
+    TableOut
+        The table, with the descriptions it shows now.
+
+    Raises
+    ------
+    lakana_core.errors.NotFoundError
+        Mapped to 404 for a missing table or column.
+    lakana_core.errors.PermissionDenied
+        Mapped to 403, unless the caller owns the table or holds `DROP_TABLE` on it, and may
+        read it.
+    lakana_core.errors.ValidationError
+        Mapped to 422 for a blank text or one over 4,000 characters.
+    """
+    ref = TableRef(environment=env, namespace=NamespacePath.from_parts(path.split(".")), name=name)
+    catalog.set_column_description(principal, ref, column, body.description)
     return _describe_out(path, catalog.describe_table(principal, ref))
 
 

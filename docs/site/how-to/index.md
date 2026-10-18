@@ -19,6 +19,7 @@ Pages:
 - [Delete an artifact version](delete-an-artifact-version.md): remove one version or a whole artifact; Lakana cannot undo it.
 - [Show some people only some rows](filter-rows.md): hide the rows that fail a condition, and what Lakana refuses when you create a filter.
 - [Mask a column for some people](mask-a-column.md): show a replacement value instead of a column, and what masks do not protect.
+- [Describe a table](describe-a-table.md): write a description for a table and its columns, in the project or by hand, and go back to the project's text.
 - [Stop a query](stop-a-query.md): cancel one with Ctrl-C or a command, who may, and what else ends a query.
 - [Why is my query or task waiting?](why-is-it-waiting.md): read the reason a query or a task has not started and what to do about it.
 - [List and withdraw an open upload](withdraw-an-artifact-upload.md): free the place that an upload left by a killed process holds.

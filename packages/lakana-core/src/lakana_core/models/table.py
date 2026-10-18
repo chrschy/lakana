@@ -10,6 +10,7 @@ from sqlalchemy import (
     Enum,
     ForeignKey,
     String,
+    Text,
     UniqueConstraint,
     Uuid,
     false,
@@ -164,6 +165,19 @@ class Table(Base, TimestampMixin):
     newest `lakana_core.runs.kept.KEPT_EARLIER_LIMIT` entries are kept. A set-back with no entry
     for its snapshot (a row from before this column, history that ran out) gives a mark of unknown
     checks. An entry of a mark of unknown checks has ``"unknown": true``.
+    """
+
+    description_project: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    """The description the project's asset header gives the table (`description:`).
+
+    Written only by a deploy, a rollback, or the table's creation by a run; never by an edit.
+    """
+
+    description_edited: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    """The description set through the API, which is shown instead of `description_project`.
+
+    Written only by `lakana_core.catalog.descriptions`; `None` once reset. A deploy never
+    changes it.
     """
 
     @property
