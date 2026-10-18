@@ -15,6 +15,7 @@ from lakana_core.models.group import Group, GroupMembership
 from lakana_core.models.namespace import Namespace
 from lakana_core.models.query_run import QueryErrorCause, QueryRun, QueryRunStatus, WriteMode
 from lakana_core.models.table import Table, TableType
+from lakana_core.models.table_read import TableRead
 from lakana_core.models.artifact import ArtifactBlob, ArtifactUpload, ArtifactVersion
 from lakana_core.models.row_filter import RowFilter
 from lakana_core.models.secret import Secret, SecretUseKind
@@ -93,6 +94,7 @@ __all__ = [
     "Secret",
     "SecretUseKind",
     "Table",
+    "TableRead",
     "TableType",
     "TaskAttempt",
     "TaskRun",

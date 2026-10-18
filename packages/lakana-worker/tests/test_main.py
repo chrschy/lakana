@@ -656,6 +656,7 @@ def _housekeeping(
     artifacts: mock.MagicMock,
     code: mock.MagicMock,
     fires: mock.MagicMock | None = None,
+    reads: mock.MagicMock | None = None,
 ) -> None:
     """Run `main`, then the housekeeping callable it gave the scheduler, once.
 
@@ -671,6 +672,8 @@ def _housekeeping(
         Stands in for `sweep_code_archives`.
     fires
         Stands in for `sweep_job_fires`; a mock that succeeds when `None`.
+    reads
+        Stands in for `sweep_table_reads`; a mock that succeeds when `None`.
     """
     monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{tmp_path}/lakana.db")
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
@@ -680,6 +683,7 @@ def _housekeeping(
         mock.patch("lakana_worker.__main__.sweep_artifacts", artifacts),
         mock.patch("lakana_worker.__main__.sweep_code_archives", code),
         mock.patch("lakana_worker.__main__.sweep_job_fires", fires or mock.MagicMock()),
+        mock.patch("lakana_worker.__main__.sweep_table_reads", reads or mock.MagicMock()),
         mock.patch("lakana_worker.__main__.signal.signal"),
     ):
         scheduler_mock.return_value.start.return_value.is_alive.return_value = False
@@ -736,6 +740,44 @@ def test_a_failing_job_fire_sweep_is_logged_and_the_others_still_run(
         _housekeeping(tmp_path, monkeypatch, artifacts, code, mock.MagicMock(side_effect=OSError))
     assert artifacts.call_count == code.call_count == 1
     assert "OSError" in caplog.text
+
+
+def _housekeeping_with_table_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reads: mock.MagicMock
+) -> None:
+    """Run `main` with `LAKANA_TABLE_READS__KEEP_DAYS=45`, then its housekeeping once.
+
+    Parameters
+    ----------
+    tmp_path
+        Pytest's per-test directory.
+    monkeypatch
+        The fixture.
+    reads
+        Stands in for `sweep_table_reads`.
+    """
+    monkeypatch.setenv("LAKANA_TABLE_READS__KEEP_DAYS", "45")
+    _housekeeping(tmp_path, monkeypatch, mock.MagicMock(), mock.MagicMock(), reads=reads)
+
+
+def test_housekeeping_also_deletes_the_reads_past_the_kept_period(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reads = mock.MagicMock()
+    _housekeeping_with_table_reads(tmp_path, monkeypatch, reads)
+    assert reads.call_count == 1
+    assert reads.call_args.kwargs == {
+        "keep_days": 45,
+        "now": datetime(2026, 10, 5, 12, 0, tzinfo=UTC),
+    }
+
+
+def test_a_failing_table_reads_sweep_is_logged_and_does_not_raise(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.WARNING):
+        _housekeeping_with_table_reads(tmp_path, monkeypatch, mock.MagicMock(side_effect=OSError))
+    assert "The table reads sweep failed (OSError)" in caplog.text
 
 
 def test_the_start_up_log_says_when_nothing_collects_leftovers(

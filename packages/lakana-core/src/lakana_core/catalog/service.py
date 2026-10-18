@@ -75,6 +75,13 @@ from lakana_core.catalog.descriptions import (
 )
 from lakana_core.catalog.external_location import check_claim_free, parse_external_location
 from lakana_core.catalog.field_ids import check_added_files_have_field_ids
+from lakana_core.catalog.health import (
+    TableHealth,
+    last_maintenance,
+    latest_checks,
+    readers,
+    snapshot_stats,
+)
 from lakana_core.catalog.identity import artifact_refusal, resolve_table_id
 from lakana_core.catalog.json_schema import ColumnSpec, from_iceberg_schema
 from lakana_core.catalog.maintenance import (
@@ -132,6 +139,7 @@ from lakana_core.errors import (
     ValidationError,
     WriteOutcomeUnknownError,
 )
+from lakana_core.grants.admin import may_see_grants
 from lakana_core.grants.revocation import revoke_attached
 from lakana_core.identifiers import (
     NAMESPACE_SEPARATOR,
@@ -534,6 +542,15 @@ class TableDescription:
         ``"edited"`` or ``"project"``; `None` when there is no description.
     column_descriptions
         Column name → text and source, for the columns of `columns` that have a description.
+    last_write_at
+        When the current snapshot of a managed table was committed; `None` without one, and for
+        every other kind.
+    row_count
+        The rows in the current snapshot's summary (``total-records``); `None` when missing.
+    size_bytes
+        The size of its data files (``total-files-size``); `None` when missing.
+    file_count
+        Its data files (``total-data-files``); `None` when missing.
     """
 
     ref: TableRef
@@ -552,6 +569,10 @@ class TableDescription:
     description: str | None = None
     description_source: Literal["project", "edited"] | None = None
     column_descriptions: dict[str, ShownDescription] = dataclass_field(default_factory=dict)
+    last_write_at: datetime | None = None
+    row_count: int | None = None
+    size_bytes: int | None = None
+    file_count: int | None = None
 
 
 _NO_UNPUBLISHING = (
@@ -2653,6 +2674,53 @@ class CatalogService:
             ),
         )
 
+    def table_health(
+        self,
+        p: PrincipalRef,
+        ref: TableRef,
+        *,
+        days: int,
+        now: datetime,
+    ) -> TableHealth:
+        """Show a table's last maintenance, the newest result of each of its checks and its readers.
+
+        Parameters
+        ----------
+        p
+            The acting principal.
+        ref
+            The table reference.
+        days
+            The window of the readers in days, already checked against the kept period.
+        now
+            The present time.
+
+        Returns
+        -------
+        TableHealth
+            The health. `readers` is `None` unless `p` may see grants (`MANAGE_GRANT` and the
+            `ADMIN` role, as for the grants listing).
+
+        Raises
+        ------
+        NotFoundError
+            If the table does not exist.
+        PermissionDenied
+            If `p` may not read it.
+        """
+        self._authz.authorize(
+            p, Action.READ_TABLE, Securable.table_scope(ref.environment, ref.namespace, ref.name)
+        )
+        _, row = self._find_table(ref)
+        return TableHealth(
+            days=days,
+            last_maintenance=last_maintenance(self._session, row.id),
+            checks=latest_checks(self._session, row.id),
+            readers=readers(self._session, row.id, days=days, now=now)
+            if may_see_grants(self._session, self._authz, p)
+            else None,
+        )
+
     def _describe_row(self, p: PrincipalRef, ref: TableRef, row: Table) -> TableDescription:
         """Describe a table row by kind, without its descriptions.
 
@@ -2721,6 +2789,7 @@ class CatalogService:
             )
         elif row.kept_run_id is not None:
             state, message = "kept", kept_message(row)
+        stats = snapshot_stats(loaded.metadata)
         return TableDescription(
             ref=ref,
             id=row.id,
@@ -2731,6 +2800,10 @@ class CatalogService:
             state=state,
             state_message=message,
             schema_id=loaded.metadata.current_schema_id,
+            last_write_at=stats.last_write_at,
+            row_count=stats.row_count,
+            size_bytes=stats.size_bytes,
+            file_count=stats.file_count,
         )
 
     def _authorize_describe(self, p: PrincipalRef, ref: TableRef, row: Table) -> None:

@@ -3265,3 +3265,59 @@ def test_0037_adds_the_description_columns_and_table(
         )
     finally:
         engine.dispose()
+
+
+_REVISION_0038 = "d7a4b0e3c9f5"
+
+
+def test_0038_adds_the_table_reads_table(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Revision `0038`: `table_reads` with its keys and its day index, undone on downgrade.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    """
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, _REVISION_0037)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        assert "table_reads" not in inspect(engine).get_table_names()
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, _REVISION_0038)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        inspector = inspect(engine)
+        columns = {c["name"]: c for c in inspector.get_columns("table_reads")}
+        assert set(columns) == {
+            "id",
+            "table_id",
+            "principal_id",
+            "day",
+            "read_count",
+            "last_read_at",
+        }
+        assert not any(c["nullable"] for c in columns.values())
+        assert [
+            (fk["referred_table"], fk["options"].get("ondelete"))
+            for fk in inspector.get_foreign_keys("table_reads")
+        ] == [("tables", "CASCADE"), ("principals", "CASCADE")]
+        assert [u["column_names"] for u in inspector.get_unique_constraints("table_reads")] == [
+            ["table_id", "principal_id", "day"]
+        ]
+        assert [i["column_names"] for i in inspector.get_indexes("table_reads")] == [["day"]]
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, _REVISION_0037)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        assert "table_reads" not in inspect(engine).get_table_names()
+    finally:
+        engine.dispose()
