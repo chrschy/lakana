@@ -277,7 +277,7 @@ SQLite alike.
 
 | Action | Needs | Notes |
 |---|---|---|
-| Set or reset a table's or a column's description (`PATCH .../tables/{name}`, `PUT .../tables/{name}/columns/{column}/description`) | the table's owner (`Table.owner_id`), or `DROP_TABLE` on the table | There is no `MANAGE_TABLE` action; the manager's right is the existing `DROP_TABLE` (data engineer and admin roles). `DROP_TABLE` is in `TASK_TOKEN_ACTIONS`, so an unbound task token that holds it may describe, as it may drop; a bound one cannot. A column also needs `READ_TABLE` (the column must be checked against the schema the caller may read). A refusal is `AUTHORIZATION_DENIED` as for any action. |
+| Set or reset a table's or a column's description (`PATCH .../tables/{name}`, `PUT .../tables/{name}/columns/{column}/description`) | the table's owner (`Table.owner_id`), or `DROP_TABLE` on the table | There is no `MANAGE_TABLE` action; the manager's right is the existing `DROP_TABLE` (data engineer and admin roles). `DROP_TABLE` is in `TASK_TOKEN_ACTIONS`, so an unbound task token that holds it may describe, as it may drop; a bound one cannot. Both routes also need `READ_TABLE`, checked before anything is written (the answer is the table as the caller reads it; a column is also checked against the schema the caller may read). A refusal is `AUTHORIZATION_DENIED` as for any action. |
 | Read | `READ_TABLE`, as the table itself | |
 
 Audited in the same transaction (`TABLE_DESCRIBED`, `COLUMN_DESCRIBED`; `detail`: `table`, `column`, `old_length`, `new_length`, `reset`); the text is never in `detail`. A deploy writes only `description_project` and the project rows of `column_descriptions`; it never touches an edit (`catalog/descriptions.py`). Pins: `test_descriptions.py`.

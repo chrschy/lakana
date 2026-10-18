@@ -61,7 +61,7 @@ Under `/api/v1/environments/{env}/namespaces/{path}/tables/{name}`:
 ## Rights
 
 The table's owner (the principal that created it), or a principal holding `DROP_TABLE` on the table.
-A column route also needs `READ_TABLE`. There is no separate action. A refusal is `403` and is
+Both routes also need `READ_TABLE`, checked before anything is written. There is no separate action. A refusal is `403` and is
 recorded as `AUTHORIZATION_DENIED`.
 
 ## Audit events

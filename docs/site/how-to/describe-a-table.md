@@ -71,7 +71,7 @@ lakana table describe silver.orders --column status --reset
 ## Who may change a description
 
 The table's owner, which is whoever created it, and anyone who holds `DROP_TABLE` on it. Changing a
-column's text also needs the right to read the table. A refusal is recorded in the audit log like any
+table's or a column's text also needs the right to read the table. A refusal is recorded in the audit log like any
 other. Every change is recorded as `TABLE_DESCRIBED` or `COLUMN_DESCRIBED`; the record holds the table,
 the column and the length of the edit before and after, not the text. The facts of the routes, the
 SDK and the audit events are in [Descriptions](../reference/descriptions.md).

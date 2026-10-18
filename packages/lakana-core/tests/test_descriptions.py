@@ -504,3 +504,17 @@ def test_resetting_a_column_that_has_no_description_changes_nothing(
         0,
         True,
     )
+
+
+def test_a_description_needs_the_right_to_read_the_table_and_writes_nothing_without_it(
+    session: Session, tmp_path: Path, principal: PrincipalRef
+) -> None:
+    """An owner without READ_TABLE is refused before the edit is stored or audited."""
+    owner = _person(session, "owner")
+    setup = _prepared_catalog(session, tmp_path, AllowAllAuthorization(), namespaces=[_SILVER])
+    setup.create_table(owner, _ORDERS, schema=_SCHEMA)
+    catalog = _prepared_catalog(session, tmp_path, ActionAllowList(Action.DROP_TABLE))
+    with pytest.raises(PermissionDenied, match="READ_TABLE"):
+        catalog.set_table_description(owner, _ORDERS, "No")
+    assert session.scalars(select(Table)).one().description_edited is None
+    assert _events(session, AuditEventType.TABLE_DESCRIBED) == []

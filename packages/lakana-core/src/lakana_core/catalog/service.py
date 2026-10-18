@@ -2826,12 +2826,15 @@ class CatalogService:
         NotFoundError
             If the table does not exist.
         PermissionDenied
-            If `p` neither owns the table nor holds `DROP_TABLE` on it.
+            If `p` neither owns the table nor holds `DROP_TABLE` on it, or may not read it.
         ValidationError
             If the text is blank or over `MAX_DESCRIPTION_LENGTH` characters, or the row is an
             artifact.
         """
         row = self._find_table_to_describe(p, ref)
+        self._authz.authorize(
+            p, Action.READ_TABLE, Securable.table_scope(ref.environment, ref.namespace, ref.name)
+        )
         check_text(description, f"table {ref.dotted()}")
         old, new = edit_table(row, description)
         AuditService(self._session).record(

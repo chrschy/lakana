@@ -198,3 +198,28 @@ def test_the_creator_owns_the_table_and_may_describe_it(client: TestClient) -> N
         assert row.description_edited == "Mine"
     other = client.patch(f"{_TABLES}/t", headers=owner, json={"description": "Not mine"})
     assert other.status_code == 403, other.text
+
+
+def test_a_creator_without_read_is_refused_and_nothing_is_stored(client: TestClient) -> None:
+    _setup(client)
+    maker = _person(client, "writer-only", "CREATE_TABLE", "READ_NAMESPACE")
+    created = client.post(
+        _TABLES,
+        headers=maker,
+        json={"name": "blind", "schema": [{"name": "id", "type": "long", "nullable": False}]},
+    )
+    assert created.status_code == 201, created.text
+    refused = client.patch(f"{_TABLES}/blind", headers=maker, json={"description": "No"})
+    assert refused.status_code == 403, refused.text
+    assert "READ_TABLE" in refused.text
+    with Session(client.app.state.engine) as session:
+        assert (
+            session.scalars(select(Table).where(Table.name == "blind")).one().description_edited
+            is None
+        )
+        assert (
+            session.scalars(
+                select(AuditEvent).where(AuditEvent.event_type == AuditEventType.TABLE_DESCRIBED)
+            ).all()
+            == []
+        )
