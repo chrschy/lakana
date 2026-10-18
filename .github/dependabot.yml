@@ -51,3 +51,13 @@ updates:
         patterns: ["*"]
     commit-message:
       prefix: "ci"
+
+  - package-ecosystem: "npm"
+    directory: "/tools/jscpd"     # package-lock.json: the pinned jscpd of the duplication check
+    schedule:
+      interval: "weekly"
+    groups:
+      script-tools:                   # one pull request per week, not one per package
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"            # a tool of CI, hidden from the changelog

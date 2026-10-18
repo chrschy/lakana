@@ -189,6 +189,9 @@ every missing output of it means "run everything".
   `packages/*/src/` as well as for the bundle, packaging and script files in the filter of its
   "Did the bundle change?" step. `test` has a 30-minute timeout.
 - **Coverage** is measured on 3.14 only (see the coverage ratchet below).
+- **Duplication** is measured by the `lint` job: `jscpd`, pinned in `tools/jscpd`, scans
+  `packages/*/src` (not the tests) and `scripts/duplication_ratchet.py` fails when the duplicated
+  lines or the clones rise (see "The duplication ratchet" below).
 - **`test (macos)`** (job `test-macos`) is the macOS check: Lakana's local mode supports macOS
   (Python 3.13 and later), and this job runs what a macOS user runs, on GitHub's `macos-latest`
   (Apple Silicon, 3 cores, 7 GB) with Python 3.14. It runs the `packages/` unit suite (not
@@ -202,11 +205,14 @@ every missing output of it means "run everything".
   `coreutils` and puts a small Python `setsid` in front of the path. The job always runs on
   GitHub's runner, never the `CI_RUNNER` switch (see "CI runners"); a pull request runs it only if
   it changes `packages/`, the root `pyproject.toml`, `uv.lock`, `docs/examples/` or the files the job runs, and it skips a
-  draft and a documentation-only change like the other heavy jobs. It is **informational for
-  now** (`continue-on-error: true`): the first runs found 50 failures, collected in #153, and the
-  PR that closes #153 removes the flag. It is **not a required check yet**; the maintainer makes
-  it one after a week of green runs (#148). A failure that only macOS shows is fixed or filed as
-  an issue.
+  draft and a documentation-only change like the other heavy jobs. A failure fails the run (the
+  first runs' 50 failures were fixed in #153). It is **not a required check yet**; the maintainer
+  makes it one after a week of green runs (#148). A failure that only macOS shows is fixed or
+  filed as an issue. A test that cannot hold on macOS (it reads `/proc`, or needs a file name
+  APFS refuses) is skipped there with `skipif(sys.platform == "darwin", reason=...)` naming why;
+  one that only assumes a Linux path or limit is made portable instead. Code that differs on macOS
+  gets a seam (a missing `os.O_PATH`, `sys.platform`, an errno) so its macOS branch runs on Linux
+  too and coverage holds.
 
 ### Scorecard, Semgrep and the release workflow
 
@@ -758,6 +764,41 @@ right now: any PR that drops total coverage below 100% fails even though it woul
 clear the 90% floor. Both checks run on every CI invocation; whichever is higher wins. As
 the codebase grows and coverage settles below 100%, the 90% floor becomes the operative
 bound instead — but it has been enforced, unconditionally, since the baseline was set.
+
+## The duplication ratchet
+
+Nothing else in CI sees copied code, so the `lint` job runs **jscpd** (MIT) over the Python source
+of the four packages, `packages/*/src`. Tests are not scanned: they repeat their setup on purpose.
+jscpd is a pinned npm tool in `tools/jscpd` (`package.json` with one exact version,
+`package-lock.json`, Dependabot's `npm` entry, and the licence check of
+`scripts/check_licenses.py` reads the lock like any other). CI runs `npm ci --ignore-scripts` there
+and never a bare `npx jscpd`. A clone is a block of at least 70 tokens (`--min-tokens 70`, about
+six lines) that appears twice. The licence check needs the `license` field of every package in the lock,
+which npm writes from version 11 on: regenerate the lock with `npx npm@11 install
+--package-lock-only` in `tools/jscpd` when a Dependabot update leaves it out (the check then
+fails and names the packages).
+
+`scripts/duplication_ratchet.py` reads jscpd's JSON report (`jscpd-report/jscpd-report.json`,
+ignored by git) and the baseline `scripts/duplication-baseline.json`: duplicated lines, number of
+clones, and both per pair of files. It fails when either total **rises**, and then prints every
+block of the pairs that gained duplication as `file:start-end ↔ file:start-end`. Names are
+relative to each package's `src`. When the numbers **fall** it passes and prints the new numbers;
+lower the baseline in the same pull request with `--update`, or the freed room will be spent by
+the next change.
+
+Run it locally the same way CI does:
+
+```bash
+npm ci --ignore-scripts --prefix tools/jscpd
+tools/jscpd/node_modules/.bin/jscpd packages/*/src \
+  --format python --min-tokens 70 --reporters json --output jscpd-report --silent
+uv run python scripts/duplication_ratchet.py          # check
+uv run python scripts/duplication_ratchet.py --update # lower the baseline after a fall
+```
+
+`--update` never records a rise. To regenerate `tools/jscpd/package-lock.json` use npm 11 or
+later: older npm versions leave out the `license` fields that the licence check needs.
+How to handle a finding: "Duplicated code" in `docs/agent/conventions.md`.
 
 ## Property-based testing for the policy rewriter (M3)
 

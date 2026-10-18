@@ -121,6 +121,19 @@ jobs:
         run: uv run ty check packages
       - name: import contracts
         run: uv run lint-imports
+      # Copied code: jscpd (pinned in tools/jscpd) reports the clones in the packages' source,
+      # tests excluded because they repeat their setup on purpose; the ratchet fails when the
+      # duplicated lines or the clones rise above scripts/duplication-baseline.json.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: "22"
+      - name: duplication (jscpd)
+        run: |
+          npm ci --ignore-scripts --prefix tools/jscpd
+          tools/jscpd/node_modules/.bin/jscpd packages/*/src \
+            --format python --min-tokens 70 --reporters json --output jscpd-report --silent
+      - name: duplication (ratchet)
+        run: uv run python scripts/duplication_ratchet.py
 
   # `test (3.11)` and `test (3.14)` are required checks, so this job always runs and
   # reports; for a docs-only change it runs the tests that read the documentation.
@@ -198,8 +211,6 @@ jobs:
     if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.draft != 'true' }}
     runs-on: macos-latest
     timeout-minutes: 40
-    # Informational until the suite passes on macOS (#153); remove this line with the fixes.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
 import subprocess
 import tomllib
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -267,6 +269,126 @@ def test_each_package_publishes_to_production_pypi_from_its_own_environment() ->
     }
 
 
+_BEFORE_THE_GATE = {"release-please", "build", "sbom", "approve"}
+_APPROVE_KEYS = {"needs", "if", "runs-on", "timeout-minutes", "environment", "permissions", "steps"}
+_STATUS_FUNCTIONS = re.compile(r"\b(always|cancelled|failure|success)\s*\(")
+"""Any status function in an ``if`` drops the implicit ``success() &&``.
+
+The job could then run after a rejection.
+"""
+
+
+def _reaches(jobs: dict, name: str, target: str) -> bool:
+    """Tell whether a job depends on another one, directly or through its ``needs``.
+
+    Parameters
+    ----------
+    jobs
+        The workflow's ``jobs`` mapping.
+    name
+        The job to start from.
+    target
+        The job it must depend on.
+
+    Returns
+    -------
+    bool
+        ``True`` when ``target`` is in the transitive ``needs`` of ``name``.
+    """
+    needs = jobs[name].get("needs", [])
+    needs = [needs] if isinstance(needs, str) else needs
+    return any(n == target or _reaches(jobs, n, target) for n in needs)
+
+
+def _gate_violations(jobs: dict) -> list[str]:
+    """List the ways a release workflow lets something happen before or despite the approval.
+
+    Parameters
+    ----------
+    jobs
+        The workflow's ``jobs`` mapping.
+
+    Returns
+    -------
+    list of str
+        One message per violation; empty when the gate holds.
+    """
+    problems = []
+    approve = jobs["approve"]
+    if approve.get("environment") != "release-approval":
+        problems.append("approve is not in the environment `release-approval`")
+    if approve.get("permissions") != {}:
+        problems.append("approve holds permissions")
+    if set(approve) != _APPROVE_KEYS:
+        problems.append(f"approve has the keys {sorted(set(approve))}")
+    steps = approve.get("steps", [])
+    if len(steps) != 1 or set(steps[0]) - {"run", "env"} or "run" not in steps[0]:
+        problems.append("approve runs more than one plain `run` step")
+    if set(approve.get("needs", [])) != {"release-please", "build"}:
+        problems.append("approve does not need release-please and build")
+    for name, job in jobs.items():
+        if name in _BEFORE_THE_GATE:
+            if name in {"release-please", "approve"}:
+                continue
+            if "write" in (job.get("permissions") or {}).values():
+                problems.append(f"`{name}` runs before the gate with a write permission")
+            if re.search(r"\bsecrets\b", str(job)):
+                problems.append(f"`{name}` runs before the gate and reads a secret")
+            continue
+        if not _reaches(jobs, name, "approve"):
+            problems.append(f"`{name}` does not wait for approve")
+        if _STATUS_FUNCTIONS.search(str(job.get("if", ""))):
+            problems.append(
+                f"`{name}` has a status function in its `if` and can run after a rejection"
+            )
+    return problems
+
+
+def test_one_approval_job_gates_a_release() -> None:
+    """Only release-please, build and sbom run before ``approve``; none runs after a rejection."""
+    jobs = _jobs("release.yml")
+    assert _gate_violations(jobs) == []
+    assert jobs["approve"]["if"] == "needs.release-please.outputs.released == 'true'"
+
+
+@pytest.mark.parametrize(
+    ("break_it", "expected"),
+    [
+        (lambda j: j["publish-core"].update(needs=["build"]), "`publish-core` does not wait"),
+        (lambda j: j["pages"].update(**{"if": "always()"}), "`pages` has a status function"),
+        (lambda j: j["pages"].update(**{"if": "success() || x"}), "`pages` has a status function"),
+        (lambda j: j["approve"].update(**{"continue-on-error": True}), "approve has the keys"),
+        (
+            lambda j: j["approve"].update(permissions={"contents": "write"}),
+            "approve holds permissions",
+        ),
+        (lambda j: j["approve"]["steps"].append({"uses": "x/y@z"}), "more than one plain"),
+        (lambda j: j.update(upload={"needs": "build", "steps": []}), "`upload` does not wait"),
+        (lambda j: j["pages"].update(**{"if": "${{ !success() }}"}), "`pages` has a status"),
+        (lambda j: j["pages"].update(**{"if": "x || success()"}), "`pages` has a status"),
+        (
+            lambda j: j["build"].update(permissions={"contents": "write"}),
+            "`build` runs before the gate with a write permission",
+        ),
+        (
+            lambda j: j["sbom"]["steps"].append({"run": "x", "env": {"T": "${{ secrets.T }}"}}),
+            "`sbom` runs before the gate and reads a secret",
+        ),
+        (
+            lambda j: j["sbom"].update(secrets="inherit"),
+            "`sbom` runs before the gate and reads a secret",
+        ),
+    ],
+)
+def test_the_gate_check_catches_a_broken_workflow(
+    break_it: Callable[[dict], object], expected: str
+) -> None:
+    """The check flags each way of weakening the gate, on a copy of the real workflow."""
+    jobs = copy.deepcopy(_jobs("release.yml"))
+    break_it(jobs)
+    assert any(expected in problem for problem in _gate_violations(jobs))
+
+
 def test_no_release_step_points_at_the_test_index() -> None:
     """Production PyPI is the default; no step overrides it with a repository or index URL."""
     text = (WORKFLOWS / "release.yml").read_text()
@@ -278,7 +400,7 @@ def test_dependabot_groups_its_updates_and_keeps_the_pinned_tools_apart() -> Non
     """One pull request per ecosystem and week; ruff and ty upgrade in their own."""
     config = yaml.safe_load((ROOT / ".github" / "dependabot.yml").read_text())
     updates = {entry["package-ecosystem"]: entry for entry in config["updates"]}
-    assert set(updates) == {"uv", "github-actions", "docker", "pip"}
+    assert set(updates) == {"uv", "github-actions", "docker", "pip", "npm"}
     for ecosystem, entry in updates.items():
         groups = entry["groups"]
         assert len(groups) == 1, ecosystem
@@ -286,6 +408,54 @@ def test_dependabot_groups_its_updates_and_keeps_the_pinned_tools_apart() -> Non
         assert group["patterns"] == ["*"], ecosystem
     (python,) = updates["uv"]["groups"].values()
     assert python["exclude-patterns"] == ["ruff", "ty"]
+
+
+def test_dependabot_watches_the_pinned_jscpd() -> None:
+    """The lockfile of the duplication check is updated by Dependabot, as a hidden `ci` change."""
+    config = yaml.safe_load((ROOT / ".github" / "dependabot.yml").read_text())
+    (npm,) = (entry for entry in config["updates"] if entry["package-ecosystem"] == "npm")
+    assert npm["directory"] == "/tools/jscpd"
+    assert npm["commit-message"]["prefix"] == "ci"
+    assert (ROOT / "tools" / "jscpd" / "package-lock.json").is_file()
+
+
+def test_jscpd_is_pinned_to_one_exact_version() -> None:
+    """No range and no bare `npx jscpd`: the version CI runs is the one in the lock."""
+    package = json.loads((ROOT / "tools" / "jscpd" / "package.json").read_text())
+    assert re.fullmatch(r"\d+\.\d+\.\d+", package["devDependencies"]["jscpd"])
+    assert set(package["devDependencies"]) == {"jscpd"}
+
+
+def test_lint_measures_duplication_in_the_sources_and_runs_the_ratchet() -> None:
+    """`lint` installs the locked jscpd, scans the packages' source and ratchets the report.
+
+    Tests are not scanned (they repeat their setup on purpose), the report is JSON, and the
+    ratchet runs after jscpd so that it never reads a stale report.
+    """
+    steps = _jobs("ci.yml")["lint"]["steps"]
+    commands = [command for step in steps for command in _commands(step)]
+    install = next(i for i, c in enumerate(commands) if c.startswith("npm ci"))
+    scan = next(i for i, c in enumerate(commands) if "node_modules/.bin/jscpd" in c)
+    ratchet = next(i for i, c in enumerate(commands) if "scripts/duplication_ratchet.py" in c)
+    assert install < scan < ratchet
+    assert "--prefix tools/jscpd" in commands[install]
+    assert "--ignore-scripts" in commands[install]
+    assert "packages/*/src" in commands[scan]
+    assert "tests" not in commands[scan]
+    assert "--min-tokens 70" in commands[scan]
+    assert "--reporters json" in commands[scan]
+    assert commands[scan].startswith("tools/jscpd/node_modules/.bin/jscpd")
+    node = next(
+        step for step in steps if str(step.get("uses", "")).startswith("actions/setup-node")
+    )
+    assert steps.index(node) < next(i for i, s in enumerate(steps) if "npm ci" in str(s.get("run")))
+
+
+def test_lint_keeps_the_read_only_token_while_it_runs_jscpd() -> None:
+    """`lint` declares no permissions of its own, so it keeps the read-only top level."""
+    workflow = yaml.safe_load((WORKFLOWS / "ci.yml").read_text())
+    assert workflow["permissions"] == {"contents": "read"}
+    assert "permissions" not in workflow["jobs"]["lint"]
 
 
 def _test_steps() -> dict[str, dict]:
@@ -1033,7 +1203,7 @@ def test_only_the_job_that_uploads_the_sbom_can_write_to_the_release() -> None:
 
     job = jobs["sbom-release"]
     assert job["permissions"] == {"contents": "write"}
-    assert set(job["needs"]) == {"release-please", "sbom"}
+    assert set(job["needs"]) == {"release-please", "approve", "sbom"}
     assert job["if"] == jobs["sbom"]["if"]
     uses = [s["uses"].split("@")[0] for s in job["steps"] if "uses" in s]
     assert uses == ["actions/download-artifact"]
@@ -1182,7 +1352,7 @@ def test_every_published_artefact_gets_a_build_provenance_attestation() -> None:
     assert jobs["publish-image"]["permissions"] == {"contents": "read", "packages": "write"}
     (wheels,) = attest(jobs["attest-dist"])
     assert wheels["with"]["subject-path"].split() == ["dist/*.whl", "dist/*.tar.gz"]
-    assert jobs["attest-dist"]["needs"] == "build"
+    assert set(jobs["attest-dist"]["needs"]) == {"build", "approve"}
     # Scorecard looks for a signature among the release's assets: the bundle goes there from a
     # job that only downloads it, like the SBOM's.
     release = jobs["provenance-release"]
@@ -1210,12 +1380,12 @@ def test_the_macos_job_runs_the_unit_suite_and_the_getting_started_example() -> 
 
     macOS users run local mode, so the job runs what they use: the unit suite, and the tutorial's
     example (which ends with ``lakana server reset --local``). It is pinned to GitHub's runner,
-    never the ``CI_RUNNER`` switch, and it is not a required check. Until the suite passes on
-    macOS (#153) a failure does not fail the run.
+    never the ``CI_RUNNER`` switch, and it is not a required check yet. Since the suite passes on
+    macOS (#153) a failure fails the run like any other job's.
     """
     job = _jobs("ci.yml")[MACOS_JOB]
     assert job["name"] == "test (macos)"
-    assert job["continue-on-error"] is True  # remove with #153
+    assert "continue-on-error" not in job
     assert job["runs-on"] == "macos-latest"
     assert "CI_RUNNER" not in str(job)
     assert job["timeout-minutes"] <= 45
@@ -1365,7 +1535,7 @@ def test_each_release_publishes_the_documentation_site_on_github_pages() -> None
     workflow = yaml.safe_load((WORKFLOWS / "release.yml").read_text())
     assert set(workflow[True]) == {"push"}  # no manual trigger: only a release deploys
     job = workflow["jobs"]["pages"]
-    assert job["needs"] == "release-please"
+    assert set(job["needs"]) == {"release-please", "approve"}
     assert job["if"] == workflow["jobs"]["sbom"]["if"]
     assert job["runs-on"] == "ubuntu-latest"
     checkout = next(s for s in job["steps"] if s.get("uses", "").startswith("actions/checkout@"))

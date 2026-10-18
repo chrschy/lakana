@@ -452,13 +452,22 @@ class FsspecStorage:
         NotFoundError
             If no object exists at that path, or the path names a directory
             rather than an object.
+        PermissionError
+            If the backend refuses to delete the object.
         ValidationError
             If the path contains a NUL byte, or escapes the configured storage
             root.
         """
+        full = self._full(path)
         try:
-            self._fs.rm_file(self._full(path))
+            self._fs.rm_file(full)
         except (FileNotFoundError, IsADirectoryError) as exc:
+            raise NotFoundError(f"No object at {path!r}.") from exc
+        except PermissionError as exc:
+            # macOS `unlink` refuses a directory with EPERM where Linux says EISDIR. On an object
+            # store `x` can be an object and a prefix at once, so a denial there stays a denial.
+            if not isinstance(self._fs, LocalFileSystem) or not self._fs.isdir(full):
+                raise
             raise NotFoundError(f"No object at {path!r}.") from exc
 
     def exists(self, path: str) -> bool:

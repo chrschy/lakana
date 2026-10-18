@@ -573,9 +573,24 @@ def test_start_watchdog_logs_the_limit_and_starts(
     monkeypatch.setattr(memory, "read_cgroup_limit", lambda: None)
     monkeypatch.setattr(memory, "tools", lambda *a: (lambda: 0, lambda: None))
     with caplog.at_level(logging.INFO):
-        dog = start_watchdog("4GB", FAKE_SESSIONS, lambda: 0.5)
+        dog = start_watchdog("4GB", FAKE_SESSIONS, lambda: 0.5, platform="linux")
     assert dog is not None and started == [1]
     assert "Memory limit: 4GB (LAKANA_WORKER__MEMORY_LIMIT)." in caplog.messages
+
+
+def test_on_macos_the_start_up_line_says_the_limit_covers_the_worker_only(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The measurement there is the worker's own peak, and the line says so."""
+    monkeypatch.setattr(MemoryWatchdog, "start", lambda self: None)
+    monkeypatch.setattr(memory, "read_cgroup_limit", lambda: None)
+    monkeypatch.setattr(memory, "tools", lambda *a: (lambda: 0, lambda: None))
+    with caplog.at_level(logging.INFO):
+        assert start_watchdog("4GB", FAKE_SESSIONS, lambda: 0.5, platform="darwin") is not None
+    assert (
+        "Memory limit: 4GB (LAKANA_WORKER__MEMORY_LIMIT); on macOS it covers the worker "
+        "process only." in caplog.messages
+    )
 
 
 def test_a_derived_limit_below_the_floor_warns_with_the_minimum(
@@ -586,7 +601,7 @@ def test_a_derived_limit_below_the_floor_warns_with_the_minimum(
     monkeypatch.setattr(memory, "read_cgroup_limit", lambda: 256 * MB)
     monkeypatch.setattr(memory, "tools", lambda *a: (lambda: 0, lambda: None))
     with caplog.at_level(logging.INFO):
-        assert start_watchdog(None, FAKE_SESSIONS, lambda: 0.5) is not None
+        assert start_watchdog(None, FAKE_SESSIONS, lambda: 0.5, platform="linux") is not None
     assert "Memory limit: 230 MB, 90% of the container's 256 MB." in caplog.messages
     assert any(
         "at least 512 MB" in m and "LAKANA_WORKER_MEMORY to at least 1g" in m

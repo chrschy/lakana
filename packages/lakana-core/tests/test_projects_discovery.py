@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -429,6 +430,9 @@ def test_invalid_files_count_toward_the_asset_limit(tmp_path: Path) -> None:
     assert "assets: more than 3 assets" in _messages(info.value)
 
 
+@pytest.mark.skipif(
+    sys.platform == "darwin", reason="APFS refuses a file name that is not UTF-8 (EILSEQ)"
+)
 def test_non_utf8_filename_is_refused_and_escaped(tmp_path: Path) -> None:
     """A filename that is not UTF-8 never becomes a table name or reaches a message raw."""
     directory = tmp_path / "assets" / "bronze"

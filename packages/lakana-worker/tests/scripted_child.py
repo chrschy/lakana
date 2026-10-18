@@ -238,7 +238,12 @@ def main() -> None:
         pid = os.fork()
         if pid == 0:
             os.setsid()  # out of the group, still holding the pipes
-            time.sleep(15)
+            # Lives until the test creates the release file (argv[2]); never a fixed sleep,
+            # which a loaded runner can outlast. The long bound only stops a leaked holder.
+            release = sys.argv[2]
+            give_up = time.monotonic() + 300
+            while not os.path.exists(release) and time.monotonic() < give_up:
+                time.sleep(0.05)
             os._exit(0)
         sys.stderr.write(json.dumps({"escaped": pid}) + "\n")
         sys.stderr.flush()

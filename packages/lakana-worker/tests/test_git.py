@@ -10,6 +10,7 @@ import os
 import resource
 import selectors
 import stat
+import string
 import subprocess
 import tarfile
 import tempfile
@@ -1142,7 +1143,14 @@ def test_extract_refuses_members_below_a_symlink_lexically_even_past_path_max(
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "victim").write_text("orig")
-    component, steps = "d" * 247, "abcdefghijklmnop"
+    tree = tmp_path / "tree"
+    component = "d" * 247
+    # As many levels as fit below the platform's PATH_MAX (16 on Linux's 4096, 3 on macOS's
+    # 1024), so the directories can be created and only the resolved link runs past it.
+    path_max = os.pathconf(tmp_path, "PC_PATH_MAX")
+    room = path_max - len(str(tree)) - 2
+    steps = string.ascii_lowercase[: min(16, room // (len(component) + 1))]
+    assert len(str(tree)) + 1 + len(steps) * (len(component) + 1) + 254 > path_max
     members: list[tuple[tarfile.TarInfo, bytes | None]] = []
     path = ""
     for step in steps:
@@ -1159,7 +1167,7 @@ def test_extract_refuses_members_below_a_symlink_lexically_even_past_path_max(
         for info, _ in members:
             handle.addfile(info)
     with pytest.raises(GitError, match="unsafe path"):
-        _extract(archive, tmp_path / "tree", limit=10**6, max_members=1000)
+        _extract(archive, tree, limit=10**6, max_members=1000)
     assert (outside / "victim").read_text() == "orig"
 
 
@@ -1322,24 +1330,28 @@ def _process_with(marker: str) -> list[str]:
     Parameters
     ----------
     marker
-        Text to look for in `/proc/*/cmdline`.
+        Text to look for in `/proc/*/cmdline`, or in what ``ps`` lists where there is no
+        `/proc` (macOS).
 
     Returns
     -------
     list of str
         Matching command lines.
     """
-    found = []
-    for entry in Path("/proc").iterdir():
-        if not entry.name.isdigit():
-            continue
-        try:
-            cmdline = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode()
-        except OSError:
-            continue
-        if marker in cmdline and "pytest" not in cmdline:
-            found.append(cmdline)
-    return found
+    if not Path("/proc/self").exists():
+        listing = subprocess.run(
+            ["ps", "-A", "-ww", "-o", "args="], capture_output=True, text=True, check=True
+        ).stdout.splitlines()
+    else:
+        listing = []
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                listing.append((entry / "cmdline").read_bytes().replace(b"\0", b" ").decode())
+            except OSError:
+                continue
+    return [line for line in listing if marker in line and "pytest" not in line]
 
 
 def _stub_git_leaving_a_child(tmp_path: Path, marker: str) -> Path:

@@ -26,3 +26,4 @@ site-build/
 
 # Wheels downloaded to compute hashes never belong in the tree.
 /*.whl
+jscpd-report/

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import errno
 import gzip
@@ -1194,7 +1195,10 @@ def test_the_kill_and_the_reap_exclude_each_other(monkeypatch: pytest.MonkeyPatc
         thread.join(20)
         assert answer == [True] and handle.detail == "x"
     finally:
-        os.killpg(process.pid, signal.SIGKILL)
+        # The kill has reaped nothing yet: on macOS a group of exited, unreaped processes
+        # refuses signals with EPERM (#152), as `signal_group` already allows for.
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(process.pid, signal.SIGKILL)
         handle.reap()
 
 

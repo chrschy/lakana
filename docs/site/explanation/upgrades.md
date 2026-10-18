@@ -130,7 +130,7 @@ The repository is now `https://github.com/lakana-labs/lakana`, and new images ar
 `ghcr.io/lakana-labs/lakana`. Old links to `github.com/chrschy/lakana` still lead to the new place.
 The old images under `ghcr.io/chrschy/lakana` stay where they are but get no new versions.
 
-A Compose bundle that an earlier `lakana deploy init` wrote names the old image in its `.env`
+A Compose bundle that an earlier `lakana bundle init` wrote names the old image in its `.env`
 (`LAKANA_IMAGE=ghcr.io/chrschy/lakana:<version>`). Before you pull, change it to
 `LAKANA_IMAGE=ghcr.io/lakana-labs/lakana:<new version>` and upgrade as in
 [Upgrading](../how-to/deploy-with-compose.md#upgrading). A bundle

@@ -6,6 +6,7 @@ import errno
 import hashlib
 import os
 import socket
+import sys
 from pathlib import Path
 
 import pytest
@@ -81,7 +82,9 @@ def test_scan_refuses_a_symbolic_link_and_names_it(tmp_path: Path) -> None:
         scan(alias)
 
 
-def test_scan_refuses_what_is_not_a_regular_file(tmp_path: Path) -> None:
+def test_scan_refuses_what_is_not_a_regular_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     out = tmp_path / "out"
     out.mkdir()
     (out / "model.json").write_bytes(b"m")
@@ -93,8 +96,9 @@ def test_scan_refuses_what_is_not_a_regular_file(tmp_path: Path) -> None:
         "regular files."
     )
     (out / "pipe").unlink()
+    monkeypatch.chdir(out)  # a relative name: macOS caps a socket's path at 104 bytes
     with socket.socket(socket.AF_UNIX) as listener:
-        listener.bind(str(out / "sock"))
+        listener.bind("sock")
         with pytest.raises(ManifestError, match="sock is not a regular file"):
             scan(out)
 
@@ -199,6 +203,10 @@ def test_names_windows_cannot_hold_are_refused_before_any_request(
     assert str(caught.value).endswith("; rename it.")
 
 
+@pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason="APFS is normalisation-insensitive: the two names cannot both exist",
+)
 def test_names_that_differ_only_by_unicode_normalisation_are_refused(tmp_path: Path) -> None:
     (tmp_path / "café.txt").write_bytes(b"1")
     (tmp_path / "café.txt").write_bytes(b"2")

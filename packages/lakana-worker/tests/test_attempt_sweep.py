@@ -299,7 +299,7 @@ def _skip_as_root() -> None:
 
 
 def test_an_old_directory_user_code_set_to_mode_zero_is_removed(work: Path) -> None:
-    """The sweeper restores access through `O_PATH`, then removes it like any orphan."""
+    """The sweeper restores access without following a link, then removes it like any orphan."""
     _skip_as_root()
     locked = _attempt(work, "attempt-abcd1234", _MAX_AGE * 5)
     (locked / "sub").mkdir(mode=0o700)
@@ -356,8 +356,8 @@ def test_a_directory_whose_access_cannot_be_restored_is_left_alone_and_logged(
     locked = _attempt(work, "attempt-abcd1234", _MAX_AGE * 5)
     locked.chmod(0)
 
-    def refuse(path: object, mode: int) -> None:
-        raise PermissionError(path)
+    def refuse(*args: object, **kwargs: object) -> None:
+        raise PermissionError(args[0])
 
     monkeypatch.setattr(os, "chmod", refuse)
     try:
@@ -401,14 +401,11 @@ def test_a_directory_that_vanishes_during_the_restore_is_skipped(
     _skip_as_root()
     gone = _attempt(work, "attempt-abcd1234", _MAX_AGE * 5)
     gone.chmod(0)
-    real = os.open
 
-    def opening(path: str | os.PathLike[str], flags: int, *args: int, **kwargs: int) -> int:
-        if Path(path) == gone and flags & os.O_PATH:
-            raise FileNotFoundError(path)
-        return real(path, flags, *args, **kwargs)
+    def vanish(name: str, parent_fd: int, path: Path) -> bool:
+        raise FileNotFoundError(name)
 
-    monkeypatch.setattr(os, "open", opening)
+    monkeypatch.setattr("lakana_worker.attempt_sweep.restore_directory_access", vanish)
     try:
         assert _sweeper(work).sweep() == 0
     finally:
@@ -419,12 +416,12 @@ def test_a_directory_that_vanishes_during_the_restore_is_skipped(
 def test_a_directory_whose_restore_handle_cannot_be_opened_is_left_alone_and_logged(
     work: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """If even the `O_PATH` open is refused, the warning stays."""
+    """If even the restore's own open is refused, the warning stays."""
     refused = _attempt(work, "attempt-abcd1234", _MAX_AGE * 5)
     real = os.open
 
     def opening(path: str | os.PathLike[str], flags: int, *args: int, **kwargs: int) -> int:
-        if Path(path) == refused:
+        if Path(path).name == refused.name:  # by path, or by name below the work directory
             raise PermissionError(13, "denied")
         return real(path, flags, *args, **kwargs)
 
@@ -600,3 +597,88 @@ def test_a_directory_swapped_for_a_young_one_before_it_is_opened_is_kept(
     monkeypatch.setattr(os, "open", swap_then_open)
     assert _sweeper(work).sweep() == 0
     assert (old / "result.json").read_text() == "live"
+
+
+@pytest.mark.usefixtures("without_o_path")
+def test_without_o_path_an_old_directory_of_mode_zero_is_removed(work: Path) -> None:
+    """Without `O_PATH` (macOS) the restore is a `chmod` relative to the work directory."""
+    _skip_as_root()
+    locked = _attempt(work, "attempt-abcd1234", _MAX_AGE * 5)
+    locked.chmod(0)
+    try:
+        assert _sweeper(work).sweep() == 1
+        assert not locked.exists()
+    finally:
+        if locked.exists():
+            locked.chmod(0o700)
+
+
+@pytest.mark.usefixtures("without_o_path")
+def test_without_o_path_a_directory_swapped_for_a_link_before_the_restore_is_not_chmoded(
+    work: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same race as with `O_PATH`: the restore's `lstat` sees the link and stops."""
+    target = tmp_path / "elsewhere"
+    target.mkdir(mode=0o755)
+    swapped = _attempt(work, "attempt-abcd1234", _MAX_AGE * 5)
+    real = os.open
+
+    def opening(path: str | os.PathLike[str], flags: int, *args: int, **kwargs: int) -> int:
+        if Path(path) == swapped and swapped.is_dir() and not swapped.is_symlink():
+            swapped.rename(tmp_path / "moved")
+            swapped.symlink_to(target)
+            raise PermissionError(13, "denied")
+        return real(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", opening)
+    assert _sweeper(work).sweep() == 0
+    assert target.stat().st_mode & 0o777 == 0o755
+    assert swapped.is_symlink()
+
+
+def test_a_work_directory_that_cannot_be_opened_for_the_restore_leaves_the_attempt_alone(
+    work: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The restore works below a descriptor of the work directory; without one, no `chmod`."""
+    _skip_as_root()
+    locked = _attempt(work, "attempt-abcd1234", _MAX_AGE * 5)
+    locked.chmod(0)
+    real = os.open
+
+    def opening(path: str | os.PathLike[str], flags: int, *args: int, **kwargs: int) -> int:
+        if Path(path) == work:
+            raise OSError(5, "input/output error")
+        return real(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", opening)
+    try:
+        with caplog.at_level(logging.WARNING):
+            assert _sweeper(work).sweep() == 0
+        assert locked.stat().st_mode & 0o777 == 0
+    finally:
+        monkeypatch.undo()
+        locked.chmod(0o700)
+    assert "could not be opened" in caplog.text
+
+
+def test_a_restored_directory_that_cannot_be_reopened_is_left_alone_and_logged(
+    work: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _skip_as_root()
+    locked = _attempt(work, "attempt-abcd1234", _MAX_AGE * 5)
+    locked.chmod(0)
+    real = os.open
+
+    def opening(path: str | os.PathLike[str], flags: int, *args: int, **kwargs: int) -> int:
+        if kwargs.get("dir_fd") is not None and flags & os.O_DIRECTORY:
+            raise OSError(5, "input/output error")
+        return real(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", opening)
+    try:
+        with caplog.at_level(logging.WARNING):
+            assert _sweeper(work).sweep() == 0
+    finally:
+        monkeypatch.undo()
+    assert locked.stat().st_mode & 0o777 == 0o700
+    assert "could not be opened" in caplog.text

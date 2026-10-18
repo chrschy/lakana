@@ -404,6 +404,16 @@ def test_a_megabyte_on_standard_error_neither_blocks_the_child_nor_is_kept() -> 
         assert len(child.stderr) <= query_process._MAX_STDERR_BYTES
 
 
+_ADDED_BY_THE_CHILD_ITSELF = {"LC_CTYPE"} | (
+    {"__CF_USER_TEXT_ENCODING"} if sys.platform == "darwin" else set()
+)
+"""Variables the child's own runtime sets after `exec`, none of them from the worker.
+
+The interpreter adds ``LC_CTYPE`` when the locale is C (PEP 538); macOS's libSystem adds
+``__CF_USER_TEXT_ENCODING`` (the user's id and text encoding) to every process that lacks it.
+"""
+
+
 def test_the_child_gets_the_request_a_scrubbed_environment_and_only_its_pipes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -422,8 +432,7 @@ def test_the_child_gets_the_request_a_scrubbed_environment_and_only_its_pipes(
         os.close(read_end)
         os.close(write_end)
     seen = json.loads(lines[0])
-    # The interpreter adds LC_CTYPE to its own environment when the locale is C (PEP 538).
-    assert set(seen["env"]) - {"LC_CTYPE"} == {
+    assert set(seen["env"]) - _ADDED_BY_THE_CHILD_ITSELF == {
         "PATH",
         "HOME",
         "TMPDIR",
@@ -519,15 +528,19 @@ def test_a_stream_cut_where_its_last_bytes_equal_the_marker_is_refused_by_the_st
 
 
 def test_a_clean_exit_is_not_enough_without_the_real_end_of_the_pipe(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """A holder of the pipe outside the group keeps it open: the end was never seen."""
     monkeypatch.setattr(query_process, "_DRAIN_SECONDS", 0.3)
+    release = tmp_path / "release"  # the holder lives until this file exists, however slow the run
     escaped = 0
     try:
         with (
             pytest.raises(ChildFailed) as caught,
-            _child("clean_exit_with_a_pipe_holder") as child,
+            _child(
+                "clean_exit_with_a_pipe_holder",
+                argv=[sys.executable, str(SCRIPT), "clean_exit_with_a_pipe_holder", str(release)],
+            ) as child,
         ):
             try:
                 _rows(child)
@@ -538,8 +551,10 @@ def test_a_clean_exit_is_not_enough_without_the_real_end_of_the_pipe(
                 ]
         assert (caught.value.stop, caught.value.returncode) == (None, 0)
     finally:
+        release.touch()
         if escaped:
-            os.kill(escaped, signal.SIGKILL)
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(escaped, signal.SIGKILL)
 
 
 def test_after_the_ask_the_worker_keeps_reading_so_a_child_blocked_on_a_full_pipe_can_stop() -> (
@@ -1400,7 +1415,8 @@ def test_a_process_that_left_the_group_cannot_hold_the_worker(
         assert time.monotonic() - started < 30
     finally:
         if escaped:
-            os.kill(escaped, signal.SIGKILL)
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(escaped, signal.SIGKILL)
 
 
 def test_a_child_that_already_ended_is_passed_over_for_the_next_largest() -> None:
