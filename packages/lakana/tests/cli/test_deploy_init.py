@@ -824,3 +824,31 @@ def test_neither_new_service_gets_the_bootstrap_secret(tmp_path: Path, released:
     s, _ = _bundle_services(tmp_path)
     for service in ("worker-interactive", "worker-pipeline"):
         assert "LAKANA_BOOTSTRAP_PAT_SECRET" not in str(s[service]["environment"])
+
+
+def test_the_three_worker_services_share_one_cache_volume_and_nothing_else_does(
+    tmp_path: Path, released: None
+) -> None:
+    """Pins which services mount `worker-cache`, the volume two workers can populate at once.
+
+    The image must create nothing inside its mount point (`test_dockerfile.py`), and each
+    worker makes `attempts` itself. A service added to this list, or a second shared volume,
+    needs the same care, so this test fails until someone looks.
+    """
+    state = make_state(tmp_path, FakeApi())
+    invoke(state, "bundle", "init", str(tmp_path / "b"))
+    compose = yaml.safe_load((tmp_path / "b" / "compose.yaml").read_text())
+    mounting = {
+        name
+        for name, service in compose["services"].items()
+        for entry in service.get("volumes", [])
+        if str(entry).startswith("worker-cache:")
+    }
+    assert mounting == {"worker", "worker-interactive", "worker-pipeline"}
+    mounts = {
+        entry
+        for name in mounting
+        for entry in compose["services"][name]["volumes"]
+        if str(entry).startswith("worker-cache:")
+    }
+    assert mounts == {"worker-cache:/home/lakana/.cache/lakana-worker"}

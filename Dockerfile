@@ -31,8 +31,11 @@ ENV TMPDIR=/var/tmp/lakana \
     PYTHONUNBUFFERED=1 \
     LAKANA_HOST=0.0.0.0 \
     LAKANA_PORT=8000
-# Directories that named volumes inherit owner and mode from on first use: the worker's attempt
-# directories (shared with task containers through the launcher), the launcher's socket directory
+# Directories that named volumes inherit owner and mode from on first use: the worker's cache
+# directory (its mount point only; nothing is created inside it, because Docker copies the image's
+# content into a new volume at the first mount and two workers starting together would both copy
+# and the second would fail with "mkdir: file exists" - the worker makes `attempts` itself), the
+# launcher's socket directory
 # (its group is the worker's; set-group-id keeps the socket and token in that group, sticky stops
 # the worker from renaming or deleting them), the launcher's own state and the egress proxy's key.
 RUN groupadd --system --gid 10001 lakana \
@@ -40,7 +43,6 @@ RUN groupadd --system --gid 10001 lakana \
  && mkdir -p /var/tmp/lakana /home/lakana/.cache/lakana-worker \
  && chown -R lakana:lakana /home/lakana /var/tmp/lakana \
  && chmod 0700 /home/lakana/.cache/lakana-worker \
- && install -d -o 10001 -g 10001 -m 0700 /home/lakana/.cache/lakana-worker/attempts \
  && install -d -o 0 -g 10001 -m 0770 /run/lakana-launcher \
  && chmod 3770 /run/lakana-launcher \
  && install -d -o 0 -g 0 -m 0700 /var/lib/lakana-launcher \

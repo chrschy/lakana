@@ -6,6 +6,7 @@ import os
 import re
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -18,9 +19,10 @@ from unittest import mock
 
 import pytest
 
+from lakana_core.config import Settings
 from lakana_core.projects.limits import DeployLimits
 from lakana_worker import deploy_sweep, pipeline
-from lakana_worker.__main__ import configure_logging, main, make_worker_id
+from lakana_worker.__main__ import _python_runtime, configure_logging, main, make_worker_id
 from lakana_worker.python_support import PythonSupport
 from lakana_worker.python_tasks import PythonRuntime
 from lakana_worker.runners import LocalProcessRunner
@@ -1586,3 +1588,33 @@ def test_a_failing_sweep_in_housekeeping_keeps_its_traceback(
         _housekeeping(tmp_path, monkeypatch, artifacts, code)
     errors = [r.exc_info[0] for r in caplog.records if r.exc_info]
     assert errors == [RuntimeError, ValueError]
+
+
+def test_the_worker_creates_its_attempt_directory_at_start_when_it_can_run_python(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The image no longer creates `attempts` (two workers copying it into one volume raced)."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    settings = Settings(database={"url": f"sqlite:///{tmp_path}/lakana.db"})  # type: ignore[arg-type]
+    runtime = _python_runtime(settings, PythonSupport(server_url="http://s", uv="/bin/uv"))
+    attempts = tmp_path / "xdg" / "lakana-worker" / "attempts"
+    assert runtime.work_dir == attempts
+    assert stat.S_IMODE(os.lstat(attempts).st_mode) == 0o700
+    _python_runtime(settings, PythonSupport(server_url="http://s", uv="/bin/uv"))
+
+
+def test_the_worker_starts_and_says_why_when_its_attempt_directory_is_a_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A link in place of `attempts` is not followed; Python tasks fail, SQL keeps working."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    cache = tmp_path / "xdg" / "lakana-worker"
+    cache.mkdir(parents=True, mode=0o700)
+    (tmp_path / "elsewhere").mkdir()
+    (cache / "attempts").symlink_to(tmp_path / "elsewhere")
+    settings = Settings(database={"url": f"sqlite:///{tmp_path}/lakana.db"})  # type: ignore[arg-type]
+    with caplog.at_level(logging.WARNING):
+        _python_runtime(settings, PythonSupport(server_url="http://s", uv="/bin/uv"))
+    assert "attempts" in caplog.text
+    assert "real directory" in caplog.text
+    assert (cache / "attempts").is_symlink()
