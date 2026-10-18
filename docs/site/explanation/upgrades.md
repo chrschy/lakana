@@ -146,6 +146,12 @@ This affects someone who holds `MANAGE_ENVIRONMENT` but not `MANAGE_SECRET` (the
 both): the command is now refused and audited, and says who can run it. Environments without a
 storage secret, and options sent unchanged, behave as before.
 
+In the Compose bundle, the set-up attaches the SeaweedFS secret to `dev` only together with the
+bundle's own storage options, in one step. A `dev` at the bundle's storage root that has no
+storage secret therefore gets its storage options set to the bundle's when the stack starts, and
+the set-up prints a line saying so. Change them again afterwards with `lakana env set-storage`
+(which then needs `MANAGE_SECRET`, see above).
+
 ## Notes for 0.14.0
 
 ### The project moved to the lakana-labs organisation
