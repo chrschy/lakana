@@ -92,14 +92,20 @@ def test_final_stage_uses_tini_as_entrypoint() -> None:
     assert entrypoints and "tini" in entrypoints[-1]
 
 
-def test_builder_installs_from_locked_constraints() -> None:
-    """Third-party versions come from `uv.lock`, not an unpinned PyPI resolve.
+def test_builder_installs_third_party_packages_by_hash_from_the_lock() -> None:
+    """Third-party versions and hashes come from `uv.lock`, not an unpinned PyPI resolve.
 
-    The install happens in the builder stage — the final stage has no pip.
+    The install happens in the builder stage — the final stage has no pip. The workspace's own
+    wheels go in afterwards without dependency resolution, and `pip check` proves that nothing
+    is missing.
     """
+    instructions = _all_instructions()
     assert any(
-        "pip install" in ln and "-c /wheels/constraints.txt" in ln for ln in _all_instructions()
+        "pip install --require-hashes --no-deps -r /wheels/requirements.txt" in ln
+        for ln in instructions
     )
+    assert any("pip install --no-deps /wheels/*.whl" in ln for ln in instructions)
+    assert any("pip check" in ln for ln in instructions)
 
 
 def test_final_stage_installs_no_compilers() -> None:

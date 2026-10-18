@@ -23,3 +23,6 @@ docs/superpowers/
 graphify-out/
 .worktrees/
 site-build/
+
+# Wheels downloaded to compute hashes never belong in the tree.
+/*.whl

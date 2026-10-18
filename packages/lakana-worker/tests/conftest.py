@@ -185,7 +185,7 @@ def child_leak_check(
     for pid in started:
         try:
             real_killpg(pid, signal.SIGKILL)  # a test may have replaced os.killpg
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):  # macOS: a group of exited processes
             continue
         left.append(pid)
     still_registered = REGISTRY.pids()

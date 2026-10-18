@@ -7,26 +7,46 @@ on:
 
 permissions:
   contents: read
-  security-events: write
 
 jobs:
+  # The scan runs a third-party image over the checkout, so it holds no write scope and no
+  # token in the workspace; the upload to code scanning is the separate job below.
   semgrep:
+    permissions:
+      contents: read
     runs-on: ${{ (github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER) || 'ubuntu-latest' }}
     container:
-      image: semgrep/semgrep
+      # Pinned by version and digest. Dependabot does not read a workflow's `container:` image:
+      # bump both by hand (`docker buildx imagetools inspect semgrep/semgrep:<version>`).
+      image: semgrep/semgrep:1.181.0@sha256:81474464c1f07483ba0682a44787fd93c91397419762a04abe2bafaae396304b
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
       - run: semgrep scan --config=p/python --config=p/security-audit --sarif --output=semgrep.sarif
-      # SARIF upload to code scanning is free on a public repository; enable it when wanted.
-      #
-      # - uses: github/codeql-action/upload-sarif@v3
-      #   with:
-      #     sarif_file: semgrep.sarif
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7
         if: always()
         with:
           name: semgrep-sarif
           path: semgrep.sarif
+
+  # The only job with `security-events: write`: no checkout, and no action but the artifact
+  # download and the upload to code scanning.
+  semgrep-upload:
+    needs: semgrep
+    if: ${{ !cancelled() }}
+    permissions:
+      security-events: write   # the SARIF upload to code scanning
+    runs-on: ${{ (github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER) || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
+        with:
+          name: semgrep-sarif
+          path: sarif
+      - uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee  # v4.39.0
+        with:
+          sarif_file: sarif/semgrep.sarif
+          category: semgrep
 
   trivy:
     runs-on: ${{ (github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER) || 'ubuntu-latest' }}
@@ -36,8 +56,8 @@ jobs:
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
       - name: Build wheels
         run: uv build --all-packages -o dist
-      - name: Generate the pinned constraints file for the image build
-        run: uv export --frozen --no-dev --all-packages --no-emit-workspace --no-hashes -o dist/constraints.txt
+      - name: Generate the pinned requirements file (with hashes) for the image build
+        run: uv export --frozen --no-dev --all-packages --no-emit-workspace -o dist/requirements.txt
       - name: Build the image to scan
         run: docker build -t lakana:scan .
       # Pinned by commit SHA, not the mutable v0.36.0 tag: trivy-action tags
@@ -49,14 +69,3 @@ jobs:
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: 1
-
-  # CodeQL is free on a public repository; enable this job when wanted.
-  #
-  # codeql:
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
-  #     - uses: github/codeql-action/init@v3
-  #       with:
-  #         languages: python
-  #     - uses: github/codeql-action/analyze@v3

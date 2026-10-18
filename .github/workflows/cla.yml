@@ -16,14 +16,17 @@ on:
   pull_request_target:
     types: [opened, synchronize, reopened]
 
+# Read-only at the top: the one job below asks for what it writes.
 permissions:
-  actions: write
   contents: read
-  pull-requests: write
-  statuses: write
 
 jobs:
   cla:
+    permissions:
+      actions: write           # re-run the check after a signature
+      contents: read
+      pull-requests: write     # the comment that asks for a signature
+      statuses: write          # the commit status
     # A pull request starts the action; a comment starts it only on a pull request and only when
     # it is the signing phrase or `recheck`.
     if: >-

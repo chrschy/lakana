@@ -31,3 +31,23 @@ updates:
         patterns: ["*"]
     commit-message:
       prefix: "deps"
+
+  - package-ecosystem: "docker"
+    directory: "/packages/lakana-worker/tests/sshd"   # the test SSH server's alpine image
+    schedule:
+      interval: "weekly"
+    groups:
+      test-images:
+        patterns: ["*"]
+    commit-message:
+      prefix: "deps"
+
+  - package-ecosystem: "pip"
+    directory: "/scripts"         # requirements-uv.txt: the hash-pinned uv of the five-minute test
+    schedule:
+      interval: "weekly"
+    groups:
+      script-tools:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"

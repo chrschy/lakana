@@ -15,7 +15,7 @@ EXEMPT = (
     "scripts/tests/test_docs_site.py",
     "scripts/tests/test_docs_only.py",
 )
-NOT_TESTED_CEILING = 53
+NOT_TESTED_CEILING = 54
 """Blocks marked as not tested; it only goes down, apart from the rises below.
 
 The artifact pages left six when they were written: the `artifact uploads abort` command,
@@ -80,6 +80,10 @@ The upgrade note "A secret is bound to one use" rose it from 52 to 53 with one b
 and binds the secrets of an upgraded instance, with placeholders for the names. The commands run
 for real in `docs/examples/bind-a-secret/run.sh` and, for the index case, in
 `docs/examples/getting-started/run.sh`.
+
+The "Verify a download" block of `deploy-with-compose.md` rose it from 53 to 54 (#130): it runs
+`pip download` and `gh attestation verify` against a published, attested release, which needs
+the network, the GitHub CLI and a release that exists, none of which the example harness has.
 """
 SECTIONS = ("tutorials", "how-to", "reference", "explanation")
 

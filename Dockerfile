@@ -1,17 +1,21 @@
 # syntax=docker/dockerfile:1
 # Lakana: one image for the server, workers and first-run setup.
-# Build context: run these two commands first, from the repo root:
+# Build context: run these two commands first, from the repo root (the second writes every
+# third-party package with its hashes from uv.lock; pip installs nothing that does not match):
 #   uv build --all-packages -o dist
-#   uv export --frozen --no-dev --all-packages --no-emit-workspace --no-hashes -o dist/constraints.txt
+#   uv export --frozen --no-dev --all-packages --no-emit-workspace -o dist/requirements.txt
 
-FROM python:3.14-slim AS builder
+# Base image: pinned by tag and digest; Dependabot bumps the two together.
+FROM python:3.14-slim@sha256:a2b82f3c48559aa0a8446d9af49826b6e2b2016f4cd2afabfe6013ec53729170 AS builder
 ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 RUN apt-get update \
  && apt-get install -y --no-install-recommends tini \
  && rm -rf /var/lib/apt/lists/*
 COPY dist/ /wheels/
 RUN python -m venv /opt/lakana \
- && /opt/lakana/bin/pip install -c /wheels/constraints.txt /wheels/*.whl \
+ && /opt/lakana/bin/pip install --require-hashes --no-deps -r /wheels/requirements.txt \
+ && /opt/lakana/bin/pip install --no-deps /wheels/*.whl \
+ && /opt/lakana/bin/pip check \
  && /opt/lakana/bin/pip uninstall -y pip
 
 # uv, for the Python assets' venvs. MIT OR Apache-2.0. Pinned by tag and digest, in a stage
@@ -20,7 +24,7 @@ RUN python -m venv /opt/lakana \
 # Dependabot bumps the tag and the digest together; by hand, use `docker buildx imagetools inspect`.
 FROM ghcr.io/astral-sh/uv:0.13.1@sha256:4a1f3666816dafadd20ceb71eac9a7d56d7ef30279f7d64048519ab901ada336 AS uv
 
-FROM python:3.14-slim
+FROM python:3.14-slim@sha256:a2b82f3c48559aa0a8446d9af49826b6e2b2016f4cd2afabfe6013ec53729170
 ENV TMPDIR=/var/tmp/lakana \
     HOME=/home/lakana \
     PATH=/opt/lakana/bin:$PATH \

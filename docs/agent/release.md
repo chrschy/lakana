@@ -220,7 +220,7 @@ bad release never advances past the point that would have caught it:
   bundles — this guarantees the image is only ever built from wheels that PyPI already
   has (see "Why untagged builds cannot publish" below), so a broken PyPI release never gets a
   matching `latest` container. It regenerates
-  `dist/constraints.txt` (the shared `dist` artifact only carries wheels/sdists) and builds
+  `dist/requirements.txt` (the shared `dist` artifact only carries wheels/sdists) and builds
   **multi-arch** (`linux/amd64,linux/arm64`, via `docker/setup-qemu-action` +
   `docker/setup-buildx-action`), pushing `ghcr.io/chrschy/lakana:<version>` — a public package.
 - **`compose-smoke-release`** needs `publish-image` and runs
@@ -261,11 +261,46 @@ Two jobs of `release.yml` ship the SBOM. `sbom` builds an SPDX software bill of 
 tagged tree with `anchore/sbom-action` (read-only token) and keeps it as the workflow artifact
 `lakana-sbom.spdx.json`. `sbom-release` then downloads that artifact and attaches it to the
 **GitHub release** of the tag, so it is found on the release page; it runs
-`gh release upload "$TAG" … --clobber`, so a re-run replaces the file. `sbom-release` is the only job
-with `contents: write`: it has no checkout and no third-party action but the artifact download, so
-no code that builds anything holds the write token. The workflow's own `permissions` is `{}`; every
+`gh release upload "$TAG" … --clobber`, so a re-run replaces the file. `sbom-release` and
+`provenance-release` (below) are the only jobs with `contents: write`: neither has a checkout or a
+third-party action other than the artifact download, so no code that builds anything holds the
+write token. The workflow's own `permissions` is `{}`; every
 job names what it needs, and `release-please` needs nothing from `GITHUB_TOKEN` because it uses
 `RELEASE_PLEASE_TOKEN`. `scripts/tests/test_workflows.py` pins this by effective permissions.
+
+## Build provenance attestations
+
+Every release is signed with GitHub's build provenance attestations (Sigstore, keyless:
+`actions/attest-build-provenance`), so a user can check that a file or the image was built by
+this repository's `release.yml` from the tagged commit.
+
+- **`attest-dist`** needs `build`, downloads the shared `dist` artifact and attests every wheel and
+  sdist (`subject-path` lists `dist/*.whl` and `dist/*.tar.gz`). It has `id-token: write` and `attestations: write` and nothing
+  else but `contents: read`. It also keeps the bundle as the workflow artifact `provenance`.
+- **`provenance-release`** (like `sbom-release`: no checkout, only the artifact download and
+  `gh release upload`, the only other job with `contents: write`) attaches the bundle to the
+  GitHub release as `lakana-provenance.intoto.jsonl`, where OpenSSF Scorecard's Signed-Releases
+  check looks for a signature.
+- **`attest-image`** needs `publish-image`, which passes the pushed image's digest as a job
+  output. It attests the image by digest (`subject-digest`, `push-to-registry: false`: `gh
+  attestation verify` reads attestations from GitHub, so nothing is pushed to the registry). It
+  is a job of its own with one step: `publish-image` runs several third-party actions, and any
+  step of a job with `id-token: write` could ask for a signing certificate. `publish-image` has
+  neither `id-token` nor `attestations`.
+- No other job has `id-token` (the three PyPI publish jobs have it for Trusted Publishing) or
+  `attestations` write; `scripts/tests/test_workflows.py` pins this by effective permissions.
+
+How a user verifies (also in the user documentation, "Verify a download" in the Compose how-to):
+
+```bash
+gh attestation verify lakana-<version>-py3-none-any.whl --repo chrschy/lakana \
+  --signer-workflow chrschy/lakana/.github/workflows/release.yml
+gh attestation verify oci://ghcr.io/chrschy/lakana:<version> --repo chrschy/lakana \
+  --signer-workflow chrschy/lakana/.github/workflows/release.yml
+```
+
+Check it after each release: the first release that has attestations is the first one cut after
+this job landed; older releases have none, and `gh attestation verify` says so.
 
 ## Why untagged builds cannot publish
 

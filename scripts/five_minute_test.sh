@@ -26,9 +26,11 @@ apt_bc
 # prerequisites of Python assets, not part of the product install: set up before the stopwatch.
 apt_git() { command -v git >/dev/null || { apt-get update -qq && apt-get install -y -qq git >/dev/null; }; }
 apt_git
-pip install --no-cache-dir --quiet uv
+# uv is a tool the script needs, not the product under test: pinned by hash (one per platform wheel).
+pip install --no-cache-dir --quiet --require-hashes -r "$(dirname "$0")/requirements-uv.txt"
 export XDG_CONFIG_HOME=$(mktemp -d) XDG_DATA_HOME=$(mktemp -d) NO_COLOR=1
 t0=$(date +%s.%N)   # the stopwatch starts after tool setup, at the install
+# The product install under test, as a user types it: unpinned on purpose, hashes would defeat the test.
 step "pip install" pip install --no-cache-dir --quiet "$@"
 verify_version() {
   installed=$(python3 -c 'import lakana; print(lakana.__version__)')

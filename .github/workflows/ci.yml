@@ -182,6 +182,78 @@ jobs:
         if: matrix.python-version == '3.14' && needs.changes.outputs.docs_only != 'true'
         run: uv run python scripts/coverage_ratchet.py
 
+  # Lakana's local mode runs on macOS (Python 3.13 and later), so this job runs what a macOS user
+  # runs: the unit suite and the "Getting started" example, which ends with
+  # `lakana server reset --local`. Docker-based tests and coverage stay on Linux. It is pinned to
+  # GitHub's macOS runner, never the `CI_RUNNER` switch (GitHub hosts no macOS on a
+  # self-hosted machine, and a fork's code must not reach one); it is not a required check yet.
+  # The runner has 3 cores and 7 GB: two test workers fit (the memory limit of
+  # scripts/pytest_memory_limit.py, 6 GB by default, only enforces on Linux). A pull request
+  # runs it when it touches packages/ (and the files the job itself uses); only packages/ is tested here,
+  # scripts/ is repository tooling that runs on Linux; every push to `main`
+  # runs it, and the push that merges a release pull request is the release's check.
+  test-macos:
+    name: test (macos)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.draft != 'true' }}
+    runs-on: macos-latest
+    timeout-minutes: 40
+    # Informational until the suite passes on macOS (#153); remove this line with the fixes.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          fetch-depth: 0          # hatch-vcs needs tags to compute a version
+      - id: scope
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          # Anything but a pull request that provably changes nothing relevant runs the job.
+          if [ "$EVENT" != "pull_request" ] || ! git rev-parse --verify --quiet "$BASE_SHA" > /dev/null \
+            || git diff --name-only "$BASE_SHA" HEAD | grep -qE '^(packages/|docs/examples/|pyproject\.toml|uv\.lock|scripts/run_docs_examples\.sh|\.github/workflows/ci\.yml)'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No change under packages/: skipping the macOS run."
+          fi
+      - if: steps.scope.outputs.run == 'true'
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          enable-cache: true
+          python-version: "3.14"
+      - if: steps.scope.outputs.run == 'true'
+        run: uv sync --all-packages --locked
+      - name: Unit tests
+        if: steps.scope.outputs.run == 'true'
+        run: uv run pytest packages -m "not integration" -n 2 --dist loadfile -p no:cacheprovider
+      # scripts/run_docs_examples.sh uses GNU `timeout` and `setsid` and bash 4: Homebrew has the
+      # first and the last, and a few lines of Python stand in for `setsid`, which macOS lacks.
+      - name: Tools the example runner needs
+        if: steps.scope.outputs.run == 'true'
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"       # a slow `brew update` must not eat the time budget
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: |
+          brew install bash coreutils
+          shims="$RUNNER_TEMP/shims"
+          mkdir -p "$shims"
+          cat > "$shims/setsid" <<'SHIM'
+          #!/usr/bin/env python3
+          import os, sys
+          args = [a for a in sys.argv[1:] if a not in ("--wait", "-w")]
+          os.setsid()
+          os.execvp(args[0], args)
+          SHIM
+          chmod +x "$shims/setsid"
+          echo "$shims" >> "$GITHUB_PATH"
+          echo "$(brew --prefix coreutils)/libexec/gnubin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
+      - name: Getting-started example (init, start, deploy, run, query, reset)
+        if: steps.scope.outputs.run == 'true'
+        env:
+          LAKANA_DOCS_EXAMPLE_BUDGET: "240"
+        run: uv run bash scripts/run_docs_examples.sh getting-started
+
   # The documentation site: every code block checked, the site built in strict mode.
   # Fast, and it guards a documentation-only change, so it has no condition.
   docs:
@@ -333,6 +405,6 @@ jobs:
       - if: steps.changes.outputs.run == 'true'
         run: |
           uv build --all-packages -o dist
-          uv export --frozen --no-dev --all-packages --no-emit-workspace --no-hashes -o dist/constraints.txt
+          uv export --frozen --no-dev --all-packages --no-emit-workspace -o dist/requirements.txt
           docker build -t lakana:ci .
           uv run --locked bash scripts/compose_smoke_test.sh lakana:ci
