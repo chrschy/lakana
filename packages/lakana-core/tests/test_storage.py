@@ -1,5 +1,6 @@
 """Tests for the storage abstraction."""
 
+import errno
 import logging
 import os
 import tracemalloc
@@ -8,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from fsspec.implementations.local import LocalFileSystem
 from fsspec.implementations.memory import MemoryFile, MemoryFileSystem
 from fsspec.spec import AbstractBufferedFile
 from pyiceberg.io.pyarrow import PyArrowFileIO
@@ -245,6 +247,52 @@ def test_deleting_the_root_itself_raises_not_found(config: StorageConfig) -> Non
     storage = build_storage(config)
     with pytest.raises(NotFoundError):
         storage.delete("")
+
+
+def _unlink_as_on_macos(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the local filesystem's `rm_file` refuse a directory as macOS does (EPERM, not EISDIR).
+
+    Parameters
+    ----------
+    monkeypatch
+        Pytest's monkeypatch.
+    """
+    real = LocalFileSystem.rm_file
+
+    def rm_file(self: LocalFileSystem, path: str) -> None:
+        if os.path.isdir(path):
+            raise PermissionError(errno.EPERM, "Operation not permitted", path)
+        real(self, path)
+
+    monkeypatch.setattr(LocalFileSystem, "rm_file", rm_file)
+
+
+@pytest.mark.parametrize("path", ["", "dir"])
+def test_deleting_a_directory_raises_not_found_where_unlink_says_eperm(
+    config: StorageConfig, monkeypatch: pytest.MonkeyPatch, path: str
+) -> None:
+    """On macOS `unlink` of a directory is EPERM; the caller gets the same error as on Linux."""
+    storage = build_storage(config)
+    storage.write("dir/a", b"x")
+    _unlink_as_on_macos(monkeypatch)
+    with pytest.raises(NotFoundError):
+        storage.delete(path)
+    assert storage.read("dir/a") == b"x"
+
+
+def test_a_permission_error_on_a_file_is_not_mistaken_for_a_directory(
+    config: StorageConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a directory turns EPERM into "no object"; a refused file stays a refusal."""
+    storage = build_storage(config)
+    storage.write("a", b"x")
+
+    def refuse(self: LocalFileSystem, path: str) -> None:
+        raise PermissionError(errno.EPERM, "Operation not permitted", path)
+
+    monkeypatch.setattr(LocalFileSystem, "rm_file", refuse)
+    with pytest.raises(PermissionError):
+        storage.delete("a")
 
 
 def test_writing_through_an_existing_file_raises_conflict(config: StorageConfig) -> None:
