@@ -155,6 +155,22 @@ that bumps the pin and fixes whatever it flags differently, never a side effect 
 unrelated change. The same discipline applies to `ruff`: a version bump is its own commit
 so a lint-rule change is never hidden inside a feature diff.
 
+## Upper bounds on the deeply used dependencies
+
+`sqlglot` and `pyiceberg` (`lakana-core`) and `duckdb` (`lakana-worker`) carry an upper bound:
+`sqlglot>=30.21.0,<31`, `pyiceberg>=0.12,<0.13`, `duckdb>=1.1,<2`. Lakana uses their APIs deeply
+(`sqlglot` drives lineage and the query rewriter for row filters and column masks), and
+they change signatures in minor releases. The lock does not protect a user: `pip install` ignores
+it, so an unbounded requirement takes the newest release on the day it is installed (a `sqlglot`
+release once made an argument of `sqlglot.lineage.lineage` required, and only an unpinned CI run
+noticed). `scripts/tests/test_dependency_bounds.py` fails when one of the three has no upper bound.
+
+To raise a bound: its own pull request (the Dependabot updates keep the lock current inside the
+bounds), after reading the upstream changelog, with the suite green on the new version.
+The daily dependency canary (`canary.yml`, `docs/agent/testing.md`) covers a break inside the bounds.
+Other dependencies stay open-ended on purpose; add one to the test when Lakana starts to depend on its
+internals the same way.
+
 ## Copyleft rule: none strong, weak only via a justified allowlist entry
 
 No strong copyleft (GPL, LGPL, AGPL) or source-available (BUSL, SSPL) licensed dependency,
