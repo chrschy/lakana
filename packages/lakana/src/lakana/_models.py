@@ -188,6 +188,15 @@ class Table:
         when there is none, and from a server older than descriptions.
     description_source
         ``project`` or ``edited``; `None` without a description.
+    last_write_at
+        When the current snapshot was committed; `None` without one, for a view, an external
+        table or an artifact, and from a server older than table health.
+    row_count
+        The rows of the current snapshot; `None` when the server does not know.
+    size_bytes
+        The size of its data files; `None` when the server does not know.
+    file_count
+        Its data files; `None` when the server does not know.
     """
 
     name: str
@@ -204,6 +213,127 @@ class Table:
     state_message: str | None = None
     description: str | None = None
     description_source: str | None = None
+    last_write_at: datetime | None = None
+    row_count: int | None = None
+    size_bytes: int | None = None
+    file_count: int | None = None
+
+
+@dataclass(frozen=True)
+class LastMaintenance:
+    """The last maintenance run that changed a table.
+
+    Parameters
+    ----------
+    run_id
+        The query run that did it.
+    finished_at
+        When it ended.
+    status
+        ``complete``, or ``stopped`` when it ran past its time limit and stopped at a safe
+        point; running maintenance again continues.
+    snapshots_expired
+        Snapshots it expired.
+    files_deleted
+        Orphaned files it deleted.
+    bytes_deleted
+        Their total size.
+    tags_removed
+        Tags of failed checks it removed.
+    """
+
+    run_id: str
+    finished_at: datetime
+    status: str
+    snapshots_expired: int
+    files_deleted: int
+    bytes_deleted: int
+    tags_removed: int
+
+
+@dataclass(frozen=True)
+class CheckHealth:
+    """The newest result of one check of a table.
+
+    Parameters
+    ----------
+    name
+        ``<table>/<check>``.
+    check
+        The check's short name.
+    run_id
+        The run the result belongs to.
+    outcome
+        ``passed``, ``failed``, ``warned`` or ``errored``.
+    on_failure
+        ``block``, ``keep`` or ``warn``.
+    failing_rows
+        The count of rows that are wrong, when the check ran.
+    error
+        Why the check could not run.
+    rollback_outcome
+        What the rollback after a failed blocking check did, if there was one.
+    kept
+        The check failed or errored and its ``keep`` setting left the data in the table.
+    not_published
+        The rollback left the table not published.
+    finished_at
+        When the check ended.
+    """
+
+    name: str
+    check: str
+    run_id: str
+    outcome: str
+    on_failure: str
+    failing_rows: int | None
+    error: str | None
+    rollback_outcome: str | None
+    kept: bool
+    not_published: bool
+    finished_at: datetime
+
+
+@dataclass(frozen=True)
+class Reader:
+    """A principal's use of a table over the window.
+
+    Parameters
+    ----------
+    principal
+        The principal's name.
+    read_count
+        How many of its succeeded queries named the table.
+    last_read_at
+        When the last of them completed.
+    """
+
+    principal: str
+    read_count: int
+    last_read_at: datetime
+
+
+@dataclass(frozen=True)
+class TableHealth:
+    """A table's health at a glance.
+
+    Parameters
+    ----------
+    days
+        The window `readers` covers.
+    last_maintenance
+        The last maintenance that changed the table; `None` if there is none.
+    checks
+        The newest result of each check of the table.
+    readers
+        Who read the table in the window, most reads first; `None` when the caller may not see
+        the table's grants.
+    """
+
+    days: int
+    last_maintenance: LastMaintenance | None
+    checks: list[CheckHealth]
+    readers: list[Reader] | None
 
 
 @dataclass(frozen=True)

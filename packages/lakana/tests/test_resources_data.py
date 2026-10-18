@@ -2186,3 +2186,122 @@ def test_optional_fields_of_the_wrong_shape_are_left_out_not_fatal(extra: dict) 
     assert waiting.upstream is None
     assert waiting.next_attempt_at is None
     assert waiting.workers is None and waiting.ahead is None and waiting.attempt is None
+
+
+def test_tables_get_carries_the_numbers_of_the_snapshot() -> None:
+    """`Table` holds the snapshot's numbers; an older server sends none."""
+    bodies = [
+        {
+            "last_write_at": "2026-10-11T12:00:00Z",
+            "row_count": 3,
+            "size_bytes": 2048,
+            "file_count": 1,
+        },
+        {},
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "name": "sales",
+                "namespace": "bronze",
+                "uuid": "u1",
+                "metadata_location": None,
+                "schema": [],
+                **bodies.pop(0),
+            },
+        )
+
+    tables = Tables(_transport(handler))
+    full, bare = tables.get("dev", "bronze.sales"), tables.get("dev", "bronze.sales")
+
+    assert full.last_write_at == datetime.fromisoformat("2026-10-11T12:00:00+00:00")
+    assert (full.row_count, full.size_bytes, full.file_count) == (3, 2048, 1)
+    assert (bare.last_write_at, bare.row_count, bare.size_bytes, bare.file_count) == (
+        None,
+        None,
+        None,
+        None,
+    )
+
+
+_HEALTH_BODY = {
+    "days": 30,
+    "last_maintenance": {
+        "run_id": "r1",
+        "finished_at": "2026-10-11T12:00:00Z",
+        "status": "stopped",
+        "snapshots_expired": 3,
+        "files_deleted": 4,
+        "bytes_deleted": 2048,
+        "tags_removed": 1,
+    },
+    "checks": [
+        {
+            "name": "bronze.sales/unique_id",
+            "check": "unique_id",
+            "run_id": "r2",
+            "outcome": "failed",
+            "on_failure": "keep",
+            "failing_rows": 2,
+            "error": None,
+            "rollback_outcome": None,
+            "kept": True,
+            "not_published": False,
+            "finished_at": "2026-10-11T13:00:00Z",
+        }
+    ],
+    "readers": [{"principal": "ada", "read_count": 5, "last_read_at": "2026-10-11T14:00:00Z"}],
+}
+
+
+def test_tables_health_gets_the_health_route_and_parses_it() -> None:
+    """`health` GETs `.../tables/{name}/health` with `days` only when given."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json=_HEALTH_BODY)
+
+    tables = Tables(_transport(handler))
+    health = tables.health("dev", "bronze.sales")
+    tables.health("dev", "bronze.sales", days=7)
+
+    path = "/api/v1/environments/dev/namespaces/bronze/tables/sales/health"
+    assert [(r.method, r.url.path, dict(r.url.params)) for r in seen] == [
+        ("GET", path, {}),
+        ("GET", path, {"days": "7"}),
+    ]
+    assert health.days == 30
+    assert health.last_maintenance is not None
+    assert (health.last_maintenance.status, health.last_maintenance.snapshots_expired) == (
+        "stopped",
+        3,
+    )
+    assert health.last_maintenance.finished_at == datetime.fromisoformat(
+        "2026-10-11T12:00:00+00:00"
+    )
+    (check,) = health.checks
+    assert (check.check, check.outcome, check.kept, check.not_published) == (
+        "unique_id",
+        "failed",
+        True,
+        False,
+    )
+    assert check.finished_at == datetime.fromisoformat("2026-10-11T13:00:00+00:00")
+    assert health.readers is not None
+    assert [(r.principal, r.read_count) for r in health.readers] == [("ada", 5)]
+
+
+def test_tables_health_with_nothing_to_show() -> None:
+    """No maintenance and no right to see readers parse as `None`."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"days": 30, "last_maintenance": None, "checks": [], "readers": None}
+        )
+
+    health = Tables(_transport(handler)).health("dev", "bronze.sales")
+
+    assert (health.last_maintenance, health.checks, health.readers) == (None, [], None)

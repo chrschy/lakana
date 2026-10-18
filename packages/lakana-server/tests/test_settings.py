@@ -82,3 +82,15 @@ def test_artifact_limits_must_be_positive(
     monkeypatch.setenv(f"LAKANA_ARTIFACTS__{name}", value)
     with pytest.raises(pydantic.ValidationError):
         Settings()
+
+
+def test_table_reads_settings_have_defaults_and_read_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from lakana_core.config import TableReadsConfig
+
+    monkeypatch.setenv("LAKANA_DATABASE__URL", "sqlite://")
+    assert Settings().table_reads == TableReadsConfig(keep_days=90, default_days=30)
+    monkeypatch.setenv("LAKANA_TABLE_READS__KEEP_DAYS", "400")
+    monkeypatch.setenv("LAKANA_TABLE_READS__DEFAULT_DAYS", "14")
+    assert Settings().table_reads == TableReadsConfig(keep_days=400, default_days=14)

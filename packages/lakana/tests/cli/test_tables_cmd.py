@@ -1350,3 +1350,176 @@ def test_table_get_has_a_state_row_for_every_kind(
 
     assert result.exit_code == 0, result.stderr
     assert _state_row(result.stdout) == expected
+
+
+_HEALTH = {
+    "days": 30,
+    "last_maintenance": {
+        "run_id": "r1",
+        "finished_at": "2026-10-11T12:00:00Z",
+        "status": "complete",
+        "snapshots_expired": 3,
+        "files_deleted": 4,
+        "bytes_deleted": 2048,
+        "tags_removed": 1,
+    },
+    "checks": [
+        {
+            "name": "bronze.sales/unique_id",
+            "check": "unique_id",
+            "run_id": "r2",
+            "outcome": "failed",
+            "on_failure": "keep",
+            "failing_rows": 2,
+            "error": None,
+            "rollback_outcome": None,
+            "kept": True,
+            "not_published": False,
+            "finished_at": "2026-10-11T13:00:00Z",
+        },
+        {
+            "name": "bronze.sales/positive",
+            "check": "positive",
+            "run_id": "r3",
+            "outcome": "failed",
+            "on_failure": "block",
+            "failing_rows": 1,
+            "error": None,
+            "rollback_outcome": "unpublished",
+            "kept": False,
+            "not_published": True,
+            "finished_at": "2026-10-11T13:00:00Z",
+        },
+        {
+            "name": "bronze.sales/few_nulls",
+            "check": "few_nulls",
+            "run_id": "r4",
+            "outcome": "passed",
+            "on_failure": "warn",
+            "failing_rows": 0,
+            "error": None,
+            "rollback_outcome": None,
+            "kept": False,
+            "not_published": False,
+            "finished_at": "2026-10-11T13:00:00Z",
+        },
+    ],
+    "readers": [{"principal": "ada", "read_count": 5, "last_read_at": "2026-10-11T14:00:00Z"}],
+}
+
+
+def _health(tmp_path: Path, body: dict[str, object], *args: str) -> tuple[FakeApi, Result]:
+    """Run `lakana table health bronze.sales` against a canned answer.
+
+    Parameters
+    ----------
+    tmp_path
+        Pytest's per-test directory.
+    body
+        The route's JSON answer.
+    *args
+        More arguments for the command.
+
+    Returns
+    -------
+    tuple
+        The fake API and the result.
+    """
+    api = FakeApi()
+    api.on("GET", f"{_BASE}/sales/health", json=body)
+    result = invoke(
+        make_state(tmp_path, api), "table", "health", "bronze.sales", "--env", "dev", *args
+    )
+    return api, result
+
+
+def test_table_health_shows_maintenance_checks_and_readers(tmp_path: Path) -> None:
+    api, result = _health(tmp_path, _HEALTH)
+
+    assert result.exit_code == 0, result.stderr
+    assert api.requests[-1].url.params.get("days") is None
+    plain = _plain(result.stdout)
+    assert "Last maintenance: 2026-10-11 12:00 UTC, complete" in plain
+    assert "Expired 3 snapshots, deleted 4 files (2.0 KiB)" in plain
+    assert "removed 1 tag" in plain
+    assert "unique_id" in plain and "failed (kept)" in plain
+    assert "positive" in plain and "not published" in plain
+    assert "few_nulls" in plain and "passed" in plain
+    assert "Readers, last 30 days" in plain
+    assert "ada" in plain and "5" in plain
+
+
+def test_table_health_says_when_there_is_nothing_yet_and_when_readers_are_hidden(
+    tmp_path: Path,
+) -> None:
+    _, result = _health(
+        tmp_path, {"days": 30, "last_maintenance": None, "checks": [], "readers": None}
+    )
+
+    assert result.exit_code == 0, result.stderr
+    plain = _plain(result.stdout)
+    assert "Last maintenance: none yet" in plain
+    assert "lakana table maintain bronze.sales --env dev" in plain
+    assert "Checks: none recorded" in plain
+    assert "Readers: not shown" in plain
+    assert "ADMIN" in plain
+
+
+def test_table_health_says_when_nobody_read_the_table(tmp_path: Path) -> None:
+    _, result = _health(
+        tmp_path, {"days": 7, "last_maintenance": None, "checks": [], "readers": []}, "--days", "7"
+    )
+
+    assert "Readers, last 7 days: none" in _plain(result.stdout)
+
+
+def test_table_health_marks_a_stopped_maintenance_and_one_tag_or_none(tmp_path: Path) -> None:
+    body = {
+        **_HEALTH,
+        "last_maintenance": {**_HEALTH["last_maintenance"], "status": "stopped", "tags_removed": 0},  # type: ignore[dict-item]
+    }
+    _, result = _health(tmp_path, body)
+
+    plain = _plain(result.stdout)
+    assert "stopped" in plain
+    assert "run it again to continue" in plain
+    assert "tag" not in plain
+
+
+def test_table_health_sends_days(tmp_path: Path) -> None:
+    api, result = _health(tmp_path, _HEALTH, "--days", "7")
+
+    assert result.exit_code == 0, result.stderr
+    assert api.requests[-1].url.params.get("days") == "7"
+
+
+def test_table_health_refuses_days_below_one(tmp_path: Path) -> None:
+    api = FakeApi()
+    result = invoke(
+        make_state(tmp_path, api), "table", "health", "bronze.sales", "--days", "0", "--env", "dev"
+    )
+
+    assert result.exit_code == 2
+    assert api.requests == []
+
+
+def test_table_health_as_json(tmp_path: Path) -> None:
+    api = FakeApi()
+    api.on("GET", f"{_BASE}/sales/health", json=_HEALTH)
+
+    result = invoke(
+        make_state(tmp_path, api),
+        "--output",
+        "json",
+        "table",
+        "health",
+        "bronze.sales",
+        "--env",
+        "dev",
+    )
+
+    body = json.loads(result.stdout)
+    assert body["days"] == 30
+    assert body["last_maintenance"]["status"] == "complete"
+    assert [c["check"] for c in body["checks"]] == ["unique_id", "positive", "few_nulls"]
+    assert body["readers"][0]["principal"] == "ada"

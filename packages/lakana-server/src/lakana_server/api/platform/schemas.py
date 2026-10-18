@@ -609,6 +609,15 @@ class TableOut(BaseModel):
         when there is none.
     description_source
         ``edited`` or ``project``; `None` when there is no description.
+    last_write_at
+        When the current snapshot was committed; `None` without one, and for a view, an
+        external table and an artifact.
+    row_count
+        The rows of the current snapshot, from its summary; `None` when missing.
+    size_bytes
+        The size of its data files, from its summary; `None` when missing.
+    file_count
+        Its data files, from its summary; `None` when missing.
     """
 
     name: str
@@ -625,6 +634,123 @@ class TableOut(BaseModel):
     state_message: str | None = None
     description: str | None = None
     description_source: Literal["project", "edited"] | None = None
+    last_write_at: datetime | None = None
+    row_count: int | None = None
+    size_bytes: int | None = None
+    file_count: int | None = None
+
+
+class LastMaintenanceOut(BaseModel):
+    """The last maintenance run that changed a table.
+
+    Parameters
+    ----------
+    run_id
+        The query run that did it.
+    finished_at
+        When it ended.
+    status
+        ``complete``, or ``stopped`` when it ran past its time limit and stopped at a safe point;
+        running maintenance again continues.
+    snapshots_expired
+        Snapshots it expired.
+    files_deleted
+        Orphaned files it deleted.
+    bytes_deleted
+        Their total size.
+    tags_removed
+        Tags of failed checks it removed.
+    """
+
+    run_id: uuid.UUID
+    finished_at: datetime
+    status: Literal["complete", "stopped"]
+    snapshots_expired: int
+    files_deleted: int
+    bytes_deleted: int
+    tags_removed: int
+
+
+class CheckHealthOut(BaseModel):
+    """The newest result of one check of a table.
+
+    Parameters
+    ----------
+    name
+        ``<table>/<check>``.
+    check
+        The check's short name.
+    run_id
+        The run the result belongs to.
+    outcome
+        ``passed``, ``failed``, ``warned`` or ``errored``.
+    on_failure
+        ``block``, ``keep`` or ``warn``.
+    failing_rows
+        The count of rows that are wrong, when the check ran.
+    error
+        Why the check could not run.
+    rollback_outcome
+        What the rollback after a failed blocking check did, if there was one.
+    kept
+        The check failed or errored and its ``keep`` setting left the data in the table.
+    not_published
+        The rollback left the table not published.
+    finished_at
+        When the check ended.
+    """
+
+    name: str
+    check: str
+    run_id: uuid.UUID
+    outcome: str
+    on_failure: str
+    failing_rows: int | None
+    error: str | None
+    rollback_outcome: str | None
+    kept: bool
+    not_published: bool
+    finished_at: datetime
+
+
+class ReaderOut(BaseModel):
+    """A principal's use of a table over the window.
+
+    Parameters
+    ----------
+    principal
+        The principal's name.
+    read_count
+        How many of its succeeded queries named the table.
+    last_read_at
+        When the last of them completed.
+    """
+
+    principal: str
+    read_count: int
+    last_read_at: datetime
+
+
+class TableHealthOut(BaseModel):
+    """A table's health at a glance.
+
+    Parameters
+    ----------
+    days
+        The window `readers` covers.
+    last_maintenance
+        The last maintenance that changed the table; `None` if there is none.
+    checks
+        The newest result of each check of the table.
+    readers
+        Who read the table in the window, most reads first; `None` for a caller who may not see
+        the table's grants.
+    """
+
+    days: int
+    last_maintenance: LastMaintenanceOut | None
+    checks: list[CheckHealthOut]
+    readers: list[ReaderOut] | None
 
 
 class DescriptionIn(BaseModel):
