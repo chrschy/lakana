@@ -1253,3 +1253,68 @@ def test_the_five_minute_script_installs_uv_by_hash_and_dependabot_keeps_it_curr
     assert [u["directory"] for u in config["updates"] if u["package-ecosystem"] == "pip"] == [
         "/scripts"
     ]
+
+
+def _canary() -> dict:
+    """Load the dependency canary workflow.
+
+    Returns
+    -------
+    dict
+        The parsed ``canary.yml``.
+    """
+    return yaml.safe_load((WORKFLOWS / "canary.yml").read_text())
+
+
+def test_the_canary_runs_every_day_and_on_demand() -> None:
+    """A breaking upstream release is seen within a day: a daily schedule, and a manual run."""
+    triggers = _canary()[True]
+    assert set(triggers) == {"schedule", "workflow_dispatch"}
+    (entry,) = triggers["schedule"]
+    minute, hour, day, month, weekday = entry["cron"].split()
+    assert (day, month, weekday) == ("*", "*", "*"), "daily means every day"
+    assert minute.isdigit() and hour.isdigit()
+
+
+def test_the_canary_has_the_least_privilege() -> None:
+    """No token write scope anywhere: a failure is a failed run, not an issue the job writes."""
+    workflow = _canary()
+    assert workflow["permissions"] == {}
+    (job,) = workflow["jobs"].values()
+    assert job["permissions"] == {"contents": "read"}
+    assert isinstance(job["timeout-minutes"], int)
+    checkout = next(s for s in job["steps"] if s.get("uses", "").startswith("actions/checkout@"))
+    assert checkout["with"]["persist-credentials"] is False
+
+
+def test_the_canary_runs_on_github_s_runner() -> None:
+    """A scheduled job has no pull request to judge it, so the `CI_RUNNER` switch does not apply."""
+    (job,) = _canary()["jobs"].values()
+    assert job["runs-on"] == "ubuntu-latest"
+
+
+def test_the_canary_installs_its_own_build_with_unpinned_dependencies() -> None:
+    """The five-minute script runs against wheels built from `main`; third parties float.
+
+    Only `lakana` is pinned (to the build's own version, with `--find-links`), never with
+    `--no-index` or a constraints file: an unpinned install is the point of the job.
+    """
+    (job,) = _canary()["jobs"].values()
+    commands = "\n".join(c for step in job["steps"] for c in _commands(step))
+    assert "uv build --all-packages" in commands
+    assert "five_minute_test.sh --find-links /dist" in commands
+    assert "lakana[server]==$version" in commands
+    assert "--no-index" not in commands
+    assert "--constraint" not in commands and " -c " not in commands
+    assert "uv.lock" not in commands
+    checkout = next(s for s in job["steps"] if s.get("uses", "").startswith("actions/checkout@"))
+    assert checkout["with"]["fetch-depth"] == 0  # the version comes from git tags
+
+
+def test_the_canary_shows_the_versions_it_resolved_even_when_it_fails() -> None:
+    """A failure names the version that broke it: the summary is written even on a failure."""
+    (job,) = _canary()["jobs"].values()
+    script = (ROOT / "scripts" / "five_minute_test.sh").read_text()
+    assert "pip freeze" in script
+    summary = [s for s in job["steps"] if '>> "$GITHUB_STEP_SUMMARY"' in s.get("run", "")]
+    assert summary and all(s.get("if") == "${{ always() }}" for s in summary)

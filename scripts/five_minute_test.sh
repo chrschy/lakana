@@ -32,6 +32,9 @@ export XDG_CONFIG_HOME=$(mktemp -d) XDG_DATA_HOME=$(mktemp -d) NO_COLOR=1
 t0=$(date +%s.%N)   # the stopwatch starts after tool setup, at the install
 # The product install under test, as a user types it: unpinned on purpose, hashes would defeat the test.
 step "pip install" pip install --no-cache-dir --quiet "$@"
+# What the unpinned install resolved, written at once so that a failure further down still names it.
+{ echo "<details><summary>Installed packages (pip freeze)</summary>"; echo; echo '```'; pip freeze; echo '```'; echo; echo "</details>"; echo; } \
+  | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
 verify_version() {
   installed=$(python3 -c 'import lakana; print(lakana.__version__)')
   if [ "$installed" != "$LAKANA_EXPECTED_VERSION" ]; then

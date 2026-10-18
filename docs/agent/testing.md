@@ -218,6 +218,14 @@ every missing output of it means "run everything".
   time, when it reports them, never in bulk. `scripts/tests/test_workflows.py` pins the
   permissions, the triggers and its runner; another test there pins every action of every workflow
   by commit SHA.
+- **`canary.yml`** (Dependency canary) runs daily and on demand. It builds the wheels from `main`
+  and runs `scripts/five_minute_test.sh` as the `five-minute` job does: `lakana` is pinned to the
+  job's own build, every third-party dependency resolves from PyPI unpinned, so it sees a breaking
+  release of `sqlglot`, `duckdb`, `pyiceberg` or anything else within a day, which the lock and the
+  pull-request jobs cannot. A failure is a failed scheduled run (GitHub notifies the maintainer;
+  the job has `contents: read` only and files no issue); the step summary lists the resolved
+  versions (`pip freeze`) so the run names the release that broke it. It is outside `ci.yml` and
+  its `changes` gating, and on GitHub's runner whatever `CI_RUNNER` says.
 - **`security-deep.yml`** runs semgrep and Trivy weekly. The semgrep scan (a pinned image, no write
   scope, no token in the workspace) keeps its SARIF as an artifact; `semgrep-upload` alone has
   `security-events: write` and does nothing but upload it to code scanning. Dependabot does not
