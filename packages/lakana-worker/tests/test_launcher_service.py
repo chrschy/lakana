@@ -523,7 +523,7 @@ def test_a_root_with_a_socket_is_unusable_and_its_reason_never_names_its_path(
     """A read-only mount does not stop a task from connecting to a socket under it."""
     reason = _reason(tmp_path, FakeEngine(probe_exits={"data": 4}))
 
-    assert "ingestion root 'data' holds a socket" in reason
+    assert "ingestion root 'data' holds a socket, pipe or device node" in reason
     assert "/srv/data" not in reason and "INGESTION_ROOTS" in reason
 
 
@@ -706,6 +706,21 @@ def test_the_probe_script_finds_a_socket_below_the_root_or_as_the_root(
         listener.bind("s.sock")
         assert _probe(root, info) == 4
         assert _probe(root / "a" / "b" / "s.sock", info) == 4
+
+
+def test_the_probe_script_refuses_a_pipe_or_a_device_node(
+    tmp_path: Path,
+) -> None:
+    """A world-writable FIFO is a way into a host process, whatever the mount says."""
+    root = tmp_path / "data"
+    (root / "a").mkdir(parents=True)
+    info = tmp_path / "info"
+    info.write_text("", encoding="utf-8")
+    os.mkfifo(root / "a" / "pipe")
+
+    assert _probe(root, info) == 4
+    assert _probe(root / "a" / "pipe", info) == 4
+    assert _probe(Path("/dev/null"), info) == 4
 
 
 def test_the_probe_script_stops_walking_after_a_bound(
@@ -1000,8 +1015,8 @@ def test_a_failed_pull_names_the_image_and_the_next_step(tmp_path: Path) -> None
             lambda m, p, b: (
                 p == "/networks/create" and b["Labels"]["lakana.launcher.kind"] == "task"
             ),
-            (403, {"message": "pool overlaps"}),
-            "Docker refused the task network: pool overlaps",
+            (403, {"message": "network not allowed"}),
+            "Docker refused the task network: network not allowed",
         ),
         (
             lambda m, p, b: p.endswith("/connect"),
@@ -1214,7 +1229,7 @@ def test_cleanup_lists_the_containers_before_it_looks_at_the_live_runs(tmp_path:
     ) -> tuple[int, Any]:
         answer = real(method, path, body, query=query, timeout=timeout)
         if path == "/containers/json":
-            launcher._register("lakana-task-late", 3)
+            launcher._register("lakana-task-late", 3, 0)
         return answer
 
     engine.request = listing_then_register  # ty: ignore[invalid-assignment]
@@ -1331,6 +1346,516 @@ def test_a_task_that_writes_before_it_reads_its_input_does_not_block_the_launche
     assert not worker.is_alive(), "the launcher is stuck writing input while the task writes output"
     assert len(_logs(emitted)) == 60000 * 100
     assert engine.stdin == [b"y" * (1 << 20)]
+
+
+def _volume_creations(engine: FakeEngine) -> dict[str, dict[str, str]]:
+    """Collect the labels of every volume created explicitly.
+
+    Parameters
+    ----------
+    engine
+        The fake engine.
+
+    Returns
+    -------
+    dict
+        Volume name to labels.
+    """
+    return {b["Name"]: b["Labels"] for m, p, b in engine.calls if p == "/volumes/create"}
+
+
+def test_a_build_creates_its_volumes_with_labels_and_a_source_build_gets_a_private_cache(
+    tmp_path: Path,
+) -> None:
+    """Environment and cache volumes are found by label; the private cache goes with the build."""
+    engine = FakeEngine()
+    launcher = _started(engine, tmp_path, built=False)
+    environment = environment_volume(launcher.settings, "3.13", KEY)
+
+    launcher.build(_build(), lambda line: None)
+
+    created = _volume_creations(engine)
+    cache = engine.created("build")[0]["HostConfig"]["Mounts"][2]["Source"]
+    assert "uvcache-private-" in cache
+    assert created[environment]["lakana.launcher.kind"] == "env"
+    assert created[cache] == {
+        "lakana.launcher.stack": "lakana",
+        "lakana.launcher.kind": "cache",
+        "lakana.launcher.shared": "0",
+    }
+    assert cache not in engine.volumes and environment in engine.volumes
+
+
+def test_a_wheels_only_build_keeps_the_shared_cache_it_mounted(tmp_path: Path) -> None:
+    """The shared cache is labelled shared and outlives the build."""
+    engine = FakeEngine()
+    launcher = _started(engine, tmp_path, built=False)
+
+    launcher.build(replace(_build(), no_build=True), lambda line: None)
+
+    cache = engine.created("build")[0]["HostConfig"]["Mounts"][2]["Source"]
+    assert "private" not in cache
+    assert _volume_creations(engine)[cache]["lakana.launcher.shared"] == "1"
+    assert cache in engine.volumes
+
+
+def test_a_failed_source_build_removes_its_private_cache_too(tmp_path: Path) -> None:
+    """Nothing of a failed build outlives it."""
+    engine = FakeEngine(exit_code=1)
+    launcher = _started(engine, tmp_path, built=False)
+
+    launcher.build(_build(), lambda line: None)
+
+    assert not [v for v in engine.volumes if "uvcache-private" in v]
+
+
+def test_every_container_is_removed_with_its_anonymous_volumes(tmp_path: Path) -> None:
+    """An image `VOLUME` makes an anonymous volume that survives a removal without `v=1`."""
+    engine = FakeEngine()
+    launcher = _started(engine, tmp_path, ingestion_roots={"data": "/srv/data"})
+
+    launcher.run(_run(), lambda line: None)
+
+    removals = [q for m, p, q in engine.calls if m == "DELETE" and p.startswith("/containers/")]
+    assert removals and all(q == {"force": "1", "v": "1"} for q in removals)
+
+
+def test_every_container_and_network_gets_a_deadline_after_its_timeout(tmp_path: Path) -> None:
+    """The reaper needs a clock that does not depend on the launcher's memory."""
+    engine = FakeEngine(hold=True)
+    launcher = _started(engine, tmp_path)
+    before = time.time()
+
+    launcher.run(_run(timeout=1), lambda line: None)
+
+    label = "lakana.launcher.deadline"
+    deadline = int(engine.created("task")[0]["Labels"][label])
+    assert before + 1 + 3 <= deadline <= time.time() + 1 + 3 + 121
+    network = next(b for m, p, b in engine.calls if p == "/networks/create" and "task" in b["Name"])
+    assert network["Labels"][label] == str(deadline)
+
+
+def _plant(
+    engine: FakeEngine, name: str, deadline: float | None, *, cid: str | None = None
+) -> None:
+    """Add a labelled container and network, as an earlier launcher run would have left.
+
+    Parameters
+    ----------
+    engine
+        The fake engine.
+    name
+        Their name.
+    deadline
+        The deadline label, or `None` for none.
+    cid
+        The container id (the name by default).
+    """
+    labels = {"lakana.launcher.stack": "lakana"}
+    if deadline is not None:
+        labels["lakana.launcher.deadline"] = str(int(deadline))
+    ident = cid or name
+    engine.containers[ident] = {
+        "Name": name,
+        "exit": None,
+        "spec": {"HostConfig": {"Mounts": []}},
+        "Labels": labels,
+    }
+    engine._released[ident] = threading.Event()
+    engine.networks[name] = {"Labels": labels, "Containers": {}}
+
+
+def test_the_reaper_removes_what_is_past_its_deadline_and_spares_the_rest(tmp_path: Path) -> None:
+    """Including a container nobody supervises, as after a launcher restart."""
+    engine = FakeEngine()
+    launcher = _started(engine, tmp_path)
+    now = time.time()
+    _plant(engine, "lakana-task-old", now - 10)
+    _plant(engine, "lakana-task-new", now + 600)
+    _plant(engine, "lakana-task-none", None)
+
+    removed = launcher.reap()
+
+    assert removed == 1
+    assert set(engine.containers) == {"lakana-task-new", "lakana-task-none"}
+    assert set(engine.networks) == {"lakana-task-new", "lakana-task-none"}
+
+
+def test_the_reaper_stops_a_live_run_that_outlived_its_deadline(tmp_path: Path) -> None:
+    """A stuck run is marked stopped, so its connection ends with the container."""
+    engine = FakeEngine(hold=True)
+    launcher = _started(engine, tmp_path)
+    results: list[dict[str, object]] = []
+    worker = threading.Thread(
+        target=lambda: results.append(launcher.run(_run(), lambda line: None))
+    )
+    worker.start()
+    _until(lambda: _task_started(engine))
+
+    launcher.reap(now=time.time() + 100000)
+    worker.join(10)
+
+    assert results[0]["stopped"] is True and engine.containers == {}
+
+
+def test_the_reaper_survives_an_engine_that_fails(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """One bad listing is logged; the next pass tries again."""
+    engine = FakeEngine()
+    launcher = _started(engine, tmp_path)
+    _intercept(engine, lambda m, p, b: p == "/containers/json", (500, {"message": "busy"}))
+
+    assert launcher.reap() == 0
+    assert "Could not list" in caplog.text
+
+
+def test_the_reaper_thread_removes_an_expired_container_and_stops_on_request(
+    tmp_path: Path,
+) -> None:
+    """The loop that runs beside the server."""
+    engine = FakeEngine()
+    launcher = _started(engine, tmp_path)
+    _plant(engine, "lakana-task-old", time.time() - 10)
+
+    thread = launcher.start_reaper(interval=0.05)
+    _until(lambda: "lakana-task-old" not in engine.containers)
+    launcher.stop_reaper()
+    thread.join(5)
+
+    assert not thread.is_alive()
+
+
+def test_an_error_inside_a_reaper_pass_does_not_end_the_thread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An unexpected exception is logged and the loop goes on."""
+    launcher = _started(FakeEngine(), tmp_path)
+    calls: list[int] = []
+
+    def reap(now: float | None = None) -> int:
+        calls.append(1)
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(launcher, "reap", reap)
+
+    thread = launcher.start_reaper(interval=0.02)
+    _until(lambda: len(calls) >= 2)
+    launcher.stop_reaper()
+    thread.join(5)
+
+    assert "The reaper failed" in caplog.text
+
+
+def test_the_reaper_removes_old_shared_caches_and_keeps_recent_and_used_ones(
+    tmp_path: Path,
+) -> None:
+    """A simple age limit; a cache in use answers 409 and stays."""
+    engine = FakeEngine()
+    launcher = _started(engine, tmp_path)
+    cache = {
+        "lakana.launcher.stack": "lakana",
+        "lakana.launcher.kind": "cache",
+        "lakana.launcher.shared": "1",
+    }
+    for name, created in (
+        ("lakana-uvcache-old", "2020-01-01T00:00:00Z"),
+        ("lakana-uvcache-new", "2999-01-01T00:00:00+00:00"),
+        ("lakana-uvcache-busy", "2020-01-01T00:00:00Z"),
+        ("lakana-uvcache-odd", "yesterday"),
+    ):
+        engine.volumes.add(name)
+        engine.volume_labels[name] = cache
+        engine.volume_created[name] = created
+    engine.containers["user"] = {
+        "Name": "other",
+        "Labels": {},
+        "exit": None,
+        "spec": {"HostConfig": {"Mounts": [{"Source": "lakana-uvcache-busy", "Type": "volume"}]}},
+    }
+
+    launcher.reap()
+
+    caches = {name for name in engine.volumes if name.startswith("lakana-uvcache")}
+    assert caches == {"lakana-uvcache-new", "lakana-uvcache-busy", "lakana-uvcache-odd"}
+
+
+def test_a_deadline_label_that_is_not_a_number_is_ignored(tmp_path: Path) -> None:
+    """Someone else's label on a stack-labelled object must not crash the reaper."""
+    engine = FakeEngine()
+    launcher = _started(engine, tmp_path)
+    _plant(engine, "lakana-task-odd", None)
+    engine.containers["lakana-task-odd"]["Labels"]["lakana.launcher.deadline"] = "soon"
+
+    assert launcher.reap() == 0
+    assert "lakana-task-odd" in engine.containers
+
+
+def test_a_reaper_pass_goes_on_when_the_network_or_cache_listing_fails(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Each listing is tried on its own."""
+    engine = FakeEngine()
+    launcher = _started(engine, tmp_path)
+    _intercept(engine, lambda m, p, b: p == "/networks", (500, {"message": "busy"}))
+    _intercept(engine, lambda m, p, b: p == "/volumes", EngineError("gone"))
+
+    launcher.reap()
+
+    assert "Could not list networks" in caplog.text and "Could not list caches" in caplog.text
+
+
+def test_a_missing_docker_socket_file_is_left_to_the_engine_check(tmp_path: Path) -> None:
+    """The group check needs a socket to look at; without one the engine check speaks."""
+    _started(FakeEngine(), tmp_path, docker_socket=tmp_path / "missing.sock")
+
+
+def test_a_recovered_network_with_an_unreadable_subnet_is_skipped(tmp_path: Path) -> None:
+    """Only addresses inside the pool are taken as in use."""
+    engine = FakeEngine()
+    _plant(engine, "lakana-task-odd", None)
+    engine.networks["lakana-task-odd"]["spec"] = {"IPAM": {"Config": [{"Subnet": "not-a-subnet"}]}}
+    _intercept(
+        engine,
+        lambda m, p, b: m == "DELETE" and p.startswith("/networks/"),
+        (500, {"message": "x"}),
+    )
+
+    launcher = _started(engine, tmp_path)
+
+    assert launcher._subnets == {}
+
+
+def test_a_build_fails_when_docker_refuses_its_volume(tmp_path: Path) -> None:
+    """The volumes are created with labels first; a refusal stops the build."""
+    engine = FakeEngine()
+    launcher = _started(engine, tmp_path, built=False)
+    _intercept(engine, lambda m, p, b: p == "/volumes/create", (500, {"message": "no space"}))
+
+    with pytest.raises(EngineError, match=r"Docker refused the volume .*: no space"):
+        launcher.build(_build(), lambda line: None)
+
+    assert engine.created("build") == []
+
+
+def test_a_shutdown_removes_the_containers_and_networks_of_live_runs(tmp_path: Path) -> None:
+    """SIGTERM must not leave a task running with nobody to time it out."""
+    engine = FakeEngine(hold=True)
+    launcher = _started(engine, tmp_path)
+    results: list[dict[str, object]] = []
+    worker = threading.Thread(
+        target=lambda: results.append(launcher.run(_run(), lambda line: None))
+    )
+    worker.start()
+    _until(lambda: _task_started(engine))
+
+    launcher.shutdown()
+    worker.join(10)
+
+    assert results[0]["stopped"] is True
+    assert engine.containers == {} and engine.networks == {}
+
+
+def test_a_shutdown_survives_an_engine_that_cannot_be_asked(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The process still ends; the reaper of the next launcher does the rest."""
+    engine = FakeEngine()
+    launcher = _started(engine, tmp_path)
+    _intercept(engine, lambda m, p, b: p == "/containers/json", EngineError("gone"))
+
+    launcher.shutdown()
+
+    assert "Could not remove everything" in caplog.text
+
+
+def test_start_refuses_when_it_cannot_list_what_an_earlier_launcher_left(tmp_path: Path) -> None:
+    """A failed listing used to remove nothing, silently, and leave tasks running."""
+    engine = FakeEngine()
+    _intercept(engine, lambda m, p, b: p == "/containers/json", (500, {"message": "daemon busy"}))
+
+    with pytest.raises(StartError, match="cannot list the containers") as caught:
+        _started(engine, tmp_path)
+
+    assert "daemon busy" in str(caught.value)
+
+
+def test_a_task_network_gets_a_slash_29_from_the_range_and_gives_it_back(tmp_path: Path) -> None:
+    """The host's address pools are not touched, and the same subnet is used again."""
+    engine = FakeEngine()
+    launcher = _started(engine, tmp_path)
+
+    launcher.run(_run(), lambda line: None)
+    launcher.run(_run("t2"), lambda line: None)
+
+    subnets = [
+        b["IPAM"]["Config"][0]["Subnet"]
+        for m, p, b in engine.calls
+        if p == "/networks/create" and "IPAM" in b
+    ]
+    assert subnets == ["10.207.0.0/29", "10.207.0.0/29"]
+    assert launcher._subnets == {} and launcher._used_subnets == set()
+
+
+def test_concurrent_networks_get_different_subnets(tmp_path: Path) -> None:
+    """Allocation happens under the lock."""
+    launcher = _started(FakeEngine(), tmp_path)
+
+    first = launcher._open_network("task", "t1", "w1", None, 0)
+    second = launcher._open_network("build", "b1", "w1", None, 0)
+
+    assert launcher._subnets[first] == "10.207.0.0/29"
+    assert launcher._subnets[second] == "10.207.0.8/29"
+
+
+def test_subnets_of_networks_that_survive_the_start_are_recovered(tmp_path: Path) -> None:
+    """A network that could not be removed keeps its subnet; no new network may take it."""
+    engine = FakeEngine()
+    _plant(engine, "lakana-task-stuck", None)
+    engine.networks["lakana-task-stuck"]["spec"] = {
+        "IPAM": {"Config": [{"Subnet": "10.207.0.0/29"}, {"Subnet": "192.168.1.0/29"}]}
+    }
+    _intercept(
+        engine,
+        lambda m, p, b: m == "DELETE" and p.startswith("/networks/"),
+        (500, {"message": "x"}),
+    )
+
+    launcher = _started(engine, tmp_path)
+
+    assert launcher._subnets == {"lakana-task-stuck": "10.207.0.0/29"}
+    assert launcher._open_network("task", "t1", "w1", None, 0) and (
+        launcher._subnets["lakana-task-t1"] == "10.207.0.8/29"
+    )
+
+
+def test_a_subnet_docker_says_overlaps_is_skipped(tmp_path: Path) -> None:
+    """Something else on the host may hold an address inside the range."""
+    engine = FakeEngine(overlaps={"10.207.0.0/29"})
+    launcher = _started(engine, tmp_path)
+
+    name = launcher._open_network("task", "t1", "w1", None, 0)
+
+    assert launcher._subnets[name] == "10.207.0.8/29"
+    assert "10.207.0.0/29" in launcher._used_subnets
+
+
+def test_a_range_full_of_overlaps_gives_up_with_the_setting_named(tmp_path: Path) -> None:
+    """After a few tries the message says what to change."""
+    engine = FakeEngine(overlaps={f"10.207.0.{8 * n}/29" for n in range(8)})
+    launcher = _started(engine, tmp_path)
+
+    with pytest.raises(EngineError, match="LAKANA_LAUNCHER__NETWORK_RANGE"):
+        launcher._open_network("task", "t1", "w1", None, 0)
+
+    assert launcher._subnets == {}
+
+
+def test_runs_beyond_the_concurrency_bound_are_refused_naming_the_setting(tmp_path: Path) -> None:
+    """A /24 holds 32 networks; the bound is below that, so a burst cannot use them all."""
+    launcher = _started(FakeEngine(), tmp_path, network_range="10.207.0.0/24")
+    for number in range(24):
+        launcher._open_network("task", f"t{number}", "w1", None, 0)
+
+    with pytest.raises(EngineError, match="LAKANA_LAUNCHER__NETWORK_RANGE") as caught:
+        launcher._open_network("task", "t99", "w1", None, 0)
+
+    assert "24 of 24" in str(caught.value)
+
+
+def test_an_exhausted_pool_is_an_error_naming_the_setting(tmp_path: Path) -> None:
+    """Subnets that overlaps took out of use can exhaust the pool below the bound."""
+    launcher = _started(FakeEngine(), tmp_path, network_range="10.207.0.0/24")
+    launcher._used_subnets.update(f"10.207.0.{8 * n}/29" for n in range(32))
+
+    with pytest.raises(EngineError, match="no free address range"):
+        launcher._open_network("task", "t1", "w1", None, 0)
+
+
+def test_a_network_that_cannot_be_deleted_keeps_its_subnet(tmp_path: Path) -> None:
+    """Only a removed network gives its addresses back."""
+    engine = FakeEngine()
+    launcher = _started(engine, tmp_path)
+    name = launcher._open_network("task", "t1", "w1", None, 0)
+    _intercept(engine, lambda m, p, b: m == "DELETE", (500, {"message": "busy"}))
+
+    launcher._close_network(name)
+
+    assert launcher._subnets == {name: "10.207.0.0/29"}
+
+
+def test_no_new_privileges_auto_turns_off_only_when_a_control_container_starts(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A probe that fails for another reason must not silently drop the option."""
+    engine = FakeEngine(probe_exits={"no-new-privileges": 1})
+
+    launcher = _started(engine, tmp_path)
+
+    assert launcher.no_new_privileges is False
+    assert any(r.levelname == "WARNING" for r in caplog.records)
+
+
+def test_start_refuses_when_not_even_the_control_container_runs(tmp_path: Path) -> None:
+    """The image or the host is broken, not the option: do not start with a guess."""
+    engine = FakeEngine(probe_exits={"no-new-privileges": 1, "no-new-privileges-control": 1})
+
+    with pytest.raises(StartError, match="cannot start a container at all"):
+        _started(engine, tmp_path)
+
+
+def test_start_refuses_a_docker_socket_whose_group_is_a_task_group(tmp_path: Path) -> None:
+    """The docker group must not be a group that tasks run in."""
+    docker = tmp_path / "docker.sock"
+    docker.write_text("", encoding="utf-8")
+
+    with pytest.raises(StartError, match="group of the Docker socket") as caught:
+        _started(FakeEngine(), tmp_path, docker_socket=docker, task_user=f"10001:{os.getgid()}")
+
+    assert str(os.getgid()) in str(caught.value)
+    _started(FakeEngine(), tmp_path, docker_socket=docker)  # another gid: fine
+
+
+def test_a_container_that_never_stops_is_removed_when_the_wait_gives_up(tmp_path: Path) -> None:
+    """The wait after the stream is bounded by the timeout, the grace and a margin."""
+    engine = FakeEngine()
+    launcher = _started(engine, tmp_path)
+    seen: list[float | None] = []
+    real = engine.request
+
+    def request(
+        method: str, path: str, body: Any = None, *, query: Any = None, timeout: Any = 60.0
+    ) -> tuple[int, Any]:
+        if path.endswith("/wait") and "c2" in path:
+            seen.append(timeout)
+            raise EngineError("Docker did not answer within 123 s")
+        return real(method, path, body, query=query, timeout=timeout)
+
+    engine.request = request  # ty: ignore[invalid-assignment]
+
+    with pytest.raises(EngineError, match="did not answer"):
+        launcher.run(_run(timeout=30), lambda line: None)
+
+    assert seen[0] is not None and 3 + 60 <= seen[0] <= 30 + 3 + 60
+    assert engine.containers == {} and engine.networks == {}
+
+
+def test_the_memory_of_live_runs_is_bounded_in_total(tmp_path: Path) -> None:
+    """One run asks for 256 MiB; a total of 300 MiB admits one at a time."""
+    engine = FakeEngine(hold=True)
+    launcher = _started(engine, tmp_path, max_total_memory_mb=300)
+    worker = threading.Thread(target=lambda: launcher.run(_run(), lambda line: None))
+    worker.start()
+    _until(lambda: _task_started(engine))
+
+    with pytest.raises(EngineError, match="LAKANA_LAUNCHER__MAX_TOTAL_MEMORY_MB"):
+        launcher.run(_run("t2"), lambda line: None)
+
+    launcher.stop(StopRequest("t1"))
+    worker.join(10)
+    engine.hold = False
+    assert launcher._reserved_mb == 0
+    assert launcher.run(_run("t3"), lambda line: None)["exit"] == 0
 
 
 def _task_started(engine: FakeEngine) -> bool:

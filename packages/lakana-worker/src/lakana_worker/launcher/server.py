@@ -16,9 +16,11 @@ import json
 import logging
 import os
 import secrets
+import signal
 import socket
 import socketserver
 import stat
+import struct
 import threading
 import time
 from collections.abc import Callable
@@ -38,10 +40,12 @@ from lakana_worker.launcher.service import Launcher, StartError
 
 logger = logging.getLogger("lakana_worker.launcher")
 
-TOKEN_FILE = "launcher.token"
+TOKEN_FILE = "launcher.token"  # nosec B105 -- a file name, not a secret
 _MAX_CONNECTIONS = 128
 _READ_TIMEOUT = 30.0
 """Seconds a connection has to send its request line; the wait for the result is not bounded."""
+_SEND_TIMEOUT = 60.0
+"""Seconds a write to the caller may block; a caller that stops reading is treated as gone."""
 _ROOT_UID = 0
 """Who must own the socket's directory."""
 _TOKEN_TRIES = 8
@@ -183,6 +187,13 @@ class _Handler(socketserver.StreamRequestHandler):
             self._try_send({"refused": "no request line arrived in time; send the request at once"})
             return None
         self.connection.settimeout(None)
+        # A send timeout of its own: the watcher thread blocks in `recv` on this socket, so a
+        # socket-wide timeout would end it. A blocked send then fails and the caller is gone.
+        seconds = int(_SEND_TIMEOUT)
+        micro = int((_SEND_TIMEOUT - seconds) * 1_000_000)
+        self.connection.setsockopt(
+            socket.SOL_SOCKET, socket.SO_SNDTIMEO, struct.pack("ll", seconds, micro)
+        )
         return bytes(data.split(b"\n", 1)[0] + b"\n") if b"\n" in data else bytes(data)
 
     def _serve(self) -> None:
@@ -398,5 +409,32 @@ def serve(launcher: Launcher) -> None:
     if existing is not None:
         path.unlink(missing_ok=True)
     server = LauncherServer(str(path), launcher=launcher, token=token)
+
+    def on_signal(number: int, frame: object) -> None:
+        """End the serving loop from a thread.
+
+        `shutdown` waits for the loop, which this handler interrupted, so it cannot run here.
+
+        Parameters
+        ----------
+        number
+            The signal.
+        frame
+            The interrupted frame.
+        """
+        logger.info("Signal %d: stopping and removing every run of this stack.", number)
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    previous = {
+        number: signal.signal(number, on_signal) for number in (signal.SIGTERM, signal.SIGINT)
+    }
+    launcher.start_reaper()
     logger.info("The launcher listens on %s.", path)
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        launcher.shutdown()
+        server.server_close()
+        for number, handler in previous.items():
+            if handler is not None:
+                signal.signal(number, handler)

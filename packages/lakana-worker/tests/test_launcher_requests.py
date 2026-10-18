@@ -32,6 +32,7 @@ from lakana_worker.launcher.requests import (
     probe_container_spec,
     run_container_spec,
     uv_index_value,
+    volume_spec,
 )
 from lakana_worker.launcher.settings import LauncherSettings
 
@@ -246,7 +247,7 @@ HOSTILE: list[Any] = [
     ),
     pytest.param(
         _with(RUN, cpus=1e-10),
-        "cpus: a number from 0.01 to 64 .LAKANA_LAUNCHER__MAX_CPUS",
+        "cpus: a number from 0.01 to 8 .LAKANA_LAUNCHER__MAX_CPUS",
         id="cpus-tiny",
     ),
     pytest.param(_with(RUN, cpus=5e-324), "cpus:", id="cpus-denormal"),
@@ -599,6 +600,126 @@ def test_volume_names_change_with_the_image_and_the_index_set() -> None:
     assert environment_volume(SETTINGS, "3.13", KEY) != environment_volume(newer, "3.13", KEY)
     assert environment_volume(SETTINGS, "3.13", KEY).startswith("lakana-env-")
     assert cache_volume(SETTINGS, build) != cache_volume(SETTINGS, other)
+
+
+def _build_request(**changes: object) -> BuildRequest:
+    """Parse a build request with some fields changed.
+
+    Parameters
+    ----------
+    **changes
+        Fields to replace.
+
+    Returns
+    -------
+    BuildRequest
+        The request.
+    """
+    request = parse_request(_raw(_with(BUILD, **changes)), token=TOKEN, settings=SETTINGS)
+    assert isinstance(request, BuildRequest)
+    return request
+
+
+def test_a_wheels_only_build_shares_the_cache_of_its_index_set_across_environments() -> None:
+    """With `--no-build` no package code runs, so the cache may be shared."""
+    first = _build_request()
+    other_environment = _build_request(environment="b" * 64)
+
+    assert cache_volume(SETTINGS, first) == cache_volume(SETTINGS, other_environment)
+    assert "private" not in cache_volume(SETTINGS, first)
+
+
+def test_a_build_that_may_run_package_code_never_mounts_the_shared_cache() -> None:
+    """An sdist's or a path package's code runs with the cache writable: it gets its own."""
+    shared = cache_volume(SETTINGS, _build_request())
+    source = _build_request(no_build=False)
+    other = _build_request(no_build=False, environment="b" * 64)
+
+    spec = build_container_spec(source, SETTINGS, no_new_privileges=False, proxy_url=None)
+    cache_mounts = [m for m in spec["HostConfig"]["Mounts"] if m["Target"] == "/uv-cache"]
+
+    assert [m["Source"] for m in cache_mounts] == [cache_volume(SETTINGS, source)]
+    assert cache_mounts[0]["Source"] != shared
+    assert "uvcache-private-" in cache_mounts[0]["Source"]
+    assert cache_volume(SETTINGS, source) != cache_volume(SETTINGS, other)
+
+
+def test_the_cache_key_holds_who_the_credential_belongs_to_not_its_password() -> None:
+    """Two teams on one index URL do not share entries; a password change does not split them."""
+    team_a = {"url": "https://pkgs.example.org/simple", "username": "team-a", "password": "x"}
+    team_b = {"url": "https://pkgs.example.org/simple", "username": "team-b", "password": "x"}
+    rotated = {"url": "https://pkgs.example.org/simple", "username": "team-a", "password": "y"}
+
+    a = cache_volume(SETTINGS, _build_request(indexes=[team_a]))
+    b = cache_volume(SETTINGS, _build_request(indexes=[team_b]))
+    again = cache_volume(SETTINGS, _build_request(indexes=[rotated]))
+
+    assert a != b and a == again
+
+
+def test_the_cache_key_holds_the_operator_index_user() -> None:
+    """The operator's own credential is part of the identity too."""
+    hosts = [*BUILD["hosts"], "mirror.example.org"]
+    one = _build_request(operator_index="https://u1:p@mirror.example.org/simple", hosts=hosts)
+    two = _build_request(operator_index="https://u2:p@mirror.example.org/simple", hosts=hosts)
+
+    assert cache_volume(SETTINGS, one) != cache_volume(SETTINGS, two)
+
+
+def test_environment_and_cache_volumes_are_created_with_labels() -> None:
+    """An uninstall or an incident response finds them by the stack label."""
+    spec = volume_spec(SETTINGS, "lakana-uvcache-x", "cache", shared=True)
+
+    assert spec == {
+        "Name": "lakana-uvcache-x",
+        "Labels": {
+            "lakana.launcher.stack": "lakana",
+            "lakana.launcher.kind": "cache",
+            "lakana.launcher.shared": "1",
+        },
+    }
+    assert (
+        volume_spec(SETTINGS, "e", "env", shared=False)["Labels"]["lakana.launcher.shared"] == "0"
+    )
+
+
+def test_a_network_gets_its_allocated_subnet_and_a_deadline() -> None:
+    """A /29 from the launcher's range, so the host's address pools are not used up."""
+    spec = network_spec(SETTINGS, "task", "t1", "w1", subnet="10.207.0.8/29", deadline=1234)
+
+    assert spec["IPAM"] == {"Driver": "default", "Config": [{"Subnet": "10.207.0.8/29"}]}
+    assert spec["Labels"]["lakana.launcher.deadline"] == "1234"
+    assert "IPAM" not in network_spec(SETTINGS, "probe", "x", "launcher")
+
+
+def test_containers_carry_their_deadline() -> None:
+    """The reaper removes what outlives it, with or without a running launcher to ask."""
+    run = parse_request(_raw(RUN), token=TOKEN, settings=SETTINGS)
+    build = _build_request()
+    assert isinstance(run, RunRequest)
+
+    task = run_container_spec(run, SETTINGS, no_new_privileges=False, deadline=99)
+    built = build_container_spec(
+        build, SETTINGS, no_new_privileges=False, proxy_url=None, deadline=77
+    )
+
+    assert task["Labels"]["lakana.launcher.deadline"] == "99"
+    assert built["Labels"]["lakana.launcher.deadline"] == "77"
+    assert (
+        "lakana.launcher.deadline"
+        not in run_container_spec(run, SETTINGS, no_new_privileges=False)["Labels"]
+    )
+
+
+def test_the_control_probe_has_no_option_and_its_own_name() -> None:
+    """It tells a Docker that refuses the option from one that cannot start the image."""
+    control = probe_container_spec(SETTINGS, "img", no_new_privileges=False)
+
+    assert control["HostConfig"]["SecurityOpt"] == []
+    assert control["Labels"]["lakana.launcher.id"] == "no-new-privileges-control"
+    assert probe_container_spec(SETTINGS, "img")["HostConfig"]["SecurityOpt"] == [
+        "no-new-privileges"
+    ]
 
 
 def test_the_cache_volume_names_the_operator_index_without_its_credential() -> None:

@@ -95,6 +95,12 @@ class FakeEngine:
         ``start`` (a task container), each a window in which a caller can leave.
     volumes
         Volumes that exist.
+    volume_labels
+        Labels of the volumes created explicitly.
+    volume_created
+        Volume name to its ``CreatedAt`` (a default for the rest).
+    overlaps
+        Subnets Docker refuses as overlapping an address pool of its own.
     calls
         Every call: method, path, body or query.
     containers
@@ -122,6 +128,9 @@ class FakeEngine:
     probe_exits: dict[str, int] = field(default_factory=dict)
     hooks: dict[str, Callable[[], None]] = field(default_factory=dict)
     volumes: set[str] = field(default_factory=set)
+    volume_labels: dict[str, dict[str, str]] = field(default_factory=dict)
+    volume_created: dict[str, str] = field(default_factory=dict)
+    overlaps: set[str] = field(default_factory=set)
     calls: list[tuple[str, str, Any]] = field(default_factory=list)
     containers: dict[str, dict[str, Any]] = field(default_factory=dict)
     networks: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -226,16 +235,39 @@ class FakeEngine:
         if parts == ["networks", "create"]:
             if self.isolated == "refused":
                 return 400, {"message": "invalid option gateway_mode_ipv4"}
+            subnets = [c["Subnet"] for c in body.get("IPAM", {}).get("Config", [])]
+            if any(subnet in self.overlaps for subnet in subnets):
+                return 403, {"message": "Pool overlaps with other one on this address space"}
             self.networks[body["Name"]] = {"Labels": body["Labels"], "Containers": {}, "spec": body}
             return 201, {"Id": body["Name"]}
         if parts == ["networks"]:
             return 200, [
-                {"Name": name}
+                {
+                    "Name": name,
+                    "Labels": n["Labels"],
+                    "IPAM": n.get("spec", {}).get("IPAM", {"Config": []}),
+                }
                 for name, n in self.networks.items()
                 if _labels_match(n["Labels"], query)
             ]
         if parts[0] == "networks":
             return self._network(method, parts[1], parts[2] if len(parts) > 2 else None, body)
+        if parts == ["volumes", "create"]:
+            self.volumes.add(body["Name"])
+            self.volume_labels[body["Name"]] = body["Labels"]
+            return 201, {"Name": body["Name"]}
+        if parts == ["volumes"] and method == "GET":
+            return 200, {
+                "Volumes": [
+                    {
+                        "Name": name,
+                        "Labels": labels,
+                        "CreatedAt": self.volume_created.get(name, "2026-10-18T00:00:00Z"),
+                    }
+                    for name, labels in self.volume_labels.items()
+                    if name in self.volumes and _labels_match(labels, query)
+                ]
+            }
         if parts[0] == "volumes" and method == "GET":
             return (
                 (200, {"Name": parts[1]}) if parts[1] in self.volumes else (404, {"message": "no"})
@@ -249,6 +281,7 @@ class FakeEngine:
             if mounted:
                 return 409, {"message": "volume is in use"}
             self.volumes.discard(parts[1])
+            self.volume_labels.pop(parts[1], None)
             return 204, b""
         return 500, {"message": f"the fake does not know {method} {path}"}
 

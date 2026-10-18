@@ -19,7 +19,7 @@ import math
 import re
 from dataclasses import dataclass, field
 from typing import Any, NoReturn
-from urllib.parse import quote, urlsplit, urlunsplit
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 from lakana_worker.launcher.settings import LauncherSettings
 
@@ -40,6 +40,12 @@ LABEL_STACK = "lakana.launcher.stack"
 LABEL_KIND = "lakana.launcher.kind"
 LABEL_ID = "lakana.launcher.id"
 LABEL_OWNER = "lakana.launcher.owner"
+LABEL_DEADLINE = "lakana.launcher.deadline"
+"""Epoch seconds after which a container or network is the reaper's to remove."""
+LABEL_SHARED = "lakana.launcher.shared"
+"""``1`` on a volume that several environments may mount (the wheels-only index cache)."""
+DEADLINE_MARGIN = 120
+"""Seconds past a run's timeout and kill grace that its deadline label allows."""
 
 _ID = re.compile(r"\A[a-z0-9][a-z0-9-]{0,62}\Z")
 _OWNER = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
@@ -783,7 +789,9 @@ def container_name(settings: LauncherSettings, kind: str, ident: str) -> str:
     return f"{settings.stack}-{kind}-{ident}"
 
 
-def labels(settings: LauncherSettings, kind: str, ident: str, owner: str) -> dict[str, str]:
+def labels(
+    settings: LauncherSettings, kind: str, ident: str, owner: str, deadline: int | None = None
+) -> dict[str, str]:
     """Label what the launcher creates, so a restart and `cleanup` find it.
 
     Parameters
@@ -796,13 +804,18 @@ def labels(settings: LauncherSettings, kind: str, ident: str, owner: str) -> dic
         Its id.
     owner
         The worker that asked.
+    deadline
+        Epoch seconds after which the reaper removes it; `None` for what lives only a moment.
 
     Returns
     -------
     dict
-        The four labels.
+        The four labels, and the deadline when there is one.
     """
-    return {LABEL_STACK: settings.stack, LABEL_KIND: kind, LABEL_ID: ident, LABEL_OWNER: owner}
+    found = {LABEL_STACK: settings.stack, LABEL_KIND: kind, LABEL_ID: ident, LABEL_OWNER: owner}
+    if deadline is not None:
+        found[LABEL_DEADLINE] = str(deadline)
+    return found
 
 
 def _digest(*parts: str) -> str:
@@ -844,32 +857,104 @@ def environment_volume(settings: LauncherSettings, python: str, key: str) -> str
     return f"{settings.stack}-env-{_digest(settings.images[python], key)}"
 
 
-def cache_volume(settings: LauncherSettings, request: BuildRequest) -> str:
-    """Name the uv cache of one set of package indexes.
+def _operator_identity(request: BuildRequest) -> tuple[str, str]:
+    """Split the operator index into its credential-free URL and its user name.
 
-    Builds that may reach the same hosts share it; it is never mounted into a task.
+    Parameters
+    ----------
+    request
+        The build.
+
+    Returns
+    -------
+    tuple
+        The URL without userinfo, and the user name (both empty without an operator index).
+    """
+    if not request.operator_index:
+        return "", ""
+    parts = urlsplit(request.operator_index)
+    url = urlunsplit((parts.scheme, parts.hostname or "", parts.path, "", ""))
+    return url, unquote(parts.username or "")
+
+
+def cache_volume(settings: LauncherSettings, request: BuildRequest) -> str:
+    """Name the uv cache a build mounts.
+
+    A wheels-only build (``no_build``) only downloads and unpacks wheels that the lock pins by
+    hash; no package code runs, so builds that reach the same indexes with the same credential
+    identities share one cache. Any other build runs the code of an sdist or a path package as
+    the build user with the cache writable, and could rewrite files that another project's later
+    build would install: it gets a cache private to its own environment. The cache is never
+    mounted into a task.
 
     Parameters
     ----------
     settings
-        For the stack.
+        For the stack and the image.
     request
         The build.
 
     Returns
     -------
     str
-        ``<stack>-uvcache-<digest>``.
+        ``<stack>-uvcache-<digest>`` (shared) or ``<stack>-uvcache-private-<digest>``. The digest
+        holds the index set and who the credentials belong to (their user names, never the
+        passwords), so teams with different credentials do not share cache entries; a private
+        cache also holds the environment.
     """
-    operator = request.operator_index or ""
-    if operator:
-        parts = urlsplit(operator)
-        operator = urlunsplit((parts.scheme, parts.hostname or "", parts.path, "", ""))
-    digest = _digest(operator, *sorted(request.hosts), *sorted(c.url for c in request.indexes))
-    return f"{settings.stack}-uvcache-{digest}"
+    operator, operator_user = _operator_identity(request)
+    identity = (
+        operator,
+        operator_user,
+        *sorted(request.hosts),
+        *sorted(f"{c.url}\n{c.username}" for c in request.indexes),
+    )
+    if request.no_build:
+        return f"{settings.stack}-uvcache-{_digest(*identity)}"
+    environment = environment_volume(settings, request.python, request.environment)
+    return f"{settings.stack}-uvcache-private-{_digest(environment, *identity)}"
 
 
-def network_spec(settings: LauncherSettings, kind: str, ident: str, owner: str) -> dict[str, Any]:
+def volume_spec(
+    settings: LauncherSettings, name: str, kind: str, *, shared: bool
+) -> dict[str, Any]:
+    """Describe an environment or cache volume, labelled so an uninstall or a cleanup finds it.
+
+    Parameters
+    ----------
+    settings
+        For the stack.
+    name
+        The volume's name.
+    kind
+        ``env`` or ``cache``.
+    shared
+        Whether several environments may mount it.
+
+    Returns
+    -------
+    dict
+        The body of ``POST /volumes/create``.
+    """
+    return {
+        "Name": name,
+        "Labels": {
+            LABEL_STACK: settings.stack,
+            LABEL_KIND: kind,
+            LABEL_SHARED: "1" if shared else "0",
+        },
+    }
+
+
+def network_spec(
+    settings: LauncherSettings,
+    kind: str,
+    ident: str,
+    owner: str,
+    *,
+    subnet: str | None = None,
+    deadline: int | None = None,
+) -> dict[str, Any]:
     """Describe the network of one task or build.
 
     Internal, so nothing routes out of it, and with an isolated gateway: a default internal
@@ -886,24 +971,31 @@ def network_spec(settings: LauncherSettings, kind: str, ident: str, owner: str) 
         Its id.
     owner
         The worker that asked.
+    subnet
+        The /29 the launcher allocated, or `None` for Docker's own pools (the start-up check).
+    deadline
+        Epoch seconds after which the reaper removes it.
 
     Returns
     -------
     dict
         The body of ``POST /networks/create``.
     """
-    return {
+    spec: dict[str, Any] = {
         "Name": container_name(settings, kind, ident),
         "Driver": "bridge",
         "Internal": True,
         "Attachable": False,
         "EnableIPv6": False,
-        "Labels": labels(settings, kind, ident, owner),
+        "Labels": labels(settings, kind, ident, owner, deadline),
         "Options": {
             "com.docker.network.bridge.gateway_mode_ipv4": "isolated",
             "com.docker.network.bridge.gateway_mode_ipv6": "isolated",
         },
     }
+    if subnet is not None:
+        spec["IPAM"] = {"Driver": "default", "Config": [{"Subnet": subnet}]}
+    return spec
 
 
 def _volume(
@@ -1014,7 +1106,7 @@ def _host_config(
         "CgroupnsMode": "private",
         "NetworkMode": network,
         "PublishAllPorts": False,
-        "Tmpfs": {"/tmp": tmpfs},
+        "Tmpfs": {"/tmp": tmpfs},  # nosec B108 -- the container's own tmpfs mount point
         "LogConfig": {"Type": "none"},
         "AutoRemove": False,
         "RestartPolicy": {"Name": "no"},
@@ -1023,7 +1115,11 @@ def _host_config(
 
 
 def run_container_spec(
-    request: RunRequest, settings: LauncherSettings, *, no_new_privileges: bool
+    request: RunRequest,
+    settings: LauncherSettings,
+    *,
+    no_new_privileges: bool,
+    deadline: int | None = None,
 ) -> dict[str, Any]:
     """Describe the container of one task attempt.
 
@@ -1035,6 +1131,8 @@ def run_container_spec(
         Images, work volume, user and roots.
     no_new_privileges
         Whether to set the option.
+    deadline
+        Epoch seconds after which the reaper removes the container.
 
     Returns
     -------
@@ -1076,7 +1174,7 @@ def run_container_spec(
         "StdinOnce": True,
         "Tty": False,
         "NetworkDisabled": False,
-        "Labels": labels(settings, "task", request.task, request.owner),
+        "Labels": labels(settings, "task", request.task, request.owner, deadline),
         "HostConfig": _host_config(
             request.limits,
             container_name(settings, "task", request.task),
@@ -1118,6 +1216,7 @@ def build_container_spec(
     *,
     no_new_privileges: bool,
     proxy_url: str | None,
+    deadline: int | None = None,
 ) -> dict[str, Any]:
     """Describe the container that builds one environment.
 
@@ -1134,6 +1233,8 @@ def build_container_spec(
         Whether to set the option.
     proxy_url
         The egress proxy with this build's token; `None` leaves the build without a way out.
+    deadline
+        Epoch seconds after which the reaper removes the container.
 
     Returns
     -------
@@ -1179,7 +1280,7 @@ def build_container_spec(
         "AttachStderr": True,
         "OpenStdin": False,
         "Tty": False,
-        "Labels": labels(settings, "build", request.build, request.owner),
+        "Labels": labels(settings, "build", request.build, request.owner, deadline),
         "HostConfig": _host_config(
             request.limits,
             container_name(settings, "build", request.build),
@@ -1190,7 +1291,9 @@ def build_container_spec(
     }
 
 
-def probe_container_spec(settings: LauncherSettings, image: str) -> dict[str, Any]:
+def probe_container_spec(
+    settings: LauncherSettings, image: str, *, no_new_privileges: bool = True
+) -> dict[str, Any]:
     """Describe the container that finds out whether `no-new-privileges` works here.
 
     Parameters
@@ -1199,19 +1302,21 @@ def probe_container_spec(settings: LauncherSettings, image: str) -> dict[str, An
         For the user and the labels.
     image
         An allowed image.
+    no_new_privileges
+        ``True`` for the probe, ``False`` for the control that tells a Docker that refuses the
+        option from one that cannot start the image at all.
 
     Returns
     -------
     dict
-        The body of ``POST /containers/create``: ``python -c pass`` with the option, no
-        network, no mounts.
+        The body of ``POST /containers/create``: ``python -c pass``, no network, no mounts.
     """
     host = _host_config(
         Limits(memory_mb=MIN_MEMORY_MB, cpus=0.5, pids=16, timeout_seconds=60),
         "none",
         [],
         "rw,noexec,nosuid,nodev,size=1m",
-        no_new_privileges=True,
+        no_new_privileges=no_new_privileges,
     )
     return {
         "Image": image,
@@ -1219,7 +1324,12 @@ def probe_container_spec(settings: LauncherSettings, image: str) -> dict[str, An
         "Cmd": [],
         "User": settings.task_user,
         "NetworkDisabled": True,
-        "Labels": labels(settings, "probe", "no-new-privileges", "launcher"),
+        "Labels": labels(
+            settings,
+            "probe",
+            "no-new-privileges" if no_new_privileges else "no-new-privileges-control",
+            "launcher",
+        ),
         "HostConfig": host,
     }
 
@@ -1243,7 +1353,7 @@ try:
     mode = os.lstat(root).st_mode
 except OSError:
     sys.exit(6)
-if stat.S_ISSOCK(mode):
+if stat.S_ISSOCK(mode) or stat.S_ISFIFO(mode) or stat.S_ISCHR(mode) or stat.S_ISBLK(mode):
     sys.exit(4)
 if not stat.S_ISDIR(mode):
     sys.exit(0)
@@ -1258,7 +1368,9 @@ while queue:
                     print("root %r has more than %d entries" % (root, _LIMIT), file=sys.stderr)
                     sys.exit(5)
                 mode = entry.stat(follow_symlinks=False).st_mode
-                if stat.S_ISSOCK(mode):
+                if stat.S_ISSOCK(mode) or stat.S_ISFIFO(mode):
+                    sys.exit(4)
+                if stat.S_ISCHR(mode) or stat.S_ISBLK(mode):
                     sys.exit(4)
                 if stat.S_ISDIR(mode):
                     queue.append(entry.path)
@@ -1266,9 +1378,10 @@ while queue:
         sys.exit(6)
 """
 """The script an ingestion-root probe runs, failing closed. Exit 3: a system mount (proc, sysfs,
-cgroup, debugfs and the like) at or below the root. 4: a socket. 5: more entries than the cap
-(its third argument), so part of the root was not looked at. 6: something that cannot be listed
-or examined. 0 otherwise. The walk is breadth-first and never follows a link."""
+cgroup, debugfs and the like) at or below the root. 4: a socket, pipe or device node. 5: more
+entries than the cap (its third argument), so part of the root was not looked at. 6: something
+that cannot be listed or examined. 0 otherwise. The walk is breadth-first and never follows a
+link."""
 
 
 def ingestion_probe_spec(

@@ -30,7 +30,7 @@ def test_the_two_required_settings_and_the_defaults() -> None:
     )
     assert settings.socket == Path("/run/lakana-launcher/launcher.sock")
     assert settings.no_new_privileges == "auto"
-    assert (settings.max_memory_mb, settings.max_cpus, settings.max_pids) == (65536, 64.0, 32768)
+    assert (settings.max_memory_mb, settings.max_cpus, settings.max_pids) == (16384, 8.0, 4096)
 
 
 @pytest.mark.parametrize(
@@ -95,6 +95,31 @@ def test_the_probe_cap_is_a_known_setting_with_a_default() -> None:
         load_settings({**base, "LAKANA_LAUNCHER__PROBE_MAX_ENTRIES": "5000000"}).probe_max_entries
         == 5000000
     )
+
+
+def test_the_network_range_and_the_total_memory_have_defaults_that_work() -> None:
+    """Task networks come from 10.207.0.0/16 unless told otherwise; memory is bounded in total."""
+    settings = load_settings(
+        {"LAKANA_LAUNCHER__STACK": "lakana", "LAKANA_LAUNCHER__IMAGES": _IMAGES}
+    )
+
+    assert settings.network_range == "10.207.0.0/16"
+    assert settings.max_total_memory_mb == 65536
+    assert "NETWORK_RANGE" in KNOWN_SETTINGS and "MAX_TOTAL_MEMORY_MB" in KNOWN_SETTINGS
+
+
+def test_the_network_range_and_the_total_memory_can_be_set() -> None:
+    """A smaller or another private range, and a bigger total."""
+    settings = load_settings(
+        {
+            "LAKANA_LAUNCHER__STACK": "lakana",
+            "LAKANA_LAUNCHER__IMAGES": _IMAGES,
+            "LAKANA_LAUNCHER__NETWORK_RANGE": "192.168.64.0/24",
+            "LAKANA_LAUNCHER__MAX_TOTAL_MEMORY_MB": "131072",
+        }
+    )
+
+    assert settings.network_range == "192.168.64.0/24" and settings.max_total_memory_mb == 131072
 
 
 def test_an_allowed_ingestion_root_is_kept() -> None:
@@ -181,6 +206,36 @@ def _roots(path: str) -> dict[str, str]:
             {**_BASE, "LAKANA_LAUNCHER__PROBE_MAX_ENTRIES": "0"},
             "LAKANA_LAUNCHER__PROBE_MAX_ENTRIES must be",
             id="probe-cap-zero",
+        ),
+        pytest.param(
+            {**_BASE, "LAKANA_LAUNCHER__NETWORK_RANGE": "8.8.0.0/16"},
+            "LAKANA_LAUNCHER__NETWORK_RANGE must be a private IPv4 range",
+            id="range-public",
+        ),
+        pytest.param(
+            {**_BASE, "LAKANA_LAUNCHER__NETWORK_RANGE": "10.207.0.0/28"},
+            "LAKANA_LAUNCHER__NETWORK_RANGE must be a private IPv4 range",
+            id="range-too-small",
+        ),
+        pytest.param(
+            {**_BASE, "LAKANA_LAUNCHER__NETWORK_RANGE": "fd00::/48"},
+            "LAKANA_LAUNCHER__NETWORK_RANGE must be a private IPv4 range",
+            id="range-ipv6",
+        ),
+        pytest.param(
+            {**_BASE, "LAKANA_LAUNCHER__NETWORK_RANGE": "10.207.0.5/16"},
+            "LAKANA_LAUNCHER__NETWORK_RANGE must be a private IPv4 range",
+            id="range-host-bits",
+        ),
+        pytest.param(
+            {**_BASE, "LAKANA_LAUNCHER__NETWORK_RANGE": "10.0.0.0/7"},
+            "LAKANA_LAUNCHER__NETWORK_RANGE must be a private IPv4 range",
+            id="range-wider-than-private",
+        ),
+        pytest.param(
+            {**_BASE, "LAKANA_LAUNCHER__MAX_TOTAL_MEMORY_MB": "1024"},
+            "LAKANA_LAUNCHER__MAX_TOTAL_MEMORY_MB must be at least",
+            id="total-below-single",
         ),
         pytest.param(
             {**_BASE, "LAKANA_LAUNCHER__MAX_CPUS": "0"},

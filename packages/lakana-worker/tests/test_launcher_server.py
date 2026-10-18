@@ -6,6 +6,7 @@ import base64
 import json
 import logging
 import os
+import signal
 import socket
 import stat
 import threading
@@ -638,3 +639,53 @@ def test_serve_refuses_a_directory_that_lost_the_image_protections(
     assert "Mount the volume at /run/lakana-launcher in both services" in str(caught.value)
     assert "docker compose down" in str(caught.value)
     assert "docker volume rm <project>_launcher-socket" in str(caught.value)
+
+
+def test_sigterm_removes_the_containers_of_live_runs_and_ends_the_server(
+    shared: Launcher, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stopping the launcher service must not leave tasks running untimed."""
+    engine = shared.engine
+    assert isinstance(engine, FakeEngine)
+    engine.hold = True
+    handlers: dict[int, object] = {}
+    monkeypatch.setattr(
+        server_module.signal,
+        "signal",
+        lambda number, handler: handlers.__setitem__(number, handler),
+    )
+    volume = environment_volume(shared.settings, "3.13", "a" * 64)
+    shared._mark_complete(volume)
+    engine.volumes.add(volume)
+    thread = threading.Thread(target=lambda: serve(shared), daemon=True)
+    thread.start()
+    _wait_for(lambda: Path("l.sock").exists() and signal.SIGTERM in handlers)
+    token = Path(TOKEN_FILE).read_text(encoding="ascii")
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.connect("l.sock")
+    client.sendall(json.dumps({**RUN, "token": token}).encode() + b"\n")
+    _wait_for(lambda: sum(path.endswith("/start") for _, path, _ in engine.calls) >= 2)
+
+    handlers[signal.SIGTERM](signal.SIGTERM, None)  # ty: ignore[call-non-callable]
+    thread.join(10)
+
+    assert not thread.is_alive()
+    assert engine.containers == {} and engine.networks == {}
+    assert signal.SIGINT in handlers
+    client.close()
+
+
+def test_a_caller_that_stops_reading_loses_its_run_after_the_send_timeout(
+    served: Served, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A full socket buffer must not pin a slot, a container and a network for ever."""
+    monkeypatch.setattr(server_module, "_SEND_TIMEOUT", 0.3)
+    served.engine.hold = False
+    served.engine.output = [b"x" * 60000] * 400
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+    client.connect("l.sock")
+    client.sendall(json.dumps({**RUN, "token": served.token}).encode() + b"\n")
+
+    _wait_for(lambda: not served.engine.containers and not served.engine.networks, seconds=20)
+    client.close()

@@ -5,12 +5,26 @@ from the specs of `lakana_worker.launcher.requests`, streams the container's out
 caller, and removes both at the end, on a stop, on the timeout, and when the caller's connection
 closes. At start it checks the engine, finds out whether `no-new-privileges` works, and removes
 every container and network that carries its stack label: their owners run them again.
+
+Everything the launcher creates carries the label ``lakana.launcher.stack=<project>``. To
+remove all of it by hand (an uninstall, or after a worker was compromised)::
+
+    docker rm -f -v $(docker ps -aq --filter label=lakana.launcher.stack=<project>)
+    docker network rm $(docker network ls -q --filter label=lakana.launcher.stack=<project>)
+    docker volume rm $(docker volume ls -q --filter label=lakana.launcher.stack=<project>)
+
+Each container and network also carries ``lakana.launcher.deadline`` (epoch seconds); a reaper
+thread removes what outlives it, whether or not a run still supervises it.
+
+Not limited: the disk a task, a build or a cache may fill (Docker volumes have no quota on
+every storage driver), and nothing evicts a cache beyond the age limit of the reaper.
 """
 
 from __future__ import annotations
 
 import base64
 import contextlib
+import ipaddress
 import json
 import logging
 import os
@@ -18,14 +32,19 @@ import re
 import socket
 import struct
 import threading
+import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import quote
 
 from lakana_worker.launcher.engine import API_VERSION, Engine, EngineError
 from lakana_worker.launcher.requests import (
+    DEADLINE_MARGIN,
+    LABEL_DEADLINE,
+    LABEL_KIND,
     LABEL_OWNER,
     LABEL_STACK,
     BuildRequest,
@@ -36,12 +55,14 @@ from lakana_worker.launcher.requests import (
     StatusRequest,
     StopRequest,
     build_container_spec,
+    cache_volume,
     container_name,
     environment_volume,
     ingestion_probe_spec,
     network_spec,
     probe_container_spec,
     run_container_spec,
+    volume_spec,
 )
 from lakana_worker.launcher.settings import LauncherSettings
 
@@ -62,6 +83,12 @@ _STOPPED_BEFORE_START: dict[str, object] = {
 """The result of a run whose caller left, or that was stopped, before its container started."""
 _PULL_SECONDS = 600.0
 _PROBE_SECONDS = 300.0
+_WAIT_MARGIN = 60.0
+"""Seconds past a run's timeout and grace that the wait for its container may last."""
+_SUBNET_TRIES = 8
+"""How many subnets are tried when Docker says one overlaps an address pool of its own."""
+_CACHE_MAX_AGE = 14 * 86400
+"""Seconds after which an idle shared cache is removed; the next build fills a new one."""
 _MAX_FRAME_PIECE = 1 << 20
 """The most one read of a container's output takes, whatever size a frame header claims."""
 _SPECIAL_MOUNT = 3
@@ -83,6 +110,8 @@ class _Live:
     ----------
     grace
         Seconds between SIGTERM and SIGKILL on a stop.
+    memory_mb
+        The memory this run asked for, held against the total ceiling.
     container_id
         Docker's id, once the container exists.
     stopped
@@ -92,9 +121,48 @@ class _Live:
     """
 
     grace: int
+    memory_mb: int = 0
     container_id: str | None = None
     stopped: threading.Event = field(default_factory=threading.Event)
     timed_out: threading.Event = field(default_factory=threading.Event)
+
+
+def _expired(labels: object, moment: float) -> bool:
+    """Say whether a container's or network's deadline label has passed.
+
+    Parameters
+    ----------
+    labels
+        Its labels.
+    moment
+        Epoch seconds to measure against.
+
+    Returns
+    -------
+    bool
+        `False` without a deadline label or with one that is not a number.
+    """
+    raw = labels.get(LABEL_DEADLINE) if isinstance(labels, dict) else None
+    try:
+        return raw is not None and int(raw) < moment
+    except ValueError:
+        return False
+
+
+def _deadline(seconds: int) -> int:
+    """Compute the epoch second after which the reaper removes a run's container and network.
+
+    Parameters
+    ----------
+    seconds
+        The run's timeout plus its kill grace.
+
+    Returns
+    -------
+    int
+        Now plus `seconds` and the margin.
+    """
+    return int(time.time()) + seconds + DEADLINE_MARGIN
 
 
 def _message(body: object) -> str:
@@ -238,6 +306,12 @@ class Launcher:
         self.unusable_roots: dict[str, str] = {}
         self._lock = threading.Lock()
         self._build_locks: dict[str, threading.Lock] = {}
+        self._pool = ipaddress.IPv4Network(settings.network_range)
+        self._max_networks = self._pool.num_addresses // 8 * 3 // 4
+        self._subnets: dict[str, str] = {}
+        self._used_subnets: set[str] = set()
+        self._reserved_mb = 0
+        self._reaper_stop = threading.Event()
 
     # --- start-up -----------------------------------------------------------------------
 
@@ -275,7 +349,16 @@ class Launcher:
                 "network away from the host (gateway_mode_ipv4=isolated). This engine reports "
                 f"'{text or 'no version'}'; upgrade Docker."
             )
-        removed = self._remove_labelled({LABEL_STACK: self.settings.stack}, spare_live=False)
+        self._check_socket_group()
+        try:
+            removed = self._remove_labelled({LABEL_STACK: self.settings.stack}, spare_live=False)
+        except EngineError as exc:
+            raise StartError(
+                f"cannot list the containers of stack '{self.settings.stack}' ({exc}); "
+                "tasks an earlier launcher left may still be running, so the launcher does not "
+                "start. Check `docker compose logs launcher` and the Docker daemon."
+            ) from None
+        self._recover_subnets()
         if removed:
             logger.info(
                 "Removed %d containers an earlier launcher left; their workers run them again.",
@@ -359,7 +442,7 @@ class Launcher:
         """
         with contextlib.suppress(EngineError):
             self.engine.request(
-                "DELETE", f"/containers/{quote(name, safe='')}", query={"force": "1"}
+                "DELETE", f"/containers/{quote(name, safe='')}", query={"force": "1", "v": "1"}
             )
         cid = self._create(name, spec)
         try:
@@ -387,17 +470,62 @@ class Launcher:
         return image
 
     def _probe_no_new_privileges(self) -> bool:
-        """Start ``python -c pass`` with the option and see whether it exits 0.
+        """Find out whether Docker starts a container with the option.
+
+        A probe with the option that does not exit 0 is followed by a control without it: only
+        when the control runs does the failure belong to the option (Docker installed as a snap
+        refuses every exec with it). If the control fails too, the image or the host is at fault.
 
         Returns
         -------
         bool
             Whether the option works on this Docker.
+
+        Raises
+        ------
+        StartError
+            If not even the control container runs.
         """
         image = self._probe_image()
         name = container_name(self.settings, "probe", "no-new-privileges")
         code, _ = self._run_probe(name, probe_container_spec(self.settings, image))
-        return code == 0
+        if code == 0:
+            return True
+        control = container_name(self.settings, "probe", "no-new-privileges-control")
+        control_code, detail = self._run_probe(
+            control, probe_container_spec(self.settings, image, no_new_privileges=False)
+        )
+        if control_code != 0:
+            raise StartError(
+                f"Docker cannot start a container at all from the task image {image} "
+                f"({detail or f'exit status {control_code}'}); check that the image runs "
+                "(`docker run --rm <image> python -c pass`) and `docker compose logs launcher`."
+            )
+        logger.warning(
+            "Docker refuses no-new-privileges (a container with the option does not run, one "
+            "without it does); task and build containers run without it."
+        )
+        return False
+
+    def _check_socket_group(self) -> None:
+        """Refuse a Docker socket whose group is one tasks or builds run in.
+
+        Raises
+        ------
+        StartError
+            If the socket's group is the group of the task or the build user.
+        """
+        try:
+            gid = self.settings.docker_socket.stat().st_gid
+        except OSError:
+            return  # the engine check that follows names an unreachable socket
+        users = (self.settings.task_user, self.settings.build_user)
+        if gid in {int(user.split(":")[1]) for user in users}:
+            raise StartError(
+                f"The group of the Docker socket ({gid}) is a group that task or build "
+                "containers run in, so a task that ever saw the socket could use it. Give the "
+                "Docker group another id on the host."
+            )
 
     def _check_ingestion_roots(self) -> None:
         """Look at every allowed ingestion root from inside a container, as a task would.
@@ -451,8 +579,8 @@ class Launcher:
             )
         if code == _SOCKET_FOUND:
             return (
-                f"ingestion root '{root}' holds a socket; a read-only mount does not stop a "
-                "task from connecting to it. Move the socket out of the directory or choose "
+                f"ingestion root '{root}' holds a socket, pipe or device node; a read-only mount "
+                "does not stop a task from using it. Move it out of the directory or choose "
                 f"another one {setting}."
             )
         if code == _TOO_MANY:
@@ -533,7 +661,8 @@ class Launcher:
             if root in self.unusable_roots:
                 raise Refused(self.unusable_roots[root])
         name = container_name(self.settings, "task", request.task)
-        live = self._register(name, request.kill_grace_seconds)
+        live = self._register(name, request.kill_grace_seconds, request.limits.memory_mb)
+        deadline = _deadline(request.limits.timeout_seconds + request.kill_grace_seconds)
         try:
             volume = environment_volume(self.settings, request.python, request.environment)
             if not self._built(volume):
@@ -546,10 +675,14 @@ class Launcher:
                 request.task,
                 request.owner,
                 (self.settings.server_service, self.settings.server_alias),
+                deadline,
             )
             try:
                 spec = run_container_spec(
-                    request, self.settings, no_new_privileges=self.no_new_privileges
+                    request,
+                    self.settings,
+                    no_new_privileges=self.no_new_privileges,
+                    deadline=deadline,
                 )
                 self._ensure_image(spec["Image"])
                 # A pull takes minutes; a prune or an eviction in that time must not let Docker
@@ -609,7 +742,7 @@ class Launcher:
             Whatever `emit` raises when the caller is gone.
         """
         name = container_name(self.settings, "build", request.build)
-        live = self._register(name, 0)
+        live = self._register(name, 0, request.limits.memory_mb)
         try:
             volume = environment_volume(self.settings, request.python, request.environment)
             with self._lock:
@@ -665,15 +798,26 @@ class Launcher:
                 "be removed; wait for the tasks that use it, or check "
                 "`docker compose logs launcher`"
             )
-        network = self._open_network("build", request.build, request.owner, None)
+        deadline = _deadline(request.limits.timeout_seconds)
+        cache = cache_volume(self.settings, request)
+        self._create_volume(volume_spec(self.settings, volume, "env", shared=False))
+        self._create_volume(volume_spec(self.settings, cache, "cache", shared=request.no_build))
+        network = self._open_network("build", request.build, request.owner, None, deadline)
         try:
             spec = build_container_spec(
-                request, self.settings, no_new_privileges=self.no_new_privileges, proxy_url=None
+                request,
+                self.settings,
+                no_new_privileges=self.no_new_privileges,
+                proxy_url=None,
+                deadline=deadline,
             )
             self._ensure_image(spec["Image"])
             result = self._supervise(name, spec, live, request.limits.timeout_seconds, emit)
         finally:
             self._close_network(network)
+            if not request.no_build:
+                # A build that may run package code had a cache of its own: nothing of it stays.
+                self._remove_volume(cache)
         complete = (
             result["exit"] == 0
             and not result["oom_killed"]
@@ -752,6 +896,7 @@ class Launcher:
         with self._lock:
             if live is not None and self._live.get(name) is live:
                 del self._live[name]
+                self._reserved_mb -= live.memory_mb
             self._abandoned.discard(name)
 
     def status(self, request: StatusRequest) -> dict[str, object]:
@@ -791,7 +936,7 @@ class Launcher:
         )
         return {"removed": removed}
 
-    def _register(self, name: str, grace: int) -> _Live:
+    def _register(self, name: str, grace: int, memory_mb: int) -> _Live:
         """Register a run or build, stopped at once when its caller left already.
 
         Parameters
@@ -800,6 +945,8 @@ class Launcher:
             The container's name.
         grace
             Seconds between SIGTERM and SIGKILL.
+        memory_mb
+            The memory the run asks for, counted against the total ceiling.
 
         Returns
         -------
@@ -809,9 +956,10 @@ class Launcher:
         Raises
         ------
         EngineError
-            If a run is registered under that name already.
+            If a run is registered under that name already, or the live runs would hold more
+            memory in total than the ceiling allows.
         """
-        live = _Live(grace)
+        live = _Live(grace, memory_mb)
         with self._lock:
             if name in self._live:
                 ident = name.removeprefix(f"{self.settings.stack}-").split("-", 1)[-1]
@@ -819,6 +967,13 @@ class Launcher:
                     f"a run with the id {ident} is already live; wait for it to end or use "
                     "another id"
                 )
+            if self._reserved_mb + memory_mb > self.settings.max_total_memory_mb:
+                raise EngineError(
+                    f"the live runs already hold {self._reserved_mb} MiB of the "
+                    f"{self.settings.max_total_memory_mb} MiB allowed in total; wait for one to "
+                    "end, or raise LAKANA_LAUNCHER__MAX_TOTAL_MEMORY_MB"
+                )
+            self._reserved_mb += memory_mb
             self._live[name] = live
             if name in self._abandoned:
                 live.stopped.set()
@@ -903,6 +1058,7 @@ class Launcher:
         if live.stopped.is_set():
             return dict(_STOPPED_BEFORE_START)
         cid = live.container_id = self._create(name, spec)
+        began = time.monotonic()
         timer = threading.Timer(timeout, self._expire, (live,))
         timer.daemon = True
         try:
@@ -926,7 +1082,12 @@ class Launcher:
                     emit({"log": base64.b64encode(payload).decode("ascii")})
             finally:
                 stream.close()
-            _, waited = self.engine.request("POST", f"/containers/{cid}/wait", timeout=None)
+            # The stream ended, so the container is gone or about to be: wait no longer than its
+            # timeout, its grace and a margin, then the removal below is forced.
+            left = max(timeout - (time.monotonic() - began), 0.0)
+            _, waited = self.engine.request(
+                "POST", f"/containers/{cid}/wait", timeout=left + live.grace + _WAIT_MARGIN
+            )
             _, info = self.engine.request("GET", f"/containers/{cid}/json")
             state = info.get("State", {}) if isinstance(info, dict) else {}
             code = waited.get("StatusCode") if isinstance(waited, dict) else None
@@ -992,7 +1153,7 @@ class Launcher:
         """
         try:
             self.engine.request(
-                "DELETE", f"/containers/{quote(cid, safe='')}", query={"force": "1"}
+                "DELETE", f"/containers/{quote(cid, safe='')}", query={"force": "1", "v": "1"}
             )
         except EngineError as exc:
             logger.error("Could not remove container %s: %s", cid, exc)
@@ -1040,32 +1201,191 @@ class Launcher:
         -------
         int
             How many containers were removed.
+
+        Raises
+        ------
+        EngineError
+            If Docker does not list the containers or the networks: nothing is removed then,
+            and the caller must not take that for "nothing is there".
         """
         filters = json.dumps({"label": [f"{k}={v}" for k, v in sorted(wanted.items())]})
-        _, containers = self.engine.request(
-            "GET", "/containers/json", query={"all": "1", "filters": filters}
-        )
-        _, networks = self.engine.request("GET", "/networks", query={"filters": filters})
+        containers = self._list("/containers/json", {"all": "1", "filters": filters}, "containers")
+        networks = self._list("/networks", {"filters": filters}, "networks")
         # The live runs are read after the listing: a run registers before it creates anything,
         # so everything listed that belongs to a live run is found among them.
         with self._lock:
             live = set(self._live) if spare_live else set()
         removed = 0
-        for container in containers if isinstance(containers, list) else []:
+        for container in containers:
             names = {str(n).lstrip("/") for n in container.get("Names", [])}
             if names & live:
                 continue
             self._remove_container(str(container["Id"]))
             removed += 1
-        for network in networks if isinstance(networks, list) else []:
+        for network in networks:
             if network.get("Name") not in live:
                 self._close_network(str(network["Name"]))
         return removed
 
+    def _list(self, path: str, query: dict[str, str], what: str) -> list[dict[str, Any]]:
+        """List objects of Docker and insist on an answer.
+
+        Parameters
+        ----------
+        path
+            ``/containers/json`` or ``/networks``.
+        query
+            The query parameters.
+        what
+            ``containers`` or ``networks``, for the message.
+
+        Returns
+        -------
+        list of dict
+            The objects.
+
+        Raises
+        ------
+        EngineError
+            If Docker does not answer 200 with a list.
+        """
+        status, body = self.engine.request("GET", path, query=query)
+        if status != 200 or not isinstance(body, list):
+            raise EngineError(f"Docker could not list the {what}: {_message(body)}")
+        return body
+
+    # --- reaper and shutdown ------------------------------------------------------------
+
+    def reap(self, now: float | None = None) -> int:
+        """Remove containers and networks past their deadline, and caches that are too old.
+
+        Runs without the registry's help: after a restart, or when a run's own timer failed,
+        the labels are all that is left.
+
+        Parameters
+        ----------
+        now
+            Epoch seconds to measure against; the clock by default.
+
+        Returns
+        -------
+        int
+            How many containers were removed.
+        """
+        moment = time.time() if now is None else now
+        filters = json.dumps({"label": [f"{LABEL_STACK}={self.settings.stack}"]})
+        removed = 0
+        try:
+            for container in self._list(
+                "/containers/json", {"all": "1", "filters": filters}, "containers"
+            ):
+                if _expired(container.get("Labels"), moment):
+                    for raw in container.get("Names", []):
+                        with self._lock:
+                            live = self._live.get(str(raw).lstrip("/"))
+                        if live is not None:
+                            live.stopped.set()
+                    self._remove_container(str(container["Id"]))
+                    removed += 1
+        except EngineError as exc:
+            logger.error("Could not list containers to reap: %s", exc)
+        try:
+            for network in self._list("/networks", {"filters": filters}, "networks"):
+                if _expired(network.get("Labels"), moment):
+                    self._close_network(str(network["Name"]))
+        except EngineError as exc:
+            logger.error("Could not list networks to reap: %s", exc)
+        self._reap_caches(moment)
+        return removed
+
+    def _reap_caches(self, moment: float) -> None:
+        """Remove shared caches older than the age limit; one in use answers 409 and stays.
+
+        Parameters
+        ----------
+        moment
+            Epoch seconds to measure against.
+        """
+        wanted = [
+            f"{LABEL_STACK}={self.settings.stack}",
+            f"{LABEL_KIND}=cache",
+            "lakana.launcher.shared=1",
+        ]
+        try:
+            status, body = self.engine.request(
+                "GET", "/volumes", query={"filters": json.dumps({"label": wanted})}
+            )
+        except EngineError as exc:
+            logger.error("Could not list caches to reap: %s", exc)
+            return
+        volumes = body.get("Volumes") if status == 200 and isinstance(body, dict) else None
+        for volume in volumes or []:
+            try:
+                created = datetime.fromisoformat(str(volume["CreatedAt"])).timestamp()
+            except (KeyError, ValueError):
+                continue
+            if moment - created > _CACHE_MAX_AGE:
+                self._remove_volume(str(volume["Name"]))
+
+    def start_reaper(self, interval: float = 60.0) -> threading.Thread:
+        """Run `reap` every `interval` seconds on a daemon thread until `stop_reaper`.
+
+        Parameters
+        ----------
+        interval
+            Seconds between passes.
+
+        Returns
+        -------
+        threading.Thread
+            The started thread.
+        """
+        self._reaper_stop.clear()
+
+        def loop() -> None:
+            """Reap until stopped; an error in one pass is logged and the loop goes on."""
+            while not self._reaper_stop.wait(interval):
+                try:
+                    self.reap()
+                except Exception:
+                    logger.exception("The reaper failed")
+
+        thread = threading.Thread(target=loop, name="lakana-launcher-reaper", daemon=True)
+        thread.start()
+        return thread
+
+    def stop_reaper(self) -> None:
+        """Ask the reaper thread to end."""
+        self._reaper_stop.set()
+
+    def shutdown(self) -> None:
+        """Stop every live run and remove everything of this stack, for SIGTERM and SIGINT.
+
+        Without it a task would keep running, untimed, after the launcher service stopped.
+        """
+        self.stop_reaper()
+        with self._lock:
+            runs = list(self._live.values())
+        for live in runs:
+            live.stopped.set()
+        try:
+            self._remove_labelled({LABEL_STACK: self.settings.stack}, spare_live=False)
+        except EngineError as exc:
+            logger.error(
+                "Could not remove everything the launcher created: %s; the reaper of the next "
+                "launcher removes it after its deadline.",
+                exc,
+            )
+
     # --- networks -----------------------------------------------------------------------
 
     def _open_network(
-        self, kind: str, ident: str, owner: str, service: tuple[str, str] | None
+        self,
+        kind: str,
+        ident: str,
+        owner: str,
+        service: tuple[str, str] | None,
+        deadline: int,
     ) -> str:
         """Create a task's or build's network and attach a service to it.
 
@@ -1079,6 +1399,8 @@ class Launcher:
             The worker.
         service
             Compose service and alias to attach, or `None`.
+        deadline
+            Epoch seconds after which the reaper removes the network.
 
         Returns
         -------
@@ -1088,14 +1410,11 @@ class Launcher:
         Raises
         ------
         EngineError
-            If Docker refuses it or the service is not running; nothing is left behind.
+            If Docker refuses it, no subnet is free, too many networks are in use, or the
+            service is not running; nothing is left behind.
         """
         name = container_name(self.settings, kind, ident)
-        status, body = self.engine.request(
-            "POST", "/networks/create", network_spec(self.settings, kind, ident, owner)
-        )
-        if status != 201:
-            raise EngineError(f"Docker refused the {kind} network: {_message(body)}")
+        self._create_network(name, kind, ident, owner, deadline)
         if service is not None:
             try:
                 cid = self._service_container(service[0])
@@ -1110,6 +1429,108 @@ class Launcher:
                 self._close_network(name)
                 raise
         return name
+
+    def _create_network(self, name: str, kind: str, ident: str, owner: str, deadline: int) -> None:
+        """Create a network on a /29 of the launcher's own range.
+
+        Parameters
+        ----------
+        name
+            The network's name.
+        kind
+            ``task`` or ``build``.
+        ident
+            Its id.
+        owner
+            The worker.
+        deadline
+            Epoch seconds after which the reaper removes it.
+
+        Raises
+        ------
+        EngineError
+            If Docker refuses it, or no subnet is free.
+        """
+        for _ in range(_SUBNET_TRIES):
+            subnet = self._allocate_subnet(name)
+            spec = network_spec(self.settings, kind, ident, owner, subnet=subnet, deadline=deadline)
+            status, body = self.engine.request("POST", "/networks/create", spec)
+            if status == 201:
+                return
+            with self._lock:
+                self._subnets.pop(name, None)
+                if status == 403 and "overlap" in _message(body).lower():
+                    continue  # something else holds it: keep it out of use, take the next one
+                self._used_subnets.discard(subnet)
+            raise EngineError(f"Docker refused the {kind} network: {_message(body)}")
+        raise EngineError(
+            f"Docker kept refusing the subnets of {self.settings.network_range} as overlapping "
+            "another network; choose another range in LAKANA_LAUNCHER__NETWORK_RANGE"
+        )
+
+    def _allocate_subnet(self, name: str) -> str:
+        """Take the first free /29 of the range for a network.
+
+        Parameters
+        ----------
+        name
+            The network's name.
+
+        Returns
+        -------
+        str
+            The subnet in CIDR form.
+
+        Raises
+        ------
+        EngineError
+            If as many networks as the bound allows are in use, or the range is used up.
+        """
+        with self._lock:
+            if len(self._subnets) >= self._max_networks:
+                raise EngineError(
+                    f"too many task networks in use ({len(self._subnets)} of "
+                    f"{self._max_networks}); wait for runs to end, or enlarge "
+                    "LAKANA_LAUNCHER__NETWORK_RANGE"
+                )
+            for candidate in self._pool.subnets(new_prefix=29):
+                text = str(candidate)
+                if text not in self._used_subnets:
+                    self._used_subnets.add(text)
+                    self._subnets[name] = text
+                    return text
+        raise EngineError(
+            f"no free address range is left in {self.settings.network_range}; enlarge "
+            "LAKANA_LAUNCHER__NETWORK_RANGE"
+        )
+
+    def _free_subnet(self, name: str) -> None:
+        """Give back the subnet of a removed network.
+
+        Parameters
+        ----------
+        name
+            The network's name.
+        """
+        with self._lock:
+            subnet = self._subnets.pop(name, None)
+            if subnet is not None:
+                self._used_subnets.discard(subnet)
+
+    def _recover_subnets(self) -> None:
+        """Mark the subnets of networks that survived the start-up removal as in use."""
+        filters = json.dumps({"label": [f"{LABEL_STACK}={self.settings.stack}"]})
+        status, networks = self.engine.request("GET", "/networks", query={"filters": filters})
+        for network in networks if status == 200 and isinstance(networks, list) else []:
+            for config in network.get("IPAM", {}).get("Config") or []:
+                try:
+                    subnet = ipaddress.IPv4Network(config.get("Subnet", ""))
+                except ValueError:
+                    continue
+                if subnet.subnet_of(self._pool):
+                    with self._lock:
+                        self._subnets[str(network["Name"])] = str(subnet)
+                        self._used_subnets.add(str(subnet))
 
     def _service_container(self, service: str) -> str:
         """Find the running container of a Compose service of this stack.
@@ -1162,11 +1583,30 @@ class Launcher:
                     self.engine.request(
                         "POST", f"{path}/disconnect", {"Container": cid, "Force": True}
                     )
-            self.engine.request("DELETE", path)
+            status, _ = self.engine.request("DELETE", path)
+            if status in (204, 404):
+                self._free_subnet(name)
         except EngineError as exc:
             logger.error("Could not remove network %s: %s", name, exc)
 
     # --- environments -------------------------------------------------------------------
+
+    def _create_volume(self, spec: dict[str, Any]) -> None:
+        """Create a labelled volume (Docker answers 201 for one that exists already).
+
+        Parameters
+        ----------
+        spec
+            The body from `volume_spec`.
+
+        Raises
+        ------
+        EngineError
+            If Docker refuses it.
+        """
+        status, body = self.engine.request("POST", "/volumes/create", spec)
+        if status != 201:
+            raise EngineError(f"Docker refused the volume {spec['Name']}: {_message(body)}")
 
     def _marker(self, volume: str) -> Path:
         """Locate an environment's completion marker in the launcher's own volume.

@@ -12,6 +12,7 @@ break the isolation.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import re
@@ -41,6 +42,8 @@ EGRESS_SERVICE = "egress"
 """The Compose service of the build proxy."""
 MAX_SECONDS = 604800
 """Ceiling of a request's timeout: one week."""
+NETWORK_RANGE = "10.207.0.0/16"
+"""Where task networks get their addresses unless `LAKANA_LAUNCHER__NETWORK_RANGE` says so."""
 KEEP_ENVIRONMENTS = 10
 """How many built environments are kept, most recently used first."""
 FORBIDDEN_ROOTS = (
@@ -75,6 +78,8 @@ KNOWN_SETTINGS = (
     "MAX_CPUS",
     "MAX_PIDS",
     "PROBE_MAX_ENTRIES",
+    "NETWORK_RANGE",
+    "MAX_TOTAL_MEMORY_MB",
 )
 """The names after the prefix that the launcher reads."""
 _CONSTANT_NOW = frozenset(
@@ -159,6 +164,10 @@ class LauncherSettings:
         Ceiling of a request's CPUs.
     max_pids
         Ceiling of a request's process count.
+    network_range
+        The private IPv4 range the launcher carves one /29 per task or build network from.
+    max_total_memory_mb
+        Ceiling of the memory the live runs and builds may ask for together.
     probe_max_entries
         Most entries the start-up probe looks at in one ingestion root; a root with more is
         unusable until the cap is raised.
@@ -177,10 +186,12 @@ class LauncherSettings:
     socket: Path = Path("/run/lakana-launcher/launcher.sock")
     ingestion_roots: Mapping[str, str] = field(default_factory=dict)
     no_new_privileges: str = "auto"
-    max_memory_mb: int = 65536
-    max_cpus: float = 64.0
-    max_pids: int = 32768
+    max_memory_mb: int = 16384
+    max_cpus: float = 8.0
+    max_pids: int = 4096
     probe_max_entries: int = 100000
+    network_range: str = NETWORK_RANGE
+    max_total_memory_mb: int = 65536
     docker_socket: Path = DOCKER_SOCKET
     state_dir: Path = STATE_DIR
     egress_key: Path = EGRESS_KEY
@@ -285,6 +296,46 @@ def _number(environ: Mapping[str, str], name: str, default: int, low: int, high:
     if _NUMBER.fullmatch(text) is None or not low <= int(text) <= high:
         raise SettingsError(f"{PREFIX}{name} must be a whole number from {low} to {high}.")
     return int(text)
+
+
+_PRIVATE_BLOCKS = tuple(
+    ipaddress.IPv4Network(block) for block in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+)
+
+
+def _network_range(environ: Mapping[str, str]) -> str:
+    """Read the range task networks are carved from.
+
+    Parameters
+    ----------
+    environ
+        The environment.
+
+    Returns
+    -------
+    str
+        The range in CIDR form.
+
+    Raises
+    ------
+    SettingsError
+        If it is not an IPv4 network inside 10/8, 172.16/12 or 192.168/16 with room for at
+        least 32 networks of 8 addresses (a /24 or larger).
+    """
+    text = _get(environ, "NETWORK_RANGE")
+    if text is None:
+        return NETWORK_RANGE
+    rule = (
+        f"{PREFIX}NETWORK_RANGE must be a private IPv4 range in CIDR form (inside 10.0.0.0/8, "
+        "172.16.0.0/12 or 192.168.0.0/16) of at least 256 addresses, for example 10.207.0.0/16."
+    )
+    try:
+        network = ipaddress.IPv4Network(text, strict=True)
+    except ValueError:
+        raise SettingsError(rule) from None
+    if network.prefixlen > 24 or not any(network.subnet_of(block) for block in _PRIVATE_BLOCKS):
+        raise SettingsError(rule)
+    return str(network)
 
 
 def _path(environ: Mapping[str, str], name: str, default: Path) -> Path:
@@ -461,14 +512,23 @@ def load_settings(environ: Mapping[str, str]) -> LauncherSettings:
             f"{PREFIX}NO_NEW_PRIVILEGES must be auto or on (auto leaves it off where Docker "
             "refuses it, as Docker installed as a snap does)."
         )
+    max_memory = _number(environ, "MAX_MEMORY_MB", 16384, 64, 1 << 24)
+    max_total = _number(environ, "MAX_TOTAL_MEMORY_MB", max(65536, max_memory), 64, 1 << 30)
+    if max_total < max_memory:
+        raise SettingsError(
+            f"{PREFIX}MAX_TOTAL_MEMORY_MB must be at least {PREFIX}MAX_MEMORY_MB, or the biggest "
+            "task could never run."
+        )
     return LauncherSettings(
         stack=stack,
         images={str(k): str(v) for k, v in images.items()},
         socket=socket,
         ingestion_roots={str(k): str(v) for k, v in roots.items()},
         no_new_privileges=no_new_privileges,
-        max_memory_mb=_number(environ, "MAX_MEMORY_MB", 65536, 64, 1 << 24),
-        max_cpus=float(_number(environ, "MAX_CPUS", 64, 1, 1024)),
-        max_pids=_number(environ, "MAX_PIDS", 32768, 16, 4_194_304),
+        max_memory_mb=max_memory,
+        max_cpus=float(_number(environ, "MAX_CPUS", 8, 1, 1024)),
+        max_pids=_number(environ, "MAX_PIDS", 4096, 16, 4_194_304),
         probe_max_entries=_number(environ, "PROBE_MAX_ENTRIES", 100000, 1, 1_000_000_000),
+        network_range=_network_range(environ),
+        max_total_memory_mb=max_total,
     )

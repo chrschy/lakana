@@ -51,6 +51,14 @@ RUN apt-get update \
 COPY --from=uv /uv /usr/local/bin/uv
 COPY --from=builder /opt/lakana /opt/lakana
 COPY --from=builder /usr/bin/tini /usr/bin/tini
+# The launcher holds the Docker socket, so it must not start on the venv above: every `.pth` file
+# of a dependency would run in it before `main`. It runs from this copy of its own package (it
+# imports only the standard library) with the base interpreter, `-I` (no environment, no user
+# site) and `-S` (no site at all). The bundle's `launcher` service sets this as its command:
+# launcher command: /usr/local/bin/python -I -S -c "import sys; sys.path.insert(0, '/opt/lakana-launcher'); from lakana_worker.launcher.__main__ import main; main()"
+COPY --from=builder /opt/lakana/lib/python3.14/site-packages/lakana_worker/launcher/ /opt/lakana-launcher/lakana_worker/launcher/
+RUN touch /opt/lakana-launcher/lakana_worker/__init__.py \
+ && chmod -R go-w /opt/lakana-launcher
 USER 10001:10001
 RUN python -c "import duckdb; duckdb.connect().execute('INSTALL httpfs')"
 EXPOSE 8000
