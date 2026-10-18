@@ -10,7 +10,7 @@ import typer
 
 from lakana._models import Grant
 from lakana.cli import _output
-from lakana.cli._state import CliError, confirm, state_of
+from lakana.cli._state import CliError, CliState, confirm, state_of
 from lakana.errors import LakanaError
 
 if TYPE_CHECKING:
@@ -165,12 +165,18 @@ def _names_of(client: Client, grants: Sequence[Grant]) -> dict[str, str]:
 
 
 def _subject_namer(
-    client: Client, grants: Sequence[Grant], principal: str | None, group: str | None
+    state: CliState,
+    client: Client,
+    grants: Sequence[Grant],
+    principal: str | None,
+    group: str | None,
 ) -> Callable[[Grant], str]:
     """Build the function that says who a grant is for, by name where it can.
 
     Parameters
     ----------
+    state
+        The CLI state (for the output mode).
     client
         The SDK client.
     grants
@@ -197,6 +203,13 @@ def _subject_namer(
         names = {g.principal_id: f"{kind} {principal}" for g in grants if g.principal_id}
     else:
         names = _names_of(client, grants)
+        if any(i not in names for g in grants if (i := g.principal_id or g.group_id)):
+            _output.next_step(
+                state,
+                "Names not found for some subjects, so their ids are shown: reading the names "
+                "needs the right to list principals and groups. Ask an administrator, or map "
+                "the ids with `lakana principal list` and `lakana group list`.",
+            )
 
     def subject(grant: Grant) -> str:
         """Say who one grant is for.
@@ -334,13 +347,14 @@ def list_grants(
     and group until all are found, and a caller that may not list them sees the ids. A
     column with nothing in it is left out. `--env NAME` lists who has access to one
     environment, with names and roles. When the terminal is too narrow the table leaves out
-    `kind`, `namespace`, `table`, `environment` and last `id`, in that order, so that the `id`
-    that `grant revoke` needs stays, and a line under the table shows the revoke command;
-    `--output json` always has every field.
+    `kind`, `namespace`, `table`, `environment` and `action`, in that order, and folds a
+    long `subject` onto more lines, so that the `id` that `grant revoke` needs always stays
+    whole, and a line under the table shows the revoke command; `--output json` always has
+    every field.
 
     A grant of `MANAGE_GRANT`, `MANAGE_GROUP` or `MANAGE_TOKEN` as a single action has the
     marker `no effect` in a `note` column, which never drops (a narrow terminal leaves out
-    `table` after the others, so that `subject` and the marker stay whole), and a line under
+    `table` after the others, so that the `id` and the marker stay whole), and a line under
     the table explains it, followed by the command that revokes each such grant with its whole
     id (the first five; `--output json` has all of them and carries the full sentence). Revoke
     such a grant, and give the `ADMIN` role to whoever should keep the ability.
@@ -365,12 +379,14 @@ def list_grants(
     grants = client.grants.list(
         principal_name=principal, group_name=group, environment=env, namespace=ns, table=table
     )
-    subject = _subject_namer(client, grants, principal, group) if state.output != "json" else None
+    subject = (
+        _subject_namer(state, client, grants, principal, group) if state.output != "json" else None
+    )
     columns = ["id", "subject", "role", "action", "kind", "environment", "namespace", "table"]
     for name in ("role", "action", "environment", "namespace", "table"):
         if not any(getattr(grant, name) for grant in grants):
             columns.remove(name)
-    droppable = ["kind", "namespace", "table", "environment", "id"]
+    droppable = ["kind", "namespace", "table", "environment", "action"]
     footnotes: dict[str, str] = {}
     if len(grants) == 1:
         footnotes["id"] = (
@@ -389,7 +405,7 @@ def list_grants(
         columns=columns,
         droppable=droppable,
         derived={"subject": subject or subject_of, "note": _marker},
-        whole=["subject", "note"],
+        whole=["note"],
         footnotes=footnotes,
     )
 

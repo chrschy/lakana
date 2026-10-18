@@ -141,8 +141,10 @@ lakana token list alice
 ```
 
 The table of `grant list` names each grant's subject (`user alice`, `service ci-bot` or
-`group analysts`) and shows its role. The `id` column stays on a terminal 80 columns wide, and a
-line under the table gives the command that revokes a grant. A column that is empty for every grant
+`group analysts`) and shows its role. The `id` column is always shown whole, at any width: a long name
+wraps onto more lines and other columns give way first. A line under the table gives the command
+that revokes a grant. If a name cannot be found (reading names needs the right to list principals
+and groups), the table shows the id there and a notice says so. A column that is empty for every grant
 is left out, and when the terminal is too narrow a line under the table says which columns were
 left out; `--output json` always has every field. `--env dev` lists who has access to one
 environment, with their roles; without a filter `lakana grant list` shows the grants on the

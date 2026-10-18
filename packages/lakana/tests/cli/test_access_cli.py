@@ -317,3 +317,100 @@ def test_an_empty_column_is_left_out(tmp_path: Path) -> None:
     header = result.stdout.splitlines()[1]
     assert "action" not in header and "namespace" not in header and "table" not in header
     assert "role" in header and "environment" in header
+
+
+_LONG_ID = "11111111-2222-4333-8444-555555555555"
+_LONG = _grant(
+    _LONG_ID,
+    principal_id="aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+    role="DATA_ENGINEER",
+)
+
+
+def _assert_ids_whole_with_hint(out: str, ids: list[str]) -> None:
+    """Check that every full grant id and the revoke hint are in a listing.
+
+    Parameters
+    ----------
+    out
+        What `grant list` printed.
+    ids
+        The grant ids that must appear whole on one line.
+    """
+    lines = out.splitlines()
+    for grant_id in ids:
+        assert any(grant_id in line for line in lines), out
+    assert any(line.startswith("Revoke ") and "lakana grant revoke" in line for line in lines), out
+
+
+def test_long_names_never_push_the_id_out_at_80_columns(tmp_path: Path) -> None:
+    """The subject folds onto more lines; every id stays whole."""
+    api = FakeApi()
+    api.on(
+        "GET",
+        "/api/v1/grants",
+        json=[
+            _LONG,
+            _grant(_ANALYST_GRANT, principal_id=_ALICE_ID),
+            _grant(_GROUP_GRANT, principal_id=None, group_id=_GROUP_ID, role="VIEWER"),
+        ],
+    )
+    api.on(
+        "GET",
+        "/api/v1/principals",
+        json=[
+            {"name": "ci-pipeline-production", "type": "SERVICE_ACCOUNT", "is_active": True},
+            {"name": "alice", "type": "USER", "is_active": True},
+        ],
+    )
+
+    def by_principal(request: httpx.Request) -> httpx.Response:
+        owner = {"ci-pipeline-production": _LONG["principal_id"], "alice": _ALICE_ID}[
+            request.url.params["principal_name"]
+        ]
+        both = [_LONG, _grant(_ANALYST_GRANT)]
+        return httpx.Response(200, json=[g for g in both if g["principal_id"] == owner])
+
+    def grants(request: httpx.Request) -> httpx.Response:
+        if "principal_name" in request.url.params:
+            return by_principal(request)
+        return httpx.Response(
+            200,
+            json=[
+                _LONG,
+                _grant(_ANALYST_GRANT),
+                _grant(_GROUP_GRANT, principal_id=None, group_id=_GROUP_ID, role="VIEWER"),
+            ],
+        )
+
+    api.routes["GET", "/api/v1/grants"] = grants
+    api.on("GET", "/api/v1/groups", json=[])
+
+    result = invoke(make_state(tmp_path, api), "grant", "list", env={"COLUMNS": "80"})
+
+    assert result.exit_code == 0, result.stderr
+    _assert_ids_whole_with_hint(result.stdout, [_LONG_ID, _ANALYST_GRANT, _GROUP_GRANT])
+    assert "service" in result.stdout and "ci-pipeline" in result.stdout
+    assert "Not shown: id" not in result.stdout
+
+
+def test_unresolved_names_keep_the_id_and_say_why(tmp_path: Path) -> None:
+    """The `principal <uuid>` fallback at 80 columns keeps ids whole and explains itself."""
+    api = FakeApi()
+    api.on("GET", "/api/v1/grants", json=_GRANTS)
+
+    result = invoke(make_state(tmp_path, api), "grant", "list", env={"COLUMNS": "80"})
+
+    assert result.exit_code == 0, result.stderr
+    _assert_ids_whole_with_hint(result.stdout, [_ANALYST_GRANT, _ENGINEER_GRANT, _GROUP_GRANT])
+    assert "Names not found" in result.stderr
+    assert "lakana principal list" in result.stderr
+
+
+def test_resolved_names_print_no_warning_and_json_none(tmp_path: Path) -> None:
+    """Nothing is said on stderr when every name is found, or in JSON mode."""
+    assert invoke(make_state(tmp_path, _api()), "grant", "list").stderr == ""
+    api = FakeApi()
+    api.on("GET", "/api/v1/grants", json=_GRANTS)
+    quiet = invoke(make_state(tmp_path, api), "--output", "json", "grant", "list")
+    assert quiet.stderr == ""

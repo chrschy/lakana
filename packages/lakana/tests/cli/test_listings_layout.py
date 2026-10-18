@@ -386,10 +386,10 @@ _LISTINGS = {
         ("grant", "list"),
         "/api/v1/grants",
         [_grant(), _grant(principal_id=None, group_id=_GID)],
+        key=_ID,
         whole=(("id", _ID),),
         wraps_at=(80,),
         headers=("subject", "role"),
-        subjects=(f"principal {_ID2}", f"group {_GID}"),
     ),
     "row filters": _Listing(
         ("row-filter", "list"),
@@ -598,9 +598,10 @@ def test_a_grant_without_effect_shows_the_marker_and_one_explaining_line(
     assert sum("no effect" in row for row in rows) == 1, out
     assert "MANAGE_GRANT needs" not in out
     subject = f"group {_GID}" if group else f"principal {_ID2}"
-    assert sum(subject in row for row in rows) >= 1, out
-    if "id" in cells:
-        assert sum(_ID in row for row in rows) == 2, out
+    column = cells.index("subject") + 1
+    folded = "".join(row.split("│")[column].strip() for row in rows)
+    assert subject.replace(" ", "") in folded.replace(" ", ""), out
+    assert "id" in cells and sum(_ID in row for row in rows) == 2, out
     assert lines.count(_NO_EFFECT_LINE) == 1, out
 
 
