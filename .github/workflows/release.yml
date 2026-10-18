@@ -74,7 +74,8 @@ jobs:
     environment: release-approval
     permissions: {}
     steps:
-      - run: echo "Release ${{ needs.release-please.outputs.tag }} approved for publishing"
+      - run: echo "Release $TAG approved for publishing"
+        env: {TAG: "${{ needs.release-please.outputs.tag }}"}
 
   # Signs what `build` produced: a build provenance attestation (Sigstore, keyless) for every
   # wheel and sdist, which `gh attestation verify <file> --repo lakana-labs/lakana` checks (see

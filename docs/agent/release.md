@@ -161,20 +161,30 @@ one `echo`. The run stops there until the maintainer approves it (Actions run pa
 deployments"). Every job that publishes or signs depends on it, directly or through its
 `needs`: the four PyPI jobs, `publish-image` and `attest-image`, `attest-dist` and
 `provenance-release`, `sbom-release`, `pages` and `pages-deploy`. `release-please` (tag and
-GitHub release) and `build` (nothing leaves the run) run before the gate, as do `sbom` (it
-uploads to the run only) and the two smoke jobs, which follow their publish jobs anyway.
+GitHub release), `build` and `sbom` run before the gate: they upload nothing but workflow
+artifacts (`dist`, the SBOM), which logged-in users can download from a public repository. The
+two smoke jobs follow the publish jobs, so they run after it too.
 **Rejecting publishes nothing**: PyPI, the registry, the release page and the docs site stay
-as they were. The tag and the GitHub release already exist; to retry, re-run the workflow on
-the same commit.
+as they were. The tag and the GitHub release already exist. To retry, use **"Re-run failed jobs"** on the
+rejected run, which asks for the approval again (GitHub allows it for 30 days). Never use
+"Re-run all jobs": it re-runs `release-please`, which finds the release already tagged, so
+every job is skipped and the run ends green with nothing published. A pending approval holds
+the `release-${{ github.ref }}` concurrency group, so later pushes to `main` queue behind it:
+approve or reject promptly.
 
-`scripts/tests/test_workflows.py` pins the job and that every job holding a write scope
-(`id-token`, `packages`, `pages`, `attestations`, `contents`) reaches it through `needs`.
+`scripts/tests/test_workflows.py` pins the job (its full key set, so it can gain no
+`continue-on-error`, permission or `uses:`) and that every job apart from `release-please`,
+`build` and `sbom` reaches it through `needs` with no `always()`, `cancelled()`, `failure()` or
+`success() ||` in its `if`. A new job after the gate needs no test change; a new job before it
+has to be added to the test's list on purpose.
 
 **Maintainer setup, before the next release.** The workflow cannot create the environment's
 protection, and GitHub creates a missing environment *without* a reviewer, which would let
 the release through unapproved. Create `release-approval` under Settings > Environments with
 the maintainer as required reviewer and the same branch/tag rule as the PyPI environments.
-Then remove the required reviewer from `pypi-lakana`, which asked on its own until now; keep
+Do not tick "Prevent self-review": the maintainer is the only reviewer and usually merged the
+release PR, so nobody could approve. "Allow administrators to bypass" stays on (the default),
+which is acceptable for a sole maintainer. Then remove the required reviewer from `pypi-lakana`, which asked on its own until now; keep
 its branch rule and that of the other three PyPI environments (the trusted publishers name
 them).
 
@@ -241,7 +251,8 @@ upload sequence guarantees that one exists before they do.
 Four more `release.yml` jobs run after `publish-sdk`, each gated on the one before it so a
 bad release never advances past the point that would have caught it:
 
-- **`publish-image`** needs `publish-sdk` (as well as `build`), not just the packages it
+- **`publish-image`** needs `publish-sdk` (as well as `release-please`, `build` and
+  `approve`), not just the packages it
   bundles — this guarantees the image is only ever built from wheels that PyPI already
   has (see "Why untagged builds cannot publish" below), so a broken PyPI release never gets a
   matching `latest` container. It regenerates
@@ -326,7 +337,7 @@ Every release is signed with GitHub's build provenance attestations (Sigstore, k
 `actions/attest-build-provenance`), so a user can check that a file or the image was built by
 this repository's `release.yml` from the tagged commit.
 
-- **`attest-dist`** needs `build`, downloads the shared `dist` artifact and attests every wheel and
+- **`attest-dist`** needs `build` and `approve`, downloads the shared `dist` artifact and attests every wheel and
   sdist (`subject-path` lists `dist/*.whl` and `dist/*.tar.gz`). It has `id-token: write` and `attestations: write` and nothing
   else but `contents: read`. It also keeps the bundle as the workflow artifact `provenance`.
 - **`provenance-release`** (like `sbom-release`: no checkout, only the artifact download and

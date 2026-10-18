@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
 import subprocess
 import tomllib
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -267,7 +269,9 @@ def test_each_package_publishes_to_production_pypi_from_its_own_environment() ->
     }
 
 
-_PUBLISHING_SCOPES = ("id-token", "packages", "pages", "attestations", "contents")
+_BEFORE_THE_GATE = {"release-please", "build", "sbom", "approve"}
+_APPROVE_KEYS = {"needs", "if", "runs-on", "timeout-minutes", "environment", "permissions", "steps"}
+_STATUS_FUNCTIONS = re.compile(r"\b(always|cancelled|failure)\s*\(|\bsuccess\s*\(\)\s*\|\|")
 
 
 def _reaches(jobs: dict, name: str, target: str) -> bool:
@@ -292,33 +296,73 @@ def _reaches(jobs: dict, name: str, target: str) -> bool:
     return any(n == target or _reaches(jobs, n, target) for n in needs)
 
 
+def _gate_violations(jobs: dict) -> list[str]:
+    """List the ways a release workflow lets something happen before or despite the approval.
+
+    Parameters
+    ----------
+    jobs
+        The workflow's ``jobs`` mapping.
+
+    Returns
+    -------
+    list of str
+        One message per violation; empty when the gate holds.
+    """
+    problems = []
+    approve = jobs["approve"]
+    if approve.get("environment") != "release-approval":
+        problems.append("approve is not in the environment `release-approval`")
+    if approve.get("permissions") != {}:
+        problems.append("approve holds permissions")
+    if set(approve) != _APPROVE_KEYS:
+        problems.append(f"approve has the keys {sorted(set(approve))}")
+    steps = approve.get("steps", [])
+    if len(steps) != 1 or set(steps[0]) - {"run", "env"} or "run" not in steps[0]:
+        problems.append("approve runs more than one plain `run` step")
+    if set(approve.get("needs", [])) != {"release-please", "build"}:
+        problems.append("approve does not need release-please and build")
+    for name, job in jobs.items():
+        if name in _BEFORE_THE_GATE:
+            continue
+        if not _reaches(jobs, name, "approve"):
+            problems.append(f"`{name}` does not wait for approve")
+        if _STATUS_FUNCTIONS.search(str(job.get("if", ""))):
+            problems.append(
+                f"`{name}` has a status function in its `if` and can run after a rejection"
+            )
+    return problems
+
+
 def test_one_approval_job_gates_a_release() -> None:
-    """The ``approve`` job asks once, runs nothing but an echo and holds no permission."""
+    """Only release-please, build and sbom run before ``approve``; none runs after a rejection."""
     jobs = _jobs("release.yml")
-    job = jobs["approve"]
-    assert job["environment"] == "release-approval"
-    assert job["permissions"] == {}
-    assert set(job["needs"]) == {"release-please", "build"}
-    assert job["if"] == "needs.release-please.outputs.released == 'true'"
-    assert len(job["steps"]) == 1
-    assert set(job["steps"][0]) == {"run"}
+    assert _gate_violations(jobs) == []
+    assert jobs["approve"]["if"] == "needs.release-please.outputs.released == 'true'"
 
 
-def test_every_job_that_can_publish_waits_for_the_approval() -> None:
-    """A job holding a write scope (apart from release-please) depends on ``approve``."""
-    jobs = _jobs("release.yml")
-    publishers = [
-        name
-        for name, job in jobs.items()
-        if name not in ("release-please", "approve")
-        and any(job.get("permissions", {}).get(scope) == "write" for scope in _PUBLISHING_SCOPES)
-    ]
-    assert {"publish-core", "publish-runtime", "publish-sdk", "publish-image"} <= set(publishers)
-    for name in publishers:
-        assert _reaches(jobs, name, "approve"), (
-            f"release.yml: job `{name}` publishes before the approval"
-        )
-    assert _reaches(jobs, "pages", "approve")
+@pytest.mark.parametrize(
+    ("break_it", "expected"),
+    [
+        (lambda j: j["publish-core"].update(needs=["build"]), "`publish-core` does not wait"),
+        (lambda j: j["pages"].update(**{"if": "always()"}), "`pages` has a status function"),
+        (lambda j: j["pages"].update(**{"if": "success() || x"}), "`pages` has a status function"),
+        (lambda j: j["approve"].update(**{"continue-on-error": True}), "approve has the keys"),
+        (
+            lambda j: j["approve"].update(permissions={"contents": "write"}),
+            "approve holds permissions",
+        ),
+        (lambda j: j["approve"]["steps"].append({"uses": "x/y@z"}), "more than one plain"),
+        (lambda j: j.update(upload={"needs": "build", "steps": []}), "`upload` does not wait"),
+    ],
+)
+def test_the_gate_check_catches_a_broken_workflow(
+    break_it: Callable[[dict], object], expected: str
+) -> None:
+    """The check flags each way of weakening the gate, on a copy of the real workflow."""
+    jobs = copy.deepcopy(_jobs("release.yml"))
+    break_it(jobs)
+    assert any(expected in problem for problem in _gate_violations(jobs))
 
 
 def test_no_release_step_points_at_the_test_index() -> None:
