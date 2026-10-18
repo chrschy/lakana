@@ -2,14 +2,14 @@
 
 ## Before your first pull request
 
-You must sign the [Contributor License Agreement](../docs/legal/CLA.md). A bot will comment
+You must sign the [Contributor License Agreement](https://github.com/lakana-labs/lakana/blob/main/docs/legal/CLA.md). A bot will comment
 on your first PR with what to write; signing takes one comment.
 
 In plain words: you keep the copyright in your contribution. You license it to the
 maintainer and to whoever maintains the project after them, including the right to license
 the project, with your contribution in it, under other terms later. A version we have
 published under Apache-2.0 keeps that license. If you contribute for an employer, your
-employer also signs the [corporate agreement](../docs/legal/CLA-CORPORATE.md), and you still
+employer also signs the [corporate agreement](https://github.com/lakana-labs/lakana/blob/main/docs/legal/CLA-CORPORATE.md), and you still
 sign the individual one. The agreement says how your signature is stored and for how long.
 
 ## Workflow

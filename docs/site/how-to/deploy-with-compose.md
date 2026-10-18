@@ -191,7 +191,10 @@ directories, artifact leftovers or those) and keep the newest `LAKANA_RUN__VENV_
 
 The cache directory must be private to the worker: owned by uid 10001 and mode `0700`, or every
 Python task fails with "not private". The image creates it that way and a new named volume
-inherits that, so the bundle needs no setup. If you replace the volume with a bind mount or set
+inherits that, so the bundle needs no setup. The image creates only that directory; each worker
+creates `attempts/` inside it when it starts (several workers can start together on one new
+volume without clashing), and logs a warning, and fails Python tasks, if `attempts` is a link or
+not private. If you replace the volume with a bind mount or set
 `LAKANA_RUN__VENV_CACHE` yourself, create the directory first with
 `chown 10001:10001 DIR && chmod 0700 DIR`.
 

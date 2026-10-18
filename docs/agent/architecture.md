@@ -381,7 +381,9 @@ served by the worker that runs it. No second task and no deploy is claimed meanw
 once the drain is set. Three threads, each with its own database session:
 
 - the *supervisor* prepares the attempt, unpacks the verified code into a private per-attempt
-  directory under `<worker cache>/attempts/` (there is no shared code cache), re-checks the lock
+  directory under `<worker cache>/attempts/` (there is no shared code cache; the worker creates
+  `attempts/` at start with `prepare_private_directory`, never the image, because Docker's
+  copy-up into a new shared volume races between workers), re-checks the lock
   against this worker, gets the venv, reads the target table's state, mints a token bound to the
   attempt, and calls the runner. It starts the process and outlives it. On every path out it
   revokes the token, releases the venv and removes the attempt directory. A worker that dies

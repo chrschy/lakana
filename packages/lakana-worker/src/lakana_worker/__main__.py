@@ -42,6 +42,7 @@ from lakana_worker.memory import resolve_limit, start_watchdog
 from lakana_worker.notify import DeliveryLoop, NotifySettings
 from lakana_worker.pipeline import install_maintenance_timeout
 from lakana_worker.poller import WorkerPool, poll_forever
+from lakana_worker.processes import UnsafeDirectory, prepare_private_directory
 from lakana_worker.python_support import PythonSupport, detect, worker_cache_dir
 from lakana_worker.python_tasks import PythonRuntime, token_ttl
 from lakana_worker.runners import LocalProcessRunner
@@ -173,9 +174,12 @@ def _secret(value: SecretStr | None) -> str | None:
 def _python_runtime(settings: Settings, python: PythonSupport) -> PythonRuntime:
     """Build what runs Python tasks, from the settings.
 
-    Nothing is created on disk here: the attempt directory and the venv
-    cache are made, privately, when the first Python task needs them. A
-    task-token cap too low for a task with the default timeout is logged.
+    A worker that can run Python assets creates its attempt directory here, privately
+    and idempotently: the image does not, because two workers that mount one new volume
+    would both copy it in and the second would fail. One that is not private (a link, group
+    or other access) is logged and left alone; Python tasks then fail with the reason.
+    The venv cache is made when the first task needs it. A task-token cap too low for a task
+    with the default timeout is logged.
 
     Parameters
     ----------
@@ -196,6 +200,14 @@ def _python_runtime(settings: Settings, python: PythonSupport) -> PythonRuntime:
         `LAKANA_RUN__SWEEP_INTERVAL` seconds.
     """
     cache = worker_cache_dir()
+    if python.reason() is None:
+        try:
+            prepare_private_directory(cache / "attempts")
+        except (UnsafeDirectory, OSError) as exc:
+            logger.warning(
+                "The task directory is not usable, so Python tasks fail until it is: %s",
+                exc if isinstance(exc, UnsafeDirectory) else f"{cache / 'attempts'}: {exc}",
+            )
     run = settings.run
     cap, timeout = settings.task_tokens.max_ttl_seconds, settings.query_limits.timeout_seconds
     needed = token_ttl(timeout, run.kill_grace)

@@ -7,7 +7,12 @@ DuckDB's extension cache, tini as PID 1, and locked third-party versions.
 import re
 from pathlib import Path
 
+import yaml
+
 _DOCKERFILE = Path(__file__).resolve().parents[3] / "Dockerfile"
+_COMPOSE = (
+    Path(__file__).resolve().parents[1] / "src" / "lakana" / "cli" / "deploy" / "compose.yaml"
+)
 
 
 def _all_instructions() -> list[str]:
@@ -155,7 +160,6 @@ def test_the_image_prepares_the_directories_the_launcher_and_the_worker_mount() 
     # delete the token or the socket, so no link can be swapped in under the launcher.
     assert "chmod 3770 /run/lakana-launcher" in text
     assert "install -d -o 0 -g 0 -m 0700 /var/lib/lakana-launcher" in text
-    assert "install -d -o 10001 -g 10001 -m 0700 /home/lakana/.cache/lakana-worker/attempts" in text
 
 
 _LAUNCHER_COMMAND = (
@@ -176,3 +180,69 @@ def test_the_image_carries_an_isolated_copy_of_the_launcher_and_the_command_to_r
     assert "touch /opt/lakana-launcher/lakana_worker/__init__.py" in text
     assert f"# launcher command: {_LAUNCHER_COMMAND}" in text
     assert " -S " in _LAUNCHER_COMMAND and " -I " in _LAUNCHER_COMMAND
+
+
+def test_the_image_creates_nothing_below_the_mount_point_of_a_shared_volume() -> None:
+    """Docker copies the image's content into a new named volume at its first mount.
+
+    Two containers that mount one empty volume at the same moment both copy, and the second
+    fails on `mkdir ...: file exists`. The mount point itself may be prepared (a fresh volume
+    takes its owner and mode); anything inside is made by the program that needs it.
+    """
+    mounts = [m for volume in _SHARED_VOLUMES for m in [_mount_point(volume)]]
+    created = _created_directories()
+    assert created, "the Dockerfile creates no directory at all: the parser found nothing"
+    for mount in mounts:
+        below = [d for d in created if d != mount and d.startswith(f"{mount}/")]
+        assert below == [], f"the image creates {below} inside the shared volume at {mount}"
+    # the mount point stays, so a fresh volume inherits its owner and mode
+    assert "/home/lakana/.cache/lakana-worker" in created
+
+
+_SHARED_VOLUMES = ("worker-cache",)
+"""Named volumes that more than one container mounts (checked against `compose.yaml`)."""
+
+
+def _mount_point(volume: str) -> str:
+    """Return where the Compose bundle mounts a named volume in the worker.
+
+    Parameters
+    ----------
+    volume
+        The volume's name.
+
+    Returns
+    -------
+    str
+        The container path.
+
+    Raises
+    ------
+    AssertionError
+        If the worker mounts no such volume.
+    """
+    compose = yaml.safe_load(_COMPOSE.read_text(encoding="utf-8"))
+    for entry in compose["services"]["worker"]["volumes"]:
+        source, _, rest = entry.partition(":")
+        if source == volume:
+            return rest.split(":")[0].rstrip("/")
+    raise AssertionError(f"the worker does not mount {volume}")
+
+
+def _created_directories() -> list[str]:
+    """List the absolute paths the final stage creates with `mkdir` or `install -d`.
+
+    Returns
+    -------
+    list of str
+        Paths, without a trailing slash.
+    """
+    found: list[str] = []
+    for ln in _final_stage():
+        for part in re.split(r"&&|;", ln):
+            words = part.split()
+            if words[:1] == ["RUN"]:
+                words = words[1:]
+            if words[:1] == ["mkdir"] or words[:2] == ["install", "-d"]:
+                found += [w.rstrip("/") for w in words if w.startswith("/")]
+    return found

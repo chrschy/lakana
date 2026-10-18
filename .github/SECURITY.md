@@ -61,6 +61,6 @@ and this one differ, the threat model is right.
 ## Response expectations
 
 This is a single-maintainer, pre-1.0 open-source project. There is no SLA and no time
-commitment, before or after v1.0.0 (see [SUPPORT.md](SUPPORT.md)). Reports are read
+commitment, before or after v1.0.0 (see [SUPPORT.md](https://github.com/lakana-labs/lakana/blob/main/.github/SUPPORT.md)). Reports are read
 on a best-effort basis; response and fix times vary with maintainer availability. Coordinated disclosure is welcome —
 say so in your report if you'd like to discuss timing before anything is made public.
