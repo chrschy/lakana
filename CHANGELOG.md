@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.15.0](https://github.com/lakana-labs/lakana/compare/v0.14.0...v0.15.0) (2026-10-18)
+
+
+### ⚠ BREAKING CHANGES
+
+* **security:** while an environment has a storage secret, changing its storage options (`lakana env set-storage --option`) needs MANAGE_SECRET in that environment as well as MANAGE_ENVIRONMENT; before, MANAGE_ENVIRONMENT was enough and the secret could be sent to another endpoint. Someone without MANAGE_SECRET is now refused (403, audited); an administrator makes the change. Migration 0035 adds a CHECK constraint on a secret's use and stops if an existing row is inconsistent, naming it.
+
+### Bug Fixes
+
+* clean up task directories on macOS, gate releases on one approval, and check for copied code ([#167](https://github.com/lakana-labs/lakana/issues/167)) ([b214b9f](https://github.com/lakana-labs/lakana/commit/b214b9fbefdfb8d2d7f6065b9c17a4329db6f580)), closes [#164](https://github.com/lakana-labs/lakana/issues/164) [#155](https://github.com/lakana-labs/lakana/issues/155) [#153](https://github.com/lakana-labs/lakana/issues/153) [#157](https://github.com/lakana-labs/lakana/issues/157)
+* **security:** storage options need the right to manage secrets; a memory stop records each task ([1378456](https://github.com/lakana-labs/lakana/commit/13784569215cad10427f6550bdbe38ce4077582c))
+
+
+### Documentation
+
+* the upgrade notes name 0.15.0 ([#174](https://github.com/lakana-labs/lakana/issues/174)) ([ad32fab](https://github.com/lakana-labs/lakana/commit/ad32fab37207712eaf24fad0eca2d8152bdffd43))
+
+
+### Dependencies
+
+* bump hypothesis from 6.169.3 to 6.169.4 in the python group ([#169](https://github.com/lakana-labs/lakana/issues/169)) ([e069235](https://github.com/lakana-labs/lakana/commit/e069235d907901e26a142886fefa13e97b9b9597))
+* bump ty from 0.0.87 to 0.0.88 ([#170](https://github.com/lakana-labs/lakana/issues/170)) ([2374e9b](https://github.com/lakana-labs/lakana/commit/2374e9b97403bd1f2f701e550108f9c9938b8e28))
+
 ## [0.14.0](https://github.com/lakana-labs/lakana/compare/v0.13.0...v0.14.0) (2026-10-18)
 
 
