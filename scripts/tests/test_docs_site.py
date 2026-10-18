@@ -15,7 +15,7 @@ EXEMPT = (
     "scripts/tests/test_docs_site.py",
     "scripts/tests/test_docs_only.py",
 )
-NOT_TESTED_CEILING = 54
+NOT_TESTED_CEILING = 55
 """Blocks marked as not tested; it only goes down, apart from the rises below.
 
 The artifact pages left six when they were written: the `artifact uploads abort` command,
@@ -51,6 +51,10 @@ Six tests of `test_python_assets_integration.py` run the effect of those command
 end and are the proof. The page's registering, rotating and clearing of an index run in the
 `getting-started` example, because a local instance has a secrets master key and registering never
 contacts the index.
+
+The upgrade page's section on a dependency that breaks Lakana rose it from 54 to 55 with one
+block: the `pip`, `uv` and constraints-file ways to pin a package name versions that no example
+can know are good.
 
 The upgrade note of the following release rose it from 48 to 52 with four blocks. Two need
 names or ids of the reader's own instance (`grant list --principal NAME` and `group members

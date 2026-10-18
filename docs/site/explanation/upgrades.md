@@ -65,6 +65,34 @@ steps, with the commands, are in
 This step is a known cost. [Issue 73](https://github.com/chrschy/lakana/issues/73) looks at
 reducing it. From v1.0.0 the check only requires the major versions to match.
 
+## When a dependency's new release breaks Lakana
+
+Lakana uses other Python packages, such as `sqlglot` and `pyiceberg`. A `pip` or `uv` install
+looks up the newest allowed version of each one when you install, so a release of such a package
+that came out after the Lakana release you installed can break it, even though that Lakana
+release worked the day it was published. Lakana limits the versions of the packages it depends
+on most, and a daily test run looks for breaks, but one can still get through. The container
+images are not affected: they install exactly the versions that were tested.
+
+If Lakana fails after a fresh install with an error that names another package (a missing or
+unexpected argument, for example), pin that package to the version before the one that broke. Use
+`pip`, `uv`, or a constraints file that keeps the pin for every later install:
+
+<!-- not tested: needs a package version that is known to be good -->
+```bash
+pip install "lakana[server]==0.13.0" "sqlglot==30.21.0"
+
+uv pip install "lakana[server]==0.13.0" "sqlglot==30.21.0"
+
+echo "sqlglot==30.21.0" > constraints.txt
+pip install -c constraints.txt "lakana[server]==0.13.0"
+```
+
+Replace the versions with yours: `pip freeze` lists what is installed, and the package's page on
+PyPI lists its earlier releases. Then [open an issue](https://github.com/chrschy/lakana/issues)
+with the package, the version that broke and the error. A release of Lakana that is already
+published cannot be repaired, so the fix comes in a new release, and you can remove the pin then.
+
 ## Going back
 
 A downgrade is not generally supported. No `lakana` command downgrades an instance. The way back
