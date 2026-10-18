@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 import time
 from collections import Counter
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pyarrow as pa
@@ -31,13 +32,15 @@ from pyiceberg.table.snapshots import Operation, Snapshot, Summary
 from pyiceberg.table.update import AddSnapshotUpdate, SetSnapshotRefUpdate
 from pyiceberg.typedef import Record
 from pyiceberg.types import LongType, NestedField, StringType
+from sqlalchemy import select, update
+from sqlalchemy.orm import Session
 
 from lakana_core.auth import PrincipalRef
 from lakana_core.catalog import field_ids as field_ids_module
 from lakana_core.catalog.service import CatalogService, LoadedTable
-from lakana_core.errors import StorageUnavailableError, ValidationError
+from lakana_core.errors import ConflictError, StorageUnavailableError, ValidationError
 from lakana_core.identifiers import NamespacePath, TableRef, shown
-from lakana_core.models import WriteMode
+from lakana_core.models import Table, WriteMode
 
 _SCHEMA = Schema(
     NestedField(1, "id", LongType(), required=False),
@@ -641,7 +644,7 @@ def test_a_storage_failure_while_reading_a_manifest_is_not_blamed_on_the_client(
     def fail(*_args: object, **_kwargs: object) -> list[object]:
         raise OSError("AWS Error SLOW_DOWN for https://bucket.example/secret?X-Amz-Signature=abc")
 
-    monkeypatch.setattr(ManifestFile, "fetch_manifest_entry", fail)
+    monkeypatch.setattr(field_ids_module, "_live_entries", fail)
 
     with pytest.raises(StorageUnavailableError) as caught:
         _commit_files(catalog, principal, ref, created, [uri], 900_000_111)
@@ -813,15 +816,13 @@ def test_collecting_stops_once_the_cap_is_passed(
         900_000_171,
     )
     fetched: list[str] = []
-    real = ManifestFile.fetch_manifest_entry
+    real = field_ids_module._live_entries
 
-    def counting(
-        self: ManifestFile, io: object, discard_deleted: bool = True
-    ) -> list[ManifestEntry]:
-        fetched.append(self.manifest_path)
-        return real(self, io, discard_deleted)  # ty: ignore[invalid-argument-type]
+    def counting(file_io: object, manifest: ManifestFile, *rest: object) -> Iterator[ManifestEntry]:
+        fetched.append(manifest.manifest_path)
+        return real(file_io, manifest, *rest)  # ty: ignore[invalid-argument-type]
 
-    monkeypatch.setattr(ManifestFile, "fetch_manifest_entry", counting)
+    monkeypatch.setattr(field_ids_module, "_live_entries", counting)
 
     with pytest.raises(ValidationError, match="Lakana checks at most 2 per commit"):
         _commit_snapshots(catalog, principal, ref, [first, second])
@@ -852,3 +853,136 @@ def test_the_deadline_also_covers_the_manifest_reads(
         _commit_files(catalog, principal, ref, created, [uri], 900_000_180)
 
     assert opened == []
+
+
+def _watching_manifest_reads(
+    monkeypatch: pytest.MonkeyPatch, on_entry: Callable[[], None]
+) -> list[int]:
+    """Wrap the manifest entry stream so each entry it yields is counted and announced.
+
+    Parameters
+    ----------
+    monkeypatch
+        Replaces `_live_entries` for the test.
+    on_entry
+        Called each time an entry is about to be handed to the check.
+
+    Returns
+    -------
+    list of int
+        Holds one element, the number of entries yielded so far.
+    """
+    real = field_ids_module._live_entries
+    count = [0]
+
+    def watching(*args: object) -> Iterator[ManifestEntry]:
+        for entry in real(*args):  # ty: ignore[invalid-argument-type]
+            count[0] += 1
+            on_entry()
+            yield entry
+
+    monkeypatch.setattr(field_ids_module, "_live_entries", watching)
+    return count
+
+
+def test_no_database_session_is_open_while_manifests_and_footers_are_read(
+    catalog: CatalogService,
+    principal: PrincipalRef,
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ref, created = _created(catalog, principal, tmp_path)
+    uris = [_parquet(created, f"s{i}.parquet", field_ids=True) for i in range(3)]
+    open_during_entries: list[bool] = []
+    open_during_footers: list[bool] = []
+    _watching_manifest_reads(
+        monkeypatch, lambda: open_during_entries.append(session.in_transaction())
+    )
+    real = field_ids_module.has_field_ids
+
+    def watching(file_io: object, path: str) -> bool:
+        open_during_footers.append(session.in_transaction())
+        return real(file_io, path)  # ty: ignore[invalid-argument-type]
+
+    monkeypatch.setattr(field_ids_module, "has_field_ids", watching)
+
+    _commit_files(catalog, principal, ref, created, uris, 900_000_190)
+
+    assert open_during_entries == [False] * 3
+    assert open_during_footers == [False] * 3
+    assert catalog.load_table(principal, ref).metadata.current_snapshot_id == 900_000_190
+
+
+def test_the_cap_applies_while_a_manifest_is_being_read(
+    catalog: CatalogService,
+    principal: PrincipalRef,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ref, created = _created(catalog, principal, tmp_path)
+    monkeypatch.setattr(field_ids_module, "MAX_CHECKED_FILES", 2)
+    uris = [_parquet(created, f"c{i}.parquet", field_ids=True) for i in range(6)]
+    count = _watching_manifest_reads(monkeypatch, lambda: None)
+
+    with pytest.raises(ValidationError, match="Lakana checks at most 2 per commit"):
+        _commit_files(catalog, principal, ref, created, uris, 900_000_191)
+
+    assert count == [3]
+
+
+def test_the_deadline_applies_while_a_manifest_is_being_read(
+    catalog: CatalogService,
+    principal: PrincipalRef,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ref, created = _created(catalog, principal, tmp_path)
+    uris = [_parquet(created, f"d{i}.parquet", field_ids=True) for i in range(6)]
+    snapshot = _snapshot(created.metadata, None, uris, 900_000_192)
+    now = [0.0]
+
+    def clock() -> float:
+        now[0] += 10.0
+        return now[0]
+
+    monkeypatch.setattr(field_ids_module, "_clock", clock)
+    count = _watching_manifest_reads(monkeypatch, lambda: None)
+
+    with pytest.raises(ValidationError, match="took longer than 60 seconds"):
+        _commit_snapshots(catalog, principal, ref, [snapshot])
+
+    assert count == [3]
+
+
+def test_a_table_changed_while_its_files_were_checked_refuses_the_commit_cleanly(
+    catalog: CatalogService,
+    principal: PrincipalRef,
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ref, created = _created(catalog, principal, tmp_path)
+    uri = _parquet(created, "r.parquet", field_ids=True)
+    changed = [False]
+
+    def another_writer_commits_first() -> None:
+        if changed[0]:
+            return
+        changed[0] = True
+        session.execute(
+            update(Table)
+            .where(Table.id == created.uuid)
+            .values(metadata_location=created.metadata_location + ".other")
+        )
+        session.commit()
+
+    _watching_manifest_reads(monkeypatch, another_writer_commits_first)
+
+    with pytest.raises(ConflictError, match="another writer committed first"):
+        _commit_files(catalog, principal, ref, created, [uri], 900_000_193)
+
+    location = session.execute(
+        select(Table.metadata_location).where(Table.id == created.uuid)
+    ).scalar_one()
+    assert location == created.metadata_location + ".other"

@@ -2180,6 +2180,18 @@ class CatalogService:
             select(Table).where(Table.namespace_id == ns.id, Table.name == name)
         ).scalar_one_or_none()
 
+    def _release_session(self) -> None:
+        """Give the session's database connection back to the pool before slow storage reads.
+
+        Nothing is released while the session holds a change of its own that a rollback would
+        lose; the connection then stays, as before. Otherwise the transaction, which held only
+        reads, ends: the next statement begins a new one, and objects loaded earlier are
+        reloaded on use.
+        """
+        if self._session.new or self._session.dirty or self._session.deleted:
+            return
+        self._session.rollback()
+
     def _find_table(self, ref: TableRef) -> tuple[Namespace, Table]:
         """Resolve a table row from a reference, without authorizing.
 
@@ -3099,6 +3111,10 @@ class CatalogService:
             # under the table's location.
             added_snapshots = [u.snapshot for u in updates if isinstance(u, AddSnapshotUpdate)]
             if added_snapshots:
+                # The reads can take a minute: no pooled connection sits idle in a transaction
+                # meanwhile. The pointer swap below compares against `expected`, so a table
+                # that changed meanwhile fails it like any concurrent commit.
+                self._release_session()
                 check_added_files_have_field_ids(
                     added_snapshots, current, resolved.file_io, ref.dotted()
                 )

@@ -16,18 +16,26 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Sequence
+from collections.abc import Generator, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
+from contextlib import closing
+from typing import cast
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+from pyiceberg.avro.file import AvroFile
 from pyiceberg.io import FileIO
 from pyiceberg.manifest import (
+    DEFAULT_READ_VERSION,
+    MANIFEST_ENTRY_SCHEMAS,
     DataFile,
     DataFileContent,
     FileFormat,
+    ManifestEntry,
     ManifestEntryStatus,
+    ManifestFile,
+    read_manifest_list,
 )
 from pyiceberg.schema import Schema, index_name_by_id
 from pyiceberg.table.metadata import TableMetadata
@@ -444,6 +452,82 @@ def _timed_out(table: str) -> str:
     return _TIMED_OUT.format(table=shown(table), seconds=CHECK_DEADLINE_SECONDS)
 
 
+def _listed_manifests(
+    file_io: FileIO, manifest_list: str, table: str, deadline: float
+) -> Iterator[ManifestFile]:
+    """Stream the manifests of a manifest list, checking the deadline before each.
+
+    Parameters
+    ----------
+    file_io
+        Reads the table's storage.
+    manifest_list
+        The manifest list's URI.
+    table
+        The table's dotted name, for the message.
+    deadline
+        When the check's time is up, on the clock `_clock` reads.
+
+    Yields
+    ------
+    ManifestFile
+        Each manifest of the list, in order; the list is never held whole.
+
+    Raises
+    ------
+    ValidationError
+        If the deadline has passed before the list is opened or before an entry is yielded.
+    """
+    if _clock() >= deadline:
+        raise ValidationError(_timed_out(table))
+    reader = cast("Generator[ManifestFile]", read_manifest_list(file_io.new_input(manifest_list)))
+    with closing(reader) as listed:
+        for manifest in listed:
+            if _clock() >= deadline:
+                raise ValidationError(_timed_out(table))
+            yield manifest
+
+
+def _live_entries(
+    file_io: FileIO, manifest: ManifestFile, table: str, deadline: float
+) -> Iterator[ManifestEntry]:
+    """Stream the live entries of a manifest, checking the deadline before each.
+
+    Parameters
+    ----------
+    file_io
+        Reads the table's storage.
+    manifest
+        The manifest to read.
+    table
+        The table's dotted name, for the message.
+    deadline
+        When the check's time is up, on the clock `_clock` reads.
+
+    Yields
+    ------
+    ManifestEntry
+        Each entry that is not `DELETED`, in order; the manifest is never held whole.
+
+    Raises
+    ------
+    ValidationError
+        If the deadline has passed before an entry is yielded.
+    """
+    input_file = file_io.new_input(manifest.manifest_path)
+    with AvroFile[ManifestEntry](
+        input_file,
+        MANIFEST_ENTRY_SCHEMAS[DEFAULT_READ_VERSION],
+        read_types={-1: ManifestEntry, 2: DataFile},
+        read_enums={0: ManifestEntryStatus, 101: FileFormat, 134: DataFileContent},
+    ) as reader:
+        for entry in reader:
+            if _clock() >= deadline:
+                raise ValidationError(_timed_out(table))
+            if entry.status != ManifestEntryStatus.DELETED:
+                yield entry
+
+
 def _added_data_files(
     snapshots: Sequence[Snapshot],
     metadata: TableMetadata,
@@ -500,20 +584,19 @@ def _added_data_files(
         )
         earlier[snapshot.snapshot_id] = snapshot
         try:
-            known = (
-                set() if parent is None else {m.manifest_path for m in parent.manifests(file_io)}
-            )
-            for manifest in snapshot.manifests(file_io):
+            known: set[str] = set()
+            if parent is not None:
+                for listed in _listed_manifests(file_io, parent.manifest_list, table, deadline):
+                    known.add(listed.manifest_path)
+            for manifest in _listed_manifests(file_io, snapshot.manifest_list, table, deadline):
                 if (
                     manifest.manifest_path in known
                     or manifest.manifest_path in seen_manifests
                     or not is_within_location(metadata.location, manifest.manifest_path)
                 ):
                     continue
-                if _clock() >= deadline:
-                    raise ValidationError(_timed_out(table))
                 seen_manifests.add(manifest.manifest_path)
-                for entry in manifest.fetch_manifest_entry(file_io, discard_deleted=True):
+                for entry in _live_entries(file_io, manifest, table, deadline):
                     if (
                         entry.status == ManifestEntryStatus.ADDED
                         and entry.data_file.content == DataFileContent.DATA
@@ -521,10 +604,10 @@ def _added_data_files(
                     ):
                         seen_files.add(entry.data_file.file_path)
                         added.append(entry.data_file)
-                if len(added) > MAX_CHECKED_FILES:
-                    raise ValidationError(
-                        _TOO_MANY_FILES.format(table=shown(table), limit=MAX_CHECKED_FILES)
-                    )
+                        if len(added) > MAX_CHECKED_FILES:
+                            raise ValidationError(
+                                _TOO_MANY_FILES.format(table=shown(table), limit=MAX_CHECKED_FILES)
+                            )
         except ValidationError:
             raise
         except Exception as exc:  # any reader failure refuses the commit with a fixed text
