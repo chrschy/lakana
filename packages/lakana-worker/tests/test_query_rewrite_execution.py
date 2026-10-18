@@ -975,7 +975,10 @@ def test_a_nanosecond_parquet_timestamp_takes_a_literal_only_inside_its_range(
 def test_a_mask_on_a_nanosecond_parquet_timestamp_is_read_as_written(tmp_path: Path) -> None:
     """`NULL` and the column itself are used as stored: no cast, the column keeps its type."""
     path = _timestamp_file(tmp_path, "ns")
-    for mask, expected in (("NULL", None), ("ts", datetime(2026, 1, 1))):
+    for mask, expected in (
+        ("NULL", ('"NULL"', None)),
+        ("ts", ("TIMESTAMP_NS", datetime(2026, 1, 1))),
+    ):
         source = TableSource(
             urls=[path],
             file_format="parquet",
@@ -983,6 +986,9 @@ def test_a_mask_on_a_nanosecond_parquet_timestamp_is_read_as_written(tmp_path: P
             column_masks={"ts": mask},
             mask_types={},
         )
-        rewritten = rewrite_query("SELECT ts FROM gold.t", {"gold.t": source})
-        assert "CAST" not in rewritten.sql
-        assert _fetch(rewritten) == [(expected,)]
+        rewritten = rewrite_query(
+            "SELECT typeof(ts), ts FROM gold.t WHERE ts > TIMESTAMP '2020-01-01' OR ts IS NULL",
+            {"gold.t": source},
+        )
+        assert "CAST" not in rewritten.sql.split(" FROM READ_PARQUET")[0]
+        assert _fetch(rewritten) == [expected]

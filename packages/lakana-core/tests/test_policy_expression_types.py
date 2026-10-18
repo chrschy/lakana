@@ -757,10 +757,28 @@ def test_a_nanosecond_timestamp_is_not_compared_with_a_column_of_another_precisi
             check_expression_types(expression, kind="filter", columns=columns)
 
 
-def test_a_mask_on_a_nanosecond_timestamp_is_not_type_checked() -> None:
-    """No cast target exists for it, so any subset-valid mask is accepted and reported unchecked."""
-    for mask in ("NULL", "c", "TIMESTAMP '1970-01-01 00:00:00'", "'x'"):
-        assert not check_expression_types(mask, kind="mask", columns=_NS, masked_column="c")
+def test_a_mask_on_a_nanosecond_timestamp_is_accepted_only_as_null_or_a_timestamp() -> None:
+    """No cast target exists, so the mask is reported unchecked; its kind must still be right."""
+    columns = [
+        *_NS,
+        ColumnSpec(name="u", type=_stored(pa.timestamp("us")), nullable=True),
+        ColumnSpec(name="m", type=_stored(pa.timestamp("ms")), nullable=True),
+        ColumnSpec(name="d", type=_stored(pa.date32()), nullable=True),
+    ]
+    for mask in ("NULL", "c", "u", "m", "TIMESTAMP '1970-01-01 00:00:00'"):
+        assert not check_expression_types(mask, kind="mask", columns=columns, masked_column="c")
+    for mask, found in (
+        ("'***'", "text"),
+        ("d", "date32[day]"),
+        ("0", "a number"),
+        ("c = c", "boolean"),
+    ):
+        with pytest.raises(ValidationError) as caught:
+            check_expression_types(mask, kind="mask", columns=columns, masked_column="c")
+        assert (
+            f"`c` is timestamp[ns], but the mask is {found}. Use a value of its own type:"
+            in str(caught.value)
+        )
 
 
 def test_a_nanosecond_timestamp_is_not_compared_with_a_number_or_text() -> None:
@@ -775,12 +793,12 @@ def test_a_nanosecond_timestamp_is_not_compared_with_a_number_or_text() -> None:
 
 
 def test_a_mask_on_a_nanosecond_timestamp_still_has_its_own_expression_checked() -> None:
-    """Only the mask's type against the column is skipped; a comparison inside it is not."""
+    """A comparison or function inside the mask is type-checked as for any other mask."""
     columns = [*_NS, ColumnSpec(name="code", type="string", nullable=True)]
     with pytest.raises(ValidationError) as caught:
         check_expression_types("code = 5", kind="mask", columns=columns, masked_column="c")
     assert "`code` is text; compare it with '5', not 5." in str(caught.value)
     with pytest.raises(ValidationError, match="substr needs text"):
         check_expression_types("substr(c, 1, 2)", kind="mask", columns=columns, masked_column="c")
-    for mask in ("NULL", "c", "code = 'x'"):
-        assert not check_expression_types(mask, kind="mask", columns=columns, masked_column="c")
+    with pytest.raises(ValidationError, match="but the mask is boolean"):
+        check_expression_types("code = 'x'", kind="mask", columns=columns, masked_column="c")

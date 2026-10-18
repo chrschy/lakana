@@ -966,6 +966,33 @@ class _Checker:
         spec = self._exact.get(column or "")
         return spec is not None and _column_type(spec.type).kind == "ns"
 
+    def check_nanosecond_mask(self, node: exp.Expression, column: str | None) -> None:
+        """Check a mask on a nanosecond timestamp, which has no cast target.
+
+        The expression's own types are checked, and its result must be `NULL` or a timestamp of
+        any precision, so the column keeps a timestamp kind. It is not cast.
+
+        Parameters
+        ----------
+        node
+            The mask expression.
+        column
+            The masked column's name, matched exactly.
+
+        Raises
+        ------
+        ValidationError
+            If a part of the expression is mistyped, or its result is not `NULL` or a timestamp.
+        """
+        found = self.type_of(node)
+        if found.family in ("null", "timestamp"):
+            return
+        spec = self._exact[column or ""]
+        raise self.refuse(
+            f"`{shown(spec.name)}` is {_column_type(spec.type).name}, but the mask is "
+            f"{found.name}. Use a value of its own type: {_MASK_VALUE['timestamp']}."
+        )
+
     def check_mask(self, node: exp.Expression, column: str | None) -> None:
         """Refuse a column mask that does not keep the masked column's type.
 
@@ -1098,8 +1125,8 @@ def check_expression_types(
     -------
     bool
         `True` when the expression was type-checked. `False` for a mask on a nanosecond
-        timestamp, which has no type to cast to: the expression's own types are checked, but
-        not its type against the column's, and the read uses it as written.
+        timestamp, which has no type to cast to: the expression's own types are checked and its
+        result must be `NULL` or a timestamp, and the read uses it as written.
 
     Raises
     ------
@@ -1113,7 +1140,7 @@ def check_expression_types(
     checker = _Checker(sql_expr, kind, columns)
     if kind == "mask":
         if checker.has_no_cast_target(masked_column):
-            checker.type_of(parsed)  # the expression itself is still checked
+            checker.check_nanosecond_mask(parsed, masked_column)
             return False
         checker.check_mask(parsed, masked_column)
     else:
