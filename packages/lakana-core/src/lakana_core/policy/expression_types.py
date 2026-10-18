@@ -1098,8 +1098,8 @@ def check_expression_types(
     -------
     bool
         `True` when the expression was type-checked. `False` for a mask on a nanosecond
-        timestamp, which has no type to cast to: it is accepted as the subset allows it and the
-        read uses it as written.
+        timestamp, which has no type to cast to: the expression's own types are checked, but
+        not its type against the column's, and the read uses it as written.
 
     Raises
     ------
@@ -1113,6 +1113,7 @@ def check_expression_types(
     checker = _Checker(sql_expr, kind, columns)
     if kind == "mask":
         if checker.has_no_cast_target(masked_column):
+            checker.type_of(parsed)  # the expression itself is still checked
             return False
         checker.check_mask(parsed, masked_column)
     else:

@@ -151,7 +151,10 @@ What stays accepted:
 - A number column against a number it holds exactly (`id = 5`, `amount > 1.5`, `score < 2.5`), and
   columns of one kind (`id = small_id`, `score = ratio` for two float columns).
 - Text against text, and `current_user()` against a text column.
-- A date or a timestamp against a typed literal, and a date against a timestamp (`born < seen`).
+- A date or a timestamp against a typed literal.
+- A date against a timestamp (`born < seen`). This one can still fail: the engine converts the date to
+  a timestamp, which is impossible for a date outside the timestamp range (a year such as 300000 in
+  a corrupt row). Avoid it where the data is not trusted; see issue #178.
   A typed literal is checked when you create the filter and must be written exactly
   `DATE 'YYYY-MM-DD'` or `TIMESTAMP 'YYYY-MM-DD HH:MM:SS'` (with an optional fraction). The engine
   also reads `DATETIME '...'` and `TIMESTAMP WITHOUT TIME ZONE '...'` as a timestamp.

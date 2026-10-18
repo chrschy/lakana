@@ -772,3 +772,15 @@ def test_a_nanosecond_timestamp_is_not_compared_with_a_number_or_text() -> None:
         with pytest.raises(ValidationError) as caught:
             check_expression_types(expression, kind="filter", columns=_NS)
         assert fragment in str(caught.value)
+
+
+def test_a_mask_on_a_nanosecond_timestamp_still_has_its_own_expression_checked() -> None:
+    """Only the mask's type against the column is skipped; a comparison inside it is not."""
+    columns = [*_NS, ColumnSpec(name="code", type="string", nullable=True)]
+    with pytest.raises(ValidationError) as caught:
+        check_expression_types("code = 5", kind="mask", columns=columns, masked_column="c")
+    assert "`code` is text; compare it with '5', not 5." in str(caught.value)
+    with pytest.raises(ValidationError, match="substr needs text"):
+        check_expression_types("substr(c, 1, 2)", kind="mask", columns=columns, masked_column="c")
+    for mask in ("NULL", "c", "code = 'x'"):
+        assert not check_expression_types(mask, kind="mask", columns=columns, masked_column="c")

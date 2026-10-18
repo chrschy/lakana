@@ -164,7 +164,7 @@ and `'***'` is accepted for the same column. Which value keeps the type of which
 | `boolean` | `FALSE`, `NULL`, a comparison such as `id = 1`, `has_group('staff')` |
 | `date` | `DATE '1970-01-01'`, `NULL`, a `date` column |
 | `timestamp` | `TIMESTAMP '1970-01-01 00:00:00'`, `NULL`, a `timestamp` column |
-| Parquet `timestamp[ns]` (nanoseconds) | any mask the SQL subset allows; it is not type-checked and not cast, because it has no type to cast to |
+| Parquet `timestamp[ns]` (nanoseconds) | any mask the SQL subset allows whose own comparisons and functions type-check; its type is not compared with the column's and it is not cast, because it has no type to cast to |
 | any other type (a struct, a list, `uuid`, `time`, `binary`, `timestamptz`) | `NULL`, or a column of the same type |
 
 A number that does not fit is refused, for example `99999999999` on an `int` column, `1.234` on a
