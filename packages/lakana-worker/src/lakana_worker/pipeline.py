@@ -166,6 +166,7 @@ from lakana_worker.activity import ACTIVITY
 from lakana_worker.executor import (
     INTERNAL_ADVICE,
     KILLED_FROM_OUTSIDE_MESSAGE,
+    MEMORY_LIMIT_ADVICE,
     DuckDBInternalError,
     OutOfMemoryQuery,
     QueryCancelled,
@@ -379,7 +380,8 @@ def _without_the_value(failure: LakanaError, restricted: frozenset[str]) -> Laka
         )
     kind = type(failure)
     if kind is OutOfMemoryQuery:
-        return OutOfMemoryQuery(policy_read_failure(only))
+        # The database's own out-of-memory error: fixed message plus the advice, no engine text.
+        return OutOfMemoryQuery(f"{policy_read_failure(only)} {MEMORY_LIMIT_ADVICE}")
     if kind is TransientQueryError and not str(failure).startswith(_OUTSIDE_PREFIX):
         return TransientQueryError(policy_read_failure(only))
     if kind is not ValidationError or not str(failure).startswith("Query failed: "):

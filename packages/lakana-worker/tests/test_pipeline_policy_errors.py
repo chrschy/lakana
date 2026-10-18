@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 from lakana_core.auth import AllowAllAuthorization, PrincipalRef
 from lakana_core.catalog.query_service import QueryService, WriteTarget
 from lakana_core.catalog.service import CatalogService
-from lakana_core.config import StorageConfig
+from lakana_core.config import QueryLimitsConfig, StorageConfig
 from lakana_core.errors import ValidationError
 from lakana_core.identifiers import NamespacePath, TableRef
 from lakana_core.models import (
@@ -39,6 +39,7 @@ from lakana_core.policy.column_masks import ColumnMaskService
 from lakana_core.policy.read_errors import policy_read_failure
 from lakana_core.policy.row_filters import RowFilterService
 from lakana_core.storage.resolver import StorageResolver
+from lakana_worker import executor as executor_module
 from lakana_worker import query_child
 from lakana_worker.executor import (
     _KINDS,
@@ -49,6 +50,8 @@ from lakana_worker.executor import (
     TransientQueryError,
 )
 from lakana_worker.pipeline import _without_the_value, failure_cause, run_one
+from lakana_worker.query_process import ChildFailed, StopReason
+from lakana_worker.query_protocol import MEMORY_LIMIT_ADVICE
 
 _SECRET = "HIDDEN-X"
 _BIG = 2_000_000_000
@@ -484,7 +487,6 @@ def _through_the_child(exc: BaseException) -> ValidationError:
         (duckdb.IOException("IO Error: HIDDEN-X"), TransientQueryError),
         (OSError("HTTP Error: HTTP GET error on 'HIDDEN-X' (HTTP 503)"), TransientQueryError),
         (OSError("connection reset by HIDDEN-X"), TransientQueryError),
-        (duckdb.OutOfMemoryException("Out of Memory Error: HIDDEN-X"), OutOfMemoryQuery),
     ],
 )
 def test_a_transient_or_memory_error_under_a_policy_keeps_its_class_and_shows_the_fixed_message(
@@ -581,3 +583,27 @@ def test_a_mask_stored_before_the_type_check_reads_as_it_always_did(
     session.commit()
 
     assert _typeof_id(session, principal, tmp_path) == "INTEGER"
+
+
+def test_a_database_out_of_memory_error_under_a_policy_keeps_the_advice_and_no_engine_text() -> (
+    None
+):
+    """The class stays; the text is the fixed message plus the advice, none of the engine's."""
+    raw = _through_the_child(duckdb.OutOfMemoryException("Out of Memory Error: HIDDEN-X"))
+    assert type(raw) is OutOfMemoryQuery
+
+    replaced = _without_the_value(raw, frozenset({"gold.people"}))
+
+    assert type(replaced) is OutOfMemoryQuery
+    assert str(replaced) == f"{policy_read_failure('gold.people')} {MEMORY_LIMIT_ADVICE}"
+    assert "HIDDEN-X" not in str(replaced)
+    assert failure_cause(replaced) == failure_cause(raw)
+
+
+def test_the_memory_watchdogs_own_text_stays_under_a_policy() -> None:
+    """The watchdog's stop is Lakana's wording, built with no engine output."""
+    failed = ChildFailed(stop=StopReason.OUT_OF_MEMORY, killed=True, detail="Query failed: over")
+    raw = executor_module._translate(failed, QueryLimitsConfig(), False)
+    assert isinstance(raw, OutOfMemoryQuery)
+
+    assert _without_the_value(raw, frozenset({"gold.people"})) is raw

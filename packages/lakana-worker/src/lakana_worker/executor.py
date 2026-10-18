@@ -212,6 +212,10 @@ class OutOfMemoryQuery(ValidationError):
     """DuckDB ran out of memory, or the memory watchdog stopped the query."""
 
 
+class MemoryStopQuery(OutOfMemoryQuery):
+    """The memory watchdog stopped the query: Lakana's own wording, with no engine output."""
+
+
 class DuckDBInternalError(ValidationError):
     """DuckDB or the query process failed on its own, not on the query."""
 
@@ -404,7 +408,7 @@ def _translate(failed: ChildFailed, limits: QueryLimitsConfig, writing: bool) ->
     if failed.stop is StopReason.WORKER_STALE:
         return WorkerStaleQuery(WORKER_STALE_MESSAGE)
     if failed.stop is StopReason.OUT_OF_MEMORY:
-        return OutOfMemoryQuery(
+        return MemoryStopQuery(
             failed.detail or "Query failed: the worker ran out of memory and stopped the query."
         )
     if failed.error is not None and failed.error.kind in _KINDS:
