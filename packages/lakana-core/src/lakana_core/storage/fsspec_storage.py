@@ -464,8 +464,9 @@ class FsspecStorage:
         except (FileNotFoundError, IsADirectoryError) as exc:
             raise NotFoundError(f"No object at {path!r}.") from exc
         except PermissionError as exc:
-            # macOS `unlink` refuses a directory with EPERM where Linux says EISDIR.
-            if not self._fs.isdir(full):
+            # macOS `unlink` refuses a directory with EPERM where Linux says EISDIR. On an object
+            # store `x` can be an object and a prefix at once, so a denial there stays a denial.
+            if not isinstance(self._fs, LocalFileSystem) or not self._fs.isdir(full):
                 raise
             raise NotFoundError(f"No object at {path!r}.") from exc
 

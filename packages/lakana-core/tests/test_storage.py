@@ -280,6 +280,20 @@ def test_deleting_a_directory_raises_not_found_where_unlink_says_eperm(
     assert storage.read("dir/a") == b"x"
 
 
+def test_a_denied_delete_on_an_object_store_stays_a_permission_error() -> None:
+    """On S3 `x` can be an object and the prefix of `x/y`: a denied delete is not "no object"."""
+    storage = FsspecStorage("memory://denied-lake", {})
+
+    def refuse(path: str) -> None:
+        raise PermissionError(errno.EACCES, "Access Denied", path)
+
+    storage._fs = MemoryFileSystem(skip_instance_cache=True)
+    storage._fs.rm_file = refuse  # ty: ignore[invalid-assignment]
+    storage._fs.isdir = lambda path: True  # ty: ignore[invalid-assignment]
+    with pytest.raises(PermissionError):
+        storage.delete("x")
+
+
 def test_a_permission_error_on_a_file_is_not_mistaken_for_a_directory(
     config: StorageConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
