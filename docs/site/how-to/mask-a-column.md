@@ -164,6 +164,7 @@ and `'***'` is accepted for the same column. Which value keeps the type of which
 | `boolean` | `FALSE`, `NULL`, a comparison such as `id = 1`, `has_group('staff')` |
 | `date` | `DATE '1970-01-01'`, `NULL`, a `date` column |
 | `timestamp` | `TIMESTAMP '1970-01-01 00:00:00'`, `NULL`, a `timestamp` column |
+| Parquet `timestamp[ns]` (nanoseconds) | any mask the SQL subset allows; it is not type-checked and not cast, because it has no type to cast to |
 | any other type (a struct, a list, `uuid`, `time`, `binary`, `timestamptz`) | `NULL`, or a column of the same type |
 
 A number that does not fit is refused, for example `99999999999` on an `int` column, `1.234` on a
@@ -199,7 +200,8 @@ create the mask again and revoke the old one. A column of a type with no cast (a
 map) can be masked with `NULL` or the column itself only.
 
 **Which tables get the type check and the cast:** Iceberg tables and external tables of Parquet
-files. A mask on an external table of CSV or JSON files is checked against the allowed SQL subset
+files. A Parquet timestamp in seconds, milliseconds or microseconds is a `timestamp`; one in
+nanoseconds is stored as not type-checked, as the table above says. A mask on an external table of CSV or JSON files is checked against the allowed SQL subset
 only and is never cast: Lakana only guesses the types of such a table from one sample file, while the
 query engine reads its own, so the mask behaves as masks did before the type check (it is stored as
 not type-checked). The reader then gets the type the engine infers, which may differ from the

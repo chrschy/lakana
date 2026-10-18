@@ -1144,3 +1144,12 @@ def test_a_mask_of_another_type_on_a_parquet_table_is_refused(session: Session) 
     catalog = FakeColumnCatalog(types={"id": "int64"}, file_format="parquet")
     with pytest.raises(ValidationError, match="`id` is int64, but the mask is text"):
         _create_mask(session, "id", "'***'", catalog)
+
+
+def test_a_mask_on_a_nanosecond_parquet_timestamp_is_stored_as_not_type_checked(
+    session: Session,
+) -> None:
+    """DuckDB reads it as TIMESTAMP_NS, which has no cast target: the mask is used as written."""
+    catalog = FakeColumnCatalog(names=["c"], types={"c": "timestamp[ns]"}, file_format="parquet")
+    created = _create_mask(session, "c", "TIMESTAMP '1970-01-01 00:00:00'", catalog)
+    assert created.type_checked is False

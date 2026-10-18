@@ -896,3 +896,77 @@ def test_a_type_checked_mask_that_reads_a_widened_column_shows_null_for_a_value_
     rewritten = rewrite_query("SELECT typeof(a), a FROM gold.w ORDER BY b", {"gold.w": source})
 
     assert _fetch(rewritten) == [("INTEGER", 7), ("INTEGER", None)]
+
+
+def _timestamp_file(tmp_path: Path, unit: str) -> str:
+    """Write a Parquet file with one `ts` column at a precision, as pyarrow writes it.
+
+    Parameters
+    ----------
+    tmp_path
+        Where the file goes.
+    unit
+        The Arrow unit: `s`, `ms`, `us` or `ns`.
+
+    Returns
+    -------
+    str
+        The file's path.
+    """
+    path = tmp_path / f"ts_{unit}.parquet"
+    pq.write_table(pa.table({"ts": pa.array([datetime(2026, 1, 1)], pa.timestamp(unit))}), path)
+    return str(path)
+
+
+@pytest.mark.parametrize("unit", ["s", "ms", "us"])
+def test_a_parquet_timestamp_up_to_micro_takes_a_filter_and_a_typed_mask(
+    tmp_path: Path, unit: str
+) -> None:
+    """DuckDB reads these as TIMESTAMP: the filter runs and the constant mask keeps the type."""
+    stored = str(pq.read_schema(_timestamp_file(tmp_path, unit)).field("ts").type)
+    target = arrow_cast_type(stored)
+    assert target is not None
+    for literal in ("2025-01-01 00:00:00", "3000-01-01 00:00:00", "0100-01-01 00:00:00"):
+        source = TableSource(
+            urls=[_timestamp_file(tmp_path, unit)],
+            file_format="parquet",
+            columns={"ts": stored},
+            row_filters=(f"ts > TIMESTAMP '{literal}'",),
+        )
+        rows = _fetch(rewrite_query("SELECT typeof(ts) FROM gold.t", {"gold.t": source}))
+        assert rows in ([("TIMESTAMP",)], [])
+    masked = TableSource(
+        urls=[_timestamp_file(tmp_path, unit)],
+        file_format="parquet",
+        columns={"ts": stored},
+        column_masks={"ts": "TIMESTAMP '1970-01-01 00:00:00'"},
+        mask_types={"ts": target},
+        typed_masks=frozenset({"ts"}),
+    )
+    row = _fetch(rewrite_query("SELECT typeof(ts), ts FROM gold.t", {"gold.t": masked}))[0]
+    assert row == ("TIMESTAMP", datetime(1970, 1, 1))
+
+
+def test_a_nanosecond_parquet_timestamp_takes_a_literal_only_inside_its_range(
+    tmp_path: Path,
+) -> None:
+    """The edges of the range the check allows: the last inside works, the first outside fails."""
+    path = _timestamp_file(tmp_path, "ns")
+    stored = str(pq.read_schema(path).field("ts").type)
+    assert stored == "timestamp[ns]"
+
+    def run(literal: str) -> list[tuple[object, ...]]:
+        source = TableSource(
+            urls=[path],
+            file_format="parquet",
+            columns={"ts": stored},
+            row_filters=(f"ts < {literal}",),
+        )
+        return _fetch(rewrite_query("SELECT typeof(ts) FROM gold.t", {"gold.t": source}))
+
+    assert run("TIMESTAMP '2262-04-11 23:47:16.854775'") == [("TIMESTAMP_NS",)]
+    assert run("TIMESTAMP '1677-09-21 00:12:43.145225'") == []
+    assert run("DATE '2262-04-11'") == [("TIMESTAMP_NS",)]
+    for outside in ("TIMESTAMP '2262-04-11 23:47:16.854776'", "TIMESTAMP '3000-01-01'"):
+        with pytest.raises(duckdb.ConversionException):
+            run(outside)

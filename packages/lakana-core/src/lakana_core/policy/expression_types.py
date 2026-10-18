@@ -43,6 +43,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Literal
 
@@ -103,6 +104,14 @@ _FLOAT_MAX_SHOWN = {"float": "3.4028235e+38", "double": "1.7976931348623157e+308
 _INT_DIGITS = {8: 3, 16: 5, 32: 10, 64: 19}
 """The most digits a value of each integer width has."""
 
+_NS_LOW = datetime(1677, 9, 21, 0, 12, 43, 145225)
+_NS_HIGH = datetime(2262, 4, 11, 23, 47, 16, 854775)
+_NS_RANGE = "from {} to {}".format(
+    _NS_LOW.isoformat(sep=" ", timespec="microseconds"),
+    _NS_HIGH.isoformat(sep=" ", timespec="microseconds"),
+)
+"""The moments (to the microsecond, rounded inwards) that a nanosecond timestamp can hold."""
+
 _POSITION_BITS = 32
 """`substr` takes positions of this width."""
 
@@ -130,6 +139,8 @@ class _Type:
         A number literal's value.
     plain
         Whether a number literal is written without an exponent.
+    moment
+        A typed date or timestamp literal's value.
     """
 
     family: str
@@ -140,6 +151,7 @@ class _Type:
     scale: int | None = None
     value: Decimal | None = None
     plain: bool = True
+    moment: datetime | None = None
 
 
 _NULL = _Type("null", "NULL")
@@ -159,6 +171,7 @@ _ARROW_FAMILIES: dict[exp.DType, tuple[str, str, int | None]] = {
     exp.DType.VARBINARY: ("binary", "", None),
     exp.DType.DATE: ("date", "", None),
     exp.DType.TIMESTAMP: ("timestamp", "", None),
+    exp.DType.TIMESTAMP_NS: ("timestamp", "ns", None),
     exp.DType.TIMESTAMPTZ: ("timestamptz", "", None),
 }
 """The family, number kind and integer width of each DuckDB type a stored Arrow name maps to."""
@@ -583,8 +596,8 @@ class _Checker:
             raise self.refuse(
                 f"the type of {self.describe(node)} is {shown(found.name)}, which a policy "
                 "cannot compare. Use only columns of a simple type (text, number, boolean, "
-                "date or timestamp). Unsigned integers, timestamps in seconds, milliseconds or "
-                "nanoseconds, and nested types are not supported yet. Filter on another column, "
+                "date or timestamp). Unsigned integers and nested types are not supported yet. "
+                "Filter on another column, "
                 "or on a table written by Lakana (an Iceberg table, for example one made with "
                 "`lakana sql ... --into`)."
             )
@@ -732,6 +745,9 @@ class _Checker:
             ):
                 return
             self._refuse_timestamptz(left, left_type, right, right_type)
+        if "ns" in (left_type.kind, right_type.kind):
+            self._check_nanoseconds(left, left_type, right, right_type)
+            return
         if _group(left_type.family) != _group(right_type.family):
             subject, subject_type, other, other_type = left, left_type, right, right_type
             if isinstance(_unwrap(right), exp.Column) and not isinstance(_unwrap(left), exp.Column):
@@ -739,6 +755,57 @@ class _Checker:
             raise self.refuse(self._mismatch(subject, subject_type, other, other_type))
         if left_type.family in _NUMBERS:
             self._check_numbers(left, left_type, right, right_type)
+
+    def _check_nanoseconds(
+        self, left: exp.Expression, left_type: _Type, right: exp.Expression, right_type: _Type
+    ) -> None:
+        """Refuse a comparison of a nanosecond timestamp that can fail in DuckDB's cast.
+
+        DuckDB casts the other side to TIMESTAMP_NS, which fails outside 1677-09-21 to
+        2262-04-11. A typed literal is checked against that range; another nanosecond column
+        needs no cast; any other column (a date, a microsecond timestamp) could overflow on a
+        stored value.
+
+        Parameters
+        ----------
+        left
+            The left side.
+        left_type
+            Its type.
+        right
+            The right side.
+        right_type
+            Its type.
+
+        Raises
+        ------
+        ValidationError
+            If the other side is of another kind than a timestamp or date, is not a nanosecond
+            column, or is a literal outside the nanosecond range.
+        """
+        subject, other, other_type = (
+            (left, right, right_type) if left_type.kind == "ns" else (right, left, left_type)
+        )
+        if _group(left_type.family) != _group(right_type.family):
+            raise self.refuse(
+                self._mismatch(subject, _Type("timestamp", "timestamp[ns]"), other, other_type)
+            )
+        if other_type.kind == "ns":
+            return
+        moment = other_type.moment
+        if moment is not None and _NS_LOW <= moment <= _NS_HIGH:
+            return
+        text = shown(_unwrap(other).sql(dialect="duckdb"))
+        if moment is None:
+            raise self.refuse(
+                f"{self.describe(subject)} is timestamp[ns]; it can only be compared with another "
+                f"timestamp[ns] column or with a date or timestamp written as a literal, "
+                f"not {text}."
+            )
+        raise self.refuse(
+            f"{self.describe(subject)} is timestamp[ns]; compare it with a date or timestamp "
+            f"{_NS_RANGE}, not {text}."
+        )
 
     def _refuse_timestamptz(
         self, left: exp.Expression, left_type: _Type, right: exp.Expression, right_type: _Type
@@ -883,6 +950,22 @@ class _Checker:
         example = _EXAMPLE_VALUE.get(family, "a value of its own type")
         return f"{head}; compare it with {example}, not {shown_other}."
 
+    def has_no_cast_target(self, column: str | None) -> bool:
+        """Say whether a mask on this column cannot be cast to the column's type.
+
+        Parameters
+        ----------
+        column
+            The masked column's name, matched exactly.
+
+        Returns
+        -------
+        bool
+            `True` for a nanosecond timestamp: DuckDB's TIMESTAMP_NS has no target here.
+        """
+        spec = self._exact.get(column or "")
+        return spec is not None and _column_type(spec.type).kind == "ns"
+
     def check_mask(self, node: exp.Expression, column: str | None) -> None:
         """Refuse a column mask that does not keep the masked column's type.
 
@@ -984,9 +1067,10 @@ def _typed_literal_type(node: exp.Cast) -> _Type:
     _Type
         `date` or `timestamp`.
     """
+    moment = datetime.fromisoformat(node.this.name)  # validated to be a date or a moment
     if node.to.this is exp.DType.DATE:
-        return _Type("date", "date")
-    return _Type("timestamp", "timestamp")
+        return _Type("date", "date", moment=moment)
+    return _Type("timestamp", "timestamp", moment=moment)
 
 
 def check_expression_types(
@@ -995,7 +1079,7 @@ def check_expression_types(
     kind: Literal["filter", "mask"],
     columns: Sequence[ColumnSpec],
     masked_column: str | None = None,
-) -> None:
+) -> bool:
     """Refuse a row filter or column mask expression that needs a conversion that can fail.
 
     Parameters
@@ -1010,6 +1094,13 @@ def check_expression_types(
         For a mask, the column it replaces (matched exactly); its type is the type the mask must
         have.
 
+    Returns
+    -------
+    bool
+        `True` when the expression was type-checked. `False` for a mask on a nanosecond
+        timestamp, which has no type to cast to: it is accepted as the subset allows it and the
+        read uses it as written.
+
     Raises
     ------
     ValidationError
@@ -1021,6 +1112,9 @@ def check_expression_types(
     parsed = validate_restricted_expression(sql_expr, kind=kind)
     checker = _Checker(sql_expr, kind, columns)
     if kind == "mask":
+        if checker.has_no_cast_target(masked_column):
+            return False
         checker.check_mask(parsed, masked_column)
     else:
         checker.require_condition(parsed)
+    return True

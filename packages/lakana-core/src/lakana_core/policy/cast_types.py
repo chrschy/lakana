@@ -63,11 +63,19 @@ _ARROW: dict[str, exp.DType] = {
     "binary": exp.DType.VARBINARY,
     "large_binary": exp.DType.VARBINARY,
     "date32[day]": exp.DType.DATE,
+    "timestamp[s]": exp.DType.TIMESTAMP,
+    "timestamp[ms]": exp.DType.TIMESTAMP,
     "timestamp[us]": exp.DType.TIMESTAMP,
+    "timestamp[ns]": exp.DType.TIMESTAMP_NS,
 }
-"""The exact names pyarrow prints for the supported Arrow types."""
+"""The exact names pyarrow prints for the supported Arrow types.
+
+DuckDB reads a Parquet `timestamp[s]`, `[ms]` and `[us]` as TIMESTAMP and `[ns]` as TIMESTAMP_NS,
+which has no cast target here (`arrow_cast_type` gives `None`), only a type for the check."""
 
 _MAX_PRECISION = 38
+_ZONED_UNITS = ("s", "ms", "us", "ns")
+"""DuckDB reads a Parquet timestamp with a zone as TIMESTAMPTZ at every unit."""
 _TZ_CHARACTERS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/_+-:")
 
 
@@ -133,12 +141,13 @@ def arrow_type(stored: str) -> tuple[exp.DType, tuple[int, ...]] | None:
     kind = _ARROW.get(stored)
     if kind is not None:
         return kind, ()
-    prefix = "timestamp[us, tz="
-    if stored.startswith(prefix) and stored.endswith("]"):
-        zone = stored[len(prefix) : -1]
-        if zone and all(character in _TZ_CHARACTERS for character in zone):
-            return exp.DType.TIMESTAMPTZ, ()
-        return None
+    for unit in _ZONED_UNITS:
+        prefix = f"timestamp[{unit}, tz="
+        if stored.startswith(prefix) and stored.endswith("]"):
+            zone = stored[len(prefix) : -1]
+            if zone and all(character in _TZ_CHARACTERS for character in zone):
+                return exp.DType.TIMESTAMPTZ, ()
+            return None
     head = "decimal128("
     if stored.startswith(head) and stored.endswith(")"):
         first, comma, second = stored[len(head) : -1].partition(", ")
@@ -161,12 +170,15 @@ def arrow_cast_type(stored: str) -> exp.DataType | None:
     Returns
     -------
     sqlglot.expressions.DataType or None
-        The type, or `None` unless `stored` is exactly one of the supported names.
+        The type, or `None` unless `stored` is exactly one of the supported names, and for
+        `timestamp[ns]`, which DuckDB reads as TIMESTAMP_NS and no mask is cast to.
     """
     found = arrow_type(stored)
     if found is None:
         return None
     kind, params = found
+    if kind is exp.DType.TIMESTAMP_NS:
+        return None
     if kind is exp.DType.DECIMAL:
         return _decimal(*params)
     return exp.DataType(this=kind)

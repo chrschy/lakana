@@ -62,7 +62,7 @@ def _check_column_exists(
         The id of the table's current schema as read for this check, so that the mask records
         the schema whose columns and types were checked (`None` for a table without field ids),
         and whether the types were checked: `False` for a CSV or JSON table, whose stored types
-        are only a guess.
+        are only a guess, and for a nanosecond timestamp column, which has no cast target.
 
     Raises
     ------
@@ -81,10 +81,10 @@ def _check_column_exists(
     if column in names:
         if not type_checks_apply(description):
             return description.schema_id, False
-        check_expression_types(
+        typed = check_expression_types(
             expression, kind="mask", columns=description.columns, masked_column=column
         )
-        return description.schema_id, True
+        return description.schema_id, typed
     message = f"Table {dotted!r} in environment {environment!r} has no column {column!r}. "
     message += list_columns(names)
     if names:

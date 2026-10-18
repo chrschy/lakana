@@ -143,7 +143,7 @@ the column's own type (a `0` on a `long` column is a `BIGINT`), and a mask is ac
 every value fits; a value that stops fitting later (the column the mask reads was widened) reads
 as `NULL`. The check and the cast apply to Iceberg tables and to external tables of Parquet files (checked
 against the types stored for the table: `int64`, `date32[day]`, `decimal128(10, 2)`,
-`large_string`, ...). Filters and masks on external tables of CSV or JSON files are checked against the
+`large_string`, ...). A Parquet timestamp in seconds, milliseconds or microseconds is a `timestamp`; a nanosecond one compares only with a literal inside 1677-09-21 to 2262-04-11 and its masks are not type-checked. Filters and masks on external tables of CSV or JSON files are checked against the
 SQL subset only, as before, and their masks are stored as not type-checked, because the types stored
 for such a table are only a guess from one sample file. See [Show some people
 only some rows](../how-to/filter-rows.md#an-expression-must-not-fail-on-any-stored-value) and

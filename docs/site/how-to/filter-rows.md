@@ -98,9 +98,16 @@ stored schema: Lakana only guesses the types from one sample file, and the query
 own, so a check against the guess would be wrong. A filter on such a table is checked against the
 allowed SQL subset only, as before, and nothing guarantees that its comparisons cannot fail; write
 `'007'` for a column of text that looks like a number, and check the values. The same holds for the
-columns of a Parquet table whose type is not supported yet (unsigned integers, timestamps in
-seconds, milliseconds or nanoseconds, nested types): filter on another column, or on an Iceberg
-table made with `lakana sql ... --into`.
+columns of a Parquet table whose type is not supported yet (unsigned integers, nested types):
+filter on another column, or on an Iceberg table made with `lakana sql ... --into`.
+
+A Parquet timestamp is read as a `timestamp` whatever its stored precision (seconds,
+milliseconds or microseconds), so `ts > TIMESTAMP '2026-01-01 00:00:00'` works on it. A
+**nanosecond** timestamp (pandas and pyarrow write these by default) can only be compared with a
+date or timestamp from `1677-09-21 00:12:43.145225` to `2262-04-11 23:47:16.854775`, the range
+the nanosecond type holds; a literal outside it is refused with that range. It cannot be compared
+with a date column or a microsecond timestamp column. A timestamp with a time zone (any
+precision) compares only with another such column.
 
 This is refused (the exit code is 8):
 

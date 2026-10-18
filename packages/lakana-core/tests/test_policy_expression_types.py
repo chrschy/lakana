@@ -528,7 +528,7 @@ def test_a_constant_mask_of_the_columns_own_type_is_accepted_on_an_external_tabl
 
 @pytest.mark.parametrize(
     "arrow_type",
-    [pa.timestamp("s"), pa.timestamp("ms"), pa.timestamp("ns"), pa.uint8(), pa.uint64()],
+    [pa.uint8(), pa.uint64()],
 )
 def test_an_arrow_type_the_check_has_no_rule_for_names_the_cause(arrow_type: pa.DataType) -> None:
     """Fail closed, and say which stored types are not supported yet."""
@@ -669,3 +669,106 @@ def test_a_text_literal_for_a_number_column_is_suggested_without_leading_zeros()
     """`n = '007'` is told to compare with 7."""
     message = _refusal("id = '007'")
     assert "compare it with 7, not '007'." in message
+
+
+_UNITS = ["s", "ms", "us"]
+
+
+@pytest.mark.parametrize("unit", _UNITS)
+@pytest.mark.parametrize(
+    "expression",
+    ["c > TIMESTAMP '2026-01-01 00:00:00'", "c > DATE '2026-01-01'", "c < TIMESTAMP '3000-01-01'"],
+)
+def test_a_parquet_timestamp_of_any_precision_up_to_micro_takes_a_timestamp_literal(
+    unit: str, expression: str
+) -> None:
+    """DuckDB reads `timestamp[s]`, `[ms]` and `[us]` as TIMESTAMP: the comparison cannot fail."""
+    columns = [ColumnSpec(name="c", type=_stored(pa.timestamp(unit)), nullable=True)]
+    check_expression_types(expression, kind="filter", columns=columns)
+    mask = "TIMESTAMP '1970-01-01 00:00:00'"
+    assert check_expression_types(mask, kind="mask", columns=columns, masked_column="c")
+
+
+@pytest.mark.parametrize("unit", ["s", "ms", "us", "ns"])
+def test_a_timestamp_with_a_zone_compares_only_with_a_zoned_column(unit: str) -> None:
+    """The timestamptz rules hold at every precision: no date or timestamp literal."""
+    columns = [ColumnSpec(name="c", type=_stored(pa.timestamp(unit, tz="UTC")), nullable=True)]
+    check_expression_types("c = c", kind="filter", columns=columns)
+    with pytest.raises(ValidationError, match="the read does not fix a time zone"):
+        check_expression_types(
+            "c > TIMESTAMP '2026-01-01 00:00:00'", kind="filter", columns=columns
+        )
+
+
+_NS = [ColumnSpec(name="c", type=_stored(pa.timestamp("ns")), nullable=True)]
+_NS_RANGE = "from 1677-09-21 00:12:43.145225 to 2262-04-11 23:47:16.854775"
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "c > TIMESTAMP '2026-01-01 00:00:00'",
+        "c > DATE '2026-01-01'",
+        "c < TIMESTAMP '2262-04-11 23:47:16.854775'",
+        "c < DATE '2262-04-11'",
+        "c > TIMESTAMP '1677-09-21 00:12:43.145225'",
+        "c > DATE '1677-09-22'",
+        "c = c",
+    ],
+)
+def test_a_nanosecond_timestamp_takes_a_literal_inside_the_nanosecond_range(
+    expression: str,
+) -> None:
+    """The literal is cast to TIMESTAMP_NS, which only fails outside the range."""
+    check_expression_types(expression, kind="filter", columns=_NS)
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "c < TIMESTAMP '2262-04-11 23:47:16.854776'",
+        "c < DATE '2262-04-12'",
+        "c > TIMESTAMP '3000-01-01 00:00:00'",
+        "c > DATE '1677-09-21'",
+        "c > TIMESTAMP '1500-01-01'",
+        "TIMESTAMP '3000-01-01' > c",
+    ],
+)
+def test_a_nanosecond_timestamp_refuses_a_literal_outside_the_nanosecond_range(
+    expression: str,
+) -> None:
+    """The refusal names the range."""
+    with pytest.raises(ValidationError) as caught:
+        check_expression_types(expression, kind="filter", columns=_NS)
+    assert f"`c` is timestamp[ns]; compare it with a date or timestamp {_NS_RANGE}" in str(
+        caught.value
+    )
+
+
+def test_a_nanosecond_timestamp_is_not_compared_with_a_column_of_another_precision() -> None:
+    """Casting a microsecond or date column to nanoseconds can overflow on a stored value."""
+    columns = [
+        *_NS,
+        ColumnSpec(name="u", type=_stored(pa.timestamp("us")), nullable=True),
+        ColumnSpec(name="d", type=_stored(pa.date32()), nullable=True),
+    ]
+    for expression in ("c > u", "d < c"):
+        with pytest.raises(ValidationError, match="timestamp\\[ns\\] column"):
+            check_expression_types(expression, kind="filter", columns=columns)
+
+
+def test_a_mask_on_a_nanosecond_timestamp_is_not_type_checked() -> None:
+    """No cast target exists for it, so any subset-valid mask is accepted and reported unchecked."""
+    for mask in ("NULL", "c", "TIMESTAMP '1970-01-01 00:00:00'", "'x'"):
+        assert not check_expression_types(mask, kind="mask", columns=_NS, masked_column="c")
+
+
+def test_a_nanosecond_timestamp_is_not_compared_with_a_number_or_text() -> None:
+    """Another kind is refused with the stored type named."""
+    for expression, fragment in (
+        ("c = 5", "`c` is timestamp[ns]; compare it with a timestamp such as TIMESTAMP"),
+        ("c = 'x'", "`c` is timestamp[ns]; compare it with TIMESTAMP '2026-01-01 00:00:00'"),
+    ):
+        with pytest.raises(ValidationError) as caught:
+            check_expression_types(expression, kind="filter", columns=_NS)
+        assert fragment in str(caught.value)

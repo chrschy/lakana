@@ -79,6 +79,11 @@ def test_a_nested_iceberg_type_has_no_cast() -> None:
         ("large_binary", "BLOB"),
         ("date32[day]", "DATE"),
         ("timestamp[us]", "TIMESTAMP"),
+        ("timestamp[s]", "TIMESTAMP"),
+        ("timestamp[ms]", "TIMESTAMP"),
+        ("timestamp[ms, tz=UTC]", "TIMESTAMPTZ"),
+        ("timestamp[s, tz=UTC]", "TIMESTAMPTZ"),
+        ("timestamp[ns, tz=UTC]", "TIMESTAMPTZ"),
         ("timestamp[us, tz=UTC]", "TIMESTAMPTZ"),
         ("timestamp[us, tz=Europe/Berlin]", "TIMESTAMPTZ"),
         ("decimal128(10, 2)", "DECIMAL(10, 2)"),
@@ -100,8 +105,7 @@ def test_a_stored_arrow_type_name_maps_through_a_closed_list(stored: str, render
         "list<item: int64>",
         "map<string, int64>",
         "timestamp[ns]",
-        "timestamp[s]",
-        "timestamp[ms]",
+        "timestamp[us, tz=",
         "date64[ms]",
         "uint8",
         "null",
@@ -132,4 +136,12 @@ def test_the_checker_and_the_cast_share_one_list_of_arrow_names() -> None:
     assert arrow_type("decimal128(10, 2)") == (exp.DType.DECIMAL, (10, 2))
     assert arrow_type("int64") == (exp.DType.BIGINT, ())
     assert arrow_type("timestamp[us, tz=UTC]") == (exp.DType.TIMESTAMPTZ, ())
-    assert arrow_type("timestamp[s]") is None
+    assert arrow_type("uint8") is None
+
+
+def test_a_nanosecond_timestamp_is_typed_for_the_check_but_has_no_cast() -> None:
+    """DuckDB reads it as TIMESTAMP_NS: the check knows it, a mask is never cast to it."""
+    from lakana_core.policy.cast_types import arrow_type
+
+    assert arrow_type("timestamp[ns]") == (exp.DType.TIMESTAMP_NS, ())
+    assert arrow_cast_type("timestamp[ns]") is None
