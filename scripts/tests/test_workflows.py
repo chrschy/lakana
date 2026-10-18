@@ -1181,7 +1181,8 @@ def test_every_published_artefact_gets_a_build_provenance_attestation() -> None:
         if name not in attesting:
             perms = _effective_permissions(workflow, job)
             assert perms.get("attestations") != "write", name
-            if name not in {"publish-core", "publish-runtime", "publish-sdk"}:
+            # the three PyPI publishes and the Pages deployment (its own test) use OIDC
+            if name not in {"publish-core", "publish-runtime", "publish-sdk", "pages-deploy"}:
                 assert perms.get("id-token") != "write", name
 
 
@@ -1318,3 +1319,80 @@ def test_the_canary_shows_the_versions_it_resolved_even_when_it_fails() -> None:
     assert "pip freeze" in script
     summary = [s for s in job["steps"] if '>> "$GITHUB_STEP_SUMMARY"' in s.get("run", "")]
     assert summary and all(s.get("if") == "${{ always() }}" for s in summary)
+
+
+def _all_commands(job: dict) -> list[str]:
+    """Collect every command of every step of a job.
+
+    Parameters
+    ----------
+    job
+        A workflow job.
+
+    Returns
+    -------
+    list of str
+        The commands, in order.
+    """
+    return [command for step in job["steps"] for command in _commands(step)]
+
+
+def test_each_release_publishes_the_documentation_site_on_github_pages() -> None:
+    """The site at https://lakana-labs.github.io/lakana/ is built from the release tag.
+
+    One job builds with the same commands as CI's `docs` job, from the tag release-please
+    created, and only for a release; no manual trigger can deploy something else.
+    """
+    workflow = yaml.safe_load((WORKFLOWS / "release.yml").read_text())
+    assert set(workflow[True]) == {"push"}  # no manual trigger: only a release deploys
+    job = workflow["jobs"]["pages"]
+    assert job["needs"] == "release-please"
+    assert job["if"] == workflow["jobs"]["sbom"]["if"]
+    assert job["runs-on"] == "ubuntu-latest"
+    checkout = next(s for s in job["steps"] if s.get("uses", "").startswith("actions/checkout@"))
+    assert checkout["with"]["ref"] == "${{ needs.release-please.outputs.tag }}"
+    assert checkout["with"]["persist-credentials"] is False
+    commands = _all_commands(job)
+    assert "uv sync --locked --all-packages --group docs" in commands
+    assert "uv run python scripts/docs_blocks.py" in commands
+    assert "uv run --group docs zensical build --strict" in commands
+    assert "uv run python scripts/check_built_site.py site-build" in commands
+    assert commands.index("uv run --group docs zensical build --strict") < commands.index(
+        "uv run python scripts/check_built_site.py site-build"
+    )
+    upload = next(
+        s for s in job["steps"] if s.get("uses", "").startswith("actions/upload-pages-artifact@")
+    )
+    assert upload["with"]["path"] == "site-build"
+
+
+def test_the_site_is_deployed_by_a_job_that_runs_nothing_else() -> None:
+    """The deploy job holds `pages: write` and `id-token: write` and builds nothing.
+
+    The build job, which runs the project's code, is read-only; every other job of the
+    workflow lacks the two scopes the deployment needs.
+    """
+    workflow = yaml.safe_load((WORKFLOWS / "release.yml").read_text())
+    jobs = workflow["jobs"]
+    assert workflow["permissions"] == {}
+    assert jobs["pages"]["permissions"] == {"contents": "read"}
+    deploy = jobs["pages-deploy"]
+    assert deploy["needs"] == "pages"
+    assert deploy["permissions"] == {"pages": "write", "id-token": "write"}
+    assert deploy["runs-on"] == "ubuntu-latest"
+    assert deploy["environment"] == {
+        "name": "github-pages",
+        "url": "${{ steps.deployment.outputs.page_url }}",
+    }
+    (step,) = deploy["steps"]
+    assert step["uses"].startswith("actions/deploy-pages@")
+    assert step["id"] == "deployment"
+    for name, other in jobs.items():
+        if name != "pages-deploy":
+            assert "pages" not in _effective_permissions(workflow, other), name
+
+
+def test_the_site_is_built_for_the_address_it_is_served_from() -> None:
+    """GitHub Pages serves the project under `/lakana/`, so the build needs that `site_url`."""
+    config = (ROOT / "mkdocs.yml").read_text()
+    assert re.search(r"^site_url: https://lakana-labs\.github\.io/lakana/$", config, re.MULTILINE)

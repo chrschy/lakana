@@ -340,3 +340,45 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.release-please.outputs.tag }}
+
+  # Publishes the documentation site at https://lakana-labs.github.io/lakana/ from the release
+  # tag, so the site always describes the released version; a change on `main` appears with
+  # the next release. It runs the project's code, so it only reads the repository; the
+  # deployment is its own job below.
+  pages:
+    needs: release-please
+    if: needs.release-please.outputs.released == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+          ref: ${{ needs.release-please.outputs.tag }}
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+      - run: uv sync --locked --all-packages --group docs
+      - run: uv run python scripts/docs_blocks.py
+      - name: Build the site
+        run: uv run --group docs zensical build --strict
+      - name: Built site (no external resources, no missing files, no URL outside /lakana/)
+        run: uv run python scripts/check_built_site.py site-build
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9  # v5.0.0
+        with:
+          path: site-build
+
+  # The only job with the scopes a deployment needs; it runs nothing but the deploy action.
+  pages-deploy:
+    needs: pages
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write          # the deploy action proves the artifact comes from this workflow
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346  # v5.0.1
