@@ -29,6 +29,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import socket
 import struct
 import threading
@@ -46,6 +47,7 @@ from lakana_worker.launcher.requests import (
     LABEL_DEADLINE,
     LABEL_KIND,
     LABEL_OWNER,
+    LABEL_SHARED,
     LABEL_STACK,
     BuildRequest,
     CleanupRequest,
@@ -311,6 +313,7 @@ class Launcher:
         self._subnets: dict[str, str] = {}
         self._used_subnets: set[str] = set()
         self._reserved_mb = 0
+        self._cache_key = b""
         self._reaper_stop = threading.Event()
 
     # --- start-up -----------------------------------------------------------------------
@@ -378,6 +381,7 @@ class Launcher:
             "on" if works else "off: this Docker refuses it",
         )
         (self.settings.state_dir / "environments").mkdir(mode=0o700, parents=True, exist_ok=True)
+        self._cache_key = self._load_cache_key()
         self._check_ingestion_roots()
 
     def _check_isolated_network(self, version: str) -> None:
@@ -507,6 +511,38 @@ class Launcher:
         )
         return False
 
+    def _load_cache_key(self) -> bytes:
+        """Read the key that keeps credentials apart in cache names, making it on first use.
+
+        The key never leaves the launcher: only HMACs made with it reach a Docker volume name.
+
+        Returns
+        -------
+        bytes
+            32 random bytes, from `cache.key` in the launcher's state directory (mode 0600).
+
+        Raises
+        ------
+        StartError
+            If the file exists and does not hold 32 bytes.
+        """
+        path = self.settings.state_dir / "cache.key"
+        try:
+            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        except FileExistsError:
+            key = path.read_bytes()
+            if len(key) != 32:
+                raise StartError(
+                    f"{path} does not hold the 32 bytes of the cache key; remove it and restart "
+                    "(the shared caches then start empty)."
+                ) from None
+            return key
+        key = secrets.token_bytes(32)
+        with os.fdopen(descriptor, "wb") as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            handle.write(key)
+        return key
+
     def _check_socket_group(self) -> None:
         """Refuse a Docker socket whose group is one tasks or builds run in.
 
@@ -516,9 +552,16 @@ class Launcher:
             If the socket's group is the group of the task or the build user.
         """
         try:
-            gid = self.settings.docker_socket.stat().st_gid
+            info = self.settings.docker_socket.stat()
         except OSError:
             return  # the engine check that follows names an unreachable socket
+        gid = info.st_gid
+        if info.st_mode & 0o002:
+            raise StartError(
+                f"The Docker socket {self.settings.docker_socket} is writable by everyone, which "
+                "is root on the host for every user of the machine. Restrict it to the docker "
+                "group (`chmod 660`, owned by root:docker) on the host."
+            )
         users = (self.settings.task_user, self.settings.build_user)
         if gid in {int(user.split(":")[1]) for user in users}:
             raise StartError(
@@ -799,22 +842,36 @@ class Launcher:
                 "`docker compose logs launcher`"
             )
         deadline = _deadline(request.limits.timeout_seconds)
-        cache = cache_volume(self.settings, request)
-        self._create_volume(volume_spec(self.settings, volume, "env", shared=False))
-        self._create_volume(volume_spec(self.settings, cache, "cache", shared=request.no_build))
-        network = self._open_network("build", request.build, request.owner, None, deadline)
+        cache = cache_volume(self.settings, request, key=self._cache_key)
+        network: str | None = None
         try:
+            self._create_volume(volume_spec(self.settings, volume, "env", shared=False))
+            if not request.no_build:
+                # A private cache is never reused: what a dead launcher left is removed first.
+                self._remove_volume(cache)
+            self._create_volume(
+                volume_spec(
+                    self.settings,
+                    cache,
+                    "cache",
+                    shared=request.no_build,
+                    deadline=None if request.no_build else deadline,
+                )
+            )
+            network = self._open_network("build", request.build, request.owner, None, deadline)
             spec = build_container_spec(
                 request,
                 self.settings,
                 no_new_privileges=self.no_new_privileges,
                 proxy_url=None,
+                cache_key=self._cache_key,
                 deadline=deadline,
             )
             self._ensure_image(spec["Image"])
             result = self._supervise(name, spec, live, request.limits.timeout_seconds, emit)
         finally:
-            self._close_network(network)
+            if network is not None:
+                self._close_network(network)
             if not request.no_build:
                 # A build that may run package code had a cache of its own: nothing of it stays.
                 self._remove_volume(cache)
@@ -1299,33 +1356,38 @@ class Launcher:
         return removed
 
     def _reap_caches(self, moment: float) -> None:
-        """Remove shared caches older than the age limit; one in use answers 409 and stays.
+        """Remove shared caches past the age limit and private ones past their deadline.
+
+        A volume in use answers 409 and stays. A private cache outlives its build only when the
+        launcher died during it.
 
         Parameters
         ----------
         moment
             Epoch seconds to measure against.
         """
-        wanted = [
-            f"{LABEL_STACK}={self.settings.stack}",
-            f"{LABEL_KIND}=cache",
-            "lakana.launcher.shared=1",
-        ]
-        try:
-            status, body = self.engine.request(
-                "GET", "/volumes", query={"filters": json.dumps({"label": wanted})}
-            )
-        except EngineError as exc:
-            logger.error("Could not list caches to reap: %s", exc)
-            return
-        volumes = body.get("Volumes") if status == 200 and isinstance(body, dict) else None
-        for volume in volumes or []:
+        base = [f"{LABEL_STACK}={self.settings.stack}", f"{LABEL_KIND}=cache"]
+        for shared in ("1", "0"):
+            wanted = [*base, f"{LABEL_SHARED}={shared}"]
             try:
-                created = datetime.fromisoformat(str(volume["CreatedAt"])).timestamp()
-            except (KeyError, ValueError):
+                status, body = self.engine.request(
+                    "GET", "/volumes", query={"filters": json.dumps({"label": wanted})}
+                )
+            except EngineError as exc:
+                logger.error("Could not list caches to reap: %s", exc)
                 continue
-            if moment - created > _CACHE_MAX_AGE:
-                self._remove_volume(str(volume["Name"]))
+            volumes = body.get("Volumes") if status == 200 and isinstance(body, dict) else None
+            for volume in volumes or []:
+                if shared == "0":
+                    stale = _expired(volume.get("Labels"), moment)
+                else:
+                    try:
+                        created = datetime.fromisoformat(str(volume["CreatedAt"])).timestamp()
+                    except (KeyError, ValueError):
+                        continue
+                    stale = moment - created > _CACHE_MAX_AGE
+                if stale:
+                    self._remove_volume(str(volume["Name"]))
 
     def start_reaper(self, interval: float = 60.0) -> threading.Thread:
         """Run `reap` every `interval` seconds on a daemon thread until `stop_reaper`.

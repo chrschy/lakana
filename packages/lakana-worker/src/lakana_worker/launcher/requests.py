@@ -857,35 +857,57 @@ def environment_volume(settings: LauncherSettings, python: str, key: str) -> str
     return f"{settings.stack}-env-{_digest(settings.images[python], key)}"
 
 
-def _operator_identity(request: BuildRequest) -> tuple[str, str]:
-    """Split the operator index into its credential-free URL and its user name.
+def _operator_identity(request: BuildRequest, key: bytes) -> tuple[str, str]:
+    """Split the operator index into its credential-free URL and a keyed fingerprint of who it is.
 
     Parameters
     ----------
     request
         The build.
+    key
+        The launcher's cache key.
 
     Returns
     -------
     tuple
-        The URL without userinfo, and the user name (both empty without an operator index).
+        The URL without userinfo, and the fingerprint of its user name and password (both empty
+        without an operator index).
     """
     if not request.operator_index:
         return "", ""
     parts = urlsplit(request.operator_index)
     url = urlunsplit((parts.scheme, parts.hostname or "", parts.path, "", ""))
-    return url, unquote(parts.username or "")
+    return url, _fingerprint(key, url, unquote(parts.username or ""), unquote(parts.password or ""))
 
 
-def cache_volume(settings: LauncherSettings, request: BuildRequest) -> str:
+def _fingerprint(key: bytes, *parts: str) -> str:
+    """Compute a keyed fingerprint, so equal credentials give equal names and nothing else does.
+
+    Parameters
+    ----------
+    key
+        The launcher's cache key.
+    *parts
+        The texts to bind, joined by newlines.
+
+    Returns
+    -------
+    str
+        An HMAC-SHA-256 in hex. The password cannot be recovered or checked from it without the
+        key, which never leaves the launcher.
+    """
+    return hmac.new(key, "\n".join(parts).encode("utf-8"), "sha256").hexdigest()
+
+
+def cache_volume(settings: LauncherSettings, request: BuildRequest, *, key: bytes) -> str:
     """Name the uv cache a build mounts.
 
     A wheels-only build (``no_build``) only downloads and unpacks wheels that the lock pins by
-    hash; no package code runs, so builds that reach the same indexes with the same credential
-    identities share one cache. Any other build runs the code of an sdist or a path package as
-    the build user with the cache writable, and could rewrite files that another project's later
-    build would install: it gets a cache private to its own environment. The cache is never
-    mounted into a task.
+    hash; no package code runs, so builds that reach the same indexes with the same credentials
+    share one cache. Any other build runs the code of an sdist or a path package as the build
+    user with the cache writable, and could rewrite files that another project's later build
+    would install: it gets a cache private to its own environment. The cache is never mounted
+    into a task.
 
     Parameters
     ----------
@@ -893,21 +915,23 @@ def cache_volume(settings: LauncherSettings, request: BuildRequest) -> str:
         For the stack and the image.
     request
         The build.
+    key
+        The launcher's cache key (random, made once, kept in its state directory).
 
     Returns
     -------
     str
         ``<stack>-uvcache-<digest>`` (shared) or ``<stack>-uvcache-private-<digest>``. The digest
-        holds the index set and who the credentials belong to (their user names, never the
-        passwords), so teams with different credentials do not share cache entries; a private
-        cache also holds the environment.
+        holds the index set and a keyed HMAC of each credential's user name and password, so two
+        teams with different tokens never share cache entries, even under one user name; a
+        private cache also holds the environment.
     """
-    operator, operator_user = _operator_identity(request)
+    operator, operator_who = _operator_identity(request, key)
     identity = (
         operator,
-        operator_user,
+        operator_who,
         *sorted(request.hosts),
-        *sorted(f"{c.url}\n{c.username}" for c in request.indexes),
+        *sorted(_fingerprint(key, c.url, c.username, c.password) for c in request.indexes),
     )
     if request.no_build:
         return f"{settings.stack}-uvcache-{_digest(*identity)}"
@@ -916,7 +940,12 @@ def cache_volume(settings: LauncherSettings, request: BuildRequest) -> str:
 
 
 def volume_spec(
-    settings: LauncherSettings, name: str, kind: str, *, shared: bool
+    settings: LauncherSettings,
+    name: str,
+    kind: str,
+    *,
+    shared: bool,
+    deadline: int | None = None,
 ) -> dict[str, Any]:
     """Describe an environment or cache volume, labelled so an uninstall or a cleanup finds it.
 
@@ -930,20 +959,23 @@ def volume_spec(
         ``env`` or ``cache``.
     shared
         Whether several environments may mount it.
+    deadline
+        Epoch seconds after which the reaper removes it (a private cache that outlived its
+        build), or `None`.
 
     Returns
     -------
     dict
         The body of ``POST /volumes/create``.
     """
-    return {
-        "Name": name,
-        "Labels": {
-            LABEL_STACK: settings.stack,
-            LABEL_KIND: kind,
-            LABEL_SHARED: "1" if shared else "0",
-        },
+    found = {
+        LABEL_STACK: settings.stack,
+        LABEL_KIND: kind,
+        LABEL_SHARED: "1" if shared else "0",
     }
+    if deadline is not None:
+        found[LABEL_DEADLINE] = str(deadline)
+    return {"Name": name, "Labels": found}
 
 
 def network_spec(
@@ -1216,6 +1248,7 @@ def build_container_spec(
     *,
     no_new_privileges: bool,
     proxy_url: str | None,
+    cache_key: bytes,
     deadline: int | None = None,
 ) -> dict[str, Any]:
     """Describe the container that builds one environment.
@@ -1233,6 +1266,8 @@ def build_container_spec(
         Whether to set the option.
     proxy_url
         The egress proxy with this build's token; `None` leaves the build without a way out.
+    cache_key
+        The launcher's cache key, for the cache volume's name.
     deadline
         Epoch seconds after which the reaper removes the container.
 
@@ -1241,6 +1276,9 @@ def build_container_spec(
     dict
         The body of ``POST /containers/create``.
     """
+    # uv caches a local wheel or index file under its absolute `file://` URL; a path of its own
+    # per build keeps one project's cached local file from matching another project's.
+    source = f"/src/{request.build}"
     env = [
         "PATH=/usr/local/bin:/usr/bin:/bin",
         "HOME=/tmp",
@@ -1251,6 +1289,7 @@ def build_container_spec(
         "UV_NO_PROGRESS=1",
         f"LAKANA_BUILD_NO_BUILD={1 if request.no_build else 0}",
         f"LAKANA_BUILD_MAX_BYTES={request.max_bytes}",
+        f"LAKANA_BUILD_SRC={source}",
     ]
     index = uv_index_value(request)
     if index is not None:
@@ -1261,20 +1300,20 @@ def build_container_spec(
             for name in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy")
         ]
     mounts = [
-        _volume(settings.work_volume, "/src", read_only=True, subpath=f"{request.attempt}/code"),
+        _volume(settings.work_volume, source, read_only=True, subpath=f"{request.attempt}/code"),
         _volume(
             environment_volume(settings, request.python, request.environment),
             "/env",
             read_only=False,
         ),
-        _volume(cache_volume(settings, request), "/uv-cache", read_only=False),
+        _volume(cache_volume(settings, request, key=cache_key), "/uv-cache", read_only=False),
     ]
     return {
         "Image": settings.images[request.python],
         "Entrypoint": ["/usr/local/bin/python", "-I", "/opt/lakana-task/build.py"],
         "Cmd": [],
         "User": settings.build_user,
-        "WorkingDir": "/src",
+        "WorkingDir": source,
         "Env": env,
         "AttachStdout": True,
         "AttachStderr": True,

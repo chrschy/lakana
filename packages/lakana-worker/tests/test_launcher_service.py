@@ -7,6 +7,7 @@ import base64
 import io
 import os
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -29,6 +30,7 @@ from lakana_worker.launcher.requests import (
     RunRequest,
     StatusRequest,
     StopRequest,
+    cache_volume,
     container_name,
     environment_volume,
 )
@@ -1378,12 +1380,107 @@ def test_a_build_creates_its_volumes_with_labels_and_a_source_build_gets_a_priva
     cache = engine.created("build")[0]["HostConfig"]["Mounts"][2]["Source"]
     assert "uvcache-private-" in cache
     assert created[environment]["lakana.launcher.kind"] == "env"
-    assert created[cache] == {
+    assert {k: v for k, v in created[cache].items() if k != "lakana.launcher.deadline"} == {
         "lakana.launcher.stack": "lakana",
         "lakana.launcher.kind": "cache",
         "lakana.launcher.shared": "0",
     }
+    assert "lakana.launcher.deadline" in created[cache]
     assert cache not in engine.volumes and environment in engine.volumes
+
+
+def test_a_failed_network_still_removes_the_private_cache_the_build_created(
+    tmp_path: Path,
+) -> None:
+    """The volumes and the network are made inside the cleanup's reach."""
+    engine = FakeEngine()
+    launcher = _started(engine, tmp_path, built=False)
+    _intercept(
+        engine,
+        lambda m, p, b: p == "/networks/create" and "build" in b["Name"],
+        (500, {"message": "no address"}),
+    )
+
+    with pytest.raises(EngineError, match="no address"):
+        launcher.build(_build(), lambda line: None)
+
+    assert not [v for v in engine.volumes if "uvcache-private" in v]
+    assert launcher._subnets == {}
+
+
+def test_a_private_cache_left_by_a_dead_launcher_is_removed_before_the_build_makes_its_own(
+    tmp_path: Path,
+) -> None:
+    """The same environment's leftover must not seed the next build."""
+    engine = FakeEngine()
+    launcher = _started(engine, tmp_path, built=False)
+    request = _build()
+    cache = cache_volume(launcher.settings, request, key=launcher._cache_key)
+    engine.volumes.add(cache)
+
+    launcher.build(request, lambda line: None)
+
+    events = [
+        "delete" if m == "DELETE" and p == f"/volumes/{cache}" else "create"
+        for m, p, b in engine.calls
+        if (m == "DELETE" and p == f"/volumes/{cache}")
+        or (p == "/volumes/create" and b["Name"] == cache)
+    ]
+    assert events[:2] == ["delete", "create"]
+
+
+def test_the_reaper_removes_private_caches_past_their_deadline(tmp_path: Path) -> None:
+    """A launcher that died mid-build leaves a private cache; its label says when it is stale."""
+    engine = FakeEngine()
+    launcher = _started(engine, tmp_path)
+    for name, deadline in (
+        ("lakana-uvcache-private-old", 10),
+        ("lakana-uvcache-private-new", 10**12),
+    ):
+        engine.volumes.add(name)
+        engine.volume_labels[name] = {
+            "lakana.launcher.stack": "lakana",
+            "lakana.launcher.kind": "cache",
+            "lakana.launcher.shared": "0",
+            "lakana.launcher.deadline": str(deadline),
+        }
+
+    launcher.reap()
+
+    assert "lakana-uvcache-private-old" not in engine.volumes
+    assert "lakana-uvcache-private-new" in engine.volumes
+
+
+def test_a_private_cache_carries_a_deadline_and_a_shared_one_does_not(tmp_path: Path) -> None:
+    """Only a cache that dies with its build has a deadline."""
+    engine = FakeEngine()
+    launcher = _started(engine, tmp_path, built=False)
+    launcher.build(_build(), lambda line: None)
+    launcher.build(replace(_build("b2", "b" * 64), no_build=True), lambda line: None)
+
+    labels = [b["Labels"] for m, p, b in engine.calls if p == "/volumes/create"]
+    caches = [item for item in labels if item["lakana.launcher.kind"] == "cache"]
+    assert "lakana.launcher.deadline" in caches[0]
+    assert "lakana.launcher.deadline" not in caches[1]
+
+
+def test_the_cache_key_is_made_once_kept_private_and_reused(tmp_path: Path) -> None:
+    """Different tokens must never share a cache; the key never leaves the state volume."""
+    first = _started(FakeEngine(), tmp_path)
+    second = _started(FakeEngine(), tmp_path)
+
+    key_file = tmp_path / "cache.key"
+    assert len(first._cache_key) == 32 and first._cache_key == second._cache_key
+    assert key_file.read_bytes() == first._cache_key
+    assert stat.S_IMODE(key_file.stat().st_mode) == 0o600
+
+
+def test_a_cache_key_file_of_the_wrong_size_is_refused(tmp_path: Path) -> None:
+    """A truncated or planted file would weaken every cache name."""
+    (tmp_path / "cache.key").write_bytes(b"short")
+
+    with pytest.raises(StartError, match=r"cache\.key"):
+        _started(FakeEngine(), tmp_path)
 
 
 def test_a_wheels_only_build_keeps_the_shared_cache_it_mounted(tmp_path: Path) -> None:
@@ -1603,6 +1700,18 @@ def test_a_reaper_pass_goes_on_when_the_network_or_cache_listing_fails(
     launcher.reap()
 
     assert "Could not list networks" in caplog.text and "Could not list caches" in caplog.text
+
+
+def test_start_refuses_a_docker_socket_anybody_can_write_to(tmp_path: Path) -> None:
+    """A world-writable socket is root on the host for every user of the machine."""
+    docker = tmp_path / "docker.sock"
+    docker.write_text("", encoding="utf-8")
+    docker.chmod(0o666)
+
+    with pytest.raises(StartError, match="writable by everyone") as caught:
+        _started(FakeEngine(), tmp_path, docker_socket=docker)
+
+    assert "chmod" in str(caught.value) or "group" in str(caught.value)
 
 
 def test_a_missing_docker_socket_file_is_left_to_the_engine_check(tmp_path: Path) -> None:
