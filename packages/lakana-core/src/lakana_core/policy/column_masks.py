@@ -279,6 +279,7 @@ class ColumnMaskService:
             column=column,
             expression=expression,
             schema_id=schema_id,
+            type_checked=True,
             created_by=p.id,
             created_at=datetime.now(UTC),
         )

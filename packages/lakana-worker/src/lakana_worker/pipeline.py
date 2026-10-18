@@ -65,6 +65,7 @@ from typing import TYPE_CHECKING, Literal, NoReturn
 
 import pyarrow as pa
 import pyarrow.ipc
+import sqlglot.expressions as exp
 from sqlalchemy import ColumnElement, and_, or_, select, update
 from sqlalchemy.orm import Session
 
@@ -122,6 +123,7 @@ from lakana_core.models import (
     TableType,
     WriteMode,
 )
+from lakana_core.policy.cast_types import arrow_cast_type, iceberg_cast_type
 from lakana_core.policy.expressions import columns_of
 from lakana_core.policy.read_errors import policy_read_failure
 from lakana_core.policy.renames import policy_column_renamed_message, renamed_policy_column
@@ -641,6 +643,7 @@ def _resolve_sources(
     for dotted in dotted_refs:
         declared_columns_only = False
         field_ids: tuple[ReadField, ...] = ()
+        mask_types: dict[str, exp.DataType] = {}
         # For the one table read at a check: the result, and the names (lower-cased, as the
         # database compares them) of the columns that are the same column, by field id, in
         # the checked snapshot and in the table now.
@@ -681,6 +684,11 @@ def _resolve_sources(
             location_pattern = row.external_config["location_pattern"]
             file_format = row.external_config["format"]
             columns = dict(row.external_config.get("schema", {}))
+            mask_types = {
+                name: target
+                for name, stored in columns.items()
+                if (target := arrow_cast_type(stored)) is not None
+            }
             # Re-parsed rather than trusted as already-confined: a row
             # created before the id binding may hold a pattern outside
             # `raw/<dir...>/<glob>`, and this must fail the query rather
@@ -835,6 +843,11 @@ def _resolve_sources(
             # renamed, re-added or widened since a file was written reads as that schema says.
             read = [column for column in fields if column.name in columns]
             field_ids = read_fields(dotted, read)
+            mask_types = {
+                column.name: target
+                for column in read
+                if (target := iceberg_cast_type(column.field_type)) is not None
+            }
             if snapshot_id is not None:
                 refuse_changed_nested_fields(dotted, metadata, snapshot_id, read)
             if pins is not None:
@@ -902,6 +915,8 @@ def _resolve_sources(
             column_masks=column_masks,
             declared_columns_only=declared_columns_only,
             field_ids=field_ids,
+            mask_types=mask_types,
+            typed_masks=resolved_policy.typed_masks,
         )
     if checked is not None and not read_at_check:
         # Every table the query names was resolved (and its read authorized), and none is

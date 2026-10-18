@@ -424,6 +424,14 @@ class TableSource:
         means no mask applies. Cast to the column's declared type and rendered into the
         generated SQL text, never bound as a parameter, for the same reason and under the same
         pre-validation requirement as `row_filters`.
+    mask_types
+        Column name to the structured DuckDB type a type-checked mask on it is cast to
+        (`lakana_core.policy.cast_types`: built from the column's Iceberg type, or from the Arrow
+        type name stored for a raw-zone table, never parsed from a type string). A column with no
+        entry here, such as a struct, is not cast.
+    typed_masks
+        The masked columns whose mask was checked against the column's type when it was created
+        (`ColumnMask.type_checked`). Only these are cast; every other mask is used as written.
     declared_columns_only
         Read the files through the explicit list of `columns` also when no policy applies,
         never with ``SELECT *``. Set for a read at an older snapshot of a table, whose files
@@ -444,6 +452,8 @@ class TableSource:
     column_masks: Mapping[str, str] = field(default_factory=dict)
     declared_columns_only: bool = False
     field_ids: Sequence[ReadField] = field(default_factory=tuple)
+    mask_types: Mapping[str, exp.DataType] = field(default_factory=dict)
+    typed_masks: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -1078,10 +1088,12 @@ def _reader_select_sql(source: TableSource, index: int, dialect: str) -> str:
             f"Column mask references unknown column {unknown_masks[0]!r}; "
             f"known columns: {sorted(source.columns)}"
         )
-    read_types = {read.name: read.duckdb_type for read in source.field_ids}
     projections = [
         _masked_projection(
-            source.column_masks[name], name, read_types.get(name, source.columns[name]), dialect
+            source.column_masks[name],
+            name,
+            source.mask_types.get(name) if name in source.typed_masks else None,
+            dialect,
         )
         if name in source.column_masks
         else _quoted_identifier(name, dialect)
@@ -1099,13 +1111,15 @@ def _reader_select_sql(source: TableSource, index: int, dialect: str) -> str:
     return sql
 
 
-def _masked_projection(mask: str, name: str, type_name: str, dialect: str) -> str:
-    """Render a column mask as a projection that keeps the column's declared type.
+def _masked_projection(mask: str, name: str, target: exp.DataType | None, dialect: str) -> str:
+    """Render a column mask as a projection, cast to the column's type when it was checked.
 
-    The value is cast to the column's DuckDB type, taken from the table's recorded schema and
-    never from the mask's text, so a reader gets the type the column has without the mask. The
-    cast is built with sqlglot, so neither the mask nor the type can add syntax of its own.
-    Creating a mask checks the value fits that type, so the cast cannot fail.
+    A type-checked mask is cast to the column's DuckDB type so a reader gets exactly the type the
+    column has without the mask. Creating the mask checked that the cast cannot fail. The target
+    is a structured `DataType` built from the column's Iceberg type or a stored Arrow type name
+    (`lakana_core.policy.cast_types`), never parsed from a type string. Without a target, a mask
+    that was never type-checked, or a column of a type that has no cast, the mask is used as it
+    was stored.
 
     Parameters
     ----------
@@ -1113,19 +1127,21 @@ def _masked_projection(mask: str, name: str, type_name: str, dialect: str) -> st
         The resolved, context-substituted mask expression.
     name
         The masked column's name.
-    type_name
-        The column's DuckDB type name: the field-id read's type for an Iceberg table, otherwise
-        the one in `TableSource.columns`.
+    target
+        The structured type to cast to, or `None` for no cast.
     dialect
-        The SQL dialect to parse and render in.
+        The SQL dialect to render in.
 
     Returns
     -------
     str
-        `CAST(<mask> AS <type>) AS "<name>"`.
+        `CAST(<mask> AS <type>) AS "<name>"`, or `<mask> AS "<name>"`.
     """
-    value = exp.cast(sqlglot.parse_one(mask, dialect=dialect), type_name, dialect=dialect)
-    return f"{value.sql(dialect=dialect)} AS {_quoted_identifier(name, dialect)}"
+    alias = _quoted_identifier(name, dialect)
+    if target is None:
+        return f"{mask} AS {alias}"
+    value = exp.cast(sqlglot.parse_one(mask, dialect=dialect), target.copy(), dialect=dialect)
+    return f"{value.sql(dialect=dialect)} AS {alias}"
 
 
 def named_columns(sql: str, dialect: str = "duckdb") -> frozenset[str]:

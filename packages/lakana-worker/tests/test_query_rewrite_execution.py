@@ -8,6 +8,7 @@ the tests of lakana-core cannot do: they assert on the rewritten SQL text, and t
 
 from __future__ import annotations
 
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -15,8 +16,11 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+import sqlglot.expressions as exp
+from pyiceberg.types import DecimalType, DoubleType, IcebergType, IntegerType, LongType, StringType
 
 from lakana_core.errors import ValidationError
+from lakana_core.policy.cast_types import arrow_cast_type, iceberg_cast_type
 from lakana_core.query_rewrite import (
     ReadField,
     RewrittenQuery,
@@ -705,8 +709,37 @@ def test_a_users_cast_never_reaches_a_row_the_filter_hides(tmp_path: Path, query
     assert "HIDDEN" not in repr(rows_out)
 
 
-def test_a_column_mask_keeps_the_columns_own_type_for_the_reader(tmp_path: Path) -> None:
-    """A mask is cast to the declared type, so `0` on BIGINT, DOUBLE and DECIMAL stays that type."""
+def _target(field_type: IcebergType) -> exp.DataType:
+    """Give the cast target of an Iceberg type that has one.
+
+    Parameters
+    ----------
+    field_type
+        The Iceberg type.
+
+    Returns
+    -------
+    sqlglot.expressions.DataType
+        The structured type.
+    """
+    target = iceberg_cast_type(field_type)
+    assert target is not None
+    return target
+
+
+def _typed_file(tmp_path: Path) -> str:
+    """Write a parquet file with a BIGINT, DOUBLE, DECIMAL, VARCHAR and INTEGER column.
+
+    Parameters
+    ----------
+    tmp_path
+        Where the file goes.
+
+    Returns
+    -------
+    str
+        The file's path.
+    """
     probe = tmp_path / "typed.parquet"
     pq.write_table(
         pa.table(
@@ -720,25 +753,118 @@ def test_a_column_mask_keeps_the_columns_own_type_for_the_reader(tmp_path: Path)
         ),
         probe,
     )
+    return str(probe)
+
+
+_TYPEOF = (
+    "SELECT typeof(big), typeof(dbl), typeof(dec), typeof(txt), typeof(small), "
+    "big, dbl, dec, txt, small FROM gold.typed"
+)
+_TYPED_COLUMNS = {
+    "big": "BIGINT",
+    "dbl": "DOUBLE",
+    "dec": "DECIMAL(10, 2)",
+    "txt": "VARCHAR",
+    "small": "INTEGER",
+}
+_TYPED_MASKS = {"big": "0", "dbl": "0", "dec": "0", "txt": "'***'", "small": "NULL"}
+
+
+def test_a_type_checked_mask_keeps_the_columns_own_type_for_the_reader(tmp_path: Path) -> None:
+    """A type-checked mask is cast: `0` on BIGINT, DOUBLE and DECIMAL stays that type."""
     source = TableSource(
-        urls=[str(probe)],
+        urls=[_typed_file(tmp_path)],
         file_format="parquet",
-        columns={
-            "big": "BIGINT",
-            "dbl": "DOUBLE",
-            "dec": "DECIMAL(10, 2)",
-            "txt": "VARCHAR",
-            "small": "INTEGER",
+        columns=_TYPED_COLUMNS,
+        column_masks=_TYPED_MASKS,
+        mask_types={
+            "big": _target(LongType()),
+            "dbl": _target(DoubleType()),
+            "dec": _target(DecimalType(10, 2)),
+            "txt": _target(StringType()),
+            "small": _target(IntegerType()),
         },
-        column_masks={"big": "0", "dbl": "0", "dec": "0", "txt": "'***'", "small": "NULL"},
+        typed_masks=frozenset(_TYPED_MASKS),
     )
 
-    rewritten = rewrite_query(
-        "SELECT typeof(big), typeof(dbl), typeof(dec), typeof(txt), typeof(small), "
-        "big, dbl, dec, txt, small FROM gold.typed",
-        {"gold.typed": source},
-    )
-    row = _fetch(rewritten)[0]
+    row = _fetch(rewrite_query(_TYPEOF, {"gold.typed": source}))[0]
 
     assert row[:5] == ("BIGINT", "DOUBLE", "DECIMAL(10,2)", "VARCHAR", "INTEGER")
     assert row[5:] == (0, 0.0, Decimal("0.00"), "***", None)
+
+
+def test_a_mask_of_an_earlier_release_reads_as_it_always_did(tmp_path: Path) -> None:
+    """A mask that was never type-checked is not cast: `0` is an INTEGER, as before."""
+    source = TableSource(
+        urls=[_typed_file(tmp_path)],
+        file_format="parquet",
+        columns=_TYPED_COLUMNS,
+        column_masks=_TYPED_MASKS,
+        mask_types={
+            "big": _target(LongType()),
+            "dbl": _target(DoubleType()),
+        },
+    )
+
+    rewritten = rewrite_query(_TYPEOF, {"gold.typed": source})
+
+    assert "CAST(" not in rewritten.sql.split("FROM READ_PARQUET")[0]
+    row = _fetch(rewritten)[0]
+    assert row[0] == "INTEGER"
+    assert row[1] == "INTEGER"
+
+
+def test_a_masked_read_of_an_external_table_of_common_types_works(tmp_path: Path) -> None:
+    """The stored Arrow type names of timestamps, dates, decimals, structs and tz columns."""
+    path = tmp_path / "raw.parquet"
+    table = pa.table(
+        {
+            "ts": pa.array([datetime(2026, 1, 1)], pa.timestamp("us")),
+            "d": pa.array([date(2026, 1, 1)], pa.date32()),
+            "dec": pa.array([Decimal("1.50")], pa.decimal128(10, 2)),
+            "ls": pa.array(["x"], pa.large_string()),
+            "st": pa.array([{"a": 1}], pa.struct([("a", pa.int64())])),
+            "tz": pa.array([datetime(2026, 1, 1, tzinfo=UTC)], pa.timestamp("us", tz="UTC")),
+        }
+    )
+    pq.write_table(table, path)
+    stored = {field.name: str(field.type) for field in table.schema}
+    names = list(stored)
+    source = TableSource(
+        urls=[str(path)],
+        file_format="parquet",
+        columns=stored,
+        column_masks=dict.fromkeys(names, "NULL"),
+        mask_types={
+            name: target for name in names if (target := arrow_cast_type(stored[name])) is not None
+        },
+        typed_masks=frozenset(names),
+    )
+
+    rewritten = rewrite_query("SELECT * FROM gold.raw", {"gold.raw": source})
+
+    assert _fetch(rewritten) == [(None,) * len(names)]
+    assert "STRUCT" not in rewritten.sql
+
+
+def test_a_crafted_struct_field_name_cannot_reach_the_cast(tmp_path: Path) -> None:
+    """The stored type of a struct column is never rendered: no cast, and none of its text."""
+    path = tmp_path / "raw.parquet"
+    crafted = "a DECIMAL(10, (SELECT 42)) , b"
+    table = pa.table({"st": pa.array([{crafted: 1}], pa.struct([(crafted, pa.int64())]))})
+    pq.write_table(table, path)
+    stored = {"st": str(table.schema.field("st").type)}
+    assert "SELECT 42" in stored["st"]
+    source = TableSource(
+        urls=[str(path)],
+        file_format="parquet",
+        columns=stored,
+        column_masks={"st": "NULL"},
+        mask_types={},
+        typed_masks=frozenset({"st"}),
+    )
+
+    rewritten = rewrite_query("SELECT * FROM gold.raw", {"gold.raw": source})
+
+    assert "SELECT 42" not in rewritten.sql
+    assert _fetch(rewritten) == [(None,)]

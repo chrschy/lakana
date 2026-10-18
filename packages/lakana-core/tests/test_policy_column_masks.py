@@ -1109,3 +1109,8 @@ def test_a_comparison_across_types_in_a_mask_is_refused_as_the_page_says(
     with pytest.raises(ValidationError) as caught:
         _create_mask(session, "owner", "ssn = 5")
     assert str(caught.value) in _page_quotes()
+
+
+def test_create_records_that_the_mask_was_type_checked(session: Session) -> None:
+    """A mask created now is marked, so a read casts it to the column's type."""
+    assert _create_mask(session, "ssn", "'***'").type_checked is True

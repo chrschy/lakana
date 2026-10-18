@@ -144,10 +144,15 @@ that cast cannot fail. See [Show some people
 only some rows](../how-to/filter-rows.md#an-expression-must-not-fail-on-any-stored-value) and
 [Mask a column for some people](../how-to/mask-a-column.md#an-expression-must-not-fail-on-any-stored-value).
 
-Filters and masks that already exist are **not** checked again, and keep working as before. One
-that compares across types still fails every query it covers, with the message "The query failed
-on a value it could not convert or compute, under a row filter or column mask on ...". To find
-them, as an administrator:
+Filters and masks that already exist are **not** checked again and are **unchanged**. Migration
+`0036` marks every existing mask as not type-checked, and a read gives its value exactly as it
+did before; only a mask created from this release on is checked and cast to its column's type. To
+get the check and the type-keeping cast for an existing mask, create it again with the same command
+(`lakana column-mask create ...`) and then revoke the old one. A filter or mask that compares
+across types, or a mask of another type than its column, still fails every query it covers or
+gives the reader another type, as it did before; the failing ones show the message "The query
+failed on a value it could not convert or compute, under a row filter or column mask on ...". To
+find them, as an administrator:
 
 1. List them: `lakana row-filter list` and `lakana column-mask list` (`--env`, `--principal` or
    `--group` narrow the list). Each row shows the table and the `expression`, and for a mask the
@@ -155,8 +160,8 @@ them, as an administrator:
 2. Read the columns and their types of each table named: `lakana table get NAMESPACE.TABLE`.
 3. Look for a comparison (`=`, `<>`, `<`, `<=`, `>`, `>=`) of a text column with a number or of
    two columns of different types, for a column that stands alone as a condition and is not
-   boolean, and for a mask whose value is of another type than its column (a number on a text
-   column, text on a number column).
+   boolean, for `-column`, for a comparison with `NULL`, and for a mask whose value is of another
+   type than its column (a number on a text column, text on a number column, `0` on a `date`).
 4. Create the corrected filter or mask, then revoke the old one (the order matters: until the new
    one exists, revoking the old one shows the real values).
 

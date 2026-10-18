@@ -505,3 +505,16 @@ def test_timestamptz_literals_are_refused_with_the_reason() -> None:
     message = _refusal("seen = TIMESTAMPTZ '2026-01-01 00:00:00+00'")
     assert "UTC" not in message
     assert "not supported yet" in message
+
+
+@pytest.mark.parametrize(
+    "stored", ["date32[day]", "large_string", "timestamp[us]", "decimal128(10, 2)", "int64"]
+)
+def test_a_raw_zone_column_of_an_arrow_type_name_takes_only_null_or_itself(stored: str) -> None:
+    """These columns have no type rule, so their mask is `NULL` or the column; nothing is cast."""
+    columns = [ColumnSpec(name="c", type=stored, nullable=True)]
+    check_expression_types("NULL", kind="mask", columns=columns, masked_column="c")
+    check_expression_types("c", kind="mask", columns=columns, masked_column="c")
+    for expression in ("'***'", "0", "DATE '1970-01-01'"):
+        with pytest.raises(ValidationError, match="which a mask cannot be checked against"):
+            check_expression_types(expression, kind="mask", columns=columns, masked_column="c")

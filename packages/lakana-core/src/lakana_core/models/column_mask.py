@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, ForeignKey, Integer, String, Text, Uuid
+from sqlalchemy import Boolean, CheckConstraint, ForeignKey, Integer, String, Text, Uuid, false
 from sqlalchemy.orm import Mapped, mapped_column
 
 from lakana_core.models.base import Base, UTCDateTime
@@ -44,6 +44,11 @@ class ColumnMask(Base):
         column mask created before it was recorded or on a table without field ids. A rename since
         then may have made the mask cover another column
         (`lakana_core.policy.renames.renamed_policy_column`).
+    type_checked : bool
+        Whether the mask was checked against its column's type when it was created
+        (`lakana_core.policy.expression_types`). `False` for a mask of an earlier release, which
+        a read leaves exactly as written; `True` for a later one, which a read casts to the
+        column's type.
     created_by : uuid.UUID
         ID of the principal who created this mask.
     created_at : datetime
@@ -81,6 +86,7 @@ class ColumnMask(Base):
     column: Mapped[str] = mapped_column(String(255))
     expression: Mapped[str] = mapped_column(Text)
     schema_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    type_checked: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     created_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("principals.id"))
     created_at: Mapped[datetime] = mapped_column(UTCDateTime)
     revoked_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("principals.id"), nullable=True)

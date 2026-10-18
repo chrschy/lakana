@@ -1422,7 +1422,7 @@ def test_a_projected_read_by_field_id_keeps_its_policy() -> None:
     rewritten = rewrite_query("SELECT * FROM gold.t", {"gold.t": source})
 
     assert (
-        'SELECT "id", CAST(NULL AS TEXT) AS "name" FROM READ_PARQUET(GETVARIABLE(\'v_0_files\'), '
+        'SELECT "id", NULL AS "name" FROM READ_PARQUET(GETVARIABLE(\'v_0_files\'), '
         "schema = GETVARIABLE('v_0_schema')) WHERE (id > 1)"
     ) in rewritten.sql
 
@@ -1489,3 +1489,34 @@ def test_a_field_id_map_that_is_not_the_declared_columns_is_refused(
 
     with pytest.raises(ValidationError, match=message):
         rewrite_query("SELECT * FROM gold.t", {"gold.t": source})
+
+
+def test_only_a_type_checked_mask_is_cast_to_the_columns_structured_type() -> None:
+    """The cast is built from the structured type given; an unchecked mask is spelled as stored."""
+    target = exp.DataType(this=exp.DType.BIGINT)
+    columns = {"id": "BIGINT", "ssn": "VARCHAR"}
+    masks = {"id": "0", "ssn": "'***'"}
+    checked = TableSource(
+        urls=["a"],
+        file_format="parquet",
+        columns=columns,
+        column_masks=masks,
+        mask_types={"id": target},
+        typed_masks=frozenset({"id", "ssn"}),
+    )
+    legacy = TableSource(
+        urls=["a"],
+        file_format="parquet",
+        columns=columns,
+        column_masks=masks,
+        mask_types={"id": target},
+    )
+
+    assert (
+        'CAST(0 AS BIGINT) AS "id", \'***\' AS "ssn"'
+        in rewrite_query("SELECT * FROM gold.t", {"gold.t": checked}).sql
+    )
+    assert (
+        '0 AS "id", \'***\' AS "ssn"'
+        in rewrite_query("SELECT * FROM gold.t", {"gold.t": legacy}).sql
+    )

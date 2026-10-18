@@ -43,11 +43,16 @@ class ResolvedPolicy:
         One entry per applicable filter and mask, with the columns it uses and the schema
         it was written against. Unlike `column_masks`, two masks on a column that collapse to
         `NULL` are still two entries, so the check for a rename sees both.
+    typed_masks
+        The columns whose single applicable mask was checked against the column's type when it
+        was created (`ColumnMask.type_checked`). Only these are cast to the column's type on a
+        read; a mask of an earlier release is used as written.
     """
 
     row_filters: list[str] = field(default_factory=list)
     column_masks: dict[str, str] = field(default_factory=dict)
     policies: list[PolicyColumns] = field(default_factory=list)
+    typed_masks: frozenset[str] = frozenset()
 
 
 def _substitute_context_functions(
@@ -264,4 +269,12 @@ class PolicyResolver:
             PolicyColumns(frozenset({row.column, *columns_of(row.expression)}), row.schema_id)
             for row in mask_rows
         ]
-        return ResolvedPolicy(row_filters=row_filters, column_masks=column_masks, policies=policies)
+        typed_masks = frozenset(
+            column for column, rows in by_column.items() if len(rows) == 1 and rows[0].type_checked
+        )
+        return ResolvedPolicy(
+            row_filters=row_filters,
+            column_masks=column_masks,
+            policies=policies,
+            typed_masks=typed_masks,
+        )

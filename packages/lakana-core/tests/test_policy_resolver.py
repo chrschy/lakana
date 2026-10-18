@@ -163,6 +163,7 @@ def _add_mask(
     revoked_at: datetime | None = None,
     created_at: datetime | None = None,
     schema_id: int | None = None,
+    type_checked: bool = False,
 ) -> None:
     """Insert a ColumnMask row directly.
 
@@ -191,6 +192,8 @@ def _add_mask(
         Timestamp to record for this mask; defaults to now.
     schema_id
         The schema id recorded with the mask.
+    type_checked
+        Whether the mask was checked against its column's type.
     """
     environment_id, table_id = ensure_table(session, environment, namespace, table)
     session.add(
@@ -209,6 +212,7 @@ def _add_mask(
             created_at=created_at or datetime.now(UTC),
             revoked_at=revoked_at,
             schema_id=schema_id,
+            type_checked=type_checked,
         )
     )
     session.commit()
@@ -818,3 +822,17 @@ def test_resolver_and_validator_share_one_has_group_name() -> None:
     """The validator and the query-time substitution use one `has_group` name, not two copies."""
     assert expressions.HAS_GROUP == "has_group"
     assert resolver.HAS_GROUP is expressions.HAS_GROUP
+
+
+def test_a_mask_is_typed_only_when_it_was_type_checked_and_stands_alone(session: Session) -> None:
+    """`typed_masks` names the columns whose single mask was checked; a legacy mask stays out."""
+    alice = _add_principal(session, "alice")
+    _add_mask(session, principal_id=alice.id, column="ssn", expression="'***'", type_checked=True)
+    _add_mask(session, principal_id=alice.id, column="email", expression="'x'")
+    _add_mask(session, principal_id=alice.id, column="name", expression="'a'", type_checked=True)
+    _add_mask(session, principal_id=alice.id, column="name", expression="'b'", type_checked=True)
+
+    resolved = PolicyResolver(session).resolve(alice, _ref())
+
+    assert resolved.column_masks["name"] == "NULL"
+    assert resolved.typed_masks == frozenset({"ssn"})

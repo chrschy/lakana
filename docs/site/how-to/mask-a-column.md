@@ -186,9 +186,11 @@ so that nothing unchecked is stored.
 A mask cannot convert a value (`CAST`, `try_cast` and `TRY` are refused). If a mask needs the value
 in another type, store the column in that type, or add a column of that type and mask that one.
 
-A mask that already exists is **not** checked again when you upgrade. List the masks
-(`lakana column-mask list`) and compare each expression with the type of its column; the upgrade
-notes say what to look for. To change an expression, revoke it and create the new one.
+A mask that already exists is **not** checked again when you upgrade, and is not cast: it reads
+as it always did. List the masks (`lakana column-mask list`) and compare each expression with the
+type of its column; the upgrade notes say what to look for. To get the check and the cast for it,
+create the mask again and revoke the old one. A column of a type with no cast (a struct, a list, a
+map) can be masked with `NULL` or the column itself only.
 
 When a stored value still makes a mask fail, everyone it applies to gets this message, and the query
 engine's text is not shown:

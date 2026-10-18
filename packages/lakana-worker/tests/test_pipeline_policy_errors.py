@@ -13,6 +13,7 @@ import uuid
 from pathlib import Path
 
 import pyarrow as pa
+import pyarrow.ipc
 import pytest
 from sqlalchemy import update
 from sqlalchemy.orm import Session
@@ -412,3 +413,62 @@ def test_an_internal_failure_under_a_policy_gets_a_fixed_text_and_stays_internal
     assert str(replaced) == f"Query failed: the query engine failed on its own. {INTERNAL_ADVICE}"
     assert failure_cause(replaced) == failure_cause(raw)
     assert untouched is raw
+
+
+def _typeof_id(session: Session, principal: PrincipalRef, tmp_path: Path) -> object:
+    """Run a query that reports the type the reader gets for `gold.people.id`.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    principal
+        The caller.
+    tmp_path
+        The environment's storage root.
+
+    Returns
+    -------
+    object
+        The type name DuckDB reports.
+    """
+    run = _query(session, principal, "SELECT typeof(id) AS t FROM gold.people")
+    assert run.result_location is not None, run.error_message
+    with pyarrow.ipc.open_file(tmp_path / run.result_location) as reader:
+        return reader.read_all().column("t")[0].as_py()
+
+
+def test_a_mask_created_now_is_cast_to_the_columns_type_when_read(
+    session: Session, principal: PrincipalRef, catalog: CatalogService, tmp_path: Path
+) -> None:
+    """`0` on the BIGINT column `id` reaches the reader as a BIGINT."""
+    ColumnMaskService(session, AllowAllAuthorization(), catalog).create(
+        principal,
+        principal="admin",
+        environment="dev",
+        namespace="gold",
+        table="people",
+        column="id",
+        expression="0",
+    )
+
+    assert _typeof_id(session, principal, tmp_path) == "BIGINT"
+
+
+def test_a_mask_stored_before_the_type_check_reads_as_it_always_did(
+    session: Session, principal: PrincipalRef, catalog: CatalogService, tmp_path: Path
+) -> None:
+    """The same mask with `type_checked` false is used as written: an INTEGER."""
+    ColumnMaskService(session, AllowAllAuthorization(), catalog).create(
+        principal,
+        principal="admin",
+        environment="dev",
+        namespace="gold",
+        table="people",
+        column="id",
+        expression="0",
+    )
+    session.execute(update(ColumnMask).values(type_checked=False))
+    session.commit()
+
+    assert _typeof_id(session, principal, tmp_path) == "INTEGER"
