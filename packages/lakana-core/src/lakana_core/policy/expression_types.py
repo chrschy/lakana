@@ -220,9 +220,8 @@ def _digits(value: Decimal) -> tuple[int, int]:
     tuple of int
         The digits before the point and the decimal places.
     """
-    _, digits, exponent = value.as_tuple()
-    if not isinstance(exponent, int):
-        return 0, 0
+    _, digits, special = value.as_tuple()
+    exponent = int(special)  # finite by the caller's check, so an integer
     if value == 0:
         return 0, max(0, -exponent)
     return max(0, len(digits) + exponent), max(0, -exponent)

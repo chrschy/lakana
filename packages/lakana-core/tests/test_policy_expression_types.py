@@ -1,11 +1,19 @@
 """Tests for the type check of a row filter or column mask expression (#126)."""
 
+from decimal import Decimal
+
 import pytest
 import sqlglot.expressions as exp
 
 from lakana_core.catalog.json_schema import ColumnSpec
 from lakana_core.errors import ValidationError
-from lakana_core.policy.expression_types import _Checker, check_expression_types
+from lakana_core.policy.expression_types import (
+    _Checker,
+    _column_type,
+    _rule_for,
+    _Type,
+    check_expression_types,
+)
 
 COLUMNS = [
     ColumnSpec(name=name, type=declared, nullable=True)
@@ -320,6 +328,7 @@ def test_no_other_cast_is_allowed(expression: str) -> None:
         ("amount", "99999999.99"),
         ("amount", "-0.01"),
         ("amount3", "amount"),
+        ("Order Total", "score"),
         ("dec38", "n"),
         ("seen_tz", "NULL"),
         ("seen_tz", "seen_tz"),
@@ -383,6 +392,11 @@ def test_a_mask_of_the_columns_own_type_is_accepted(column: str, expression: str
         ("small", "n", "`small` is smallint, but the mask `n` is int and may not fit"),
         ("score", "id", "`score` is double, but the mask `id` is long and may not fit"),
         ("flt", "score", "`flt` is float, but the mask `score` is double and may not fit"),
+        (
+            "amount",
+            "score",
+            "`amount` is decimal(10,2), but the mask `score` is double and may not fit",
+        ),
         ("amount", "1.234", "`amount` is decimal(10,2), but the mask 1.234 may not fit"),
         ("amount", "id", "`amount` is decimal(10,2), but the mask `id` is long and may not fit"),
         (
@@ -518,3 +532,34 @@ def test_a_raw_zone_column_of_an_arrow_type_name_takes_only_null_or_itself(store
     for expression in ("'***'", "0", "DATE '1970-01-01'"):
         with pytest.raises(ValidationError, match="which a mask cannot be checked against"):
             check_expression_types(expression, kind="mask", columns=columns, masked_column="c")
+
+
+def test_a_decimal_without_parameters_has_duckdbs_default_precision_and_scale() -> None:
+    """`decimal` alone is DECIMAL(18,3): three decimal places, fifteen digits before the point."""
+    columns = [ColumnSpec(name="d", type="DECIMAL", nullable=True)]
+    check_expression_types("d = 1.5", kind="filter", columns=columns)
+    check_expression_types("d = 123456789012345.123", kind="filter", columns=columns)
+    with pytest.raises(ValidationError, match="at most 3 decimal places and 15 digits"):
+        check_expression_types("d = 1.5555", kind="filter", columns=columns)
+
+
+def test_a_decimal_with_unreadable_parameters_is_an_unknown_type() -> None:
+    """A type the check cannot read is refused when used, never guessed."""
+    columns = [ColumnSpec(name="d", type="decimal(x,y)", nullable=True)]
+    with pytest.raises(ValidationError, match="which a policy cannot compare"):
+        check_expression_types("d = 1.5", kind="filter", columns=columns)
+
+
+def test_a_number_literal_that_is_not_finite_has_no_exact_representation() -> None:
+    """A literal with no finite value fits no column; the rule says so."""
+    column = _column_type("long")
+    for value in (None, Decimal("NaN"), Decimal("Infinity")):
+        literal = _Type("fractional", "a decimal number", kind="literal", value=value)
+        assert _rule_for(column, literal) == "a finite number"
+
+
+def test_a_number_literal_that_cannot_be_read_is_refused() -> None:
+    """A node no parser would make is refused with its text, not a crash."""
+    checker = _Checker("x", "filter", COLUMNS)
+    with pytest.raises(ValidationError, match="the number abc could not be read"):
+        checker.type_of(exp.Literal.number("abc"))
