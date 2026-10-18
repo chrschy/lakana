@@ -21,7 +21,7 @@ deliberately narrow:
 - age is the second guard: nothing younger than `max_age` is touched, which also
   covers the instant between `mkdtemp` and the worker's `flock`;
 - a directory that user code set to mode 000 is made accessible again (mode 0700,
-  through an ``O_PATH`` descriptor) only after the age guard, and the lock and the
+  never through a symlink) only after the age guard, and the lock and the
   inode check still follow; a live attempt older than `max_age` that did this finds
   its directory back at 0700, which its own user and open descriptors never needed.
 """
@@ -39,7 +39,11 @@ from collections.abc import Callable
 from pathlib import Path
 
 from lakana_core.identifiers import shown
-from lakana_worker.processes import is_private_directory, remove_private_tree
+from lakana_worker.processes import (
+    is_private_directory,
+    remove_private_tree,
+    restore_directory_access,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,10 +61,10 @@ def _open_attempt(path: Path) -> int | None:
     worker's user from opening it. This is called only for a directory that
     has already passed the age guard, and it runs before the lock and the
     inode check, which still decide whether anything is removed. As in
-    `lakana_worker.processes`, the directory is opened by ``O_PATH`` and
-    chmod-ed to 0700 through its descriptor, so a rename that swaps in a link
-    cannot redirect the chmod; a handle that is not a directory owned by the
-    worker's user is refused.
+    `lakana_worker.processes`, the directory is made accessible again by
+    `restore_directory_access`, relative to a descriptor of the work directory
+    and never through a link; anything but a directory owned by the worker's
+    user is refused.
 
     Parameters
     ----------
@@ -86,21 +90,18 @@ def _open_attempt(path: Path) -> int | None:
     except OSError:
         return None
     try:
-        handle = os.open(path, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC)
-    except FileNotFoundError:
-        raise
+        parent = os.open(path.parent, _OPEN_FLAGS)
     except OSError:
         return None
     try:
-        info = os.fstat(handle)
-        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+        if not restore_directory_access(path.name, parent):
             return None
-        os.chmod(f"/proc/self/fd/{handle}", 0o700)
-        return os.open(path, _OPEN_FLAGS)
-    except OSError:
-        return None
+        try:
+            return os.open(path.name, _OPEN_FLAGS, dir_fd=parent)
+        except OSError:
+            return None
     finally:
-        os.close(handle)
+        os.close(parent)
 
 
 def lock_exclusive_if_same(descriptor: int, path: Path) -> bool:

@@ -54,6 +54,23 @@ def _no_real_watchdog(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
+def without_o_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run the restore as on macOS: no `O_PATH`, but a `chmod` relative to a directory descriptor.
+
+    Linux's Python leaves `os.chmod` out of `os.supports_follow_symlinks`, yet its
+    ``fchmodat(..., AT_SYMLINK_NOFOLLOW)`` works on a directory and refuses a symlink
+    (a `ValueError`), so the macOS branch runs here for real, apart from what a link gets.
+
+    Parameters
+    ----------
+    monkeypatch
+        Pytest's monkeypatch.
+    """
+    monkeypatch.delattr(os, "O_PATH", raising=False)
+    monkeypatch.setattr("lakana_worker.processes._CHMOD_AT_WITHOUT_FOLLOWING", True)
+
+
+@pytest.fixture
 def session() -> Iterator[Session]:
     """Provide a session against a fresh in-memory SQLite database.
 

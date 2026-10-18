@@ -23,6 +23,7 @@ from lakana_worker.processes import (
     OutputRedactor,
     is_private_directory,
     remove_private_tree,
+    restore_directory_access,
     signal_group,
     tree_size,
 )
@@ -692,6 +693,13 @@ def test_a_directory_swapped_for_a_link_after_the_listing_is_not_followed(
     assert (outside / "keep").read_text() == "keep"
 
 
+_O_PATH_ONLY = pytest.mark.skipif(
+    not hasattr(os, "O_PATH"),
+    reason="O_PATH is Linux-only; the macOS branch is tested with the O_PATH-less tests below",
+)
+
+
+@_O_PATH_ONLY
 def test_a_locked_directory_that_cannot_be_opened_by_path_is_reported(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -709,6 +717,7 @@ def test_a_locked_directory_that_cannot_be_opened_by_path_is_reported(
         (tree / "sub").chmod(0o700)
 
 
+@_O_PATH_ONLY
 def test_a_locked_root_that_cannot_be_opened_by_path_is_reported(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -757,13 +766,206 @@ def test_a_chmod_that_fails_on_a_locked_directory_is_reported(
     _fail_when(
         monkeypatch,
         "chmod",
-        lambda path, *a, **k: str(path).startswith("/proc/self/fd/"),
+        # The restore's `chmod`, by descriptor (Linux) or by name below the parent (macOS).
+        lambda path, *a, **k: str(path) == "sub" or str(path).startswith("/proc/self/fd/"),
         OSError(errno.EPERM, "denied"),
     )
     try:
         assert remove_private_tree(tree) is False
     finally:
         (tree / "sub").chmod(0o700)
+
+
+def _locked_tree(tmp_path: Path) -> Path:
+    """Build a tree whose subdirectory ``sub`` the task set to mode 000.
+
+    Parameters
+    ----------
+    tmp_path
+        Where to build it.
+
+    Returns
+    -------
+    Path
+        The tree's root.
+    """
+    tree = _tree_with(tmp_path, "sub/f")
+    (tree / "sub").chmod(0)
+    return tree
+
+
+@pytest.mark.usefixtures("without_o_path")
+@pytest.mark.parametrize("where", ["root", "sub", "nested"])
+@pytest.mark.parametrize("mode", [0o000, 0o100, 0o200])
+def test_without_o_path_directories_the_task_locked_are_removed(
+    tmp_path: Path, where: str, mode: int
+) -> None:
+    """Without `O_PATH` (macOS) the restore is a `chmod` relative to the parent's descriptor."""
+    tree = tmp_path / "attempt"
+    (tree / "sub" / "nested").mkdir(parents=True)
+    (tree / "sub" / "nested" / "f").write_text("x")
+    locked = {"root": tree, "sub": tree / "sub", "nested": tree / "sub" / "nested"}[where]
+    locked.chmod(mode)
+    if where == "nested":
+        (tree / "sub").chmod(mode)
+    try:
+        assert remove_private_tree(tree) is True
+    finally:
+        if tree.exists():
+            for directory, _dirs, _files in os.walk(tree):
+                os.chmod(directory, 0o700)
+    assert not tree.exists()
+
+
+@pytest.mark.usefixtures("without_o_path")
+def test_without_o_path_a_directory_swapped_for_a_link_before_the_chmod_is_not_followed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Adversarial: the task swaps in a link after the check; the `chmod` never reaches its target.
+
+    The `lstat` saw a directory; by the `chmod` the name is a link to a directory
+    outside. ``follow_symlinks=False`` changes at most the link itself (macOS) or
+    refuses (Linux), and the reopen with ``O_NOFOLLOW`` refuses the link.
+    """
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o755)
+    before = _modes(outside)
+    tree = _tree_with(tmp_path)
+    (tree / "swapped").symlink_to(outside)
+    real_lstat = os.lstat
+    real_open = os.open
+
+    def lstat(path: str, *, dir_fd: int | None = None) -> os.stat_result:
+        if path == "swapped":  # it was a directory when the task listed it
+            return real_lstat(outside)
+        return real_lstat(path, dir_fd=dir_fd)
+
+    def opening(path: str, flags: int, *args: int, **kwargs: int) -> int:
+        if path == "swapped":  # a mode-000 directory refuses its owner
+            raise PermissionError(errno.EACCES, "denied")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr("lakana_worker.processes.os.lstat", lstat)
+    monkeypatch.setattr("lakana_worker.processes.os.open", opening)
+    assert remove_private_tree(tree) is False
+    assert _modes(outside) == before
+
+
+@pytest.mark.usefixtures("without_o_path")
+def test_without_o_path_a_locked_directory_of_another_owner_is_not_chmoded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a directory of the worker's own user is made accessible again."""
+    tree = _locked_tree(tmp_path)
+    monkeypatch.setattr("lakana_worker.processes.os.geteuid", lambda: os.getuid() + 4242)
+    try:
+        assert remove_private_tree(tree) is False
+        assert stat.S_IMODE((tree / "sub").lstat().st_mode) == 0
+    finally:
+        (tree / "sub").chmod(0o700)
+
+
+@pytest.mark.usefixtures("without_o_path")
+@pytest.mark.parametrize(
+    "error",
+    [OSError(errno.EIO, "io"), FileNotFoundError(errno.ENOENT, "gone")],
+    ids=["io", "vanished"],
+)
+def test_without_o_path_a_locked_directory_that_cannot_be_looked_at_is_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: OSError
+) -> None:
+    """The check before the `chmod` fails: nothing is changed and the tree is reported."""
+    tree = _locked_tree(tmp_path)
+    looks: list[str] = []
+
+    def second_look(path: str, **_kwargs: object) -> bool:
+        """Pass the walk's own `lstat` of ``sub``, fail the restore's.
+
+        Parameters
+        ----------
+        path
+            The name looked at.
+        **_kwargs
+            The call's keyword arguments.
+
+        Returns
+        -------
+        bool
+            Whether this call fails.
+        """
+        if path != "sub":
+            return False
+        looks.append(path)
+        return len(looks) == 2
+
+    _fail_when(monkeypatch, "lstat", second_look, error)
+    try:
+        assert remove_private_tree(tree) is False
+        assert stat.S_IMODE((tree / "sub").lstat().st_mode) == 0
+    finally:
+        (tree / "sub").chmod(0o700)
+
+
+@pytest.mark.usefixtures("without_o_path")
+@pytest.mark.parametrize(
+    "error",
+    [OSError(errno.EPERM, "denied"), FileNotFoundError(errno.ENOENT, "gone")],
+    ids=["refused", "vanished"],
+)
+def test_without_o_path_a_chmod_that_fails_is_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: OSError
+) -> None:
+    tree = _locked_tree(tmp_path)
+    _fail_when(monkeypatch, "chmod", lambda path, *a, **k: path == "sub", error)
+    try:
+        assert remove_private_tree(tree) is False
+    finally:
+        (tree / "sub").chmod(0o700)
+
+
+def test_where_no_safe_chmod_exists_a_locked_directory_is_left_and_the_reason_logged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Neither `O_PATH` nor a `chmod` that refuses links: never fall back to a `chmod` by path."""
+    monkeypatch.delattr(os, "O_PATH", raising=False)
+    monkeypatch.setattr("lakana_worker.processes._CHMOD_AT_WITHOUT_FOLLOWING", False)
+    tree = _locked_tree(tmp_path)
+    try:
+        with caplog.at_level(logging.WARNING):
+            assert remove_private_tree(tree) is False
+        assert stat.S_IMODE((tree / "sub").lstat().st_mode) == 0
+    finally:
+        (tree / "sub").chmod(0o700)
+    assert any(
+        "sub" in message and "cannot be made accessible safely on this platform" in message
+        for message in caplog.messages
+    )
+
+
+@pytest.mark.parametrize("o_path", [True, False], ids=["o-path", "without-o-path"])
+def test_restoring_a_directory_that_is_gone_says_so(
+    tmp_path: Path, request: pytest.FixtureRequest, o_path: bool
+) -> None:
+    """A vanished name is `FileNotFoundError` on either branch; the sweep skips it silently."""
+    if o_path and not hasattr(os, "O_PATH"):
+        pytest.skip("O_PATH is Linux-only")
+    if not o_path:
+        request.getfixturevalue("without_o_path")
+    parent = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(FileNotFoundError):
+            restore_directory_access("gone", parent)
+    finally:
+        os.close(parent)
+
+
+def test_the_platform_check_matches_what_os_reports() -> None:
+    """The fallback is enabled exactly where `os.chmod` takes a descriptor and refuses links."""
+    from lakana_worker import processes
+
+    assert processes._CHMOD_AT_WITHOUT_FOLLOWING is (
+        os.chmod in os.supports_dir_fd and os.chmod in os.supports_follow_symlinks
+    )
 
 
 def test_an_entry_that_vanishes_during_the_walk_is_reported(

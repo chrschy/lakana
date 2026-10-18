@@ -11,6 +11,8 @@ import subprocess  # nosec B404 -- only signals a process the caller started; no
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
+from lakana_core.identifiers import shown
+
 logger = logging.getLogger(__name__)
 _USERINFO = re.compile(rb"(://)[^/@\s]+@")
 _OPEN_USERINFO = re.compile(rb"[/@\s]")
@@ -288,12 +290,159 @@ _MAX_REMOVE_DEPTH = 128
 """Deepest directory nesting `remove_private_tree` follows; each level holds one descriptor."""
 
 
+_CHMOD_AT_WITHOUT_FOLLOWING = (
+    os.chmod in os.supports_dir_fd and os.chmod in os.supports_follow_symlinks
+)
+"""Whether `os.chmod` works relative to a directory descriptor and can refuse to follow a link.
+
+True on macOS (``fchmodat`` with ``AT_SYMLINK_NOFOLLOW``); Linux's Python reports False, and
+Linux restores access through ``O_PATH`` instead.
+"""
+
+
+def _is_own_directory(info: os.stat_result) -> bool:
+    """Say whether a status describes a real directory of the worker's own user.
+
+    Parameters
+    ----------
+    info
+        The result of an `os.lstat` or `os.fstat`.
+
+    Returns
+    -------
+    bool
+        Whether it is a directory owned by the effective uid.
+    """
+    return stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid()
+
+
+def restore_directory_access(name: str, parent_fd: int) -> bool:
+    """Set a directory the task locked back to mode 0700, never through a symlink.
+
+    User code can set its own directories to mode 000, which keeps their owner, the
+    worker's user, from opening them. Where the platform has ``O_PATH`` (Linux), the
+    directory is opened by ``O_PATH`` and ``O_NOFOLLOW`` and chmod-ed through that
+    descriptor, so a rename that swaps in a link cannot redirect the chmod. Where it has
+    not (macOS), the chmod is relative to `parent_fd` and does not follow a link. Where
+    neither exists, nothing is chmod-ed by path: the directory is left and the reason
+    logged.
+
+    Parameters
+    ----------
+    name
+        The directory's name in its parent.
+    parent_fd
+        A descriptor of the parent directory.
+
+    Returns
+    -------
+    bool
+        Whether `name` was a directory of the worker's own user and is mode 0700 now;
+        `False` if it is anything else or the restore failed.
+
+    Raises
+    ------
+    FileNotFoundError
+        If `name` is gone.
+    """
+    if hasattr(os, "O_PATH"):
+        return _restore_through_a_path_descriptor(name, parent_fd)
+    if not _CHMOD_AT_WITHOUT_FOLLOWING:
+        logger.warning(
+            "The locked directory %s cannot be made accessible safely on this platform: it has "
+            "neither O_PATH nor a chmod that refuses to follow a symlink, so it is left in "
+            "place. Restore its access by hand (chmod u+rwx) and remove it.",
+            shown(name),
+        )
+        return False
+    return _restore_relative_to_the_parent(name, parent_fd)
+
+
+def _restore_through_a_path_descriptor(name: str, parent_fd: int) -> bool:
+    """Chmod a locked directory to 0700 through an ``O_PATH`` descriptor (Linux).
+
+    Parameters
+    ----------
+    name
+        The directory's name in its parent.
+    parent_fd
+        A descriptor of the parent directory.
+
+    Returns
+    -------
+    bool
+        Whether the directory, a real one of the worker's own user, is mode 0700 now.
+
+    Raises
+    ------
+    FileNotFoundError
+        If `name` is gone.
+    """
+    try:
+        handle = os.open(name, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_fd)
+    except FileNotFoundError:
+        raise
+    except OSError:
+        return False
+    try:
+        if not _is_own_directory(os.fstat(handle)):
+            return False
+        # The descriptor names the inode that was checked, whatever the name points to now.
+        os.chmod(f"/proc/self/fd/{handle}", 0o700)
+    except OSError:
+        return False
+    finally:
+        os.close(handle)
+    return True
+
+
+def _restore_relative_to_the_parent(name: str, parent_fd: int) -> bool:
+    """Chmod a locked directory to 0700 by name below its parent, not following a link (macOS).
+
+    A mode-000 directory cannot be opened by its owner without ``O_PATH``, so there is
+    no descriptor of it to chmod through. This is race-safe enough: `parent_fd` pins the
+    parent, so a rename of a directory above cannot redirect the call, and
+    ``follow_symlinks=False`` (``AT_SYMLINK_NOFOLLOW``) means a symlink swapped in after
+    the `lstat` has at most its own mode changed, never its target's. What remains is a
+    swap for another object of the worker's own user (a non-root caller cannot chmod
+    anyone else's, and root never gets here: its first open ignores the mode); mode 0700
+    grants nobody else anything, and the caller's reopen with ``O_DIRECTORY`` and
+    ``O_NOFOLLOW`` refuses whatever is not a directory.
+
+    Parameters
+    ----------
+    name
+        The directory's name in its parent.
+    parent_fd
+        A descriptor of the parent directory.
+
+    Returns
+    -------
+    bool
+        Whether the directory, a real one of the worker's own user, is mode 0700 now.
+
+    Raises
+    ------
+    FileNotFoundError
+        If `name` is gone.
+    """
+    try:
+        if not _is_own_directory(os.lstat(name, dir_fd=parent_fd)):
+            return False
+        os.chmod(name, 0o700, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        raise
+    except (OSError, ValueError, NotImplementedError):
+        # Linux's emulation refuses a symlink with a ValueError rather than an OSError.
+        return False
+    return True
+
+
 def _open_directory(name: str, parent_fd: int) -> int | None:
     """Open a real directory below `parent_fd`, making it readable first if its mode forbids that.
 
-    Never follows a symlink: the open uses ``O_NOFOLLOW``, and a locked directory
-    is opened by ``O_PATH`` and chmod-ed through its descriptor, so a rename that
-    swaps in a link cannot redirect the chmod.
+    Never follows a symlink: the open uses ``O_NOFOLLOW``, and a locked directory is
+    made accessible by `restore_directory_access`, which never chmods through a link.
 
     Parameters
     ----------
@@ -315,18 +464,11 @@ def _open_directory(name: str, parent_fd: int) -> int | None:
     except OSError:
         return None
     try:
-        handle = os.open(name, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_fd)
-    except OSError:
-        return None
-    try:
-        if not stat.S_ISDIR(os.fstat(handle).st_mode):
+        if not restore_directory_access(name, parent_fd):
             return None
-        os.chmod(f"/proc/self/fd/{handle}", 0o700)
         return os.open(name, flags, dir_fd=parent_fd)
     except OSError:
         return None
-    finally:
-        os.close(handle)
 
 
 def _clear_directory(root_fd: int) -> bool:
