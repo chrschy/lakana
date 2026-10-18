@@ -28,6 +28,7 @@ def _environment_from_json(data: dict[str, Any]) -> Environment:
         storage_secret_ref=data["storage_secret_ref"],
         is_protected=data["is_protected"],
         properties=data["properties"],
+        storage_options_digest=data.get("storage_options_digest"),
     )
 
 

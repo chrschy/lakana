@@ -12,7 +12,7 @@ from lakana_core.audit.authorization import AuditingAuthorization
 from lakana_core.audit.denial_limiter import DenialAuditLimiter
 from lakana_core.auth import Action, AllowAllAuthorization, PrincipalRef, SecurableKind
 from lakana_core.catalog import CatalogService
-from lakana_core.errors import PermissionDenied
+from lakana_core.errors import NotFoundError, PermissionDenied, ValidationError
 from lakana_core.grants.authorization import GrantAuthorization
 from lakana_core.grants.service import GrantService
 from lakana_core.models import (
@@ -28,12 +28,19 @@ _REFUSAL = (
     "Changing the storage options of environment 'dev' would send its storage secret 'creds' "
     "to wherever they point. That needs the right to manage secrets in 'dev' (the ADMIN role). "
     "Ask someone who may manage secrets in 'dev' to make the change: "
-    "lakana env set-storage dev --option KEY=VALUE"
+    "lakana env set-storage dev --option KEY=VALUE ... (--option replaces all the options, so "
+    "pass every option the environment should have, for example --option s3.endpoint=URL "
+    "--option s3.region=REGION)"
 )
 
 
-def _principal(session: Session, name: str, *actions: Action) -> PrincipalRef:
-    """Persist a principal holding instance-scoped grants of the given actions.
+def _principal(
+    session: Session, name: str, *actions: Action, secret_scope: str | None = None
+) -> PrincipalRef:
+    """Persist a principal holding grants of the given actions.
+
+    `MANAGE_ENVIRONMENT` is granted at instance scope; `MANAGE_SECRET` at instance scope, or in
+    the environment `secret_scope` when given.
 
     Parameters
     ----------
@@ -42,7 +49,9 @@ def _principal(session: Session, name: str, *actions: Action) -> PrincipalRef:
     name
         Its name.
     *actions
-        The actions granted at instance scope.
+        The actions granted.
+    secret_scope
+        The environment to grant `MANAGE_SECRET` in instead of the instance.
 
     Returns
     -------
@@ -54,7 +63,16 @@ def _principal(session: Session, name: str, *actions: Action) -> PrincipalRef:
     session.commit()
     grants = GrantService(session, AllowAllAuthorization())
     for action in actions:
-        grants.grant(ref, principal=name, action=action, kind=SecurableKind.INSTANCE)
+        if action is Action.MANAGE_SECRET and secret_scope is not None:
+            grants.grant(
+                ref,
+                principal=name,
+                action=action,
+                kind=SecurableKind.ENVIRONMENT,
+                environment=secret_scope,
+            )
+        else:
+            grants.grant(ref, principal=name, action=action, kind=SecurableKind.INSTANCE)
     return ref
 
 
@@ -201,3 +219,64 @@ def test_naming_a_secret_stays_covered_by_manage_secret(session: Session) -> Non
     session.expire_all()
     assert session.execute(select(Environment.storage_secret_ref)).scalar_one() == "creds"
     assert len(_denials(session)) == 1
+
+
+def test_manage_secret_in_this_environment_is_enough(session: Session) -> None:
+    """The right is environment-scoped: a grant in `dev` itself satisfies the check."""
+    _environment(session, secret="creds")
+    holder = _principal(
+        session, "holder", Action.MANAGE_ENVIRONMENT, Action.MANAGE_SECRET, secret_scope="dev"
+    )
+
+    _service(session).update_environment_storage(holder, "dev", options={"s3.endpoint": "x"})
+
+    assert _options(session) == {"s3.endpoint": "x"}
+
+
+def test_manage_secret_in_another_environment_does_not_count(session: Session) -> None:
+    """A grant in `prod` says nothing about `dev`: the change is refused and audited."""
+    _environment(session, secret="creds")
+    session.add(Environment(id=uuid.uuid4(), name="prod", storage_root="s3://bucket/prod"))
+    session.commit()
+    holder = _principal(
+        session, "holder", Action.MANAGE_ENVIRONMENT, Action.MANAGE_SECRET, secret_scope="prod"
+    )
+
+    with pytest.raises(PermissionDenied):
+        _service(session).update_environment_storage(holder, "dev", options={"s3.endpoint": "x"})
+
+    assert _denials(session) == [(holder.id, "storage_options_move_secret")]
+
+
+def test_early_refusals_end_the_transaction_and_release_the_row_lock(session: Session) -> None:
+    """A protected or missing environment raises with nothing left open."""
+    _environment(session, secret=None)
+    session.execute(select(Environment)).scalar_one().is_protected = True
+    session.commit()
+    admin = _principal(session, "admin", Action.MANAGE_ENVIRONMENT)
+
+    with pytest.raises(ValidationError):
+        _service(session).update_environment_storage(admin, "dev", options={"a": "b"})
+    assert not session.in_transaction()
+    with pytest.raises(NotFoundError):
+        _service(session).update_environment_storage(admin, "nope", options={"a": "b"})
+    assert not session.in_transaction()
+
+
+def test_attaching_a_secret_records_the_endpoint_it_approves(session: Session) -> None:
+    """The audit event holds the storage endpoint (no user information), never other options."""
+    _environment(session, secret=None)
+    row = session.execute(select(Environment)).scalar_one()
+    row.storage_options = {"s3.endpoint": "https://key:pw@s3.example.org:9000", "s3.x": "private"}
+    session.commit()
+    both = _principal(session, "both", Action.MANAGE_ENVIRONMENT, Action.MANAGE_SECRET)
+
+    _service(session).update_environment_storage(both, "dev", secret_ref="creds")
+
+    event = session.execute(
+        select(AuditEvent).where(
+            AuditEvent.event_type == AuditEventType.ENVIRONMENT_STORAGE_UPDATED
+        )
+    ).scalar_one()
+    assert event.detail["storage_endpoint"] == "https://s3.example.org:9000"
+    assert "private" not in str(event.detail) and "pw" not in str(event.detail)

@@ -174,6 +174,7 @@ from lakana_core.secrets.uses import (
     SecretBindingRefused,
     record_refusal,
     require_secret_management_for_storage_change,
+    storage_endpoint,
 )
 from lakana_core.storage.base import StoredObject
 from lakana_core.storage.resolver import (
@@ -1253,8 +1254,10 @@ class CatalogService:
             .execution_options(populate_existing=True)
         ).scalar_one_or_none()
         if env is None:
+            self._session.rollback()
             raise NotFoundError(f"No environment named {name!r}.")
         if env.is_protected:
+            self._session.rollback()
             raise ValidationError(f"Environment {name!r} is protected.")
         if options is not None:
             if dict(options) != env.storage_options:
@@ -1274,6 +1277,11 @@ class CatalogService:
             detail={
                 "options_keys": sorted(options.keys()) if options is not None else None,
                 "secret_ref_set": secret_ref is not None,
+                **(
+                    {"storage_endpoint": storage_endpoint(env.storage_options)}
+                    if secret_ref is not None
+                    else {}
+                ),
             },
         )
         self._session.commit()

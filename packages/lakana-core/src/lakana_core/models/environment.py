@@ -1,5 +1,7 @@
 """The environment model."""
 
+import hashlib
+import json
 import uuid
 
 from sqlalchemy import JSON, Boolean, String, Uuid
@@ -37,3 +39,35 @@ class Environment(Base, TimestampMixin):
     storage_secret_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
     is_protected: Mapped[bool] = mapped_column(Boolean, default=False)
     properties: Mapped[dict[str, str]] = mapped_column(JSON, default=dict)
+
+    @property
+    def storage_options_digest(self) -> str:
+        """Fingerprint the storage options without revealing them.
+
+        The options can carry inline credentials, so the API never returns them; a client
+        that must know whether they are exactly some map compares this digest with
+        `options_digest` of that map.
+
+        Returns
+        -------
+        str
+            The SHA-256 of the options as sorted-key, compact JSON, in hex.
+        """
+        return options_digest(self.storage_options)
+
+
+def options_digest(options: dict[str, str]) -> str:
+    """Fingerprint a storage options map.
+
+    Parameters
+    ----------
+    options
+        The options.
+
+    Returns
+    -------
+    str
+        The SHA-256 of the options as sorted-key, compact JSON, in hex.
+    """
+    canonical = json.dumps(options, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(canonical.encode("ascii")).hexdigest()

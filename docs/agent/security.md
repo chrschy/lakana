@@ -2494,7 +2494,12 @@ that uses it. User reference: `docs/site/reference/package-indexes.md`; how-to:
   instance-scoped `MANAGE_ENVIRONMENT`; the refusal is `AUTHORIZATION_DENIED` with reason
   `storage_options_move_secret`, written after the rollback. The environment row is locked for
   the check, so an attach that runs at the same time is seen. Options equal to the stored ones
-  need no extra right (nothing moves). The storage root and scheme cannot change after creation,
+  need no extra right (nothing moves). Attaching a secret records `storage_endpoint` (userinfo
+  dropped, no other option) in the `ENVIRONMENT_STORAGE_UPDATED` detail, because it approves the
+  options then. `EnvironmentOut` returns `storage_options_digest`, never the options (they can
+  hold inline credentials); the Compose `setup` attaches `seaweedfs-s3` only to a `dev` whose
+  root and whole options map match the bundle's, else it prints the command and attaches
+  nothing (delete, recreate with another endpoint, restart attaches nothing). The storage root and scheme cannot change after creation,
   and creation sets no secret; changing `secret_ref` already needs `MANAGE_SECRET`. Without `DEPLOY` a holder of
   `MANAGE_PACKAGE_INDEX` can only stop projects (`index update --url`, `index remove`). Trust
   domain: under `LocalProcessRunner` a holder who also has `DEPLOY` and `RUN` still reads what the

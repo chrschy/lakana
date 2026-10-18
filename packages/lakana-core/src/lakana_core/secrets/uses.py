@@ -15,6 +15,7 @@ import shlex
 import uuid
 from dataclasses import dataclass, field
 from typing import TypeVar
+from urllib.parse import urlsplit
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -770,7 +771,34 @@ def require_secret_management_for_storage_change(
         f"Changing the storage options of environment '{name}' would send its storage secret "
         f"'{plain(secret)}' to wherever they point. That needs the right to manage secrets in "
         f"'{name}' (the ADMIN role). Ask someone who may manage secrets in '{name}' to make the "
-        f"change: lakana env set-storage {shlex.quote(name)} --option KEY=VALUE",
+        f"change: lakana env set-storage {shlex.quote(name)} --option KEY=VALUE ... (--option "
+        "replaces all the options, so pass every option the environment should have, for "
+        "example --option s3.endpoint=URL --option s3.region=REGION)",
         scope,
         "storage_options_move_secret",
     )
+
+
+def storage_endpoint(options: dict[str, str]) -> str | None:
+    """Name the endpoint a storage secret would be presented to, for the audit log.
+
+    Only the endpoint is returned, never another option, because options can carry inline
+    credentials; any user information in the URL is dropped too.
+
+    Parameters
+    ----------
+    options
+        The environment's storage options.
+
+    Returns
+    -------
+    str | None
+        The `s3.endpoint` option without user information, or `None` if it is not set.
+    """
+    endpoint = options.get("s3.endpoint")
+    if endpoint is None:
+        return None
+    parts = urlsplit(endpoint)
+    if "@" not in parts.netloc:
+        return endpoint
+    return parts._replace(netloc=parts.netloc.rsplit("@", 1)[1]).geturl()

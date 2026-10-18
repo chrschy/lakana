@@ -121,6 +121,9 @@ class EnvironmentOut(BaseModel):
         refused.
     properties
         Free-form metadata.
+    storage_options_digest
+        A SHA-256 fingerprint of the storage options, which are not returned because they can
+        carry inline credentials; a client compares it with the digest of the options it expects.
     """
 
     name: str
@@ -128,6 +131,7 @@ class EnvironmentOut(BaseModel):
     storage_secret_ref: str | None
     is_protected: bool
     properties: dict[str, str]
+    storage_options_digest: str
 
     model_config = {"from_attributes": True}
 

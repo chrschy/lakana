@@ -27,7 +27,12 @@ _SECRET = {
 }
 
 
-def _dev(secret_ref: str | None, *, root: str = "s3://lakana/dev") -> dict[str, object]:
+def _dev(
+    secret_ref: str | None,
+    *,
+    root: str = "s3://lakana/dev",
+    options: dict[str, str] | None = None,
+) -> dict[str, object]:
     """Return an environment document for `dev`.
 
     Parameters
@@ -36,6 +41,8 @@ def _dev(secret_ref: str | None, *, root: str = "s3://lakana/dev") -> dict[str, 
         Its storage secret reference.
     root
         Its storage root.
+    options
+        Its storage options; the bundle's own when omitted.
 
     Returns
     -------
@@ -48,6 +55,9 @@ def _dev(secret_ref: str | None, *, root: str = "s3://lakana/dev") -> dict[str, 
         "storage_secret_ref": secret_ref,
         "is_protected": False,
         "properties": {},
+        "storage_options_digest": setup._options_digest(
+            setup.OPTIONS if options is None else options
+        ),
     }
 
 
@@ -224,6 +234,43 @@ def test_dev_with_a_different_storage_root_is_left_untouched() -> None:
     assert [r.method for r in api.requests] == ["GET"]
     assert "operator-managed" in out.getvalue()
     assert "file:///data/lake/dev" in out.getvalue()
+
+
+def test_dev_recreated_with_another_endpoint_gets_no_secret() -> None:
+    """Delete, recreate with other options, restart: the secret is never attached there."""
+    api = FakeApi()
+    api.on("GET", _ENV_PATH, status=200, json=_dev(None, options={"s3.endpoint": "https://evil"}))
+    out = io.StringIO()
+
+    setup.run_setup(api.client(), access_key="ak", secret_key="sk", out=out)
+
+    assert [r.method for r in api.requests] == ["GET"]
+    assert "storage options differ from the bundle's" in out.getvalue()
+    assert "'dev'" in out.getvalue()
+    assert "lakana env set-storage dev --secret-ref seaweedfs-s3" in out.getvalue()
+
+
+def test_dev_with_an_extra_option_gets_no_secret() -> None:
+    """The whole options map is compared: an added key counts as a difference."""
+    api = FakeApi()
+    options = {**setup.OPTIONS, "s3.region": "x"}
+    api.on("GET", _ENV_PATH, status=200, json=_dev(None, options=options))
+
+    setup.run_setup(api.client(), access_key="ak", secret_key="sk", out=io.StringIO())
+
+    assert [r.method for r in api.requests] == ["GET"]
+
+
+def test_dev_from_a_server_without_a_digest_gets_no_secret() -> None:
+    """A server that does not send the digest cannot prove the options, so nothing is attached."""
+    api = FakeApi()
+    body = _dev(None)
+    del body["storage_options_digest"]
+    api.on("GET", _ENV_PATH, status=200, json=body)
+
+    setup.run_setup(api.client(), access_key="ak", secret_key="sk", out=io.StringIO())
+
+    assert [r.method for r in api.requests] == ["GET"]
 
 
 def test_dev_with_a_foreign_secret_ref_is_left_untouched() -> None:

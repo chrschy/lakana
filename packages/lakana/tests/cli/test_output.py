@@ -87,6 +87,7 @@ def test_emit_json_lists_dataclasses_with_their_field_names(
             "storage_secret_ref": None,
             "is_protected": False,
             "properties": {},
+            "storage_options_digest": None,
         }
     ]
 
