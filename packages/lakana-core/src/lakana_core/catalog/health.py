@@ -116,8 +116,12 @@ def snapshot_stats(metadata: TableMetadata) -> SnapshotStats:
     if snapshot is None:
         return SnapshotStats(None, None, None, None)
     summary: Mapping[str, Any] = {} if snapshot.summary is None else snapshot.summary
+    try:
+        last_write_at = datetime.fromtimestamp(snapshot.timestamp_ms / 1000, tz=UTC)
+    except (ValueError, OverflowError, OSError):
+        last_write_at = None
     return SnapshotStats(
-        last_write_at=datetime.fromtimestamp(snapshot.timestamp_ms / 1000, tz=UTC),
+        last_write_at=last_write_at,
         row_count=_whole_number(summary.get("total-records")),
         size_bytes=_whole_number(summary.get("total-files-size")),
         file_count=_whole_number(summary.get("total-data-files")),

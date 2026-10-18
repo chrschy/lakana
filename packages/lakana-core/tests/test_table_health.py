@@ -793,3 +793,13 @@ def test_a_view_has_no_numbers(
         None,
         None,
     )
+
+
+@pytest.mark.parametrize("timestamp_ms", [10**17, -(10**17), 2**62])
+def test_a_snapshot_time_out_of_range_reads_as_no_time(timestamp_ms: int) -> None:
+    summary = {"total-records": "4"}
+    snapshot = SimpleNamespace(summary=SimpleNamespace(get=summary.get), timestamp_ms=timestamp_ms)
+    metadata = SimpleNamespace(snapshot_by_id=lambda _: snapshot, current_snapshot_id=7)
+    stats = snapshot_stats(metadata)  # ty: ignore[invalid-argument-type]
+    assert stats.last_write_at is None
+    assert stats.row_count == 4
