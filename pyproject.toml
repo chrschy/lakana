@@ -3,7 +3,7 @@ members = ["packages/*"]
 
 [dependency-groups]
 dev = [
-    "hypothesis>=6.169.0",
+    "hypothesis>=6.169.3",
     "polars>=1.30",
     "import-linter>=2",
     "pip-licenses>=5",
