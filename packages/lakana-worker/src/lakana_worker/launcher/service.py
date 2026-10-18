@@ -31,6 +31,7 @@ import os
 import re
 import secrets
 import socket
+import stat
 import struct
 import threading
 import time
@@ -313,7 +314,7 @@ class Launcher:
         self._subnets: dict[str, str] = {}
         self._used_subnets: set[str] = set()
         self._reserved_mb = 0
-        self._cache_key = b""
+        self._key: bytes | None = None
         self._reaper_stop = threading.Event()
 
     # --- start-up -----------------------------------------------------------------------
@@ -381,7 +382,7 @@ class Launcher:
             "on" if works else "off: this Docker refuses it",
         )
         (self.settings.state_dir / "environments").mkdir(mode=0o700, parents=True, exist_ok=True)
-        self._cache_key = self._load_cache_key()
+        self._key = self._load_cache_key()
         self._check_ingestion_roots()
 
     def _check_isolated_network(self, version: str) -> None:
@@ -511,10 +512,36 @@ class Launcher:
         )
         return False
 
+    @property
+    def _cache_key(self) -> bytes:
+        """The key that keeps credentials apart in cache names.
+
+        Returns
+        -------
+        bytes
+            The 32-byte key `start` loaded.
+
+        Raises
+        ------
+        RuntimeError
+            If the launcher has not started: an empty key would make cache names guessable.
+        """
+        if self._key is None:
+            raise RuntimeError("the cache key is only available after start()")
+        return self._key
+
     def _load_cache_key(self) -> bytes:
         """Read the key that keeps credentials apart in cache names, making it on first use.
 
         The key never leaves the launcher: only HMACs made with it reach a Docker volume name.
+        A new key is written to a temporary file (mode 0600, flushed to disk) and linked to
+        `cache.key` only when whole, so the file never exists half written and two launchers
+        racing on one volume agree on one key. The file is read back with the same strictness
+        on every start. Fail closed: a file that is not a regular file of this user, is
+        accessible to group or others, or does not hold exactly 32 bytes (planted, truncated by
+        hand or by a full disk under an older launcher) is refused, never repaired or replaced,
+        because an operator must decide whether the old key leaked; deleting it makes the next
+        start create a new one.
 
         Returns
         -------
@@ -524,23 +551,78 @@ class Launcher:
         Raises
         ------
         StartError
-            If the file exists and does not hold 32 bytes.
+            If the file exists and is not a private regular file of 32 bytes.
         """
         path = self.settings.state_dir / "cache.key"
         try:
-            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        except FileExistsError:
-            key = path.read_bytes()
-            if len(key) != 32:
-                raise StartError(
-                    f"{path} does not hold the 32 bytes of the cache key; remove it and restart "
-                    "(the shared caches then start empty)."
-                ) from None
-            return key
+            return self._read_cache_key(path)
+        except FileNotFoundError:
+            pass
         key = secrets.token_bytes(32)
-        with os.fdopen(descriptor, "wb") as handle:
-            os.fchmod(handle.fileno(), 0o600)
-            handle.write(key)
+        temporary = path.with_name(f"{path.name}.{secrets.token_hex(8)}.tmp")
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(key)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.link(temporary, path)
+        except FileExistsError:
+            return self._read_cache_key(path)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return key
+
+    @staticmethod
+    def _read_cache_key(path: Path) -> bytes:
+        """Read `cache.key`, refusing anything but a private regular file of 32 bytes.
+
+        Parameters
+        ----------
+        path
+            The key file.
+
+        Returns
+        -------
+        bytes
+            The key.
+
+        Raises
+        ------
+        FileNotFoundError
+            If there is no such file.
+        StartError
+            If the file is a link, not a regular file, owned by another user, accessible to
+            group or others, or not 32 bytes long.
+        """
+        fix = "delete it and restart (the shared caches then start empty)"
+        try:
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            raise
+        except OSError as exc:
+            raise StartError(
+                f"{path} cannot be opened without following a symbolic link ({exc.strerror}); "
+                f"{fix}."
+            ) from None
+        try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode):
+                raise StartError(f"{path} is not a regular file; {fix}.")
+            if info.st_uid != os.getuid():
+                raise StartError(
+                    f"{path} is owned by user {info.st_uid}, not by the launcher; {fix}."
+                )
+            if info.st_mode & 0o077:
+                raise StartError(
+                    f"{path} is accessible to group or others (mode "
+                    f"{stat.S_IMODE(info.st_mode):04o}); {fix}."
+                )
+            key = os.read(descriptor, 33)
+        finally:
+            os.close(descriptor)
+        if len(key) != 32:
+            raise StartError(f"{path} does not hold the 32 bytes of the cache key; {fix}.")
         return key
 
     def _check_socket_group(self) -> None:
@@ -843,12 +925,16 @@ class Launcher:
             )
         deadline = _deadline(request.limits.timeout_seconds)
         cache = cache_volume(self.settings, request, key=self._cache_key)
+        if not request.no_build and not self._remove_volume(cache):
+            # A private cache is never reused: what a dead launcher left must be gone first.
+            raise EngineError(
+                f"the private cache of build {request.build[:12]} from an earlier run is still "
+                "in use or cannot be removed; wait for the container that mounts it to stop, "
+                "or check `docker compose logs launcher`"
+            )
         network: str | None = None
         try:
             self._create_volume(volume_spec(self.settings, volume, "env", shared=False))
-            if not request.no_build:
-                # A private cache is never reused: what a dead launcher left is removed first.
-                self._remove_volume(cache)
             self._create_volume(
                 volume_spec(
                     self.settings,

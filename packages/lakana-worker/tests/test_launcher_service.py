@@ -1429,6 +1429,120 @@ def test_a_private_cache_left_by_a_dead_launcher_is_removed_before_the_build_mak
     assert events[:2] == ["delete", "create"]
 
 
+@pytest.mark.parametrize("reply", [(409, {"message": "in use"}), EngineError("engine down")])
+def test_a_leftover_private_cache_that_cannot_be_removed_refuses_the_build(
+    tmp_path: Path, reply: Any
+) -> None:
+    """A private cache is never reused: if the old one stays, nothing is created or mounted."""
+    engine = FakeEngine()
+    launcher = _started(engine, tmp_path, built=False)
+    request = _build()
+    cache = cache_volume(launcher.settings, request, key=launcher._cache_key)
+    engine.volumes.add(cache)
+    _intercept(engine, lambda m, p, b: m == "DELETE" and p == f"/volumes/{cache}", reply)
+
+    with pytest.raises(EngineError, match=r"private cache.*docker compose logs launcher"):
+        launcher.build(request, lambda line: None)
+
+    assert engine.created("build") == []
+    assert not [c for c in engine.calls if c[1] == "/volumes/create"]
+    assert launcher._subnets == {}
+
+
+def test_the_cache_key_is_unusable_before_start(tmp_path: Path) -> None:
+    """An unstarted launcher must fail loudly, never HMAC with an empty key."""
+    launcher = Launcher(settings(tmp_path), FakeEngine())
+
+    with pytest.raises(RuntimeError, match=r"start\(\)"):
+        _ = launcher._cache_key
+
+
+def test_a_failed_write_of_the_cache_key_leaves_no_file_behind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The key file appears whole or not at all; a crash cannot leave an empty one."""
+
+    def fail(descriptor: int) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(os, "fsync", fail)
+
+    with pytest.raises(OSError, match="disk full"):
+        _started(FakeEngine(), tmp_path)
+
+    assert not (tmp_path / "cache.key").exists()
+    assert not list(tmp_path.glob("cache.key*"))
+
+
+def test_two_launchers_starting_together_agree_on_the_key_that_won(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The loser of the race to create `cache.key` reads the winner's key, never replaces it."""
+    winner = b"w" * 32
+
+    def lose(source: Any, target: Any) -> None:
+        Path(target).write_bytes(winner)
+        Path(target).chmod(0o600)
+        raise FileExistsError(target)
+
+    monkeypatch.setattr(os, "link", lose)
+
+    launcher = _started(FakeEngine(), tmp_path)
+
+    assert launcher._cache_key == winner
+    assert not list(tmp_path.glob("cache.key.*"))
+
+
+def test_a_symlinked_cache_key_is_refused(tmp_path: Path) -> None:
+    """A link could point the key at a file someone else controls."""
+    target = tmp_path / "elsewhere"
+    target.write_bytes(b"k" * 32)
+    target.chmod(0o600)
+    (tmp_path / "cache.key").symlink_to(target)
+
+    with pytest.raises(StartError, match=r"cache\.key.*symbolic link.*delete it and restart"):
+        _started(FakeEngine(), tmp_path)
+
+
+def test_a_cache_key_that_is_a_directory_is_refused(tmp_path: Path) -> None:
+    """Only a regular file can hold the key."""
+    (tmp_path / "cache.key").mkdir()
+
+    with pytest.raises(StartError, match=r"cache\.key.*regular file"):
+        _started(FakeEngine(), tmp_path)
+
+
+def test_a_cache_key_owned_by_someone_else_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A planted key is known to whoever planted it."""
+    _started(FakeEngine(), tmp_path)
+    monkeypatch.setattr(os, "getuid", lambda: os.stat(tmp_path / "cache.key").st_uid + 1)
+
+    with pytest.raises(StartError, match=r"cache\.key.*owned by"):
+        _started(FakeEngine(), tmp_path)
+
+
+@pytest.mark.parametrize("mode", [0o640, 0o604, 0o660])
+def test_a_cache_key_others_can_read_or_write_is_refused(tmp_path: Path, mode: int) -> None:
+    """Group or world access means the key may be known."""
+    _started(FakeEngine(), tmp_path)
+    (tmp_path / "cache.key").chmod(mode)
+
+    with pytest.raises(StartError, match=r"cache\.key.*accessible"):
+        _started(FakeEngine(), tmp_path)
+
+
+def test_an_empty_cache_key_file_is_refused_with_the_fix(tmp_path: Path) -> None:
+    """Fail closed: an empty file is never used, and the message names the way out."""
+    key_file = tmp_path / "cache.key"
+    key_file.write_bytes(b"")
+    key_file.chmod(0o600)
+
+    with pytest.raises(StartError, match=r"cache\.key.*delete it and restart"):
+        _started(FakeEngine(), tmp_path)
+
+
 def test_the_reaper_removes_private_caches_past_their_deadline(tmp_path: Path) -> None:
     """A launcher that died mid-build leaves a private cache; its label says when it is stale."""
     engine = FakeEngine()
@@ -1478,6 +1592,7 @@ def test_the_cache_key_is_made_once_kept_private_and_reused(tmp_path: Path) -> N
 def test_a_cache_key_file_of_the_wrong_size_is_refused(tmp_path: Path) -> None:
     """A truncated or planted file would weaken every cache name."""
     (tmp_path / "cache.key").write_bytes(b"short")
+    (tmp_path / "cache.key").chmod(0o600)
 
     with pytest.raises(StartError, match=r"cache\.key"):
         _started(FakeEngine(), tmp_path)
