@@ -22,6 +22,7 @@ from lakana_core.policy.columns import (
     ColumnSource,
     list_columns,
     read_table_description,
+    type_checks_apply,
     validate_for_table,
 )
 from lakana_core.policy.expression_types import check_expression_types
@@ -34,8 +35,8 @@ def _check_column_exists(
     environment: str,
     column: str,
     expression: str,
-) -> int | None:
-    """Refuse a mask on a missing column or of another type; give the schema it is checked against.
+) -> tuple[int | None, bool]:
+    """Refuse a mask on a missing column or of another type; give its schema and typed flag.
 
     The comparison is exact, as it is when the mask is applied to a query, so
     a mask accepted here is a mask the query path can honour.
@@ -57,9 +58,11 @@ def _check_column_exists(
 
     Returns
     -------
-    int or None
+    tuple of int or None and bool
         The id of the table's current schema as read for this check, so that the mask records
-        the schema whose columns and types were checked; `None` for a table without field ids.
+        the schema whose columns and types were checked (`None` for a table without field ids),
+        and whether the types were checked: `False` for a CSV or JSON table, whose stored types
+        are only a guess.
 
     Raises
     ------
@@ -76,10 +79,12 @@ def _check_column_exists(
     description = read_table_description(catalog, p, ref, policy="mask")
     names = [spec.name for spec in description.columns]
     if column in names:
+        if not type_checks_apply(description):
+            return description.schema_id, False
         check_expression_types(
             expression, kind="mask", columns=description.columns, masked_column=column
         )
-        return description.schema_id
+        return description.schema_id, True
     message = f"Table {dotted!r} in environment {environment!r} has no column {column!r}. "
     message += list_columns(names)
     if names:
@@ -266,7 +271,9 @@ class ColumnMaskService:
         ref = TableRef(
             environment=environment, namespace=NamespacePath.parse(namespace), name=table
         )
-        schema_id = _check_column_exists(self._catalog, p, ref, environment, column, expression)
+        schema_id, type_checked = _check_column_exists(
+            self._catalog, p, ref, environment, column, expression
+        )
         row = ColumnMask(
             id=uuid.uuid4(),
             principal_id=principal_id,
@@ -279,7 +286,7 @@ class ColumnMaskService:
             column=column,
             expression=expression,
             schema_id=schema_id,
-            type_checked=True,
+            type_checked=type_checked,
             created_by=p.id,
             created_at=datetime.now(UTC),
         )

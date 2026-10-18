@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from lakana_core.auth import Action, AllowAllAuthorization, PrincipalRef, Securable, SecurableKind
 from lakana_core.catalog.json_schema import ColumnSpec
+from lakana_core.catalog.schema_inference import infer_schema
 from lakana_core.catalog.service import TableDescription
 from lakana_core.errors import (
     ConflictError,
@@ -1236,3 +1237,45 @@ def test_a_bad_typed_date_is_refused_as_the_page_says(session: Session) -> None:
         _create_filter(session, "born = DATE '2026-13-01'")
     [quoted] = [q for q in _page_quotes() if q.startswith("'born = DATE '2026-13-01''")]
     assert str(caught.value).startswith(quoted.removesuffix(" ...").rstrip())
+
+
+@pytest.mark.parametrize("file_format", ["csv", "json"])
+@pytest.mark.parametrize("expression", ["id = 5", "id = 'x'", "region = 5", "region"])
+def test_a_filter_on_a_csv_or_json_table_is_checked_only_against_the_subset(
+    session: Session, file_format: str, expression: str
+) -> None:
+    """The stored types of such a table are a guess; DuckDB reads its own, so no type check."""
+    catalog = FakeColumnCatalog(types={"id": "int64"}, file_format=file_format)
+    assert _create_filter(session, expression, catalog).expression == expression
+
+
+def test_a_filter_on_a_parquet_table_is_type_checked(session: Session) -> None:
+    """A Parquet file carries its schema, so the stored types are the ones the engine reads."""
+    catalog = FakeColumnCatalog(types={"id": "int64"}, file_format="parquet")
+    assert _create_filter(session, "id = 5", catalog).expression == "id = 5"
+
+
+def test_a_filter_on_a_parquet_table_keeps_the_strict_check(session: Session) -> None:
+    """A mismatch on a Parquet column is refused with the stored type named."""
+    catalog = FakeColumnCatalog(types={"id": "int64"}, file_format="parquet")
+    with pytest.raises(ValidationError, match="`id` is int64; compare it with a number"):
+        _create_filter(session, "id = 'x'", catalog)
+
+
+@pytest.mark.parametrize(
+    ("file_format", "sample", "expression"),
+    [
+        ("csv", b"id,ts\n007,2026-01-01 10:00:00\n008,2026-01-02 10:00:00\n", "id = 7"),
+        ("csv", b"id,ts\n1,2026-01-01 10:00:00\n", "ts > TIMESTAMP '2026-01-01 00:00:00'"),
+        ("json", b'{"u": "550e8400-e29b-41d4-a716-446655440000", "t": "10:00:00"}\n', "u = 'x'"),
+        ("json", b'{"u": "550e8400-e29b-41d4-a716-446655440000", "t": "10:00:00"}\n', "t = 'x'"),
+    ],
+)
+def test_a_filter_on_the_types_infer_schema_really_stores_is_not_refused(
+    session: Session, file_format: str, sample: bytes, expression: str
+) -> None:
+    """The cases where the stored guess and the engine's own reading differ are not checked."""
+    stored = infer_schema(sample, file_format)
+    catalog = FakeColumnCatalog(names=list(stored), types=stored, file_format=file_format)
+
+    assert _create_filter(session, expression, catalog).expression == expression

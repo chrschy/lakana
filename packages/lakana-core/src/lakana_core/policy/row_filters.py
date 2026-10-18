@@ -22,6 +22,7 @@ from lakana_core.policy.columns import (
     ColumnSource,
     list_columns,
     read_table_description,
+    type_checks_apply,
     validate_for_table,
 )
 from lakana_core.policy.expression_types import check_expression_types
@@ -35,7 +36,8 @@ def _check_columns_exist(
 
     The comparison ignores letter case, as the database does when the filter runs, so a
     filter accepted here is a filter the query path can apply. Then it checks the filter's types
-    against the same columns (`check_expression_types`), so the schema id recorded is the one
+    against the same columns (`check_expression_types`), unless the table is a CSV or JSON file
+    (`type_checks_apply`), so the schema id recorded is the one
     whose types were checked. A filter that reads no column (`TRUE`, `has_group('staff')`) has no
     column to look up and does not read the table; its types are still checked.
 
@@ -85,7 +87,8 @@ def _check_columns_exist(
         if names:
             message += " Check the spelling."
         raise ValidationError(message)
-    check_expression_types(expression, kind="filter", columns=description.columns)
+    if type_checks_apply(description):
+        check_expression_types(expression, kind="filter", columns=description.columns)
     return description.schema_id
 
 

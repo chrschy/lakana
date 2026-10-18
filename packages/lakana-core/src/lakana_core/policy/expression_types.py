@@ -215,8 +215,10 @@ def _column_type(declared: str) -> _Type:
     if family == "integer":
         return _Type(family, lowered, kind="int", bits=_INTEGER_BITS[base])
     if family == "fractional":
-        if base == "real":  # `float` and `double` are read through the Arrow names
+        if base in ("float", "real"):  # lower-case `float` and `double` took the Arrow names
             return _Type(family, lowered, kind="float")
+        if base == "double":
+            return _Type(family, lowered, kind="double")
         precision, scale = _DEFAULT_DECIMAL
         if params:
             try:
@@ -582,7 +584,9 @@ class _Checker:
                 f"the type of {self.describe(node)} is {shown(found.name)}, which a policy "
                 "cannot compare. Use only columns of a simple type (text, number, boolean, "
                 "date or timestamp). Unsigned integers, timestamps in seconds, milliseconds or "
-                "nanoseconds, and nested types are not supported yet."
+                "nanoseconds, and nested types are not supported yet. Filter on another column, "
+                "or on a table written by Lakana (an Iceberg table, for example one made with "
+                "`lakana sql ... --into`)."
             )
 
     def require_condition(self, node: exp.Expression) -> None:
@@ -870,7 +874,7 @@ class _Checker:
             return f"{head}; compare it with '{shown_other}', not {shown_other}."
         if family in _NUMBERS and other_type.family == "text" and isinstance(inner, exp.Literal):
             if inner.name.isascii() and inner.name.isdecimal():
-                return f"{head}; compare it with {inner.name}, not {shown_other}."
+                return f"{head}; compare it with {int(inner.name)}, not {shown_other}."
             return f"{head}; compare it with a number, not {shown_other}."
         if family in _TEMPORAL and other_type.family == "text" and isinstance(inner, exp.Literal):
             typed = "DATE" if family == "date" else "TIMESTAMP"

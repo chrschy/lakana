@@ -124,6 +124,8 @@ def test_describe_table_covers_every_kind(
     assert described_external.kind == "EXTERNAL"
     assert described_external.metadata_location is None
     assert [c.name for c in described_external.columns] == ["id"]
+    assert (managed.file_format, described_view.file_format) == (None, None)
+    assert described_external.file_format == "parquet"
 
 
 def test_describe_table_hides_a_views_sql_from_a_reader_missing_a_reference(

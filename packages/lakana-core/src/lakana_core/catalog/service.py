@@ -515,6 +515,9 @@ class TableDescription:
     schema_id
         The id of the current schema of a managed table; `None` for a view, an external table
         and an artifact, which have no field ids.
+    file_format
+        An external table's stored file format (`"parquet"`, `"csv"`, `"json"`); `None` for
+        every other kind.
     """
 
     ref: TableRef
@@ -529,6 +532,7 @@ class TableDescription:
     state: Literal["published", "not_published", "kept"] = "published"
     state_message: str | None = None
     schema_id: int | None = None
+    file_format: str | None = None
 
 
 _NO_UNPUBLISHING = (
@@ -2651,6 +2655,7 @@ class CatalogService:
                 kind=row.kind,
                 metadata_location=None,
                 columns=[ColumnSpec(name=n, type=t, nullable=True) for n, t in schema.items()],
+                file_format=(row.external_config or {}).get("format"),
             )
         loaded = self._to_loaded_table(ref, row)
         unpublished = row.unpublished_run_id

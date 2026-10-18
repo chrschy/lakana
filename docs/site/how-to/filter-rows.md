@@ -92,6 +92,16 @@ condition against the table's columns, as they are now, when you create the filt
 condition that would need a conversion. The columns it checks are the ones of the schema the filter
 records (see [After a rename](#after-a-rename)).
 
+**Which tables get this check:** Iceberg tables (the ones Lakana writes) and external tables of
+Parquet files, whose schema is stored with the file. An external table of CSV or JSON files has no
+stored schema: Lakana only guesses the types from one sample file, and the query engine reads its
+own, so a check against the guess would be wrong. A filter on such a table is checked against the
+allowed SQL subset only, as before, and nothing guarantees that its comparisons cannot fail; write
+`'007'` for a column of text that looks like a number, and check the values. The same holds for the
+columns of a Parquet table whose type is not supported yet (unsigned integers, timestamps in
+seconds, milliseconds or nanoseconds, nested types): filter on another column, or on an Iceberg
+table made with `lakana sql ... --into`.
+
 This is refused (the exit code is 8):
 
 <!-- output -->

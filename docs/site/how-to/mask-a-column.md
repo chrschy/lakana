@@ -198,10 +198,12 @@ type of its column; the upgrade notes say what to look for. To get the check and
 create the mask again and revoke the old one. A column of a type with no cast (a struct, a list, a
 map) can be masked with `NULL` or the column itself only.
 
-On an external table made from CSV or JSON files, Lakana stores the types it inferred from one sample
-file, while the query engine infers the types of every file itself. A mask that is another column
-(or the column itself) can then fail on a column the engine reads as another type than the sample
-suggested; masks with `NULL` or a constant do not depend on it.
+**Which tables get the type check and the cast:** Iceberg tables and external tables of Parquet
+files. A mask on an external table of CSV or JSON files is checked against the allowed SQL subset
+only and is never cast: Lakana only guesses the types of such a table from one sample file, while the
+query engine reads its own, so the mask behaves as masks did before the type check (it is stored as
+not type-checked). The reader then gets the type the engine infers, which may differ from the
+column's type in the table's schema.
 
 When a stored value still makes a mask fail, everyone it applies to gets this message, and the query
 engine's text is not shown:

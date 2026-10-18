@@ -141,8 +141,11 @@ date or timestamp is written as a typed literal (`DATE '2026-01-01'`), which is 
 creation. A column mask is now cast to its column's declared type when it is read, so a reader gets
 the column's own type (a `0` on a `long` column is a `BIGINT`), and a mask is accepted only when
 every value fits; a value that stops fitting later (the column the mask reads was widened) reads
-as `NULL`. Row filters and masks on external (raw-zone) tables are checked against the types
-stored for the table (`int64`, `date32[day]`, `decimal128(10, 2)`, `large_string`, ...). See [Show some people
+as `NULL`. The check and the cast apply to Iceberg tables and to external tables of Parquet files (checked
+against the types stored for the table: `int64`, `date32[day]`, `decimal128(10, 2)`,
+`large_string`, ...). Filters and masks on external tables of CSV or JSON files are checked against the
+SQL subset only, as before, and their masks are stored as not type-checked, because the types stored
+for such a table are only a guess from one sample file. See [Show some people
 only some rows](../how-to/filter-rows.md#an-expression-must-not-fail-on-any-stored-value) and
 [Mask a column for some people](../how-to/mask-a-column.md#an-expression-must-not-fail-on-any-stored-value).
 

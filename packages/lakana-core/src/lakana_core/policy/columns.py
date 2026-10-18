@@ -90,6 +90,26 @@ def read_table_description(
         ) from exc
 
 
+def type_checks_apply(description: TableDescription) -> bool:
+    """Say whether the types of a policy on this table can be checked when it is created.
+
+    An Iceberg table and a Parquet file carry their schema, so the stored types are the ones the
+    engine reads. A CSV or JSON file has none: the stored types are a guess from one sample, the
+    engine infers its own at query time, and a check against the guess would be wrong both ways.
+
+    Parameters
+    ----------
+    description
+        The table, as `read_table_description` returned it.
+
+    Returns
+    -------
+    bool
+        `False` for an external table of a CSV or JSON file, `True` otherwise.
+    """
+    return description.file_format in (None, "parquet")
+
+
 def read_column_names(
     catalog: ColumnSource, p: PrincipalRef, ref: TableRef, *, policy: str
 ) -> list[str]:

@@ -538,6 +538,7 @@ def test_an_arrow_type_the_check_has_no_rule_for_names_the_cause(arrow_type: pa.
     message = str(caught.value)
     assert f"the type of `c` is {arrow_type}, which a policy cannot compare" in message
     assert "Unsigned integers" in message
+    assert "on a table written by Lakana" in message
     check_expression_types("NULL", kind="mask", columns=columns, masked_column="c")
     with pytest.raises(ValidationError, match="which a mask cannot be checked against"):
         check_expression_types("0", kind="mask", columns=columns, masked_column="c")
@@ -655,3 +656,16 @@ def test_a_mask_that_is_a_column_of_an_unknown_type_names_that_column_and_its_ty
     """When only the mask's own type is unknown, the message names it, not the known column."""
     message = _refusal("tag", kind="mask", masked="n")
     assert "the type of `tag` is struct<a: int>, which a mask cannot be checked against" in message
+
+
+@pytest.mark.parametrize("declared", ["DOUBLE", "Double", "FLOAT"])
+def test_an_uppercase_float_spelling_is_a_float_not_a_decimal(declared: str) -> None:
+    """The SQL spellings reach the float rules: any finite number in range, not three places."""
+    columns = [ColumnSpec(name="x", type=declared, nullable=True)]
+    check_expression_types("x > 1.2345", kind="filter", columns=columns)
+
+
+def test_a_text_literal_for_a_number_column_is_suggested_without_leading_zeros() -> None:
+    """`n = '007'` is told to compare with 7."""
+    message = _refusal("id = '007'")
+    assert "compare it with 7, not '007'." in message

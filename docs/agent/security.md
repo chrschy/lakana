@@ -87,7 +87,7 @@ the column's `pyiceberg` type, for a raw-zone table from the stored Arrow type n
 closed list of the exact names pyarrow prints (decimals from two integers). It is never parsed
 from a type string, because a raw-zone struct's field name is free text. A column of any other
 type (struct, list, map, nanosecond timestamp, unknown) has no cast, and creation allows only
-`NULL` or the column itself as its mask. Creation accepts only values that cast cannot fail on. A type the table does not declare in a form the check knows is refused (fail
+`NULL` or the column itself as its mask. Creation accepts only values that cast cannot fail on. The check and the cast apply to Iceberg and Parquet tables only (`policy.columns.type_checks_apply`, from `TableDescription.file_format`): a CSV or JSON table has no stored schema, DuckDB infers its own types at read time, so its filters are checked against the subset only and its masks are stored with `type_checked` false. A type the table does not declare in a form the check knows is refused (fail
 closed, never guessed). The only conversion a policy may contain is a typed `DATE '...'` or
 `TIMESTAMP '...'` literal, which `validate_restricted_expression` accepts only for a string literal
 that is a real date or moment in the exact `YYYY-MM-DD[ HH:MM:SS[.ffffff]]` form; it is a constant, so it

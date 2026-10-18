@@ -1014,7 +1014,9 @@ _TYPED = {"id": "long", "ssn": "string", "salary": "double", "owner": "boolean",
 """The declared types the type-check tests give the fake table's columns."""
 
 
-def _create_mask(session: Session, column: str, expression: str) -> ColumnMask:
+def _create_mask(
+    session: Session, column: str, expression: str, catalog: FakeColumnCatalog | None = None
+) -> ColumnMask:
     """Create a column mask for a service account on a table with typed columns.
 
     Parameters
@@ -1025,6 +1027,8 @@ def _create_mask(session: Session, column: str, expression: str) -> ColumnMask:
         The masked column.
     expression
         The mask's expression.
+    catalog
+        The table's columns; typed ones (`_TYPED`) unless given.
 
     Returns
     -------
@@ -1032,7 +1036,9 @@ def _create_mask(session: Session, column: str, expression: str) -> ColumnMask:
         The stored mask.
     """
     service = ColumnMaskService(
-        session, AllowAllAuthorization(), FakeColumnCatalog(types=_TYPED, schema_id=7)
+        session,
+        AllowAllAuthorization(),
+        catalog or FakeColumnCatalog(types=_TYPED, schema_id=7),
     )
     admin = _admin()
     _persist_actor(session, admin)
@@ -1114,3 +1120,27 @@ def test_a_comparison_across_types_in_a_mask_is_refused_as_the_page_says(
 def test_create_records_that_the_mask_was_type_checked(session: Session) -> None:
     """A mask created now is marked, so a read casts it to the column's type."""
     assert _create_mask(session, "ssn", "'***'").type_checked is True
+
+
+@pytest.mark.parametrize("file_format", ["csv", "json"])
+def test_a_mask_on_a_csv_or_json_table_is_not_type_checked(
+    session: Session, file_format: str
+) -> None:
+    """Such a mask is stored like an earlier release's: unchecked and never cast on a read."""
+    catalog = FakeColumnCatalog(types={"id": "int64"}, file_format=file_format)
+    created = _create_mask(session, "id", "'***'", catalog)
+    assert created.expression == "'***'"
+    assert created.type_checked is False
+
+
+def test_a_mask_on_a_parquet_table_is_type_checked(session: Session) -> None:
+    """A Parquet mask keeps the check and is marked, so a read casts it."""
+    catalog = FakeColumnCatalog(types={"id": "int64"}, file_format="parquet")
+    assert _create_mask(session, "id", "0", catalog).type_checked is True
+
+
+def test_a_mask_of_another_type_on_a_parquet_table_is_refused(session: Session) -> None:
+    """A text mask on an `int64` Parquet column is refused with the stored type named."""
+    catalog = FakeColumnCatalog(types={"id": "int64"}, file_format="parquet")
+    with pytest.raises(ValidationError, match="`id` is int64, but the mask is text"):
+        _create_mask(session, "id", "'***'", catalog)
