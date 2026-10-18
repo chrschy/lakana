@@ -3493,7 +3493,10 @@ misreads (e.g. `token=token, …` in `lakana login`) — never a pattern broad e
 credential. Prefer fixture tokens that don't trip the rules at all; allowlist one only when the
 test needs its shape (e.g. the SDK's masking tests, which need a secret with underscores and
 dashes). gitleaks scans every commit in a PR, so a false positive in any earlier commit needs an
-allowlist entry even after the line has changed. Any
+allowlist entry even after the line has changed. The `secrets` job runs the gitleaks command line
+(MIT) from one pinned release whose SHA-256 is checked, not the gitleaks GitHub Action, which needs
+a paid licence key for a repository owned by an organisation; raise the version and the checksum
+together from the release's checksums file. Any
 feature touching auth, policy, secrets, or the query path should also get a `/security-review`
 pass before merge. Semgrep runs weekly (`security-deep.yml`); CodeQL (`codeql.yml`) runs on every
 pull request, every push to `main` and weekly; both upload SARIF to code scanning. OpenSSF Scorecard (`scorecard.yml`) runs on every push to `main`,

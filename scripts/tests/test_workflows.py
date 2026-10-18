@@ -122,6 +122,25 @@ def test_pip_audit_audits_every_dependency_group() -> None:
     assert "--all-groups" in audit
 
 
+def test_the_secret_scan_runs_the_checksummed_gitleaks_binary() -> None:
+    """The secret scan runs the gitleaks command line (MIT), checked against a pinned SHA-256.
+
+    The gitleaks GitHub Action needs a paid licence key for a repository owned by an
+    organisation, so the job downloads one pinned release, refuses it unless its checksum
+    matches, and scans the pull request's commits (or the pushed ones).
+    """
+    job = _jobs("security.yml")["secrets"]
+    assert not any("gitleaks/gitleaks-action" in str(s.get("uses", "")) for s in job["steps"])
+    commands = "\n".join(c for s in job["steps"] for c in _commands(s))
+    assert "sha256sum -c" in commands
+    assert "releases/download/v${GITLEAKS_VERSION}/" in commands
+    env = next(s["env"] for s in job["steps"] if "GITLEAKS_SHA256" in s.get("env", {}))
+    assert len(env["GITLEAKS_SHA256"]) == 64
+    assert '/gitleaks" git ' in commands
+    assert "--log-opts" in commands
+    assert set(job["permissions"]) == {"contents"}
+
+
 def test_dependabot_watches_the_docker_image_pins() -> None:
     """The base image and the pinned uv image in the Dockerfile get update pull requests."""
     config = yaml.safe_load((ROOT / ".github" / "dependabot.yml").read_text())
