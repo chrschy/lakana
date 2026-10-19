@@ -619,6 +619,29 @@ queueing (M5c3) and cron (M5d) plug into the tick.
   `task_runs.error_message` for the set-back claim, which ends the task with it; the scheduler's
   put-back clears that column so that an earlier attempt's text is never taken for the reason.
 
+### Failure codes of tasks (#145)
+
+- **One code per ending, stored with the text.** `task_runs.failure_code` and
+  `task_attempts.failure_code` (nullable `String(32)`, migration `0040`) hold a
+  `lakana_core.runs.failures.FailureCode` value next to `error_message`, written by the same
+  statements: `record_attempt(failure_code=...)` for a worker's ending and
+  `TaskTransition.failure_code` / the lost-attempt update in `store._apply_task` for the
+  scheduler's. A success, a release and a retry that is not an ending store none; a cancel is always
+  `cancelled`; a failure recorded without a code is `internal` (`tasks._stored_code`). A put-back
+  for a set-back clears the code with the text, and the worker that sets the table back ends the
+  task with a code of its own (`task_checks._set_back_code`: the stored memory stop's, else
+  `worker_lost`, else `cancelled`).
+- **The worker names the code where it names the kind.** `TaskFailure(kind, message, code)` takes
+  the code as a required argument, a failing `TaskOutcome` carries `failure_code`, and a
+  `RunOutcome(succeeded=False)` of the Python runner does too;
+  `tests/test_failure_code_sites.py` reads the worker's source and fails when a call site leaves
+  it out. A query's exception becomes a code through the query run's own cause
+  (`task_outcome.failure_code_of`, over `pipeline.failure_cause`, plus `conflict`).
+- **One table of sentences.** `FAILURES` in `lakana_core/runs/failures.py` maps each code to its
+  cause and next step; `docs/site/reference/why-did-it-fail.md` has the same sentences and a test
+  compares them. Rows from before the codes show `unknown` (`stored_failure`), which is never
+  stored. The REST/SDK/CLI shapes are `failure` on tasks and attempts and `failed_tasks` on runs.
+
 ## Python assets (M5c2a)
 
 User documentation: `docs/site/how-to/projects.md`, "Python assets". The run-time mechanics (threads, the
