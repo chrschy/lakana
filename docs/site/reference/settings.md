@@ -14,32 +14,32 @@ Compose](../how-to/deploy-with-compose.md).
 
 | Variable | Type | Default | Read by | Description |
 |---|---|---|---|---|
-| `LAKANA_DATABASE__URL` | text | required | server, worker | SQLAlchemy database URL. Its `repr`/`str` show the URL with any password redacted — see `__repr_args__`. |
-| `LAKANA_DATABASE__ECHO` | true or false | `false` | server, worker | Whether SQLAlchemy should log the SQL it emits. |
+| `LAKANA_DATABASE__URL` | text | required | server, worker | Address of the metadata database, for example `postgresql+psycopg://lakana:PASSWORD@postgres/lakana`. A password in it is hidden in logs and error messages. Required. |
+| `LAKANA_DATABASE__ECHO` | true or false | `false` | server, worker | Whether every SQL statement sent to the metadata database is written to the log. Off by default; turn it on only while you look for a problem, because it is very verbose. |
 
 ## General
 
 | Variable | Type | Default | Read by | Description |
 |---|---|---|---|---|
-| `LAKANA_BOOTSTRAP_ADMIN` | text | `admin` | server, worker | Name of the principal created on startup if it does not already exist. See `lakana_core.bootstrap.ensure_bootstrap_principal`. |
-| `LAKANA_BOOTSTRAP_PAT_KEY_ID` | text | not set | server | A fixed key_id/secret pair for the bootstrap principal's automatically-minted PAT, set only in tests or local development for a deterministic credential. When either is `None` (the production default), a real random PAT is generated and logged once at startup — never persisted in configuration. |
-| `LAKANA_BOOTSTRAP_PAT_SECRET` | text | not set | server | A fixed key_id/secret pair for the bootstrap principal's automatically-minted PAT, set only in tests or local development for a deterministic credential. When either is `None` (the production default), a real random PAT is generated and logged once at startup — never persisted in configuration. |
-| `LAKANA_HOST` | text | `127.0.0.1` | server | Interface to bind when run via `uvicorn`. Unused by `create_app` itself; read by whatever process starts the server. |
-| `LAKANA_PORT` | whole number | `8000` | server | Port to bind when run via `uvicorn`. Unused by `create_app` itself. |
-| `LAKANA_REPO_ROOTS` | list | empty | server, worker | Absolute directories local repositories must lie under (`LAKANA_REPO_ROOTS`, a JSON list); validated like `lakana_core.config.Settings`. Empty refuses every local repository. |
+| `LAKANA_BOOTSTRAP_ADMIN` | text | `admin` | server, worker | Name of the administrator created the first time the server starts, if no principal of that name exists. Its credential is shown once at the first start. Change it only before the first start. |
+| `LAKANA_BOOTSTRAP_PAT_KEY_ID` | text | not set | server | With `LAKANA_BOOTSTRAP_PAT_SECRET`, a fixed credential for the bootstrap administrator, for tests and local development. Unset (the default), a random credential is created at the first start and shown once. Do not set it in a deployment. |
+| `LAKANA_BOOTSTRAP_PAT_SECRET` | text | not set | server | With `LAKANA_BOOTSTRAP_PAT_SECRET`, a fixed credential for the bootstrap administrator, for tests and local development. Unset (the default), a random credential is created at the first start and shown once. Do not set it in a deployment. |
+| `LAKANA_HOST` | text | `127.0.0.1` | server | Address the server listens on. `127.0.0.1` (the default) accepts connections from this machine only; the Compose bundle publishes the port through `LAKANA_BIND`. |
+| `LAKANA_PORT` | whole number | `8000` | server | Port the server listens on (default 8000). |
+| `LAKANA_REPO_ROOTS` | list | empty | server, worker | Absolute directories that local repositories must lie under, as a JSON list, for example `["/repos"]`. Empty (the default) refuses every local repository. |
 
 ## `LAKANA_SECRETS__*`
 
 | Variable | Type | Default | Read by | Description |
 |---|---|---|---|---|
-| `LAKANA_SECRETS__MASTER_KEY` | text | not set | server, worker | Base64-encoded 32-byte master key that wraps every secret's own data key (`lakana_core.secrets.keys.EnvKeyProvider`). `None` (the default) means no secrets can be created or decrypted yet — this does not fail startup, only the first actual secret operation, so a deployment that never uses secret-backed storage needs no configuration here at all. Its `repr`/`str` show ``"***"`` when set and `None` when unset — see `__repr_args__`. |
-| `LAKANA_SECRETS__ACCEPT_FORMAT_1` | true or false | `false` | server, worker | Whether to read secrets stored in the old format (1), written before the stored format bound a secret to its row. `False` (the default) refuses such a secret with a message that says how to set it again. `True` reads them, which accepts any old-format ciphertext written under the master key on any row; the server and the worker log a WARNING at start-up while it is on. Set it (`LAKANA_SECRETS__ACCEPT_FORMAT_1=true`) on the server and on every worker, and remove it once every secret is stored again. |
+| `LAKANA_SECRETS__MASTER_KEY` | text | not set | server, worker | The key that protects every stored secret: 32 random bytes, base64-encoded. Unset (the default), the instance starts but no secret can be created or read. The Compose bundle generates one. Keep it safe: a lost key makes every stored secret unrecoverable. Set the same value on the server and on every worker. |
+| `LAKANA_SECRETS__ACCEPT_FORMAT_1` | true or false | `false` | server, worker | Whether to read secrets stored in the old format, written by a release before a secret was bound to its row. `false` (the default) refuses such a secret with a message that says how to set it again. `true` reads them, and the server and the worker log a warning at start while it is on. Turn it on, on the server and on every worker, only while you set old secrets again, and remove it afterwards. |
 
 ## `LAKANA_TASK_TOKENS__*`
 
 | Variable | Type | Default | Read by | Description |
 |---|---|---|---|---|
-| `LAKANA_TASK_TOKENS__MAX_TTL_SECONDS` | whole number, above 0 | `86400` | server, worker | Longest `ttl_seconds` a minted task token may request. Enforced by `lakana_core.identity.task_tokens.TaskTokenService.mint`, so an unattended task's credential cannot outlive human review indefinitely by requesting an arbitrarily long lifetime. |
+| `LAKANA_TASK_TOKENS__MAX_TTL_SECONDS` | whole number, above 0 | `86400` | server, worker | Longest lifetime, in seconds, that can be requested for a task token. A task token is the temporary credential a Python task uses to call Lakana. The default is one day. Lower it to shorten the time a leaked token would work. The server and the worker both read it; set the same value on both. |
 
 ## `LAKANA_ARTIFACTS__*`
 
@@ -54,17 +54,17 @@ Compose](../how-to/deploy-with-compose.md).
 
 | Variable | Type | Default | Read by | Description |
 |---|---|---|---|---|
-| `LAKANA_TABLE_READS__KEEP_DAYS` | whole number, 1 or more | `90` | server, worker | Days a day's count of reads of a table is kept (default 90). The worker's sweep deletes older rows, and `GET .../tables/{name}/health` accepts `days` up to this. |
-| `LAKANA_TABLE_READS__DEFAULT_DAYS` | whole number, 1 or more | `30` | server, worker | The window the health of a table shows when the request names none (default 30); at most `keep_days`. |
+| `LAKANA_TABLE_READS__KEEP_DAYS` | whole number, 1 or more | `90` | server, worker | Days of read counts kept for each table (default 90). A worker deletes older counts, and the health of a table can look back at most this many days. |
+| `LAKANA_TABLE_READS__DEFAULT_DAYS` | whole number, 1 or more | `30` | server, worker | Days of reads that the health of a table shows when the request names none (default 30); at most `LAKANA_TABLE_READS__KEEP_DAYS`. |
 
 ## `LAKANA_APPEND__*`
 
 | Variable | Type | Default | Read by | Description |
 |---|---|---|---|---|
-| `LAKANA_APPEND__MAX_BYTES` | whole number, above 0 | `268435456` | server | Largest Arrow IPC stream body `POST .../tables/{name}/data` accepts, enforced by reading `request.stream()` with a running total: once the accumulated size exceeds this bound, the request is refused with `PayloadTooLargeError` (413) before the rest of the body is read, and nothing is written. |
-| `LAKANA_APPEND__MAX_CONCURRENT` | whole number, above 0 | `4` | server | Most governed appends allowed to be in flight at once in this process, enforced by a non-blocking `lakana_server.concurrency.AppendConcurrencyLimiter` on `app.state.append_concurrency_limiter`. A request past this bound is refused immediately with `lakana_server.errors. AppendConcurrencyLimitError` (503, `Retry-After: 1`) rather than queuing. |
-| `LAKANA_APPEND__READ_TIMEOUT_SECONDS` | number, above 0 | `300` | server | Two bounds on reading a request body. For a governed append, the longest the whole read may take: reading is wrapped in `asyncio.timeout`, and exceeding it refuses the request with `lakana_server.errors.AppendReadTimeoutError` (408) and nothing is written. For an artifact upload it is the longest the server waits for the next piece of a file, and the longest the manifest request may take in all; a file's body as a whole ends when its upload expires (`LAKANA_ARTIFACTS__UPLOAD_TTL_SECONDS`). Either way this bounds how long a slow or stalled client can occupy a slot at all, separate from `max_concurrent` bounding how many may do so at once. |
-| `LAKANA_APPEND__MAX_ARRAYS` | whole number, above 0 | `100000` | server | Most cumulative batches-times-columns (`RecordBatch.num_columns`, summed over every batch decoded so far) a single append's decoded data may contain, checked in `lakana_server.api.platform.tables. _decode_arrow_stream` alongside `max_bytes`. Each decoded batch costs roughly 1-3 KB of object overhead in decode and again in pyiceberg, independent of its byte size — many tiny batches inside an otherwise byte-cap-respecting body can still amplify memory and CPU cost far beyond what `max_bytes` alone implies. Exceeding it refuses the request with `PayloadTooLargeError` (413), suggesting fewer, larger batches, before the rest of the stream is decoded . |
+| `LAKANA_APPEND__MAX_BYTES` | whole number, above 0 | `268435456` | server | Largest body, in bytes, of one table append (default 256 MiB). A larger request is refused with 413 before the rest of the body is read, and nothing is written. |
+| `LAKANA_APPEND__MAX_CONCURRENT` | whole number, above 0 | `4` | server | Most appends and artifact uploads one server process receives at once (default 4). A request past the limit is refused at once with 503 and a hint to retry; the SDK asks again. |
+| `LAKANA_APPEND__READ_TIMEOUT_SECONDS` | number, above 0 | `300` | server | How long the server waits for the body of a request, in seconds (default 300). For a table append, the whole body; for an artifact upload, the next piece of a file and the whole manifest request. A request past the limit is refused with 408 and nothing is written. It stops a slow or stalled client from holding a slot. |
+| `LAKANA_APPEND__MAX_ARRAYS` | whole number, above 0 | `100000` | server | Most columns, summed over all batches, that the data of one append may hold (default 100,000). Many tiny batches use much memory and processor time even in a small body. A request over the limit is refused with 413; send fewer, larger batches. |
 
 ## `LAKANA_REQUEST_BODY__*`
 
@@ -76,27 +76,27 @@ Compose](../how-to/deploy-with-compose.md).
 
 | Variable | Type | Default | Read by | Description |
 |---|---|---|---|---|
-| `LAKANA_AUTH_AUDIT__PER_IP_PER_MINUTE` | whole number, above 0 | `10` | server | `AUTHENTICATION_FAILED` audit rows recorded per client per minute, enforced by `lakana_server.auth_rate_limit.AuthAuditLimiter`. A client's requests past this rate still receive 401; they are just not individually recorded, so a retrying attacker cannot flood the audit log with one row per attempt. |
+| `LAKANA_AUTH_AUDIT__PER_IP_PER_MINUTE` | whole number, above 0 | `10` | server | Failed sign-ins that the audit log records per client per minute (default 10). Requests past the rate are still refused with 401, but not each recorded, so repeated attempts cannot flood the log. |
 
 ## `LAKANA_DENIAL_AUDIT__*`
 
 | Variable | Type | Default | Read by | Description |
 |---|---|---|---|---|
-| `LAKANA_DENIAL_AUDIT__PER_PRINCIPAL_PER_MINUTE` | whole number, above 0 | `30` | server, worker | Denials recorded per principal per minute, by each server process and each worker (`lakana_core.audit.denial_limiter.DenialAuditLimiter`). A denial past it is still refused, but not recorded; the next row recorded for that principal carries the number not recorded as `detail.suppressed`, and each one is written to the process log at INFO. The first denial of each action by a principal is always recorded. |
+| `LAKANA_DENIAL_AUDIT__PER_PRINCIPAL_PER_MINUTE` | whole number, above 0 | `30` | server, worker | Most refusals the audit log records for one principal per minute, in each server and each worker. A refusal past the limit is still refused, but not recorded; the next row recorded for that principal says how many were left out, and each one is written to the process log. The first refusal of each action by a principal is always recorded. Raise it if you need every refusal in the table. |
 
 ## `LAKANA_QUERY_LIMITS__*`
 
 | Variable | Type | Default | Read by | Description |
 |---|---|---|---|---|
 | `LAKANA_QUERY_LIMITS__MAX_RESULT_ROWS` | whole number, above 0 | `1000000` | server, worker | Most rows a query may return. Exceeding it fails the query; the result is never truncated. |
-| `LAKANA_QUERY_LIMITS__MAX_RESULT_BYTES` | whole number, above 0 | `268435456` | server, worker | Most bytes a result may occupy as in-memory Arrow buffers — a memory-exhaustion guard, not an on-disk or wire size. Checked between fetched batches (`lakana_worker.executor._FETCH_BATCH_ROWS`), so a result can overshoot this by up to one batch's worth of the query's largest value, not by an unbounded amount. |
-| `LAKANA_QUERY_LIMITS__MEMORY_LIMIT` | text | `1GB` | server, worker | DuckDB `memory_limit` for the query's connection, in DuckDB's own syntax (``"1GB"``, ``"512MiB"``). Bounds execution, not just the result. |
-| `LAKANA_QUERY_LIMITS__MAX_WRITE_ROWS` | whole number, above 0 | `100000000` | server, worker | Most rows a write run may write. Exceeding it fails the run and deletes every file it wrote. Writes are deliberately not bound by `max_result_bytes`: they stream to storage, never into a result. |
-| `LAKANA_QUERY_LIMITS__TIMEOUT_SECONDS` | number, above 0 | `900` | server, worker | Wall-clock limit for one query, in seconds. For a write run it covers the whole streaming phase, not just the start of the query, so time spent encoding and uploading to storage counts: a slow store can fail a write with the time-limit message while DuckDB is idle. Hard limit: the query runs in a process of its own; at the limit the worker asks it to stop and, `kill_grace_seconds` later, kills it. |
+| `LAKANA_QUERY_LIMITS__MAX_RESULT_BYTES` | whole number, above 0 | `268435456` | server, worker | Most bytes a query result may take in memory. A result over the limit fails the query. It protects the worker from running out of memory; the check happens between batches of rows, so a result can pass the limit by a little before it is stopped. |
+| `LAKANA_QUERY_LIMITS__MEMORY_LIMIT` | text | `1GB` | server, worker | Memory one query may use, written as DuckDB writes sizes, for example `1GB` or `512MiB`. Some operations go beyond it. Keep it well below the memory limit of the worker. |
+| `LAKANA_QUERY_LIMITS__MAX_WRITE_ROWS` | whole number, above 0 | `100000000` | server, worker | Most rows one write run may write. A run that passes it fails and removes every file it wrote. |
+| `LAKANA_QUERY_LIMITS__TIMEOUT_SECONDS` | number, above 0 | `900` | server, worker | Longest one query may run, in seconds. For a write it includes the time to store the result, so a slow object store can fail a write with the time-limit message. At the limit the worker asks the query to stop and, after the grace period of `LAKANA_QUERY_LIMITS__KILL_GRACE_SECONDS`, ends it. |
 | `LAKANA_QUERY_LIMITS__KILL_GRACE_SECONDS` | number, 0 or more | `10` | server, worker | Seconds between asking a query to stop (its time limit, a cancel, the worker's drain) and killing its process. 0 kills at once; it must be a finite number. A query that stops when asked ends with DuckDB's own clean error; one that had to be killed after its time limit or a cancel request says so in its message (a task's cancel and the worker's drain only log it). |
-| `LAKANA_QUERY_LIMITS__THREADS` | whole number, above 0 | `4` | server, worker | DuckDB `threads` for the query's connection, so one query cannot take every CPU core. |
-| `LAKANA_QUERY_LIMITS__MAX_TEMP_DIRECTORY_SIZE` | text | `10GB` | server, worker | DuckDB `max_temp_directory_size` for the per-run spill directory, in DuckDB's own syntax (``"10GB"``). Spilling only happens where the local filesystem is enabled (local `file://` mode): every other mode disables it for user SQL, which also blocks DuckDB's spill files, so a query over `memory_limit` fails there instead of spilling. |
-| `LAKANA_QUERY_LIMITS__MAX_STATEMENT_CHARS` | whole number, above 0 | `100000` | server, worker | Longest SQL text, in characters, accepted at submit: a query, a write, a row-filter or column-mask expression, and a SQL asset at deploy. The SQL parser's time and memory grow with the text and are outside the query timeout (30 MB of nested subqueries took 19 s and 2.9 GB); the default is far above any statement written by hand. |
+| `LAKANA_QUERY_LIMITS__THREADS` | whole number, above 0 | `4` | server, worker | Processor threads one query may use, so that one query cannot take every core of the worker. |
+| `LAKANA_QUERY_LIMITS__MAX_TEMP_DIRECTORY_SIZE` | text | `10GB` | server, worker | Disk a query may use for temporary files when it needs more than its memory limit, written as DuckDB writes sizes, for example `10GB`. Only local file storage allows it; with every other storage a query over its memory limit fails instead of using disk. |
+| `LAKANA_QUERY_LIMITS__MAX_STATEMENT_CHARS` | whole number, above 0 | `100000` | server, worker | Longest SQL text, in characters, that is accepted: a submitted query or write, a row filter or column mask expression, and a SQL asset at deploy. A longer text is refused with a message that names this setting. The default is far above any statement written by hand. |
 | `LAKANA_QUERY_LIMITS__RUNNING_PER_PRINCIPAL` | whole number or `auto` | `auto` | server, worker | The most ad-hoc queries one user or service account runs at once, over every environment: `auto` or a whole number of 1 or more. A further query waits and is not refused. With `auto`, one principal may run ad-hoc queries on every worker that takes interactive work while there are one or two such workers, and on all of them but one from three on. Pipeline work is never counted. The server reads it too, for the reason a query waits. |
 
 ## `LAKANA_RUN__*`
@@ -104,50 +104,50 @@ Compose](../how-to/deploy-with-compose.md).
 | Variable | Type | Default | Read by | Description |
 |---|---|---|---|---|
 | `LAKANA_RUN__MAX_RETRIES` | whole number, 0 or more | `5` | server, worker | Most retries a project may configure for one asset; deploy validation refuses more. |
-| `LAKANA_RUN__SCHEDULER_INTERVAL_SECONDS` | number, above 0 | `1` | server, worker | How often the scheduler holder ticks. |
-| `LAKANA_RUN__LEASE_SECONDS` | whole number, above 0 | `60` | server, worker | How long a claimed task's lease lasts without renewal. |
-| `LAKANA_RUN__RENEW_SECONDS` | whole number, above 0 | `20` | server, worker | How often a worker renews its lease; must be below `lease_seconds`. |
-| `LAKANA_RUN__DRAIN_GRACE_SECONDS` | number, 0 or more | `20` | server, worker | On SIGTERM, how long a running task may finish before it is released. |
+| `LAKANA_RUN__SCHEDULER_INTERVAL_SECONDS` | number, above 0 | `1` | server, worker | How often, in seconds, the worker that holds the scheduler role checks for work that is ready, retries that are due, lost workers and cancellations. |
+| `LAKANA_RUN__LEASE_SECONDS` | whole number, above 0 | `60` | server, worker | How long, in seconds, a claimed task stays with its worker without the worker renewing the claim; after that another worker may take it. |
+| `LAKANA_RUN__RENEW_SECONDS` | whole number, above 0 | `20` | server, worker | How often, in seconds, a worker renews its claim on a task. It must be below `LAKANA_RUN__LEASE_SECONDS`. |
+| `LAKANA_RUN__DRAIN_GRACE_SECONDS` | number, 0 or more | `20` | server, worker | When a worker is asked to stop, how many seconds a running task may take to finish before the task is handed to another worker. |
 | `LAKANA_RUN__SERVER_URL` | text | not set | server, worker | Base URL of the Lakana server as a Python task's subprocess reaches it. Unset, this worker cannot run Python assets. |
-| `LAKANA_RUN__VENV_CACHE` | path | not set | server, worker | Absolute directory of the venv cache; `None` uses the worker's cache directory. |
+| `LAKANA_RUN__VENV_CACHE` | path | not set | server, worker | Absolute path of the directory that keeps the Python environments of projects. Unset, the worker uses its own cache directory. |
 | `LAKANA_RUN__VENV_KEEP` | whole number, 1 or more | `10` | server, worker | How many venvs to keep, most recently used first. |
-| `LAKANA_RUN__VENV_BUILD_TIMEOUT` | number, above 0 | `600` | server, worker | Seconds one `uv sync` may run. |
+| `LAKANA_RUN__VENV_BUILD_TIMEOUT` | number, above 0 | `600` | server, worker | Longest, in seconds, that building the Python environment of a project may take. |
 | `LAKANA_RUN__VENV_MAX_BYTES` | whole number, above 0 | `5368709120` | server, worker | Largest on-disk size of one venv while it is built. |
-| `LAKANA_RUN__KILL_GRACE` | number, 0 or more | `10` | server, worker | Seconds between SIGTERM and SIGKILL when a Python task is stopped. |
+| `LAKANA_RUN__KILL_GRACE` | number, 0 or more | `10` | server, worker | Seconds between asking a Python task to stop and ending its process by force. |
 | `LAKANA_RUN__SWEEP_INTERVAL` | number, 0 or more | `3600` | server, worker | Seconds between the worker's sweeps of attempt directories a dead worker left behind (also at worker start), and between the sweeps of the artifact store that the worker holding the scheduler role runs (expired uploads, files and manifest objects no version names); 0 turns both off, and then nothing collects those leftovers. |
 | `LAKANA_RUN__MAINTENANCE_TIMEOUT` | number, above 0 | `1800` | server, worker | Seconds one `lakana table maintain` run may take. The worker checks the time between steps and between files, stops at the first safe point, and fails the run with the timeout cause; running maintenance again continues where it stopped. |
-| `LAKANA_RUN__INDEX_URL` | secret text | not set | server, worker | An extra package index for the venv build (a `SecretStr`: it may carry a password). |
-| `LAKANA_RUN__HTTPS_PROXY` | secret text | not set | server, worker | Proxy of the venv build (a `SecretStr`). |
+| `LAKANA_RUN__INDEX_URL` | secret text | not set | server, worker | An extra package index for building the environment of a Python project, as a URL. It may carry a password, which is hidden in logs and error messages. |
+| `LAKANA_RUN__HTTPS_PROXY` | secret text | not set | server, worker | Proxy that the environment build uses, as a URL. It may carry a password, which is hidden in logs and error messages. |
 | `LAKANA_RUN__NO_PROXY` | text | not set | server, worker | Comma-separated hosts that bypass the proxy. |
-| `LAKANA_RUN__CA_BUNDLE` | path | not set | server, worker | Absolute path of a PEM file the venv build trusts; only its format is checked here. |
+| `LAKANA_RUN__CA_BUNDLE` | path | not set | server, worker | Absolute path of a PEM file of certificate authorities that the environment build trusts, for an internal package index. The file must exist and be readable on the worker. |
 
 ## `LAKANA_LOG__*`
 
 | Variable | Type | Default | Read by | Description |
 |---|---|---|---|---|
-| `LAKANA_LOG__LEVEL` | text | `INFO` | server, worker | ``DEBUG``, ``INFO``, ``WARNING`` or ``ERROR``, in any letter case (kept in upper case). Lakana's own log lines, and uvicorn's, are printed from this level up; a library's only from WARNING. Above INFO the denials over the audit rate leave no line in the log (only the summary row in the audit table); uvicorn's access log, one line per request, is printed at INFO and DEBUG only. |
-| `LAKANA_LOG__ACCESS` | true or false | `true` | server, worker | Whether the server prints uvicorn's access log, one line per request (`LAKANA_LOG__ACCESS`). On by default; ``lakana server start --local`` turns it off unless asked with ``--log-requests``. Nothing else in the log changes. |
+| `LAKANA_LOG__LEVEL` | text | `INFO` | server, worker | `DEBUG`, `INFO`, `WARNING` or `ERROR`, in any letter case. Lakana's own log lines and the server's are printed from this level up; other libraries only from `WARNING`. Above `INFO`, refusals past the audit rate leave no line in the log, only the summary row in the audit log. The request log, one line per request, is printed at `INFO` and `DEBUG` only. |
+| `LAKANA_LOG__ACCESS` | true or false | `true` | server, worker | Whether the server logs every request, one line each. On by default; `lakana server start --local` turns it off unless you pass `--log-requests`. Nothing else in the log changes. |
 
 ## `LAKANA_GIT__*`
 
 | Variable | Type | Default | Read by | Description |
 |---|---|---|---|---|
-| `LAKANA_GIT__HTTPS_PROXY` | secret text | not set | worker | ``http://`` or ``https://`` URL of the proxy git tunnels through (``http://user:password@host:3128``; the password is required with a username, and both are percent-encoded). A `SecretStr`: `repr`, `str` and `model_dump` hide it. |
+| `LAKANA_GIT__HTTPS_PROXY` | secret text | not set | worker | URL of the proxy that git uses for HTTPS repositories, for example `http://user:password@host:3128`; a username needs a password, and both are percent- encoded. A password is hidden in logs and error messages. |
 | `LAKANA_GIT__NO_PROXY` | text | not set | worker | Comma-separated hosts, domains or CIDRs that bypass the proxy. |
-| `LAKANA_GIT__CA_BUNDLE` | path | not set | worker | Absolute path of a PEM file of the CAs git trusts for HTTPS (replaces the system store). Only its format is checked here. |
+| `LAKANA_GIT__CA_BUNDLE` | path | not set | worker | Absolute path of a PEM file of certificate authorities that git trusts for HTTPS; it replaces the system store. The file must exist and be readable on the worker. |
 
 ## `LAKANA_WEBHOOK__*`
 
 | Variable | Type | Default | Read by | Description |
 |---|---|---|---|---|
 | `LAKANA_WEBHOOK__ALLOW_HOSTS` | text | not set | worker | Comma-separated host names, or ``*.domain`` for every subdomain of a domain (not the domain itself), that skip the address check and may use ``http`` and any port. Matching ignores case and a trailing dot. For an internal chat server. |
-| `LAKANA_WEBHOOK__PROXY` | secret text | not set | worker | ``http://`` or ``https://`` URL of the proxy webhooks tunnel through with ``CONNECT`` (``http://user:password@host:3128``). The worker still resolves and checks the destination name, but the proxy resolves it again to connect, so the proxy is trusted to refuse internal addresses. A `SecretStr`: `repr`, `str` and `model_dump` hide it. |
-| `LAKANA_WEBHOOK__CA_BUNDLE` | path | not set | worker | Absolute path of a PEM file of the CAs webhooks trust (replaces the built-in store, never disables verification). Only its format is checked here. |
+| `LAKANA_WEBHOOK__PROXY` | secret text | not set | worker | URL of the proxy that webhooks go through, for example `http://user:password@host:3128`. The worker checks the destination name, but the proxy looks it up again, so the proxy must refuse internal addresses itself. A password is hidden in logs and error messages. |
+| `LAKANA_WEBHOOK__CA_BUNDLE` | path | not set | worker | Absolute path of a PEM file of certificate authorities that webhooks trust; it replaces the built-in store and never turns verification off. The file must exist and be readable on the worker. |
 
 ## `LAKANA_WORKER__*`
 
 | Variable | Type | Default | Read by | Description |
 |---|---|---|---|---|
-| `LAKANA_WORKER__MEMORY_LIMIT` | text | not set | worker | The limit on the worker's resident memory, counting the Python tasks and `uv` it started (``"4GB"``, at least ``512MB``; ``"off"`` or ``"0"`` for none; see `parse_memory_limit`). Units are binary: ``GB`` and ``g`` mean 1024 MB, unlike DuckDB's `LAKANA_QUERY_LIMITS__MEMORY_LIMIT`, where ``GB`` is decimal and ``GiB`` binary. A worker over the limit records why against what it was running, kills its tasks and exits; Docker or the local-mode supervisor restarts it. When unset, the worker uses 90 percent of its container's memory limit, or 4GB without one. Linux measures the worker and its descendants; macOS only the worker process; Windows nothing. |
+| `LAKANA_WORKER__MEMORY_LIMIT` | text | not set | worker | The most memory the worker may use in all, with the Python tasks and `uv` it started, for example `4GB` (at least `512MB`; `off` or `0` for none). Units are binary: `GB` and `g` mean 1024 MB, unlike `LAKANA_QUERY_LIMITS__MEMORY_LIMIT`, where `GB` is decimal. A worker over the limit ends its tasks, records why and stops; Docker or the local-mode supervisor restarts it. Unset, the worker uses 90 percent of its container's memory limit, or 4GB without one. Linux measures the worker and what it started; macOS only the worker; Windows nothing. |
 | `LAKANA_WORKER__NOTIFICATIONS` | true or false | `true` | worker | Whether this worker delivers job notifications (`LAKANA_WORKER__NOTIFICATIONS`, on by default). Set to ``false`` on a worker that must not reach the webhook hosts (a worker in a network without outbound access); another worker delivers them. With no worker delivering, queued notifications wait. |
 | `LAKANA_WORKER__TAKES` | text | `all` | worker | The work this worker takes (`LAKANA_WORKER__TAKES`): ``"all"`` (the default), ``"interactive"`` (ad-hoc queries) or ``"pipeline"`` (deploys, pipeline tasks and table maintenance), in any letter case. The worker says it when it registers. |

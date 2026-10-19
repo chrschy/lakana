@@ -23,41 +23,21 @@ class AppendConfig(BaseModel):
     Parameters
     ----------
     max_bytes
-        Largest Arrow IPC stream body `POST .../tables/{name}/data` accepts,
-        enforced by reading `request.stream()` with a running total: once
-        the accumulated size exceeds this bound, the request is refused
-        with `PayloadTooLargeError` (413) before the rest of the body is
-        read, and nothing is written.
+        Largest body, in bytes, of one table append (default 256 MiB). A larger request is refused
+        with 413 before the rest of the body is read, and nothing is written.
     max_concurrent
-        Most governed appends allowed to be in flight at once in this
-        process, enforced by a non-blocking
-        `lakana_server.concurrency.AppendConcurrencyLimiter` on
-        `app.state.append_concurrency_limiter`. A request past this bound
-        is refused immediately with `lakana_server.errors.
-        AppendConcurrencyLimitError` (503, `Retry-After: 1`) rather than
-        queuing.
+        Most appends and artifact uploads one server process receives at once (default 4). A
+        request past the limit is refused at once with 503 and a hint to retry; the SDK asks
+        again.
     read_timeout_seconds
-        Two bounds on reading a request body. For a governed append, the longest the whole
-        read may take: reading is wrapped in `asyncio.timeout`, and exceeding it refuses the
-        request with `lakana_server.errors.AppendReadTimeoutError` (408) and nothing is
-        written. For an artifact upload it is the longest the
-        server waits for the next piece of a file, and the longest the manifest request may take
-        in all; a file's body as a whole ends when its upload expires
-        (`LAKANA_ARTIFACTS__UPLOAD_TTL_SECONDS`). Either way this bounds how long a slow or
-        stalled client can occupy a slot at all, separate from `max_concurrent` bounding how
-        many may do so at once.
+        How long the server waits for the body of a request, in seconds (default 300). For a table
+        append, the whole body; for an artifact upload, the next piece of a file and the whole
+        manifest request. A request past the limit is refused with 408 and nothing is written. It
+        stops a slow or stalled client from holding a slot.
     max_arrays
-        Most cumulative batches-times-columns (`RecordBatch.num_columns`,
-        summed over every batch decoded so far) a single append's decoded
-        data may contain, checked in `lakana_server.api.platform.tables.
-        _decode_arrow_stream` alongside `max_bytes`. Each decoded batch
-        costs roughly 1-3 KB of object overhead in decode and again in
-        pyiceberg, independent of its byte size — many tiny batches inside
-        an otherwise byte-cap-respecting body can still amplify memory and
-        CPU cost far beyond what `max_bytes` alone implies. Exceeding it
-        refuses the request with `PayloadTooLargeError` (413), suggesting
-        fewer, larger batches, before the rest of the stream is decoded
-        .
+        Most columns, summed over all batches, that the data of one append may hold (default
+        100,000). Many tiny batches use much memory and processor time even in a small body. A
+        request over the limit is refused with 413; send fewer, larger batches.
     """
 
     max_bytes: int = Field(default=268_435_456, gt=0)
@@ -72,11 +52,9 @@ class AuthAuditConfig(BaseModel):
     Parameters
     ----------
     per_ip_per_minute
-        `AUTHENTICATION_FAILED` audit rows recorded per client per minute,
-        enforced by `lakana_server.auth_rate_limit.AuthAuditLimiter`. A
-        client's requests past this rate still receive 401; they are just
-        not individually recorded, so a retrying attacker cannot flood the
-        audit log with one row per attempt.
+        Failed sign-ins that the audit log records per client per minute (default 10). Requests
+        past the rate are still refused with 401, but not each recorded, so repeated attempts
+        cannot flood the log.
     """
 
     per_ip_per_minute: int = Field(default=10, gt=0)
@@ -109,14 +87,13 @@ class Settings(BaseSettings):
     database
         Metadata database configuration, in the same shape `lakana-core` uses.
     bootstrap_admin
-        Name of the principal created on startup if it does not already
-        exist. See `lakana_core.bootstrap.ensure_bootstrap_principal`.
+        Name of the administrator created the first time the server starts, if no principal of
+        that name exists. Its credential is shown once at the first start. Change it only before
+        the first start.
     bootstrap_pat_key_id, bootstrap_pat_secret
-        A fixed key_id/secret pair for the bootstrap principal's
-        automatically-minted PAT, set only in tests or local development
-        for a deterministic credential. When either is `None` (the
-        production default), a real random PAT is generated and logged
-        once at startup — never persisted in configuration.
+        With `LAKANA_BOOTSTRAP_PAT_SECRET`, a fixed credential for the bootstrap administrator,
+        for tests and local development. Unset (the default), a random credential is created at
+        the first start and shown once. Do not set it in a deployment.
     secrets
         Secrets subsystem configuration, in the same shape `lakana-core` uses.
     task_tokens
@@ -149,14 +126,13 @@ class Settings(BaseSettings):
     log
         ``LAKANA_LOG__LEVEL``, shared with the worker: how much the server logs.
     host
-        Interface to bind when run via `uvicorn`. Unused by `create_app`
-        itself; read by whatever process starts the server.
+        Address the server listens on. `127.0.0.1` (the default) accepts connections from this
+        machine only; the Compose bundle publishes the port through `LAKANA_BIND`.
     port
-        Port to bind when run via `uvicorn`. Unused by `create_app` itself.
+        Port the server listens on (default 8000).
     repo_roots
-        Absolute directories local repositories must lie under
-        (`LAKANA_REPO_ROOTS`, a JSON list); validated like `lakana_core.config.Settings`.
-        Empty refuses every local repository.
+        Absolute directories that local repositories must lie under, as a JSON list, for example
+        `["/repos"]`. Empty (the default) refuses every local repository.
     """
 
     model_config = SettingsConfigDict(

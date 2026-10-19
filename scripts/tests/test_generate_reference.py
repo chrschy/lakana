@@ -1,5 +1,6 @@
 """Tests for the generator of the CLI and settings references."""
 
+import re
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -13,6 +14,7 @@ from scripts.generate_reference import (
     SETTINGS_PAGE,
     docstring_parameters,
     main,
+    real_pages,
     render_cli,
     render_settings,
 )
@@ -274,3 +276,18 @@ def test_the_committed_pages_are_current() -> None:
 def test_the_page_names_are_the_documented_ones() -> None:
     """The constants the docs and CI refer to."""
     assert (CLI_PAGE, SETTINGS_PAGE) == ("reference/cli.md", "reference/settings.md")
+
+
+_INTERNAL = re.compile(
+    r"lakana_(?:core|server|worker)|\b[a-z_]+\.[a-z_]+\.[a-z_]+|\b[a-z_]+\.[a-z_]+\(|`[A-Za-z]+\.[a-z_]+`"
+    r"|__repr|\bmodel_dump\b|\bSecretStr\b|\basyncio\b|`None`"
+)
+
+
+def test_no_setting_description_names_internal_code() -> None:
+    """The settings page is user documentation: a description names no internal code."""
+    page = real_pages()[SETTINGS_PAGE]
+    rows = [line for line in page.splitlines() if line.startswith("| `LAKANA_")]
+    assert rows
+    bad = [row.split("|")[1].strip() for row in rows if _INTERNAL.search(row.split("|", 5)[5])]
+    assert bad == [], f"describe these for a user, not a maintainer: {bad}"
