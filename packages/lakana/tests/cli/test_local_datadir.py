@@ -270,6 +270,7 @@ def test_paths_and_urls(tmp_path: Path) -> None:
     assert data_dir.database_url == f"sqlite:///{tmp_path}/lakana.db"
     assert data_dir.env_root("dev") == f"file://{tmp_path}/lake/dev"
     assert data_dir.server_pid == tmp_path / "server.pid"
+    assert data_dir.bootstrap_token_path == tmp_path / "bootstrap-token"
     assert data_dir.worker_pid == tmp_path / "worker.pid"
 
 

@@ -20,7 +20,7 @@ from lakana_core.auth import Action, AllowAllAuthorization, PrincipalRef, Secura
 from lakana_core.bootstrap import ensure_bootstrap_principal
 from lakana_core.config import DatabaseConfig, RunConfig
 from lakana_core.db import create_engine
-from lakana_core.errors import AuthenticationError
+from lakana_core.errors import AuthenticationError, ConflictError, ValidationError
 from lakana_core.grants.roles import Role
 from lakana_core.identity.pats import PatService
 from lakana_core.identity.task_tokens import TaskTokenService
@@ -474,26 +474,108 @@ def test_the_server_warns_at_start_up_only_when_old_format_secrets_are_accepted(
     assert "any old-format ciphertext" in warnings[0] and "lakana secret rotate" in warnings[0]
 
 
-def test_bootstrap_logs_the_full_token_when_none_is_configured(
-    caplog: pytest.LogCaptureFixture, tmp_path: Path
-) -> None:
-    """The no-`LAKANA_BOOTSTRAP_PAT_*` case is unchanged: the auto-minted token is logged."""
+def _minting_settings(tmp_path: Path) -> Settings:
+    """Build settings whose first start has to mint the first administrator's token.
+
+    Parameters
+    ----------
+    tmp_path
+        Pytest's per-test temporary directory; holds the database and the token file path.
+
+    Returns
+    -------
+    Settings
+        No `LAKANA_BOOTSTRAP_PAT_*`, and `bootstrap_token_file` set to `tmp_path / "token"`
+        (not yet created).
+    """
     settings = Settings(
         database=DatabaseConfig(url=f"sqlite:///{tmp_path}/lakana.db"),
+        bootstrap_token_file=tmp_path / "token",
     )
     engine = create_engine(settings.database)
     Base.metadata.create_all(engine)
     engine.dispose()
+    return settings
+
+
+def test_a_minted_bootstrap_token_goes_to_a_private_file_and_never_to_the_log(
+    caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    """#208: the token is in a 0600 file; the log names the file, the admin and the key id only."""
+    settings = _minting_settings(tmp_path)
 
     with (
         _app_logger_enabled(),
-        caplog.at_level(logging.WARNING),
+        caplog.at_level(logging.DEBUG),
+        TestClient(create_app(settings)) as client,
+    ):
+        token = (tmp_path / "token").read_text().strip()
+        assert token.startswith("lakana_pat_")
+        assert (tmp_path / "token").stat().st_mode & 0o777 == 0o600
+        ok = client.get("/api/v1/environments", headers={"Authorization": f"Bearer {token}"})
+        assert ok.status_code == 200
+        key_id = token.split("_")[2]
+
+    assert "lakana_pat_" not in caplog.text
+    secret = token.split("_", 3)[3]
+    assert secret not in caplog.text
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    [line] = [w for w in warnings if str(tmp_path / "token") in w]
+    assert "'admin'" in line and key_id in line
+    assert "delete" in line
+
+
+def test_a_minting_start_without_a_token_file_fails_naming_the_setting(tmp_path: Path) -> None:
+    """No supplied credential and no file path: start-up stops with a message naming the setting."""
+    settings = _minting_settings(tmp_path).model_copy(update={"bootstrap_token_file": None})
+
+    with (
+        pytest.raises(ValidationError, match="LAKANA_BOOTSTRAP_TOKEN_FILE"),
         TestClient(create_app(settings)),
     ):
         pass
 
-    messages = [record.getMessage() for record in caplog.records]
-    assert any("lakana_pat_" in message for message in messages)
+
+def test_a_half_set_credential_stops_start_up_and_logs_nothing_false(
+    caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    """A key id without its secret is refused; the log never claims a supplied token was used."""
+    settings = _minting_settings(tmp_path).model_copy(update={"bootstrap_pat_key_id": "k"})
+
+    with (
+        _app_logger_enabled(),
+        caplog.at_level(logging.DEBUG),
+        pytest.raises(ValidationError, match="LAKANA_BOOTSTRAP_PAT_SECRET"),
+        TestClient(create_app(settings)),
+    ):
+        pass
+
+    assert "was supplied" not in caplog.text
+
+
+def test_a_minting_start_refuses_an_existing_token_file(tmp_path: Path) -> None:
+    """An earlier file is not overwritten; start-up stops and the file is untouched."""
+    settings = _minting_settings(tmp_path)
+    (tmp_path / "token").write_text("older\n")
+
+    with (
+        pytest.raises(ConflictError, match="remove it after use"),
+        TestClient(create_app(settings)),
+    ):
+        pass
+
+    assert (tmp_path / "token").read_text() == "older\n"
+
+
+def test_a_minting_start_refuses_a_symlink_at_the_token_path(tmp_path: Path) -> None:
+    """A symlink is never followed, whatever it points at."""
+    settings = _minting_settings(tmp_path)
+    (tmp_path / "token").symlink_to(tmp_path / "victim")
+
+    with pytest.raises(ConflictError), TestClient(create_app(settings)):
+        pass
+
+    assert not (tmp_path / "victim").exists()
 
 
 def test_lifespan_grants_the_bootstrap_admin_instance_admin(settings: Settings) -> None:
@@ -594,15 +676,17 @@ def test_restart_does_not_restore_revoked_bootstrap_admin(
 
 
 def test_restart_restores_admin_when_none_exists(
-    settings: Settings, caplog: pytest.LogCaptureFixture
+    caplog: pytest.LogCaptureFixture, tmp_path: Path
 ) -> None:
     """The recovery half: a genuine zero-admin lockout is restored on restart.
 
     The very first startup against an empty database also finds no active
     admin and takes this same path — recorded here as the baseline
     `BOOTSTRAP_ADMIN_RESTORED` count — so what this test actually pins is
-    that a *second*, later lockout is recovered too, one more event.
+    that a *second*, later lockout is recovered too, one more event, with a new token in a new
+    file and none in the log (#208).
     """
+    settings = _minting_settings(tmp_path)
     with TestClient(create_app(settings)):
         pass
 
@@ -637,14 +721,12 @@ def test_restart_restores_admin_when_none_exists(
         session.commit()
     engine.dispose()
 
-    # Restarting with the same, fixed `bootstrap_pat_key_id`/`secret` pair
-    # as the first boot: that key_id is already taken (revoking a PAT
-    # never frees it), so recovery falls back to a random credential
-    # instead of failing outright.
+    first_token = (tmp_path / "token").read_text().strip()
+    (tmp_path / "token").unlink()
     caplog.clear()
     with (
         _app_logger_enabled(),
-        caplog.at_level(logging.WARNING),
+        caplog.at_level(logging.DEBUG),
         TestClient(create_app(settings)),
     ):
         pass
@@ -677,11 +759,29 @@ def test_restart_restores_admin_when_none_exists(
         assert all(event.principal_id == admin_id for event in events)
     engine.dispose()
 
-    logged_tokens = [
-        record.getMessage() for record in caplog.records if "lakana_pat_" in record.getMessage()
-    ]
-    assert len(logged_tokens) == 1
-    assert "lakana_pat_testkey_testsecret" not in logged_tokens[0]
+    second_token = (tmp_path / "token").read_text().strip()
+    assert second_token.startswith("lakana_pat_") and second_token != first_token
+    assert "lakana_pat_" not in caplog.text
+
+
+def test_lockout_recovery_with_a_taken_key_id_fails_start_up(settings: Settings) -> None:
+    """A supplied key id an earlier token used: no token is invented, the start-up stops."""
+    with TestClient(create_app(settings)):
+        pass
+    engine = create_engine(settings.database)
+    with Session(engine) as session:
+        for grant in session.execute(select(Grant)).scalars().all():
+            grant.revoked_at = datetime.now(UTC)
+        session.commit()
+    engine.dispose()
+
+    with pytest.raises(ConflictError, match="testkey"), TestClient(create_app(settings)):
+        pass
+
+    engine = create_engine(settings.database)
+    with Session(engine) as session:
+        assert len(session.execute(select(PersonalAccessToken)).scalars().all()) == 1
+    engine.dispose()
 
 
 def test_failed_authentication_flooding_is_bounded_per_client(settings: Settings) -> None:
