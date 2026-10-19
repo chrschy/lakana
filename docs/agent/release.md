@@ -270,9 +270,11 @@ bad release never advances past the point that would have caught it:
   derive the same version the image was built with, and the script fails if the two differ.
 - **`five-minute-release`** needs only `publish-sdk` (not the image jobs — it doesn't touch
   Docker) and runs `scripts/five_minute_test.sh` against **PyPI**, the same script CI's
-  `five-minute` job runs against locally built wheels on every PR. PyPI can lag a few
-  seconds behind the upload, so this retries the whole script up to 5 times, 30s apart, on
-  failure.
+  `five-minute` job runs against locally built wheels on every PR. PyPI's index can lag
+  the upload by minutes, so `scripts/wait_for_pypi.py` first polls PyPI's JSON API (every 15 s,
+  for at most 10 minutes) until all four packages show the version, and fails with the missing
+  names after that. Then, for the odd blip, it retries the whole script up to 5 times, 30s
+  apart, on failure.
 
 Both smoke scripts also deploy and run one Python asset (`silver.doubled`, reading
 `bronze.example`) and an artifact pair (`models.doubler` stores a model, `gold.by_model` reads
