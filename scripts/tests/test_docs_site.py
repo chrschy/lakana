@@ -16,7 +16,7 @@ EXEMPT = (
     "scripts/tests/test_docs_site.py",
     "scripts/tests/test_docs_only.py",
 )
-NOT_TESTED_CEILING = 50
+NOT_TESTED_CEILING = 53
 """Blocks marked as not tested; it only goes down, apart from the rises below.
 
 The artifact pages left six when they were written: the `artifact uploads abort` command,
@@ -106,6 +106,11 @@ and upgrading one of the two. Each needs Docker and two complete stacks, which t
 does not have. The one backup block of `deploy-with-compose.md` replaced two (a single
 procedure now), so the count is 50.
 The guide's other command blocks are synced from `give-access` and `getting-started`.
+
+The page "Is my instance healthy?" (#45) rose it from 50 to 53 with three blocks that ask Docker
+about a running stack: `docker compose ps --all`, `docker system df -v` with `docker compose exec
+worker df`, and `docker compose logs` with the filter that removes secrets. The example runner has
+no Docker. The health route, the queue listings and the version run in `getting-started/run.sh`.
 """
 SECTIONS = ("tutorials", "how-to", "reference", "explanation")
 
