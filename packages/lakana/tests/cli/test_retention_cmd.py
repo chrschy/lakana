@@ -356,6 +356,29 @@ def test_sql_into_create_with_expire_after_sets_the_retention(tmp_path: Path) ->
     assert "expires 7 days after its last activity" in _plain(result.stdout)
 
 
+def test_sql_expire_after_refuses_break_glass(tmp_path: Path) -> None:
+    api = FakeApi()
+    result = invoke(
+        make_state(tmp_path, api),
+        "sql",
+        "SELECT 1 AS id",
+        "--into",
+        "gold.orders",
+        "--mode",
+        "create",
+        "--expire-after",
+        "7",
+        "--break-glass",
+        "--reason",
+        "fixing the broken load",
+        "--env",
+        "dev",
+    )
+    assert result.exit_code == 2
+    assert "never expire" in _plain(result.stderr + result.stdout)
+    assert api.requests == []
+
+
 @pytest.mark.parametrize("mode", ["append", None])
 def test_sql_expire_after_needs_mode_create(tmp_path: Path, mode: str | None) -> None:
     api = FakeApi()
