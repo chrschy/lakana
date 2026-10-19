@@ -289,7 +289,7 @@ Audited in the same transaction (`TABLE_DESCRIBED`, `COLUMN_DESCRIBED`; `detail`
 | `GET .../tables/{name}/health` | `READ_TABLE` on the table | Checked first, so a missing right is `403` before anything is read. |
 | The `readers` of that answer | `MANAGE_GRANT` and the `ADMIN` role at instance scope (`grants.admin.may_see_grants`) | The grants listing's rule asked as a yes or no: nothing is recorded as `AUTHORIZATION_DENIED` for a `False`, and the field is `null`, not an error. The helper lives in `grants/admin.py` because `test_admin_only_call_sites.py` allows the three actions nowhere else. |
 
-`table_reads` holds who read what, by day; it is written only by the worker, in the transaction that completes a succeeded query (`catalog/health.py`, `record_table_reads`), and deleted by the housekeeping sweep after `LAKANA_TABLE_READS__KEEP_DAYS`. Python tasks read through the Iceberg REST catalog and record nothing. Pins: `test_table_health.py`, `test_tables_health.py`.
+`table_reads` holds who read what, by day; it is written only by the worker, in the transaction that completes a succeeded query (`catalog/health.py`, `record_table_reads`), and deleted by the housekeeping sweep after `LAKANA_TABLE_READS__KEEP_DAYS`. A Python task reads its inputs through the query API (`lakana.runner._read_input`), so its reads count under the run's principal. Pins: `test_pipeline_table_reads.py`, `test_table_health.py`, `test_tables_health.py`.
 
 ## Search: what a result may reveal
 

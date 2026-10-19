@@ -135,6 +135,17 @@ def test_a_succeeded_query_counts_a_read_per_day_and_principal(
     assert abs(row.last_read_at - datetime.now(UTC)).total_seconds() < 300
 
 
+def test_the_input_query_of_a_python_task_counts_a_read(
+    session: Session, principal: PrincipalRef, sales: QueryService
+) -> None:
+    """A Python task reads an input with the quoted ``SELECT *`` of `lakana.runner._read_input`."""
+    run = sales.submit_query(principal, "dev", 'SELECT * FROM "gold"."sales"')
+    run_one(session, run.id, AllowAllAuthorization())
+    session.refresh(run)
+    assert run.status is QueryRunStatus.SUCCEEDED, run.error_message
+    assert _counts(session) == [("sales", "ada", 1)]
+
+
 def test_a_failed_query_counts_nothing(
     session: Session, principal: PrincipalRef, sales: QueryService
 ) -> None:
