@@ -26,7 +26,10 @@ What it does, per environment:
    an id-suffixed directory strictly inside ``managed/`` of its environment's storage root
    (`locations_refused` otherwise, record kept), and nothing in use may be the location or lie
    inside it, in any environment (`location_in_use`, and the nested-location check of
-   `CatalogService.maintain`; `purges_blocked` otherwise). Then its files are deleted one at a
+   `CatalogService.maintain`; `purges_blocked` otherwise), and no `DROPPED` record may lie inside
+   it (`dropped_inside`: a dropped table nested there keeps its files for its own undo period;
+   the purge waits, `purges_waiting`, and is tried again by every later sweep until that table
+   is restored or purged itself). Then its files are deleted one at a
    time, each under the record's lock, after checking again that the record is still purgeable
    and that nothing in use lies inside, and only objects strictly inside the location. The
    record goes last, with a `TABLE_PURGED` event (``complete``); a pass that stops part-way
@@ -72,6 +75,7 @@ from lakana_core.auth import Securable
 from lakana_core.catalog.append import root_relative_path
 from lakana_core.catalog.locations import (
     abandon_claim,
+    dropped_inside,
     location_in_use,
     lock_location,
     own_table_id,
@@ -116,6 +120,10 @@ UNRECORDED_MESSAGE = (
     'changes, the files are intact. See "After a restore" in the documentation before '
     "removing anything."
 )
+WAITING_MESSAGE = (
+    "The table location sweep left %s alone for now: it waits for a dropped table inside it, "
+    "which can be restored until its own undo period ends. The next sweep looks again."
+)
 BLOCKED_MESSAGE = (
     "The table location sweep left %s alone: a table, or a create in progress, uses this "
     "location or one inside it. Its record is kept and the next sweep looks again."
@@ -147,6 +155,9 @@ class LocationSweepReport:
         Their total size.
     purges_blocked
         Purges skipped because something in use is the location or lies inside it.
+    purges_waiting
+        Purges put off because a dropped table that may still be restored lies inside the
+        location; tried again by the next sweep.
     locations_refused
         Purgeable records whose location is not a table directory under ``managed/``; kept.
     left_alone
@@ -169,6 +180,7 @@ class LocationSweepReport:
     files_deleted: int = 0
     bytes_deleted: int = 0
     purges_blocked: int = 0
+    purges_waiting: int = 0
     locations_refused: int = 0
     left_alone: int = 0
     unrecorded_directories: int = 0
@@ -190,6 +202,10 @@ class _GiveUp(Exception):
 
 class _Blocked(Exception):
     """Something in use is the location being purged or lies inside it."""
+
+
+class _Waiting(Exception):
+    """A dropped table that may still be restored lies inside the location being purged."""
 
 
 @dataclass
@@ -503,6 +519,9 @@ class _Run:
         if self._in_use(location):
             self._blocked(relative)
             return
+        if self._waits(location):
+            self._waiting(relative)
+            return
         if not self._start(record_id):
             return
         tally = _Tally()
@@ -512,6 +531,8 @@ class _Run:
                 finished = self._forget(record_id, location, state, tally)
         except _Blocked:
             self._blocked(relative)
+        except _Waiting:
+            self._waiting(relative)
         finally:
             if tally.files and not finished:
                 self._record_purge(location, state, tally, complete=False)
@@ -548,6 +569,35 @@ class _Run:
             return True
         finally:
             self._session.rollback()
+
+    def _waits(self, location: str) -> bool:
+        """Say whether a dropped table that may still be restored lies inside a location.
+
+        Parameters
+        ----------
+        location
+            The location about to be purged.
+
+        Returns
+        -------
+        bool
+            `True` if the purge must wait.
+        """
+        try:
+            return dropped_inside(self._session, location)
+        finally:
+            self._session.rollback()
+
+    def _waiting(self, relative: str) -> None:
+        """Count and report a purge that waits for a dropped table inside it.
+
+        Parameters
+        ----------
+        relative
+            The location, relative to the root.
+        """
+        self.counts["purges_waiting"] += 1
+        logger.warning(WAITING_MESSAGE, shown(relative))
 
     def _blocked(self, relative: str) -> None:
         """Count and report a purge that something in use stopped.
@@ -586,6 +636,8 @@ class _Run:
         ------
         _Blocked
             If something in use appeared inside the location.
+        _Waiting
+            If a dropped table that may still be restored lies inside the location.
         """
         complete = True
         for found in self._storage.list_objects(relative):
@@ -627,6 +679,8 @@ class _Run:
         ------
         _Blocked
             If something in use is the location or lies inside it.
+        _Waiting
+            If a dropped table that may still be restored lies inside the location.
         """
         try:
             record = lock_location(self._session, record_id)
@@ -634,6 +688,8 @@ class _Run:
                 return False
             if location_in_use(self._session, location):
                 raise _Blocked
+            if dropped_inside(self._session, location):
+                raise _Waiting
             if delete_quietly(self._storage, found.path):
                 tally.files += 1
                 tally.size += found.size
@@ -668,6 +724,8 @@ class _Run:
         ------
         _Blocked
             If something in use is the location or lies inside it.
+        _Waiting
+            If a dropped table that may still be restored lies inside the location.
         """
         self._tick()
         try:
@@ -676,6 +734,8 @@ class _Run:
                 return False
             if location_in_use(self._session, location):
                 raise _Blocked
+            if dropped_inside(self._session, location):
+                raise _Waiting
             self._session.delete(record)
             self._audit_purge(location, state, tally, complete=True)
             self._session.commit()
@@ -915,8 +975,9 @@ def sweep_table_locations(
     if any(getattr(report, key) for key in totals if key not in quiet):
         logger.info(
             "Table location sweep: %d claims abandoned, %d claims found published, %d locations "
-            "purged (%d files, %d bytes); %d claims kept, %d purges blocked, %d locations "
-            "refused, %d objects left alone, %d records and %d environments failed%s.",
+            "purged (%d files, %d bytes); %d claims kept, %d purges blocked, %d purges waiting, "
+            "%d locations refused, %d objects left alone, %d records and %d environments "
+            "failed%s.",
             report.claims_abandoned,
             report.claims_published,
             report.locations_purged,
@@ -924,6 +985,7 @@ def sweep_table_locations(
             report.bytes_deleted,
             report.claims_kept,
             report.purges_blocked,
+            report.purges_waiting,
             report.locations_refused,
             report.left_alone,
             report.failed_records,

@@ -94,6 +94,9 @@ and no later than one sweep after it**. The sweep runs every `LAKANA_RUN__SWEEP_
   and cannot be restored.
 - **With versioning on the bucket**, a deleted file stays as an older version of its object, and the
   bucket's own rules decide when it is gone.
+- **A table nested inside another table's directory** (in a namespace named after that directory)
+  keeps its files for its own undo period even when the outer table is purged: the outer table's
+  files wait until the nested one is restored or deleted.
 - **An external table's files are never deleted.** Dropping one removes the catalog entry only; it
   is not listed by `--dropped` and cannot be restored. Register it again with
   `lakana table create-external`. A view has no files; a deploy of its project creates it again.
@@ -123,6 +126,7 @@ and no later than one sweep after it**. The sweep runs every `LAKANA_RUN__SWEEP_
 | `silver.orders cannot be restored as 'orders': a table of that name exists in silver now. ...` | A new table, view or artifact has the name. | Add `--as NEW_NAME`, or drop the new one first. |
 | `silver.orders cannot be restored: its undo period ended at ... (UTC), ...` | The period is over, or the table was dropped with `--purge`. | The files are deleted or about to be; restore from a backup if you have one. |
 | `silver.orders cannot be restored: the worker's sweep has started deleting its files, ...` | The sweep began deleting before the restore. | Restore from a backup if you have one. |
+| `silver.orders cannot be restored: its files are gone ...` | Its metadata file was deleted from storage by something other than Lakana. | Restore from a backup of the storage if you have one. |
 | `silver.orders cannot be restored: its namespace silver was dropped after it. ...` | The namespace is gone. | Create the namespace again (`lakana ns create`), then restore the table. |
 
 ## What the audit log records

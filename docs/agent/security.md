@@ -1285,7 +1285,7 @@ then the guard as `WriteOperation.CREATE_TABLE` (not a task's operation, so ever
 is refused). It finds the newest `DROPPED` record of the name in the namespace, takes
 `lock_location`, re-reads it, and refuses (rolling back first): not `DROPPED` or no snapshot (404),
 `purge_started_at` set (409), `db_now >= purge_after` (409), namespace path gone (404), name taken
-(409, `--as`). Then, in one transaction: the row from the snapshot (same id and metadata
+(409, `--as`), metadata file gone (409, `FILES_GONE_MESSAGE`). Then, in one transaction: the row from the snapshot (same id and metadata
 location, namespace by path, the new name; an owner or description author deleted since becomes
 `NULL`), its descriptions and columns, `restore_policies`, the record back to `LIVE` (cleared),
 `TABLE_UNDROPPED` with the restored `{kind, id}` list, the guard's `record_pending`, commit. An
@@ -1311,6 +1311,22 @@ is also past its period for an undrop. Pins: `test_table_undrop.py`,
 `test_table_location_sweep.py` (`test_the_purge_is_marked_started_under_the_lock_before_its_first_delete`,
 `test_a_record_no_longer_due_when_the_purge_starts_is_left_alone`), and the two-thread Postgres
 tests in `test_table_locations_postgres_integration.py`.
+
+**A dropped table nested inside another location.** `location_in_use` counts only `LIVE` and
+`CLAIMED`, so `dropped_inside` (any `DROPPED` record strictly below the location, in any
+environment) is checked too: before the mark, and again under the lock before each delete and
+before the record goes. The outer purge then waits (`purges_waiting`, one warning per record and
+run), stays due, and is retried by every later sweep until the nested table is restored (`LIVE`,
+which blocks it as before) or purged itself. A nested `ABANDONED` record does not block: nobody can
+restore it and its own purge is already due. Maintenance adds the `DROPPED` locations of its
+environment to the other tables' locations (`_other_table_locations`), so a dropped table nested
+under the maintained table's `data/` is not taken for its orphans. As a last guard, undrop refuses
+with `FILES_GONE_MESSAGE` when the snapshot's metadata file no longer exists, before anything is
+written. Pins: `test_a_dropped_table_nested_inside_blocks_the_purge_until_it_is_restored`,
+`test_the_outer_purge_follows_once_the_nested_drop_is_purged_itself`,
+`test_a_table_dropped_inside_during_the_purge_stops_it`,
+`test_a_nested_dropped_tables_files_are_kept_for_its_undo_period`,
+`test_an_undrop_whose_metadata_file_is_gone_is_refused_and_restores_nothing`.
 
 **Residuals, accepted.** A purge that is blocked after its mark (something in use appeared inside)
 leaves a tombstone that can no longer be restored although its files are whole. The read history

@@ -718,7 +718,10 @@ more than the drop took: it un-revokes only the ids the drop recorded, and only 
 stamped with the drop's own time, and it needs `DROP_TABLE` on the namespace (never the table grants
 of a new table that took the name) plus `CREATE_TABLE`. The sweep marks a purge as started under the
 record's lock before its first delete, and an undrop under the same lock refuses a marked record, so
-a table is never restored with some of its files gone.
+a table is never restored with some of its files gone. A purge also waits while a dropped table
+lies inside its location, and maintenance treats a dropped table's directory as another table's, so
+neither deletes a nested tombstone's files during its undo period; an undrop whose metadata file
+is gone anyway is refused before it writes anything.
 
 ## M3 exit criteria
 

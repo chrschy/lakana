@@ -108,6 +108,13 @@ PERIOD_PASSED_MESSAGE = (
 )
 """The `ConflictError` of an undrop after ``purge_after`` (`{table}`, `{purge_after}`)."""
 
+FILES_GONE_MESSAGE = (
+    "{table} cannot be restored: its files are gone (its current metadata file no longer "
+    "exists in the environment's storage), so nothing was restored. Restore the table from a "
+    "backup of the storage if you have one."
+)
+"""The `ConflictError` of an undrop whose metadata file is missing (`{table}`)."""
+
 PURGE_STARTED_MESSAGE = (
     "{table} cannot be restored: the worker's sweep has started deleting its files, so the "
     "table can no longer be brought back whole."

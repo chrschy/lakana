@@ -308,7 +308,10 @@ principal: the sweep does them.
 table. The same sweep deletes them afterwards: no earlier than the end of the undo period, and no
 later than one sweep after it; a drop with `--purge` is due at once. Before it deletes the first
 file it marks the record, so a restore after that is refused instead of bringing back a table with
-files missing. An external table's files are never deleted. With versioning on the bucket, the
+files missing. A table whose directory holds a dropped table of its own (in a namespace named
+after that directory) is purged only once the table inside has been restored or purged itself; until
+then the worker logs `The table location sweep left <location> alone for now: it waits for a dropped
+table inside it, …` at each sweep. An external table's files are never deleted. With versioning on the bucket, the
 bucket's own rules decide when a deleted file is gone. See
 [Drop and restore a table](drop-and-restore-a-table.md).
 

@@ -89,6 +89,7 @@ from lakana_core.catalog.locations import (
     CLAIM_RELEASED_MESSAGE,
     claim_holder,
     claim_location,
+    dropped_locations,
     forget_location,
     lock_location,
     publish_location,
@@ -122,6 +123,7 @@ from lakana_core.catalog.schema_compat import SchemaDiff, arrow_to_iceberg_schem
 from lakana_core.catalog.schema_inference import infer_schema
 from lakana_core.catalog.tombstones import (
     DEFAULT_UNDO_DAYS,
+    FILES_GONE_MESSAGE,
     NAME_TAKEN_MESSAGE,
     NAMESPACE_GONE_MESSAGE,
     NO_TOMBSTONE_MESSAGE,
@@ -5503,7 +5505,7 @@ class CatalogService:
         )
 
     def _other_table_locations(self, environment_id: uuid.UUID, table_id: uuid.UUID) -> list[str]:
-        """List every other managed table's location in an environment.
+        """List every other managed table's location in an environment, dropped ones too.
 
         Parameters
         ----------
@@ -5517,9 +5519,13 @@ class CatalogService:
         list of str
             Derived from each metadata location, as the worker's own
             confinement check does (`table_root_locations`, which the location
-            sweep uses too).
+            sweep uses too), and the locations of dropped tables within their undo
+            period (`dropped_locations`), whose files are kept for an undrop.
         """
-        return table_root_locations(self._session, environment_id=environment_id, exclude=table_id)
+        return [
+            *table_root_locations(self._session, environment_id=environment_id, exclude=table_id),
+            *dropped_locations(self._session, environment_id),
+        ]
 
     @staticmethod
     def _delete_quietly(
@@ -6216,8 +6222,9 @@ class CatalogService:
         AlreadyExistsError
             If a table of the name exists now (`NAME_TAKEN_MESSAGE` names `--as`).
         ConflictError
-            If the undo period has ended or the purge has started, or the write failed for
-            another reason (the namespace dropped at the same moment).
+            If the undo period has ended or the purge has started, the table's metadata file is
+            gone, or the write failed for another reason (the namespace dropped at the same
+            moment).
         """
         target = ref if new_name is None else replace(ref, name=new_name)
         if new_name is not None:
@@ -6265,6 +6272,9 @@ class CatalogService:
             holder = taken.table_type
             self._session.rollback()
             raise AlreadyExistsError(self._undrop_taken_message(ref, target, holder))
+        if not self._metadata_file_exists(ref.environment, snapshot["row"]["metadata_location"]):
+            self._session.rollback()
+            raise ConflictError(FILES_GONE_MESSAGE.format(table=shown(ref.dotted())))
         namespace_id = namespace.id
         try:
             row = restore_table(
@@ -6310,6 +6320,29 @@ class CatalogService:
                 "than a name collision. Check that the namespace still exists, then try again."
             ) from exc
         return self._to_loaded_table(target, row)
+
+    def _metadata_file_exists(self, environment: str, metadata_location: str) -> bool:
+        """Say whether a dropped table's metadata file is still in storage.
+
+        The tombstone's lock keeps the sweep from starting a purge meanwhile; this guards the
+        undrop against files deleted by anything else, so it never commits a row that points
+        at nothing.
+
+        Parameters
+        ----------
+        environment
+            The environment.
+        metadata_location
+            The snapshot's metadata location; a tombstone is only written for a table that has
+            one.
+
+        Returns
+        -------
+        bool
+            Whether the file exists.
+        """
+        resolved = self._storage.for_environment(environment)
+        return bool(resolved.file_io.new_input(metadata_location).exists())
 
     @staticmethod
     def _undrop_taken_message(ref: TableRef, target: TableRef, holder: TableType) -> str:

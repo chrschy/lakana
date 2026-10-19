@@ -39,6 +39,7 @@ from lakana_core.auth import (
 from lakana_core.catalog.service import CatalogService
 from lakana_core.catalog.tombstones import (
     DEFAULT_UNDO_DAYS,
+    FILES_GONE_MESSAGE,
     NAME_TAKEN_MESSAGE,
     NAMESPACE_GONE_MESSAGE,
     NO_TOMBSTONE_MESSAGE,
@@ -1117,3 +1118,21 @@ def test_a_table_dropped_at_the_same_moment_is_not_found(
     """The row lock finds no row: the other drop won, and this one says the table is gone."""
     with pytest.raises(NotFoundError, match="not found"):
         catalog._lock_table_row(_ref("gold.orders"), uuid.uuid4())
+
+
+def test_an_undrop_whose_metadata_file_is_gone_is_refused_and_restores_nothing(
+    session: Session, catalog: CatalogService, principal: PrincipalRef
+) -> None:
+    """Never a row that points at nothing: the files must still be there."""
+    table_id = _orders_table(catalog, principal)
+    metadata_location = catalog.load_table(principal, _ref("gold.orders")).metadata_location
+    catalog.drop_table(principal, _ref("gold.orders"))
+    Path(metadata_location.removeprefix("file://")).unlink()
+
+    with pytest.raises(ConflictError) as info:
+        catalog.undrop_table(principal, _ref("gold.orders"))
+
+    assert str(info.value) == FILES_GONE_MESSAGE.format(table="gold.orders")
+    session.rollback()
+    assert session.get(Table, table_id) is None
+    assert _record(session, table_id).state is TableLocationState.DROPPED

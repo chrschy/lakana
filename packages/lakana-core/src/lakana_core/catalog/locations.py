@@ -18,6 +18,8 @@ is never deleted.**
 
 `location_in_use` is the check every deletion makes again right before it deletes: no `LIVE` or
 `CLAIMED` record and no `tables` row, in any environment, may name the location or one inside it.
+`dropped_inside` is the other: no `DROPPED` record (a dropped table within its undo period, or
+due but not purged yet) may lie inside it.
 """
 
 from __future__ import annotations
@@ -285,6 +287,66 @@ def location_in_use(session: Session, location: str) -> bool:
     )
     table = exists().where(Table.metadata_location.startswith(inside, autoescape=True))
     return bool(session.scalar(select(or_(record, table))))
+
+
+def dropped_inside(session: Session, location: str) -> bool:
+    """Say whether a dropped table that may still be restored lies inside a location.
+
+    A `DROPPED` record strictly below the location, in any environment: its files are kept for
+    its own undo period, so a purge of the location around it must wait. A nested `ABANDONED`
+    record does not count: nobody can restore it, and its own purge is already due.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    location
+        An absolute location about to be purged.
+
+    Returns
+    -------
+    bool
+        `True` if a purge of `location` would delete a tombstone's files.
+    """
+    inside = location.rstrip("/") + "/"
+    return bool(
+        session.scalar(
+            select(
+                exists().where(
+                    TableLocation.state == TableLocationState.DROPPED,
+                    TableLocation.location.startswith(inside, autoescape=True),
+                )
+            )
+        )
+    )
+
+
+def dropped_locations(session: Session, environment_id: uuid.UUID) -> list[str]:
+    """List the locations of an environment's dropped tables that are not purged yet.
+
+    Maintenance treats them as other tables' directories, so the files of a dropped table
+    nested inside the table it maintains are never taken for orphans during the undo period.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    environment_id
+        The environment.
+
+    Returns
+    -------
+    list of str
+        The `DROPPED` records' locations.
+    """
+    return list(
+        session.scalars(
+            select(TableLocation.location).where(
+                TableLocation.environment_id == environment_id,
+                TableLocation.state == TableLocationState.DROPPED,
+            )
+        )
+    )
 
 
 def table_root_locations(

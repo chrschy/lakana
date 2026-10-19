@@ -1410,3 +1410,163 @@ def test_an_external_tables_files_are_never_purged(
 
     assert report.files_deleted == 0
     assert raw.read_text() == "id\n1\n"
+
+
+def _outer_and_inner(catalog: CatalogService, principal: PrincipalRef) -> tuple[str, str, str]:
+    """Create `gold.outer` and a table nested in its directory, through a namespace of its name.
+
+    Parameters
+    ----------
+    catalog
+        The catalog.
+    principal
+        The creator.
+
+    Returns
+    -------
+    tuple of str
+        The outer location, the inner location and the inner table's dotted name.
+    """
+    catalog.create_table(principal, _ref("gold.outer"), schema=_schema())
+    outer = _metadata_root(catalog, principal, "gold.outer")
+    directory = outer.rsplit("/", 1)[1]
+    catalog.create_namespace(principal, "dev", _ref(f"gold.{directory}.t").namespace)
+    dotted = f"gold.{directory}.inner"
+    catalog.create_table(principal, _ref(dotted), schema=_schema())
+    inner = _metadata_root(catalog, principal, dotted)
+    assert inner.startswith(outer + "/")
+    return outer, inner, dotted
+
+
+def test_a_dropped_table_nested_inside_blocks_the_purge_until_it_is_restored(
+    session: Session,
+    catalog: CatalogService,
+    store: Path,
+    principal: PrincipalRef,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Its undo period is honoured: the outer purge waits, and the inner table can come back."""
+    outer, inner, dotted = _outer_and_inner(catalog, principal)
+    inner_files = _files(inner)
+    catalog.drop_table(principal, _ref(dotted))
+    catalog.drop_table(principal, _ref("gold.outer"), purge=True)
+    record = _record(session, outer)
+    assert record is not None and record.purge_after is not None
+    caplog.set_level(logging.WARNING)
+
+    report = _sweep(session, now=record.purge_after + timedelta(seconds=1))
+
+    assert (report.purges_waiting, report.files_deleted, report.locations_purged) == (1, 0, 0)
+    assert _files(inner) == inner_files
+    waiting = _record(session, outer)
+    assert waiting is not None and waiting.purge_started_at is None
+    assert "waits for a dropped table inside it" in caplog.text
+    restored = catalog.undrop_table(principal, _ref(dotted))
+    assert restored.metadata_location.startswith(inner + "/")
+    assert _files(inner) == inner_files
+
+
+def test_the_outer_purge_follows_once_the_nested_drop_is_purged_itself(
+    session: Session, catalog: CatalogService, store: Path, principal: PrincipalRef
+) -> None:
+    """The outer record stays due and is purged by the first sweep after the inner one's."""
+    outer, inner, dotted = _outer_and_inner(catalog, principal)
+    catalog.drop_table(principal, _ref(dotted))
+    catalog.drop_table(principal, _ref("gold.outer"), purge=True)
+    inner_record = _record(session, inner)
+    assert inner_record is not None and inner_record.purge_after is not None
+    late = inner_record.purge_after + timedelta(seconds=1)
+
+    first = _sweep(session, now=late)
+
+    assert (first.purges_waiting, first.locations_purged) == (1, 1)
+    assert _record(session, inner) is None
+    assert _record(session, outer) is not None
+
+    second = _sweep(session, now=late)
+
+    assert (second.purges_waiting, second.locations_purged) == (0, 1)
+    assert _record(session, outer) is None
+    assert _files(outer) == []
+
+
+def test_a_table_dropped_inside_during_the_purge_stops_it(
+    session: Session, catalog: CatalogService, store: Path
+) -> None:
+    """A tombstone that appears inside between two deletes stops the pass; the rest stays."""
+    location = _location(store)
+    for index in range(3):
+        _put(location, f"data/{index}.parquet")
+    _claim(session, location, state=TableLocationState.ABANDONED, purge_after=_NOW)
+
+    def drop_inside() -> None:
+        with Session(session.get_bind()) as other:
+            other.add(
+                TableLocation(
+                    id=uuid.uuid4(),
+                    environment_id=_env_id(other),
+                    location=f"{location}/nested-{uuid.uuid4().hex}",
+                    state=TableLocationState.DROPPED,
+                    claimed_at=_NOW,
+                    purge_after=_NOW + timedelta(days=7),
+                    revoked_policy_ids=[],
+                )
+            )
+            other.commit()
+
+    report = _sweep(session, should_stop=_after_first_delete(location, drop_inside))
+
+    assert (report.locations_purged, report.purges_waiting) == (0, 1)
+    assert len(_files(location)) == 2
+
+
+def test_an_abandoned_location_nested_inside_does_not_block_the_purge(
+    session: Session, catalog: CatalogService, store: Path
+) -> None:
+    """Nobody can restore an abandoned create, so its leftovers may go with the outer purge."""
+    outer = _location(store, "outer")
+    _put(outer, "data/a.parquet")
+    nested = f"{outer}/nested-{uuid.uuid4().hex}"
+    _put(nested, "data/b.parquet")
+    _claim(session, outer, state=TableLocationState.DROPPED, purge_after=_NOW)
+    _claim(
+        session, nested, state=TableLocationState.ABANDONED, purge_after=_NOW + timedelta(days=1)
+    )
+
+    report = _sweep(session)
+
+    assert (report.purges_waiting, report.locations_purged) == (0, 1)
+    assert _files(outer) == []
+
+
+def test_a_table_dropped_inside_before_the_record_is_forgotten_keeps_it(
+    session: Session, catalog: CatalogService, store: Path
+) -> None:
+    """The last check under the lock sees the tombstone: the record stays, the purge waits."""
+    location = _location(store)
+    _put(location, "data/a.parquet")
+    _claim(session, location, state=TableLocationState.ABANDONED, purge_after=_NOW)
+    done: list[int] = []
+
+    def drop_inside_once_empty() -> bool:
+        if not done and not _files(location):
+            done.append(1)
+            with Session(session.get_bind()) as other:
+                other.add(
+                    TableLocation(
+                        id=uuid.uuid4(),
+                        environment_id=_env_id(other),
+                        location=f"{location}/nested-{uuid.uuid4().hex}",
+                        state=TableLocationState.DROPPED,
+                        claimed_at=_NOW,
+                        purge_after=_NOW + timedelta(days=7),
+                        revoked_policy_ids=[],
+                    )
+                )
+                other.commit()
+        return False
+
+    report = _sweep(session, should_stop=drop_inside_once_empty)
+
+    assert (report.locations_purged, report.purges_waiting) == (0, 1)
+    assert _record(session, location) is not None

@@ -450,6 +450,34 @@ def test_a_nested_tables_files_are_never_deleted(
     assert rows.scan().to_arrow().column("id").to_pylist() == [1]
 
 
+def test_a_nested_dropped_tables_files_are_kept_for_its_undo_period(
+    session: Session, principal: PrincipalRef, catalog: CatalogService
+) -> None:
+    """A dropped table under another's `data/` is no orphan of it while it can come back."""
+    outer = catalog.load_table(principal, _ref("gold.daily")).metadata.location
+    outer_dir = outer.rsplit("/", 1)[-1]
+    for parts in (["gold", outer_dir], ["gold", outer_dir, "data"]):
+        catalog.create_namespace(principal, "dev", NamespacePath.from_parts(parts))
+    nested = TableRef(
+        environment="dev", namespace=NamespacePath.from_parts(["gold", outer_dir, "data"]), name="n"
+    )
+    catalog.write_batches(
+        principal,
+        nested,
+        mode=WriteMode.CREATE,
+        schema=_ids([1]).schema,
+        batches=_ids([1]).to_batches(),
+    )
+    nested_location = catalog.load_table(principal, nested).metadata.location
+    nested_files = sorted(Path(nested_location.removeprefix("file://")).rglob("*"))
+    catalog.drop_table(principal, nested)
+
+    catalog.maintain(principal, _ref("gold.daily"), keep_last=1, now=_later(30))
+
+    assert sorted(Path(nested_location.removeprefix("file://")).rglob("*")) == nested_files
+    catalog.undrop_table(principal, nested)
+
+
 def test_orphan_removal_waits_while_a_write_into_the_table_is_running(
     session: Session, principal: PrincipalRef, catalog: CatalogService
 ) -> None:
