@@ -80,9 +80,13 @@ def _output_columns(sql: str) -> tuple[str, ...] | None:
     tuple of str or None
         The names, or `None` if any outermost projection is a star (`*`,
         `t.*` or `COLUMNS(...)`); a star nested in a call, like `count(*)`,
-        does not count.
+        does not count. `None` too for a bare `VALUES` list, whose columns
+        DuckDB names itself (`col0`, `col1`, ...).
     """
-    query = cast("exp.Query", sqlglot.parse_one(sql, dialect=_DIALECT))
+    parsed = sqlglot.parse_one(sql, dialect=_DIALECT)
+    if isinstance(parsed, exp.Values):
+        return None
+    query = cast("exp.Query", parsed)
     names: list[str] = []
     for projection in query.selects:
         if _is_star(projection):

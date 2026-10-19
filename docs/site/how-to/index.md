@@ -9,6 +9,8 @@ Pages:
 - [Run a job on a schedule](run-a-job-on-a-schedule.md): declare a job and its cron schedule, bind a run principal, pause it, start it from CI, and what happens when the project is busy or the platform was down.
 - [Get told when a job fails](get-told-when-a-job-fails.md): send a message to your chat tool or a webhook when a run fails and when the job works again, test it, and verify its signature.
 - [Deploying with Compose (team mode)](deploy-with-compose.md): run a team instance with Docker Compose.
+- [Run Lakana for other people](operate-for-others.md): install, hand over, back up, upgrade, watch and separate instances, in the order an operator needs them.
+- [Is my instance healthy?](instance-health.md): what to look at (services, workers, queue, database, storage, disk), which log lines matter, and what to collect before you ask a question.
 - [Give a second person access](give-a-second-person-access.md): create a user, grant the smallest set to query one environment, issue a token, and take access away.
 - [Why may (or may not) someone do this?](why-may-someone-do-this.md): see what a principal may do on an object, and through which grant, role or group.
 - [Upgrade to the release with artifacts](upgrade-to-artifacts.md): the migration, the order and the way back.
