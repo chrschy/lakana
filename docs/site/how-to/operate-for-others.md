@@ -66,11 +66,8 @@ bundle creates one, `dev`, in its own object storage. `lakana env create` makes 
 ([the command](../reference/cli.md#lakana-env-create)), and each environment can be protected
 so that only deployed projects change its tables: [Protected environments](projects.md#protected-environments-lockdown-and-break-glass).
 
-!!! note "A gap"
-    Creating a second environment needs a storage root and storage credentials. The steps that
-    give a new environment the bundle's own storage, with a secret, are not written down yet. Until
-    they are, use `dev`, or point a new environment at storage you already manage with
-    [Manage secrets](manage-secrets.md) and `lakana env set-storage`.
+A second environment, such as `prod`, needs the bundle's storage and its secret; the commands are in
+[Add an environment to a Compose instance](deploy-with-compose.md#add-an-environment-to-a-compose-instance).
 
 **The first grants.** A person who needs to read and query one environment gets the role
 `ANALYST` on it, and nothing more. Hide rows or values before you grant access to an environment
@@ -127,18 +124,11 @@ workers, dump the catalog, stop the storage and archive its volume, start everyt
 that procedure gives a consistent backup. A backup taken while the stack runs can lose or invent
 files whatever the order, so do not rely on one.
 
-**How to restore.** Restore both from backups of the same moment, with the `.env` of the same bundle
-(a new master key cannot read the old secrets). In outline:
-
-1. Stop the stack and remove its volumes: [Starting over](deploy-with-compose.md#starting-over).
-   That deletes the instance, so be sure that the backups are good first.
-2. Start the PostgreSQL service alone and load the dump into its database with `psql`.
-3. Unpack the storage backup into the new storage volume.
-4. Start the whole stack.
-
-The project has no tested commands for these steps yet; the bundle's documentation only shows how
-to take the backups. Rehearse the restore on a spare machine before you need it. A restore you have
-never run is a guess.
+**How to restore.** The steps and commands are in [Restore](deploy-with-compose.md#restore): restore
+the volume archive and the dump from backups of the same moment, with the `.env` of the same bundle
+(a new master key cannot read the old secrets), into the old directory or a new one, then check
+a table and the runs. The project tests these steps in CI. Rehearse the restore on a spare
+machine before you need it. A restore you have never run is a guess.
 
 **Artifacts after a restore.** Once an hour a worker removes the leftovers of crashed or abandoned
 uploads (the sweep). After a restore the catalog and the storage can disagree, and the sweep is

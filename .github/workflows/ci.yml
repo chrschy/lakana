@@ -411,7 +411,7 @@ jobs:
           # The root commit has no parent: nothing to compare with, so everything counts as changed.
           if ! git rev-parse --verify --quiet "$base" > /dev/null; then
             echo "run=true" >> "$GITHUB_OUTPUT"
-          elif git diff --name-only "$base" HEAD | grep -qE '^(Dockerfile|packages/[^/]+/src/|\.dockerignore|packages/[^/]+/pyproject\.toml|packages/[^/]+/hatch_build\.py|uv\.lock|scripts/(compose_smoke_test|build_wheelhouse|python_asset_project)\.sh|\.github/workflows/(ci|release)\.yml)'; then
+          elif git diff --name-only "$base" HEAD | grep -qE '^(Dockerfile|packages/[^/]+/src/|\.dockerignore|packages/[^/]+/pyproject\.toml|packages/[^/]+/hatch_build\.py|uv\.lock|scripts/(compose_smoke_test|build_wheelhouse|python_asset_project)\.sh|docs/examples/compose-[a-z-]+\.sh|\.github/workflows/(ci|release)\.yml)'; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           fi
       - if: steps.changes.outputs.run == 'true'
