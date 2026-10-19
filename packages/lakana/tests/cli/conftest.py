@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import functools
 import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 import httpx
+import typer
+import typer.main
+import typer.testing
 from typer.testing import CliRunner, Result
 
 import lakana
@@ -138,6 +143,37 @@ def make_state(tmp_path: Path, api: FakeApi, *, interactive: bool = False) -> Cl
     )
 
 
+@functools.cache
+def _app() -> typer.Typer:
+    """Build the CLI app once per process.
+
+    Typer resolves the type hints of every command each time it turns an app into a click
+    command, and with ``from __future__ import annotations`` each resolution compiles a
+    snippet (about 1.7 million code objects over the unit suite, #101). Nothing reads state
+    from the app or its command between invocations: the state comes in through `obj`, the
+    environment through `env`. A test that needs an app of its own (a changed registrar, a
+    patched command) calls `build_app` itself and runs it with its own runner.
+
+    Returns
+    -------
+    typer.Typer
+        The shared app.
+    """
+    return build_app()
+
+
+@functools.cache
+def _command() -> Any:  # ruff: ignore[any-type]
+    """Turn the shared app into its command, once per process.
+
+    Returns
+    -------
+    Any
+        The root group (Typer's own vendored click type, which it does not export).
+    """
+    return typer.main.get_command(_app())
+
+
 def invoke(
     state: CliState, *args: str, input: str | None = None, env: dict[str, str] | None = None
 ) -> Result:
@@ -177,7 +213,9 @@ def invoke(
         }
     )
     clean.update(env or {})
-    return CliRunner().invoke(build_app(), list(args), obj=state, input=input, env=clean)
+    # `CliRunner.invoke` turns the app into a command on every call: hand it the cached one.
+    with mock.patch.object(typer.testing, "_get_command", lambda _app_: _command()):
+        return CliRunner().invoke(_app(), list(args), obj=state, input=input, env=clean)
 
 
 def write_profile_file(path: Path, text: str) -> None:
