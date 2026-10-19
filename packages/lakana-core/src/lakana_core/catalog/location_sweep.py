@@ -72,6 +72,7 @@ from lakana_core.catalog.locations import (
     abandon_claim,
     location_in_use,
     lock_location,
+    own_table_id,
     table_root_locations,
 )
 from lakana_core.identifiers import shown
@@ -80,7 +81,6 @@ from lakana_core.models import (
     Environment,
     QueryRun,
     QueryRunStatus,
-    Table,
     TableLocation,
     TableLocationState,
     TaskRun,
@@ -411,11 +411,7 @@ class _Run:
         record = lock_location(self._session, record_id)
         if record is None or record.state is not TableLocationState.CLAIMED:
             return  # published, or released by its create, since it was listed
-        table_id = self._session.scalar(
-            select(Table.id).where(
-                Table.metadata_location.startswith(record.location + "/", autoescape=True)
-            )
-        )
+        table_id = own_table_id(self._session, record.location)
         if table_id is not None:
             record.state = TableLocationState.LIVE
             record.table_id = table_id

@@ -212,6 +212,7 @@ from lakana_core.storage.resolver import (
     is_id_suffixed_location,
     is_within_location,
     nested_locations_within,
+    table_root_from_metadata_location,
 )
 
 logger = logging.getLogger(__name__)
@@ -2023,8 +2024,12 @@ class CatalogService:
         sync_table_columns(self._session, row.id, from_iceberg_schema(metadata.schema()))
         try:
             # The fence's UPDATE flushes the row first, so a name collision raises here.
+            # The location as the sweep and the backfill derive it from the metadata file, so
+            # the record that goes LIVE is the one they would find for this table.
             if not publish_location(
-                self._session, location=prepared.location, table_id=prepared.table_id
+                self._session,
+                location=table_root_from_metadata_location(written) or prepared.location,
+                table_id=prepared.table_id,
             ):
                 self._session.rollback()
                 raise ConflictError(CLAIM_RELEASED_MESSAGE.format(table=ref.dotted()))

@@ -222,6 +222,40 @@ def forget_location(session: Session, location: str) -> None:
     session.commit()
 
 
+def own_table_id(session: Session, location: str) -> uuid.UUID | None:
+    """Find the table whose own root location is exactly a location.
+
+    The root is derived from the table's metadata location by
+    `table_root_from_metadata_location`, as the publish fence and the backfill of migration
+    `0042` derive it. A table nested inside the location (in a namespace named like its
+    directory) is not its table: it lies inside, it is not it.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    location
+        An absolute location.
+
+    Returns
+    -------
+    uuid.UUID or None
+        The table's id, or `None` when no table's root is the location.
+    """
+    candidates = session.execute(
+        select(Table.id, Table.metadata_location).where(
+            Table.metadata_location.startswith(location + "/", autoescape=True)
+        )
+    ).all()
+    for table_id, metadata_location in candidates:
+        if (
+            metadata_location is not None
+            and table_root_from_metadata_location(metadata_location) == location
+        ):
+            return table_id
+    return None
+
+
 def location_in_use(session: Session, location: str) -> bool:
     """Say whether anything that is in use is at a location or inside it.
 

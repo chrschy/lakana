@@ -1214,3 +1214,28 @@ def test_a_run_asked_to_stop_at_once_does_nothing(
     _claim(session, location)
     report = _sweep(session, should_stop=lambda: True)
     assert report == LocationSweepReport(stopped_early=True)
+
+
+def test_a_table_nested_inside_a_claim_does_not_resolve_it(
+    session: Session, catalog: CatalogService, store: Path, principal: PrincipalRef
+) -> None:
+    """Only the table whose own location is the claim's makes it LIVE; a nested one blocks only.
+
+    A namespace named like the claimed directory holds a live table: the claim of the create that
+    failed is still abandoned (it names no table), and its purge stays blocked by the table.
+    """
+    outer_name = f"x-{uuid.uuid4().hex}"
+    outer = f"file://{store}/managed/gold/{outer_name}"
+    _put(outer, "metadata/00000-a.metadata.json", b"{}")
+    _claim(session, outer, holder=_query_run(session, QueryRunStatus.FAILED))
+    catalog.create_namespace(principal, "dev", _ref(f"gold.{outer_name}.t").namespace)
+    catalog.create_table(principal, _ref(f"gold.{outer_name}.inner"), schema=_schema())
+
+    report = _sweep(session)
+
+    assert (report.claims_published, report.claims_abandoned) == (0, 1)
+    assert (report.purges_blocked, report.locations_purged) == (1, 0)
+    record = _record(session, outer)
+    assert record is not None
+    assert (record.state, record.table_id) == (TableLocationState.ABANDONED, None)
+    assert "metadata/00000-a.metadata.json" in _files(outer)

@@ -12,13 +12,13 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
+from lakana_core.storage.resolver import table_root_from_metadata_location
+
 # revision identifiers, used by Alembic.
 revision: str = "b1e8f4c7a3d9"
 down_revision: str | Sequence[str] | None = "a0d7e3b6f2c8"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
-
-_METADATA_DIRECTORY = "/metadata/"
 
 
 def upgrade() -> None:
@@ -26,7 +26,8 @@ def upgrade() -> None:
 
     Creates `table_locations` and backfills one `LIVE` record for every managed (Iceberg) table
     that has a metadata file, with the table's root location derived from that file's location
-    as `lakana_core.storage.resolver.table_root_from_metadata_location` derives it. External
+    with `table_root_from_metadata_location`, the derivation the publish fence and the
+    location sweep use. External
     tables, views and artifacts get none. Two older tables that share a location (created
     before locations carried the table's id) get one record between them; either protects the
     directory. Nothing is deleted.
@@ -114,11 +115,8 @@ def _backfill() -> None:
     ).all()
     seen: set[str] = set()
     for table_id, environment_id, metadata_location, created_at in rows:
-        index = metadata_location.rfind(_METADATA_DIRECTORY)
-        if index == -1:
-            continue
-        location = metadata_location[:index]
-        if location in seen:
+        location = table_root_from_metadata_location(metadata_location)
+        if location is None or location in seen:
             continue
         seen.add(location)
         connection.execute(
