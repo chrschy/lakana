@@ -1243,7 +1243,7 @@ row's metadata lies under the location, else `ABANDONED` with `purge_after = now
 `purge_after` is purged only if its location is canonical, strictly inside `managed/` of its
 environment's root and ends in `-<32 hex>`, and nothing in use is the location or lies inside it in
 **any** environment (`location_in_use`: `LIVE`/`CLAIMED` records and `tables` rows; plus
-`table_root_locations` with `nested_locations_within`, maintain's check). Before **each** delete,
+`table_root_locations` with `nested_locations_within`; maintenance uses `other_table_locations`). Before **each** delete,
 under the record's lock, the record must still be purgeable and `location_in_use` false again; only
 objects strictly inside the location with sane segments are deleted; the record goes last, with
 `TABLE_PURGED` (`files`, `bytes`, `complete`); a pass that stops part-way records `complete: false`
@@ -1323,7 +1323,8 @@ restore it and its own purge is already due. Maintenance reads the other tables'
 `tables` rows, in **one** `UNION ALL` statement, so an undrop (DROPPED to LIVE plus the row) at the
 same moment is in that snapshot either way; two queries let it fall between them. A dropped table
 nested under the maintained table's `data/` is therefore never taken for its orphans. A record
-leaves those states only through a purge, which deletes the files before the record, and a create
+leaves those states only through a purge, which deletes the files before the record, or as a
+claim that never published turning ABANDONED (no table's data), and a create
 claims before its first file, whose files are younger than the orphan cutoff; so maintenance does
 not re-check per file under a lock (the sweep does, because it has no cutoff). Pin:
 `test_a_nested_table_restored_while_maintenance_lists_locations_keeps_its_files`. As a last guard, undrop refuses
