@@ -696,6 +696,17 @@ def test_describe_says_when_a_table_expires_soon(
     assert (plain.expires_at, plain.expires_soon) == (None, False)
 
 
+def test_a_warning_window_of_zero_turns_the_warning_off_even_for_a_due_table(
+    session: Session, principal: PrincipalRef, catalog: CatalogService
+) -> None:
+    """`LAKANA_TABLES__EXPIRY_WARNING_DAYS=0` never sets `expires_soon`, not even when due."""
+    _due(session, catalog, principal)
+    due = _catalog(session, expiry_warning_days=0).describe_table(principal, _ORDERS)
+    assert due.expires_at is not None and due.expires_at <= datetime.now(UTC)
+    assert due.expires_soon is False
+    assert _catalog(session, expiry_warning_days=1).describe_table(principal, _ORDERS).expires_soon
+
+
 def test_the_expiring_listing_names_what_is_due_and_who_set_it(
     session: Session, principal: PrincipalRef, catalog: CatalogService
 ) -> None:

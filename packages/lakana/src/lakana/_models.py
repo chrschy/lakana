@@ -205,7 +205,8 @@ class Table:
         When the table's retention makes it expire; `None` when it never does, and from a
         server older than retention.
     expires_soon
-        Whether that is within the server's warning window (7 days by default).
+        Whether that is within the server's warning window (7 days by default); always
+        `False` when the server's window is 0.
     """
 
     name: str

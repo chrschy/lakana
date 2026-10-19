@@ -578,7 +578,7 @@ class TableDescription:
         When a managed table's retention makes it expire; `None` when it never does, and for
         every other kind.
     expires_soon
-        Whether that is within ``LAKANA_TABLES__EXPIRY_WARNING_DAYS``.
+        Whether that is within ``LAKANA_TABLES__EXPIRY_WARNING_DAYS``; never when that is 0.
     """
 
     ref: TableRef
@@ -1027,7 +1027,7 @@ class CatalogService:
         can be restored (`undrop_table`). 0 makes every drop due at the next sweep.
     expiry_warning_days
         `LAKANA_TABLES__EXPIRY_WARNING_DAYS`: a table that expires within this many days is
-        described as expiring soon.
+        described as expiring soon; 0 never describes one so.
     """
 
     def __init__(
@@ -2765,7 +2765,10 @@ class CatalogService:
             env = self._find_environment(ref.environment)
             expires_at = describe_retention(self._session, env, row, ref).expires_at
             warning = db_now(self._session) + timedelta(days=self._expiry_warning_days)
-            expires_soon = expires_at is not None and expires_at <= warning
+            # 0 turns the warning off, also for a table already due.
+            expires_soon = (
+                self._expiry_warning_days > 0 and expires_at is not None and expires_at <= warning
+            )
         return replace(
             described,
             description=None if shown_text is None else shown_text.text,

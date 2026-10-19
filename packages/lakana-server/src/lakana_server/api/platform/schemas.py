@@ -712,7 +712,8 @@ class TableOut(BaseModel):
         When a managed table's retention makes it expire; `None` when it never does.
     expires_soon
         Whether that is within the server's warning window
-        (``LAKANA_TABLES__EXPIRY_WARNING_DAYS``, 7 days by default).
+        (``LAKANA_TABLES__EXPIRY_WARNING_DAYS``, 7 days by default); always `false` when that
+        is 0.
     """
 
     name: str
