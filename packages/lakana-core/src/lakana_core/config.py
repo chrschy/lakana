@@ -885,6 +885,24 @@ class TablesConfig(BaseModel):
     abandoned_grace_hours: int = Field(default=24, ge=1, le=8760)
 
 
+class TableUndoConfig(BaseModel):
+    """How long the server keeps a dropped table restorable.
+
+    Read from ``LAKANA_TABLES__UNDO_DAYS`` by the server, which stamps the period on each drop.
+
+    Parameters
+    ----------
+    undo_days
+        Days a dropped managed table keeps its files and can be restored with `lakana table
+        undrop` (default 7; 0 to 365). After that the worker's sweep deletes its files, at the
+        latest one sweep (`LAKANA_RUN__SWEEP_INTERVAL`) later. 0 deletes them at the next sweep
+        and allows no undrop. A drop with `--purge` ignores it. Each drop records its own end
+        of the period, so a change applies to later drops only.
+    """
+
+    undo_days: int = Field(default=7, ge=0, le=365)
+
+
 DEFAULT_MAX_STATEMENT_CHARS = 100_000
 """The default of `QueryLimitsConfig.max_statement_chars` and of a deploy's SQL limit."""
 

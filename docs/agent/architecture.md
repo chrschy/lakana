@@ -786,6 +786,8 @@ and `LAKANA_APPEND__READ_TIMEOUT_SECONDS` with table appends; downloads have a l
 - **Table locations: record first.** A create commits its location's `CLAIMED` record before the
   first file and publishes it to `LIVE` in the transaction that inserts the row (the fence); the
   location sweep deletes only locations whose record is `ABANDONED` or `DROPPED`, never a directory
-  without a record.
+  without a record. A drop makes the record a tombstone in the transaction that deletes the row
+  (`lakana_core.catalog.tombstones`): due after `LAKANA_TABLES__UNDO_DAYS`, with the row's snapshot
+  and the ids of the policies it revoked, which `undrop_table` restores under the record's lock.
 - **SQLite and Postgres both work** for `lakana-core` — no dialect-specific SQL, so the unit
   tier can run against in-memory SQLite while the integration tier uses real Postgres.

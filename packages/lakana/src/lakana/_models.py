@@ -342,6 +342,38 @@ class TableHealth:
 
 
 @dataclass(frozen=True)
+class DroppedTable:
+    """A dropped table whose files are not deleted yet.
+
+    Parameters
+    ----------
+    name
+        The table's name when it was dropped.
+    namespace
+        Dot-joined namespace path it was dropped from.
+    uuid
+        The table's id, which a restore keeps.
+    kind
+        ``TABLE``: only managed tables can be restored.
+    dropped_at
+        When it was dropped.
+    purge_after
+        From when on the server's sweep deletes its files.
+    restorable
+        Whether `Tables.undrop` would still restore it: `False` once `purge_after` has passed
+        or the deletion has started.
+    """
+
+    name: str
+    namespace: str
+    uuid: str
+    kind: str
+    dropped_at: datetime
+    purge_after: datetime
+    restorable: bool
+
+
+@dataclass(frozen=True)
 class ExternalTable:
     """A registered raw-zone table backed by files already on storage.
 

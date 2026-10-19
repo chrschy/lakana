@@ -305,6 +305,21 @@ def test_a_view_or_a_table_cannot_take_an_artifacts_name(session: Session, tmp_p
     assert names == {"churn": TableType.ARTIFACT, "other": TableType.ICEBERG}
 
 
+def test_an_undrop_cannot_take_an_artifacts_name_and_never_lists_one(
+    session: Session, tmp_path: Path
+) -> None:
+    catalog, p = _catalog(session, tmp_path)
+    other = TableRef("dev", _REF.namespace, "other")
+    catalog.create_table(p, other, schema=Schema(NestedField(1, "id", LongType())))
+    catalog.drop_table(p, other)
+    with pytest.raises(AlreadyExistsError) as caught:
+        catalog.undrop_table(p, other, new_name="churn")
+    assert "an artifact of that name exists in gold" in str(caught.value)
+    with pytest.raises(NotFoundError):
+        catalog.undrop_table(p, _REF)
+    assert [d.name for d in catalog.list_dropped_tables(p, "dev", _REF.namespace)] == ["other"]
+
+
 def test_a_namespace_with_an_artifact_is_not_dropped(session: Session, tmp_path: Path) -> None:
     catalog, p = _catalog(session, tmp_path)
     with pytest.raises(ConflictError) as caught:
@@ -701,6 +716,8 @@ _ARTIFACT_HANDLING = {
         "maintain": "refuses",
         "drop_table": "refuses",
         "rename_table": "refuses",
+        "undrop_table": "name-taken",
+        "list_dropped_tables": "hides",
         "create_table": "name-taken",
         "create_external_table": "name-taken",
         "create_or_replace_view": "refuses",

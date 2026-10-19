@@ -18,6 +18,8 @@ is never deleted.**
 
 `location_in_use` is the check every deletion makes again right before it deletes: no `LIVE` or
 `CLAIMED` record and no `tables` row, in any environment, may name the location or one inside it.
+`dropped_inside` is the other: no `DROPPED` record (a dropped table within its undo period, or
+due but not purged yet) may lie inside it.
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import delete, exists, or_, select, update
+from sqlalchemy import delete, exists, literal, or_, select, union_all, update
 from sqlalchemy.orm import Session
 
 from lakana_core.auth import PrincipalRef
@@ -33,6 +35,9 @@ from lakana_core.db import db_now, rowcount
 from lakana_core.models import Namespace, Table, TableLocation, TableLocationState
 from lakana_core.models.table_location import IN_USE_STATES, PURGEABLE_STATES
 from lakana_core.storage.resolver import table_root_from_metadata_location
+
+PROTECTED_STATES = IN_USE_STATES | {TableLocationState.DROPPED}
+"""Records whose files maintenance of another table must never take for its orphans."""
 
 CLAIM_RELEASED_MESSAGE = (
     "{table} was not created: the clean-up released the storage location this create had "
@@ -287,25 +292,100 @@ def location_in_use(session: Session, location: str) -> bool:
     return bool(session.scalar(select(or_(record, table))))
 
 
-def table_root_locations(
-    session: Session,
-    *,
-    environment_id: uuid.UUID | None = None,
-    exclude: uuid.UUID | None = None,
-) -> list[str]:
-    """List the root locations of managed tables, derived from their metadata files.
+def dropped_inside(session: Session, location: str) -> bool:
+    """Say whether a dropped table that may still be restored lies inside a location.
 
-    The check `CatalogService.maintain` makes for tables nested in the one it maintains, and the
-    sweep for tables nested in a location it is about to purge.
+    A `DROPPED` record strictly below the location, in any environment: its files are kept for
+    its own undo period, so a purge of the location around it must wait. A nested `ABANDONED`
+    record does not count: nobody can restore it, and its own purge is already due.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    location
+        An absolute location about to be purged.
+
+    Returns
+    -------
+    bool
+        `True` if a purge of `location` would delete a tombstone's files.
+    """
+    inside = location.rstrip("/") + "/"
+    return bool(
+        session.scalar(
+            select(
+                exists().where(
+                    TableLocation.state == TableLocationState.DROPPED,
+                    TableLocation.location.startswith(inside, autoescape=True),
+                )
+            )
+        )
+    )
+
+
+def other_table_locations(
+    session: Session, *, environment_id: uuid.UUID, table_id: uuid.UUID, location: str
+) -> list[str]:
+    """List every other table's location in an environment, read in one statement.
+
+    The locations of `LIVE`, `CLAIMED` and `DROPPED` records, and the roots derived from every
+    other managed table's metadata file (a table from before records). One statement reads one
+    snapshot, so a table that moves between these states at the same moment (an undrop makes a
+    `DROPPED` record `LIVE` and inserts the row) is in the answer either way, never in neither.
+    A location stays in one of these states until its files are gone (a purge deletes the files
+    first and the record last), so the answer stays true while maintenance deletes.
 
     Parameters
     ----------
     session
         Database session.
     environment_id
-        Only this environment's tables; every environment when `None`.
-    exclude
-        A table to leave out.
+        The environment.
+    table_id
+        The table being maintained, left out.
+    location
+        Its own location, left out.
+
+    Returns
+    -------
+    list of str
+        The locations; a metadata location that does not derive contributes nothing.
+    """
+    records = select(TableLocation.location.label("path"), literal(False).label("derive")).where(
+        TableLocation.environment_id == environment_id,
+        TableLocation.state.in_(PROTECTED_STATES),
+        TableLocation.location != location,
+    )
+    rows = (
+        select(Table.metadata_location.label("path"), literal(True).label("derive"))
+        .join(Namespace, Table.namespace_id == Namespace.id)
+        .where(
+            Namespace.environment_id == environment_id,
+            Table.id != table_id,
+            Table.metadata_location.is_not(None),
+        )
+    )
+    found = []
+    for path, derive in session.execute(union_all(records, rows)).all():
+        root = table_root_from_metadata_location(path) if derive else path
+        if root is not None:
+            found.append(root)
+    return found
+
+
+def table_root_locations(session: Session) -> list[str]:
+    """List the root locations of managed tables in every environment, from their metadata files.
+
+    The check the location sweep makes for tables nested in a location it is about to purge, and
+    the set of known locations its count of directories without a record leaves alone.
+    Maintenance uses `other_table_locations`, which also reads the records in the same
+    statement.
+
+    Parameters
+    ----------
+    session
+        Database session.
 
     Returns
     -------
@@ -314,12 +394,6 @@ def table_root_locations(
         does not derive contributes nothing.
     """
     query = select(Table.metadata_location).where(Table.metadata_location.is_not(None))
-    if environment_id is not None:
-        query = query.join(Namespace, Table.namespace_id == Namespace.id).where(
-            Namespace.environment_id == environment_id
-        )
-    if exclude is not None:
-        query = query.where(Table.id != exclude)
     return [
         location
         for (metadata_location,) in session.execute(query).all()

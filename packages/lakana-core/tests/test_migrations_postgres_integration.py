@@ -2130,3 +2130,65 @@ def test_0042_on_postgres() -> None:
         assert _alembic_version(engine) == revision_0042
         assert records() == [(orders_id, env_id, location, "LIVE", None)]
         engine.dispose()
+
+
+def test_0043_on_postgres() -> None:
+    """0043 adds the two nullable tombstone columns, keeps the records, and drops them down."""
+    revision_0042 = "b1e8f4c7a3d9"
+    revision_0043 = "c2f9a5d8b4e0"
+    with PostgresContainer("postgres:16", driver="pg8000") as pg:
+        url = pg.get_connection_url()
+        migrate.upgrade(url, revision_0042)
+        engine = sqlalchemy.create_engine(url)
+        now = datetime.now(UTC)
+        env_id = uuid.uuid4()
+        with engine.begin() as conn:
+            conn.execute(
+                sqlalchemy.text(
+                    "INSERT INTO environments (id, name, storage_root, storage_options, "
+                    "is_protected, properties, created_at, updated_at) "
+                    "VALUES (:id, 'dev', 's3://bucket/dev', '{}', false, '{}', :now, :now)"
+                ),
+                {"id": env_id, "now": now},
+            )
+            conn.execute(
+                sqlalchemy.text(
+                    "INSERT INTO table_locations (id, environment_id, location, state, "
+                    "claimed_at, purge_after, revoked_policy_ids) "
+                    "VALUES (:id, :env, 's3://bucket/dev/managed/gold/x-0a1b', 'DROPPED', "
+                    ":now, :now, '[]')"
+                ),
+                {"id": uuid.uuid4(), "env": env_id, "now": now},
+            )
+
+        def records() -> list[tuple[object, ...]]:
+            with engine.connect() as conn:
+                return [
+                    tuple(row)
+                    for row in conn.execute(
+                        sqlalchemy.text("SELECT location, state, purge_after FROM table_locations")
+                    ).all()
+                ]
+
+        before = records()
+        migrate.upgrade(url, revision_0043)
+        assert _alembic_version(engine) == revision_0043
+        columns = {c["name"]: c for c in sqlalchemy.inspect(engine).get_columns("table_locations")}
+        assert columns["purge_started_at"]["nullable"] is True
+        assert columns["dropped_table"]["nullable"] is True
+        assert records() == before
+        with engine.begin() as conn:
+            conn.execute(
+                sqlalchemy.text(
+                    "UPDATE table_locations SET purge_started_at = :now, "
+                    "dropped_table = CAST(:snapshot AS JSON)"
+                ),
+                {"now": now, "snapshot": json.dumps({"namespace": ["gold"], "row": {}})},
+            )
+
+        migrate.downgrade(url, revision_0042)
+        assert _alembic_version(engine) == revision_0042
+        names = {c["name"] for c in sqlalchemy.inspect(engine).get_columns("table_locations")}
+        assert "purge_started_at" not in names and "dropped_table" not in names
+        assert records() == before
+        engine.dispose()

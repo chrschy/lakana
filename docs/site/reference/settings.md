@@ -51,6 +51,13 @@ Compose](../how-to/deploy-with-compose.md).
 | `LAKANA_ARTIFACTS__MAX_FILES` | whole number, above 0 | `10000` | server, worker | Most files in one artifact version (default 10,000). |
 | `LAKANA_ARTIFACTS__UPLOAD_TTL_SECONDS` | whole number, above 0 | `3600` | server, worker | How long an open upload may stay uncommitted, and how long a commit of it can be repeated (default one hour). |
 
+## `LAKANA_TABLES__*`
+
+| Variable | Type | Default | Read by | Description |
+|---|---|---|---|---|
+| `LAKANA_TABLES__UNDO_DAYS` | whole number, 0 or more, 365 or less | `7` | server | Days a dropped managed table keeps its files and can be restored with `lakana table undrop` (default 7; 0 to 365). After that the worker's sweep deletes its files, at the latest one sweep (`LAKANA_RUN__SWEEP_INTERVAL`) later. 0 deletes them at the next sweep and allows no undrop. A drop with `--purge` ignores it. Each drop records its own end of the period, so a change applies to later drops only. |
+| `LAKANA_TABLES__ABANDONED_GRACE_HOURS` | whole number, 1 or more, 8760 or less | `24` | worker | Hours a create that did not finish, and was not made by a pipeline run, keeps its storage location before the worker's sweep removes the files it left (default 24; 1 to 8,760). A create made by a run keeps it until that run has ended. The sweep runs every `LAKANA_RUN__SWEEP_INTERVAL` seconds and never removes a table that exists. Raise it if a create can take longer than a day. |
+
 ## `LAKANA_TABLE_READS__*`
 
 | Variable | Type | Default | Read by | Description |
@@ -152,9 +159,3 @@ Compose](../how-to/deploy-with-compose.md).
 | `LAKANA_WORKER__MEMORY_LIMIT` | text | not set | worker | The most memory the worker may use in all, with the Python tasks and `uv` it started, for example `4GB` (at least `512MB`; `off` or `0` for none). Units are binary: `GB` and `g` mean 1024 MB, unlike `LAKANA_QUERY_LIMITS__MEMORY_LIMIT`, where `GB` is decimal. A worker over the limit ends its tasks, records why and stops; Docker or the local-mode supervisor restarts it. Unset, the worker uses 90 percent of its container's memory limit, or 4GB without one. Linux measures the worker and what it started; macOS only the worker; Windows nothing. |
 | `LAKANA_WORKER__NOTIFICATIONS` | true or false | `true` | worker | Whether this worker delivers job notifications (`LAKANA_WORKER__NOTIFICATIONS`, on by default). Set to ``false`` on a worker that must not reach the webhook hosts (a worker in a network without outbound access); another worker delivers them. With no worker delivering, queued notifications wait. |
 | `LAKANA_WORKER__TAKES` | text | `all` | worker | The work this worker takes (`LAKANA_WORKER__TAKES`): ``"all"`` (the default), ``"interactive"`` (ad-hoc queries) or ``"pipeline"`` (deploys, pipeline tasks and table maintenance), in any letter case. The worker says it when it registers. |
-
-## `LAKANA_TABLES__*`
-
-| Variable | Type | Default | Read by | Description |
-|---|---|---|---|---|
-| `LAKANA_TABLES__ABANDONED_GRACE_HOURS` | whole number, 1 or more, 8760 or less | `24` | worker | Hours a create that did not finish, and was not made by a pipeline run, keeps its storage location before the worker's sweep removes the files it left (default 24; 1 to 8,760). A create made by a run keeps it until that run has ended. The sweep runs every `LAKANA_RUN__SWEEP_INTERVAL` seconds and never removes a table that exists. Raise it if a create can take longer than a day. |

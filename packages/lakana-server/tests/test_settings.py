@@ -94,3 +94,15 @@ def test_table_reads_settings_have_defaults_and_read_the_environment(
     monkeypatch.setenv("LAKANA_TABLE_READS__KEEP_DAYS", "400")
     monkeypatch.setenv("LAKANA_TABLE_READS__DEFAULT_DAYS", "14")
     assert Settings().table_reads == TableReadsConfig(keep_days=400, default_days=14)
+
+
+def test_the_undo_period_of_a_drop_is_seven_days_and_reads_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LAKANA_DATABASE__URL", "sqlite://")
+    assert Settings().tables.undo_days == 7
+    monkeypatch.setenv("LAKANA_TABLES__UNDO_DAYS", "0")
+    assert Settings().tables.undo_days == 0
+    monkeypatch.setenv("LAKANA_TABLES__UNDO_DAYS", "366")
+    with pytest.raises(pydantic.ValidationError, match="undo_days"):
+        Settings()

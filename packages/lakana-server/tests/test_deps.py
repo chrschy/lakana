@@ -54,8 +54,11 @@ def test_get_catalog_builds_a_working_catalog_service(session: Session, tmp_path
     structurally-compatible stand-in that isn't nominally the same type
     (see `fake_request` above).
     """
-    catalog = get_catalog(session=session, authz=cast(GrantAuthorization, AllowAllAuthorization()))
+    catalog = get_catalog(
+        session=session, authz=cast(GrantAuthorization, AllowAllAuthorization()), undo_days=3
+    )
     assert isinstance(catalog, CatalogService)
+    assert catalog._undo_days == 3
 
     # Persisted, not a bare `PrincipalRef`:
     # `create_environment` now records an `AuditEvent` whose `principal_id`
@@ -326,7 +329,7 @@ def test_get_query_service_uses_the_configured_lease(session: Session, tmp_path:
     session.add(Principal(id=principal.id, type=principal.type, name=principal.name))
     session.commit()
     allow = cast(GrantAuthorization, AllowAllAuthorization())
-    get_catalog(session=session, authz=allow).create_environment(
+    get_catalog(session=session, authz=allow, undo_days=7).create_environment(
         principal, name="dev", storage=StorageConfig(scheme="file", root=f"file://{tmp_path}")
     )
     request = cast(
@@ -401,3 +404,19 @@ def test_get_run_service_passes_the_configured_lease(session: Session, tmp_path:
         key_provider=cast(KeyProvider, None),
     )
     assert service._lease_seconds == 7
+
+
+def test_the_undo_period_comes_from_the_settings() -> None:
+    """`get_undo_days` reads `LAKANA_TABLES__UNDO_DAYS` from the app's settings."""
+    from lakana_core.config import TableUndoConfig
+    from lakana_server.deps import get_undo_days
+
+    request = cast(
+        Request,
+        SimpleNamespace(
+            app=SimpleNamespace(
+                state=SimpleNamespace(settings=SimpleNamespace(tables=TableUndoConfig(undo_days=2)))
+            )
+        ),
+    )
+    assert get_undo_days(request) == 2

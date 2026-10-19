@@ -1,9 +1,11 @@
-"""The publish fence against the sweep, on Postgres, with two sessions in two threads.
+"""The publish fence and the undrop against the sweep, on Postgres, in two sessions and threads.
 
 The create's commit moves its claim to LIVE in the transaction that inserts the table; the sweep
-moves a claim to ABANDONED under the same row lock. Whichever takes the lock first wins, and the
-other sees its result: these tests hold one side inside its transaction, wait until the other
-side is blocked on the row lock, and then let the first side commit.
+moves a claim to ABANDONED under the same row lock. An undrop moves a tombstone back to LIVE
+under that lock too, and the sweep marks a purge as started under it before the first delete.
+Whichever takes the lock first wins, and the other sees its result: these tests hold one side
+inside its transaction, wait until the other side is blocked on the row lock, and then let the
+first side commit.
 """
 
 from __future__ import annotations
@@ -29,6 +31,7 @@ from lakana_core.bootstrap import ensure_bootstrap_principal
 from lakana_core.catalog import location_sweep as sweep_module
 from lakana_core.catalog.location_sweep import LocationSweepReport, sweep_table_locations
 from lakana_core.catalog.service import CatalogService
+from lakana_core.catalog.tombstones import PURGE_STARTED_MESSAGE
 from lakana_core.config import DatabaseConfig, StorageConfig
 from lakana_core.db import create_engine
 from lakana_core.errors import ConflictError
@@ -261,3 +264,90 @@ def test_a_sweep_that_takes_the_lock_first_abandons_and_the_create_rolls_back(
         assert report.claims_abandoned == 1
         session.rollback()
         assert session.scalars(select(Table.id).where(Table.name == "orders")).all() == []
+
+
+def _files(root: Path) -> list[Path]:
+    """List every file below a directory.
+
+    Parameters
+    ----------
+    root
+        The directory.
+
+    Returns
+    -------
+    list of Path
+        Sorted.
+    """
+    return sorted(path for path in root.rglob("*") if path.is_file())
+
+
+def test_an_undrop_that_takes_the_lock_first_wins_and_the_purge_never_starts(
+    engine: sqlalchemy.Engine, catalog: tuple[CatalogService, PrincipalRef], tmp_path: Path
+) -> None:
+    """The undrop holds the lock; the sweep waits, then sees LIVE and deletes nothing."""
+    service, principal = catalog
+    service.create_table(principal, _REF, schema=_schema())
+    service.drop_table(principal, _REF)
+    before = _files(tmp_path)
+    real = ProtectedWriteGuard.record_pending
+    swept: dict[str, object] = {}
+
+    def undrop_held_then_sweep(guard: ProtectedWriteGuard) -> None:
+        thread, outcome = _in_thread(lambda: _sweep(engine))
+        swept["thread"], swept["outcome"] = thread, outcome
+        _wait_until_blocked(engine)
+        real(guard)
+
+    with mock.patch.object(ProtectedWriteGuard, "record_pending", undrop_held_then_sweep):
+        service.undrop_table(principal, _REF)
+
+    thread = swept["thread"]
+    assert isinstance(thread, threading.Thread)
+    thread.join(timeout=60)
+    outcome = swept["outcome"]
+    assert isinstance(outcome, dict)
+    assert "error" not in outcome, outcome
+    report = outcome["result"]
+    assert isinstance(report, LocationSweepReport)
+    assert (report.locations_purged, report.files_deleted) == (0, 0)
+    assert _state(engine) == [TableLocationState.LIVE]
+    assert _files(tmp_path) == before
+    service.load_table(principal, _REF)
+
+
+def test_a_purge_that_takes_the_lock_first_wins_and_the_undrop_is_refused(
+    engine: sqlalchemy.Engine, catalog: tuple[CatalogService, PrincipalRef], tmp_path: Path
+) -> None:
+    """The sweep marks the purge and deletes under the lock; the undrop waits, then is refused."""
+    service, principal = catalog
+    service.create_table(principal, _REF, schema=_schema())
+    service.drop_table(principal, _REF)
+    real = sweep_module.delete_quietly
+    restored: dict[str, object] = {}
+
+    with Session(engine) as session:
+        restorer = CatalogService(session, StorageResolver(session), AllowAllAuthorization())
+
+        def delete_while_an_undrop_waits(*args: object, **kwargs: object) -> bool:
+            if "thread" not in restored:
+                thread, outcome = _in_thread(lambda: restorer.undrop_table(principal, _REF))
+                restored["thread"], restored["outcome"] = thread, outcome
+                _wait_until_blocked(engine)
+            return real(*args, **kwargs)  # ty: ignore[invalid-argument-type]
+
+        with mock.patch.object(sweep_module, "delete_quietly", delete_while_an_undrop_waits):
+            report = _sweep(engine)
+
+        thread = restored["thread"]
+        assert isinstance(thread, threading.Thread)
+        thread.join(timeout=60)
+        outcome = restored["outcome"]
+        assert isinstance(outcome, dict)
+        error = outcome.get("error")
+        assert isinstance(error, ConflictError), outcome
+        assert str(error) == PURGE_STARTED_MESSAGE.format(table="gold.orders")
+        assert report.locations_purged == 1
+        session.rollback()
+        assert session.scalars(select(Table.id).where(Table.name == "orders")).all() == []
+    assert _files(tmp_path / "managed") == []

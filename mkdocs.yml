@@ -48,6 +48,7 @@ nav:
       - how-to/filter-rows.md
       - how-to/mask-a-column.md
       - how-to/describe-a-table.md
+      - how-to/drop-and-restore-a-table.md
       - how-to/find-a-table.md
       - how-to/find-a-run.md
       - how-to/stop-a-query.md
