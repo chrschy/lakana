@@ -1025,8 +1025,8 @@ and [Why is my query or task waiting?](../how-to/why-is-it-waiting.md#a-queued-q
    older `lakana` package does not know the two codes and shows their sentence.
 7. **Limits that stay.**
    - A queued deploy shows no reason why it waits, also when no worker takes pipeline work
-     ([issue 92](https://github.com/lakana-labs/lakana/issues/92)). Look at the `takes` column of
-     `lakana worker list`.
+     ([issue 92](https://github.com/lakana-labs/lakana/issues/92)); a later release added it.
+     Look at the `takes` column of `lakana worker list`.
    - The limit per user is exact on PostgreSQL's default isolation level, which Lakana does not
      change.
    - Each worker applies its own value of the limit. Give the server and every worker the same

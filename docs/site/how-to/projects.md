@@ -281,6 +281,14 @@ digest; the worker's log says whether it was restored or why not. `--ref` takes 
 never `refs/pull/*`, `refs/changes/*` or any other namespace; a SHA deploys only if a branch or tag of the
 repository contains it. A rollback never contacts the git host.
 
+A deploy, dry run or rollback that has to wait for a worker says why. After 3 seconds in the queue,
+`lakana deploy` and `lakana rollback` print a line on standard error, `Waiting: <the sentence>`, and
+print another only when the reason changes (nothing is printed with `--output json`). The reasons
+are `no_worker`, `no_worker_of_kind` (no worker takes pipeline work), `workers_busy` and
+`starting`; [Why is my query or task waiting?](why-is-it-waiting.md#a-queued-deploy) says what to
+do for each. In the SDK, `client.deploys.wait(env, id, on_update=f)` calls `f` with every polled
+deploy, and `deploy.waiting_for` holds the reason.
+
 A deploy, dry run or rollback whose worker is lost (killed, stopped for memory, or cut off from
 the database, so that its heartbeat is a lease old) ends `failed` within about a minute with the defaults,
 with the message `The worker running this deploy was lost, so the deploy was ended. Nothing was

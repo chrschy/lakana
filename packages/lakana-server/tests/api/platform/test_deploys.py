@@ -8,14 +8,17 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from lakana_core.db import db_now
 from lakana_core.models import (
     DeployRun,
+    DeployStatus,
     Environment,
     JobVersion,
     Namespace,
     Repository,
     Table,
     TableType,
+    Worker,
 )
 from tests.conftest import AUTH_HEADER
 from tests.server_test_helpers import create_environment
@@ -396,3 +399,87 @@ def test_a_deploy_run_shows_its_checks(client: TestClient) -> None:
         checked["id"]: listing,
         plain["id"]: None,
     }
+
+
+def _queue_deploy(client: TestClient) -> str:
+    """Queue a deploy of `analytics` and return its id.
+
+    Parameters
+    ----------
+    client
+        The test client.
+
+    Returns
+    -------
+    str
+        The run's id.
+    """
+    accepted = client.post(
+        "/api/v1/environments/dev/deploys",
+        headers=AUTH_HEADER,
+        json={"repository": "analytics", "ref": "main"},
+    )
+    assert accepted.status_code == 202, accepted.text
+    return accepted.json()["id"]
+
+
+def _worker(client: TestClient, takes: str) -> None:
+    """Register a worker whose heartbeat is current.
+
+    Parameters
+    ----------
+    client
+        The test client.
+    takes
+        What it takes (`all`, `interactive` or `pipeline`).
+    """
+    with Session(client.app.state.engine) as session:
+        now = db_now(session)
+        session.add(
+            Worker(id="w", host="h", version="1", started_at=now, heartbeat_at=now, takes=takes)
+        )
+        session.commit()
+
+
+def test_a_queued_deploy_says_why_it_waits_and_a_finished_one_says_nothing(
+    client: TestClient,
+) -> None:
+    """The status route carries `waiting_for`; the history does not compute it."""
+    _setup(client)
+    deploy_id = _queue_deploy(client)
+    url = f"/api/v1/environments/dev/deploys/{deploy_id}"
+
+    queued = client.get(url, headers=AUTH_HEADER).json()["waiting_for"]
+    assert queued == {
+        "code": "no_worker",
+        "message": (
+            "No worker is running, so this deploy cannot start. Ask the operator to start a "
+            "worker; on a local instance, start it again with 'lakana server start --local'."
+        ),
+        "workers": 0,
+    }
+    history = client.get("/api/v1/environments/dev/deploys", headers=AUTH_HEADER).json()
+    assert history[0]["waiting_for"] is None
+    with Session(client.app.state.engine) as session:
+        run = session.get(DeployRun, uuid.UUID(deploy_id))
+        assert run is not None
+        run.status = DeployStatus.SUCCEEDED
+        session.commit()
+    assert client.get(url, headers=AUTH_HEADER).json()["waiting_for"] is None
+
+
+def test_a_deploy_on_interactive_workers_only_has_no_worker_of_kind(client: TestClient) -> None:
+    _setup(client)
+    _worker(client, "interactive")
+    deploy_id = _queue_deploy(client)
+    body = client.get(f"/api/v1/environments/dev/deploys/{deploy_id}", headers=AUTH_HEADER).json()
+    assert body["waiting_for"]["code"] == "no_worker_of_kind"
+    assert "LAKANA_WORKER__TAKES=pipeline" in body["waiting_for"]["message"]
+
+
+def test_a_deploy_with_a_free_worker_is_starting(client: TestClient) -> None:
+    _setup(client)
+    _worker(client, "all")
+    deploy_id = _queue_deploy(client)
+    body = client.get(f"/api/v1/environments/dev/deploys/{deploy_id}", headers=AUTH_HEADER).json()
+    assert body["waiting_for"]["code"] == "starting"

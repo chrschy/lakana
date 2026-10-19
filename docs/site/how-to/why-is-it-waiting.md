@@ -1,15 +1,16 @@
 # Why is my query or task waiting?
 
 When a query seems stuck, read the line that starts with `Waiting:` on standard error, or run
-`lakana query status QUERY_ID --env dev`; for a task of a pipeline, run
+`lakana query status QUERY_ID --env dev`; for a deploy, read the same line from `lakana deploy`
+or run `lakana deploys show DEPLOY_ID --env dev`; for a task of a pipeline, run
 `lakana runs show RUN_ID --env dev`. The sentence names the reason, and the tables below say what
 each one means and what to do. Most of them need nothing from you.
 
-After this guide you can read the reason Lakana gives for a query or a task that has not started,
+After this guide you can read the reason Lakana gives for a query, a deploy or a task that has not started,
 you know which reasons need you to do something and which ones pass by themselves, and you know
 what to look at when a reason does not go away.
 
-A query waits in the state `QUEUED` until a worker takes it. A task of a run waits in `pending` or
+A query waits in the state `QUEUED` until a worker takes it, and a deploy in the state `queued`. A task of a run waits in `pending` or
 `ready`. For as long as it waits, the platform says why, in one sentence. The sentence is worked
 out when you ask; it is not stored, and the numbers in it are a good estimate, not a promise (see
 [The numbers are estimates](#the-numbers-are-estimates)).
@@ -22,12 +23,14 @@ A task that failed instead has a failure code and a next step: see
 | You run | The reason appears as |
 |---|---|
 | `lakana sql`, `lakana query wait` | One line on standard error, `Waiting: <the sentence>`, once the query has been queued for 3 seconds, and again each time the reason changes. A query that starts sooner prints nothing. Standard output carries only the result, and with `--output json` nothing about waiting is printed. |
+| `lakana deploy`, `lakana rollback` | The same line on standard error, `Waiting: <the sentence>`, once the deploy has been queued for 3 seconds, and again each time the reason changes. Standard output carries only the result, and with `--output json` nothing about waiting is printed. |
+| `lakana deploys show ID` | The `waiting_for` object of a queued deploy, with `--output json`; `null` once it runs. |
 | `lakana query status ID` | The `waiting_for` row; empty for a query that is not queued. `--output json` has the whole object. |
 | `lakana query list` | The `waiting_for` column of each queued query (see [Stop a query](stop-a-query.md#find-a-query)). |
 | `lakana runs show RUN_ID` | The `waiting_for` column of the task table; empty for a task that is not waiting. |
 | `lakana job list` | The state of each job, and under the table the sentence of each job that waits or cannot start (see [A waiting job](#a-waiting-job)). |
 | `lakana run` | The sentence at the end of a task's progress line, and a line of its own when a task starts to wait for `no_worker`, `no_worker_of_kind`, `workers_busy` or `retry`. |
-| The SDK and the REST API | `status.waiting_for` and the task's `waiting_for`: an object with a `code` and a `message` (and numbers such as `workers`, `ahead`, `running` and `limit`, only the ones the code uses), `None` or `null` when nothing is waited for. `QueryRun.wait(on_update=f)` calls `f` with every status it polls. |
+| The SDK and the REST API | `status.waiting_for` and the task's `waiting_for`: an object with a `code` and a `message` (and numbers such as `workers`, `ahead`, `running` and `limit`, only the ones the code uses), `None` or `null` when nothing is waited for. `QueryRun.wait(on_update=f)` and `client.deploys.wait(env, id, on_update=f)` call `f` with every status they poll. A deploy has `waiting_for` on the single read only, not in the history. |
 
 A query that waited behind a busy worker for ten seconds prints this on standard error and then
 runs; its result goes to standard output as always:
@@ -79,9 +82,16 @@ before this query: the same kind of work, and the other kind too while a worker 
 query that waits for the limit is passed by, so queries submitted after it, by other people, start
 before it: it can stand above them in the list and still start later.
 
-**A queued deploy shows no reason** yet. A deploy that stays `queued` is
-waiting for a worker that takes pipeline work: look at the `takes` column of `lakana worker list`
-for a worker whose value is `all` or `pipeline`.
+## A queued deploy
+
+A deploy, a dry run and a rollback are pipeline work and are never held back by the limit per
+user, so a deploy says one of four reasons: `no_worker`, `no_worker_of_kind`, `workers_busy` or
+`starting`. They mean what they mean for a query, with `deploy` in the sentence (`No worker is
+running, so this deploy cannot start. ...`, `A worker is free; the deploy starts within about a
+second.`), and the `ahead` count includes the queries and deploys of every environment that are
+queued before it. `no_worker_of_kind` is the one that needs the operator: no running worker takes
+pipeline work, so the sentence ends `Ask the operator to start a worker with
+LAKANA_WORKER__TAKES=pipeline or all.` `lakana worker list` shows the `takes` column.
 
 ## A waiting task
 
@@ -173,7 +183,7 @@ section applies.
 
 A query or deploy of one kind waits as long as no worker that takes its kind is free, even when
 workers of the other kind are idle. When no running worker takes the kind at all, a query, a
-maintenance run or a task says `no_worker_of_kind`; a deploy shows no reason. If the wait does not
+maintenance run, a deploy or a task says `no_worker_of_kind`. If the wait does not
 end, ask the operator to check `lakana worker list`: at least one worker must take that kind. The operator's side is in
 [Separate workers for ad-hoc queries and pipelines](deploy-with-compose.md#separate-workers-for-ad-hoc-queries-and-pipelines).
 
