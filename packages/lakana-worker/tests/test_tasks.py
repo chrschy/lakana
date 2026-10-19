@@ -6,6 +6,7 @@ The lease keeper, the memory stop and the check phase have files of their own
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import threading
 import time
@@ -960,6 +961,44 @@ def test_a_failing_log_write_does_not_lose_the_outcome(
         assert not storage.exists(log_path)
     (record,) = [r for r in caplog.records if r.name == "lakana_worker.tasks"]
     assert record.getMessage().startswith("Could not write the log of silver.clean")
+
+
+@pytest.mark.parametrize("failing", [False, True])
+def test_the_log_is_stored_before_the_attempt_ends(
+    world: World, monkeypatch: pytest.MonkeyPatch, failing: bool
+) -> None:
+    """A reader that sees the task finished sees its log: the block lands before the status."""
+    run_id = _start(world)
+    log_path = task_log_path(run_id, "silver.clean")
+    original = FsspecStorage.write
+    seen: list[TaskStatus] = []
+
+    def watching(self: FsspecStorage, path: str, data: bytes) -> None:
+        if path == log_path:
+            seen.append(_task(world, "silver.clean").status)
+        original(self, path, data)
+
+    monkeypatch.setattr(FsspecStorage, "write", watching)
+    if failing:
+        monkeypatch.setattr(tasks_module, "run_one", _fake_run_one(ConnectionError("blip")))
+    run_claimed(_engine(world), _claim(world))
+    assert seen == [TaskStatus.RUNNING]
+    assert _task(world, "silver.clean").status is not TaskStatus.RUNNING
+    assert "attempt 1 on w1" in _log(world, run_id, "silver.clean")
+
+
+def test_a_superseded_attempt_writes_no_log(world: World) -> None:
+    """A claim the scheduler took over records nothing and so appends no block."""
+    run_id = _start(world)
+    stale = dataclasses.replace(_claim(world), claim=99)
+    engine = _engine(world)
+    with world.session() as session:
+        tasks_module._finish(
+            session, engine, stale, TaskOutcome(kind=None, message=None, environment="dev")
+        )
+    with world.session() as session:
+        storage = StorageResolver(session).for_environment("dev").storage
+        assert not storage.exists(task_log_path(run_id, "silver.clean"))
 
 
 def test_logs_accumulate_across_attempts(world: World, monkeypatch: pytest.MonkeyPatch) -> None:

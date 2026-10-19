@@ -1009,7 +1009,7 @@ is the whole log. With it, `text` starts at byte `N` of the log and the answer a
 |---|---|
 | `next_offset` | The byte where `text` ends. Send it as the next `offset`. Always present. |
 | `more` | `true` when stored bytes remain after `next_offset`: one answer holds at most 1 MiB, so ask again at once. |
-| `complete` | `true` when the task has finished and `text` reaches the end of its log: stop asking. |
+| `complete` | `true` when the task has finished and `text` reaches the end of its log: stop asking. The worker stores an attempt's log block before it marks the attempt finished, so a finished task never has log text still to come. A task the platform ends itself (its worker was lost, or the memory limit stopped it) gets no more log, so `complete` stays true there too. If the block could not be stored, the worker logs a warning and still ends the attempt. |
 | `reset` | `true` when `offset` was beyond the end of the log (it is shorter than before, for example removed). `text` is empty; continue from `next_offset`. |
 
 Offsets count the bytes of the text you receive, which is stored already redacted, so a cut between
