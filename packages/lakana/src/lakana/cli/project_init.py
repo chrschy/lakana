@@ -23,7 +23,7 @@ from lakana.errors import ConfigError
 _NAME = re.compile(r"\A[A-Za-z0-9_-]{1,255}\Z")
 
 _LAKANA_YAML = """\
-# Lakana project. Reference: docs/site/how-to/projects.md in the Lakana repository.
+# Lakana project. Reference: https://lakana-labs.github.io/lakana/how-to/projects/
 repo: {repo}
 defaults:
   materialize: table
@@ -61,7 +61,8 @@ dependencies = []
 #   3. Commit pyproject.toml and uv.lock, then deploy: the worker builds the asset's venv from
 #      uv.lock (its first build needs the public package index too), and a deploy without it
 #      names what is missing.
-# SQL-only projects need none of this. See "Python assets" in docs/site/how-to/projects.md.
+# SQL-only projects need none of this (see "Python assets" in
+# https://lakana-labs.github.io/lakana/how-to/projects/).
 #
 # dependencies = ["lakana[assets]=={version}"]
 
@@ -73,7 +74,7 @@ _GITHUB = """\
 # Deploys main to prod; dry-runs pull requests against dev.
 # lakana is pinned to the CLI version that generated this file and installed from PyPI. To use a
 # mirror or a build you host yourself, set the repository variable LAKANA_INDEX_URL to that
-# index (see docs/site/how-to/projects.md).
+# index (see https://lakana-labs.github.io/lakana/how-to/projects/).
 # Actions are pinned to full commit SHAs; bump them deliberately (Dependabot understands this form).
 # Repository secret: LAKANA_URL, and LAKANA_TOKEN_DEV for a service principal holding DEPLOY on dev
 # only. Environment secret (GitHub environment "prod", restricted to the main branch and/or
@@ -141,7 +142,7 @@ _GITLAB = """\
 # Deploys main to prod; dry-runs merge requests against dev.
 # lakana is pinned to the CLI version that generated this file and installed from PyPI. To use a
 # mirror or a build you host yourself, set the CI/CD variable LAKANA_INDEX_URL to that index
-# (see docs/site/how-to/projects.md).
+# (see https://lakana-labs.github.io/lakana/how-to/projects/).
 # CI/CD variables: LAKANA_URL; LAKANA_TOKEN_DEV (masked) for a service principal holding DEPLOY on
 # dev only; LAKANA_TOKEN_PROD (masked AND protected, so only pipelines on protected branches see
 # it) for a principal holding DEPLOY on prod. Protect only main under Settings > Repository.

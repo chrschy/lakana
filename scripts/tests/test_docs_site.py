@@ -92,8 +92,9 @@ the network, the GitHub CLI and a release that exists, none of which the example
 The sorting of the pages (#55) removed the 28 blocks marked "moved as is" and the count fell from
 55 to 48. Seven became tested: the `*lakana-env` block of `deploy-with-compose.md` shows its
 anchor and is parsed; `uv lock` is synced from `train-and-predict`; the project start, the
-two SQL assets of the first example and `lakana undeploy` from the new example `projects`. Twenty-one
-others stayed and now say why: Docker (the Compose commands, backups and the bundle's teardown),
+two SQL assets of the first example and `lakana undeploy` from the new example `projects`.
+Twenty-one others stayed and now say why: Docker (the Compose commands, backups and the
+bundle's teardown),
 a reverse proxy's own configuration, a protected `prod` environment or a hosted repository's token
 that the one-instance examples do not set up, a command with optional parts or an id in brackets,
 and the two SQL headers that `test_the_front_matter_in_a_sql_block_is_valid` parses instead.
