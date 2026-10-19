@@ -92,7 +92,9 @@ The queries a run makes for you, such as a task's write and the count of a check
 principal. A name that matches no table counts nothing.
 
 **Gap.** A Python task reads tables through the Iceberg REST catalog, which records no reads yet. A
-table that only Python tasks read shows no readers.
+table that only Python tasks read shows no readers. A query that reads through a view counts on the
+view only, not on the tables the view reads, so a table that people read only through views shows no
+readers either.
 
 **Who sees it.** The list shows who is using which data, so it is shown only to a caller who may see the table's grants: the
 `ADMIN` role at instance scope, the same rule as the grants listing. For anyone else `readers` is
