@@ -180,8 +180,8 @@ the upgrade. Reads are kept for 90 days and shown over 30 by default; an adminis
 with `LAKANA_TABLE_READS__KEEP_DAYS` and `LAKANA_TABLE_READS__DEFAULT_DAYS` (the server and every
 worker read them). The JSON of a table gains `last_write_at`, `row_count`, `size_bytes` and
 `file_count`; nothing is removed. A new route and command show the rest; see
-[Table health](../reference/table-health.md). Python tasks that read through the Iceberg REST
-catalog record no reads yet. Going back to the previous release drops the counts.
+[Table health](../reference/table-health.md). A Python task reads its inputs through the query
+API, so its reads count too. Going back to the previous release drops the counts.
 
 ### Tables and columns have descriptions
 

@@ -3,8 +3,8 @@
 Everything here is read from rows the platform already keeps, except the reads: the worker adds
 one to a table's count for the day each time a query that read it succeeds
 (`record_table_reads`), and `sweep_table_reads` removes the days past
-``LAKANA_TABLE_READS__KEEP_DAYS``. Python tasks read through the Iceberg REST catalog, which
-records no reads yet.
+``LAKANA_TABLE_READS__KEEP_DAYS``. A Python task reads its inputs through the query API, so its
+reads are counted the same way.
 """
 
 from __future__ import annotations

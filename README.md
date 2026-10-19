@@ -36,7 +36,9 @@ Principles:
 
 What is in scope, what is not, and who it is for:
 [Scope and philosophy](docs/site/explanation/scope.md). The plan to v1.0.0:
-[Roadmap](docs/site/explanation/roadmap.md).
+[Roadmap](docs/site/explanation/roadmap.md). If you already run SQL files on DuckDB and wonder why
+you would change, or why Apache Iceberg, see
+[Where Lakana fits, and why Apache Iceberg](docs/site/explanation/where-lakana-fits.md).
 
 > A lakana is a Malagasy outrigger canoe: a narrow dugout hull, one float and a simple
 > sail — very little boat, taken a long way by a tiny crew. That is the idea here.

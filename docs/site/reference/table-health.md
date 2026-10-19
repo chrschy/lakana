@@ -91,8 +91,10 @@ same transaction that completes the query, so a query that failed or was cancell
 The queries a run makes for you, such as a task's write and the count of a check, count as the run's
 principal. A name that matches no table counts nothing.
 
-**Gap.** A Python task reads tables through the Iceberg REST catalog, which records no reads yet. A
-table that only Python tasks read shows no readers. A query that reads through a view counts on the
+**Python tasks.** A Python task reads each of its inputs through the query API, so those reads
+count like any query's, under the run's principal.
+
+**Gap.** A query that reads through a view counts on the
 view only, not on the tables the view reads, so a table that people read only through views shows no
 readers either.
 

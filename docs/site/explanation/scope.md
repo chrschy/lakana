@@ -3,6 +3,8 @@
 This page explains what Lakana is for, what it deliberately does and does not do, and who it is
 built for. It is the current statement of scope; the plan for getting there is in
 [`roadmap.md`](roadmap.md). Both pages are living documents and change as decisions change.
+If you already run SQL files on DuckDB, [Where Lakana fits, and why Apache Iceberg](where-lakana-fits.md)
+says what Lakana adds to such a stack, what it lacks, and when to stay with what you have.
 
 ## What Lakana is
 
