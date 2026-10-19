@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -175,6 +176,26 @@ def test_search_names_the_next_page_exactly_when_more_hits_follow(tmp_path: Path
         "More results: lakana search 'my text' --kind column --limit 5 --offset 15 --env dev"
         in (_plain(result.stdout))
     )
+
+
+def test_search_hint_for_text_that_starts_with_a_dash_runs_and_asks_the_same_question(
+    tmp_path: Path,
+) -> None:
+    body = _page(_hit("table", "silver.orders"), has_more=True)
+    api = FakeApi()
+    api.on("GET", _ROUTE, json=body)
+    first = invoke(make_state(tmp_path, api), "search", "--env", "dev", "--", "-x")
+    assert first.exit_code == 0, first.stderr
+    argv = shlex.split(_plain(first.stdout).split("More results: ")[1].strip())
+    assert argv[0] == "lakana" and "--" in argv
+
+    api = FakeApi()
+    api.on("GET", _ROUTE, json=_page())
+    again = invoke(make_state(tmp_path, api), *argv[1:])
+
+    assert again.exit_code == 0, again.stderr
+    assert api.requests[-1].url.params["q"] == "-x"
+    assert api.requests[-1].url.params["offset"] == "20"
 
 
 def test_search_keeps_the_default_limit_out_of_the_hint(tmp_path: Path) -> None:

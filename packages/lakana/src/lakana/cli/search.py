@@ -109,17 +109,24 @@ def search(
         droppable=["snippet", "where"],
     )
     if page.has_more:
-        parts = ["lakana", "search", shlex.quote(_output.inline(text))]
+        quoted = shlex.quote(_output.inline(text))
+        options: list[str] = []
         if kind is not None:
-            parts += ["--kind", kind.value]
+            options += ["--kind", kind.value]
         if limit != 20:
-            parts += ["--limit", str(limit)]
-        parts += [
+            options += ["--limit", str(limit)]
+        options += [
             "--offset",
             str(offset + limit),
             "--env",
             shlex.quote(_output.inline(environment)),
         ]
+        # Text that starts with a dash would be read as an option, so it follows a `--`.
+        parts = (
+            ["lakana", "search", *options, "--", quoted]
+            if text.startswith("-")
+            else ["lakana", "search", quoted, *options]
+        )
         _output.emit(state, "More results: " + " ".join(parts))
 
 
