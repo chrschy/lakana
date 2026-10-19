@@ -40,6 +40,7 @@ from lakana_server.api.platform.runs import router as runs_router
 from lakana_server.api.platform.runs import scheduler_router
 from lakana_server.api.platform.search import router as search_router
 from lakana_server.api.platform.secrets import router as secrets_router
+from lakana_server.api.platform.tables import dropped_router as dropped_tables_router
 from lakana_server.api.platform.tables import router as tables_router
 from lakana_server.api.platform.task_tokens import router as task_tokens_router
 from lakana_server.api.platform.tokens import router as tokens_router
@@ -57,6 +58,7 @@ ROUTERS = (
     namespaces_router,
     queries_router,
     tables_router,
+    dropped_tables_router,
     search_router,
     artifacts_router,
     artifacts_environment_router,

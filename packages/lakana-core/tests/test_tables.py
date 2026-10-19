@@ -47,7 +47,14 @@ from lakana_core.errors import (
 from lakana_core.grants.service import GrantService
 from lakana_core.identifiers import NamespacePath, TableRef
 from lakana_core.identity.principals import PrincipalService
-from lakana_core.models import Principal, PrincipalType, Table, TableLocation, TableType
+from lakana_core.models import (
+    Principal,
+    PrincipalType,
+    Table,
+    TableLocation,
+    TableLocationState,
+    TableType,
+)
 from lakana_core.policy.column_masks import ColumnMaskService
 from lakana_core.policy.row_filters import RowFilterService
 
@@ -588,41 +595,27 @@ def test_drop_without_purge_leaves_the_metadata_file(
     assert path.is_file()
 
 
-def test_drop_with_purge_removes_the_metadata_file(
-    catalog: CatalogService, principal: PrincipalRef, tmp_path: Path
+def test_drop_with_purge_deletes_nothing_itself_and_leaves_the_files_to_the_sweep(
+    catalog: CatalogService, principal: PrincipalRef, tmp_path: Path, session: Session
 ) -> None:
-    """`purge=True` is the destructive variant, and must actually destroy."""
+    """`purge=True` makes the files due at once; only the location sweep deletes table files.
+
+    A drop that touched storage could fail after its commit and leave a row-less half; this one
+    never calls the storage's delete at all.
+    """
     ref = _prepared_ref(catalog, principal, tmp_path)
     created = catalog.create_table(principal, ref, schema=_schema())
     path = Path(created.metadata_location.removeprefix("file://"))
 
-    catalog.drop_table(principal, ref, purge=True)
-
-    assert not path.exists()
-
-
-def test_drop_with_purge_propagates_a_delete_failure_without_a_dangling_row(
-    catalog: CatalogService, principal: PrincipalRef, tmp_path: Path, session: Session
-) -> None:
-    """A failed purge orphans a file rather than leaving a dangling row.
-
-    The catalog row is deleted and committed before the file delete is
-    attempted, so this must hold even when that delete fails: the row is
-    still gone, and the exception still propagates rather than being
-    swallowed. The alternative -- committing only after a successful
-    purge -- would instead risk a row that outlives the file it claims to
-    point at.
-    """
-    ref = _prepared_ref(catalog, principal, tmp_path)
-    catalog.create_table(principal, ref, schema=_schema())
-
-    with (
-        mock.patch.object(PyArrowFileIO, "delete", side_effect=OSError("boom")),
-        pytest.raises(OSError, match="boom"),
-    ):
+    with mock.patch.object(PyArrowFileIO, "delete", side_effect=OSError("boom")) as delete:
         catalog.drop_table(principal, ref, purge=True)
 
+    delete.assert_not_called()
+    assert path.exists()
     assert session.execute(select(Table)).first() is None
+    record = session.scalars(select(TableLocation)).one()
+    assert record.state is TableLocationState.DROPPED
+    assert record.purge_after == record.dropped_at
 
 
 def test_drop_unknown_raises_not_found(
@@ -1511,6 +1504,8 @@ def test_no_new_catalog_method_builds_a_loaded_table_without_a_decision() -> Non
         "maintain",
         "read_watermark",
         "rename_table",
+        # The table it restored, after the same two rights as a rename.
+        "undrop_table",
         "write_batches",
     ]
 

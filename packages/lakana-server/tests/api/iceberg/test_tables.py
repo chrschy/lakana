@@ -2,6 +2,7 @@
 
 import time
 import uuid
+from datetime import timedelta
 from pathlib import Path
 
 import pyarrow as pa
@@ -15,7 +16,15 @@ from lakana_core.catalog.json_schema import ColumnSpec
 from lakana_core.catalog.service import CatalogService
 from lakana_core.db import create_engine
 from lakana_core.identifiers import TableRef
-from lakana_core.models import Principal, Table, TableLocation, TableLocationState, WriteMode
+from lakana_core.models import (
+    AuditEvent,
+    AuditEventType,
+    Principal,
+    Table,
+    TableLocation,
+    TableLocationState,
+    WriteMode,
+)
 from lakana_core.storage.resolver import StorageResolver
 from lakana_server.settings import Settings
 from tests.conftest import AUTH_HEADER
@@ -209,13 +218,34 @@ def test_list_tables(client: TestClient, storage_root: str) -> None:
     assert response.json() == {"identifiers": [{"namespace": ["gold"], "name": "sales"}]}
 
 
-def test_drop_table(client: TestClient, storage_root: str) -> None:
-    """DELETE without purge removes the catalog row but leaves the metadata file.
+def _tombstone(settings: Settings) -> TableLocation:
+    """Read the one location record, which a drop makes a tombstone.
 
-    A subsequent GET is a 404, but the file on disk must survive — this is
-    the other half of the purge contract from
-    `test_drop_table_with_purge_query_parameter`: dropping without
-    `purgeRequested` must not touch storage.
+    Parameters
+    ----------
+    settings
+        The app's settings, which name its database.
+
+    Returns
+    -------
+    TableLocation
+        The record, detached.
+    """
+    engine = create_engine(settings.database)
+    try:
+        with Session(engine) as session:
+            record = session.scalars(select(TableLocation)).one()
+            session.expunge(record)
+            return record
+    finally:
+        engine.dispose()
+
+
+def test_drop_table(client: TestClient, storage_root: str, settings: Settings) -> None:
+    """DELETE without purge removes the catalog row and keeps the files for the undo period.
+
+    A subsequent GET is a 404, but the file on disk must survive, and the location record is a
+    tombstone due seven days after the drop (`purgeRequested=false` gives one too).
     """
     _setup(client, storage_root)
     created = client.post(
@@ -226,20 +256,56 @@ def test_drop_table(client: TestClient, storage_root: str) -> None:
     metadata_path = created.json()["metadata-location"].removeprefix("file://")
     assert Path(metadata_path).exists()
 
-    response = client.delete("/v1/dev/namespaces/gold/tables/sales", headers=AUTH_HEADER)
+    response = client.delete(
+        "/v1/dev/namespaces/gold/tables/sales",
+        headers=AUTH_HEADER,
+        params={"purgeRequested": "false"},
+    )
     assert response.status_code == 204
     assert (
         client.get("/v1/dev/namespaces/gold/tables/sales", headers=AUTH_HEADER).status_code == 404
     )
     assert Path(metadata_path).exists()
+    record = _tombstone(settings)
+    assert record.state is TableLocationState.DROPPED
+    assert record.purge_after is not None and record.dropped_at is not None
+    assert record.purge_after - record.dropped_at == timedelta(days=7)
+    assert _drop_reasons(settings) == ["user"]
 
 
-def test_drop_table_with_purge_query_parameter(client: TestClient, storage_root: str) -> None:
+def _drop_reasons(settings: Settings) -> list[str]:
+    """Read the reasons of the `TABLE_DROPPED` events.
+
+    Parameters
+    ----------
+    settings
+        The app's settings.
+
+    Returns
+    -------
+    list of str
+        One per event.
+    """
+    engine = create_engine(settings.database)
+    try:
+        with Session(engine) as session:
+            return [
+                event.detail["reason"]
+                for event in session.scalars(
+                    select(AuditEvent).where(AuditEvent.event_type == AuditEventType.TABLE_DROPPED)
+                )
+            ]
+    finally:
+        engine.dispose()
+
+
+def test_drop_table_with_purge_query_parameter(
+    client: TestClient, storage_root: str, settings: Settings
+) -> None:
     """The `purgeRequested` flag is a query parameter, not a body field.
 
-    Verified against a real client. Checks the file exists before the drop
-    as well as its absence after, so the "gone" assertion cannot pass
-    vacuously against a metadata path that was never real to begin with.
+    Verified against a real client. With it the tombstone is due at once: the next sweep of the
+    worker deletes the files, and the drop itself deletes nothing.
     """
     _setup(client, storage_root)
     created = client.post(
@@ -257,7 +323,11 @@ def test_drop_table_with_purge_query_parameter(client: TestClient, storage_root:
         params={"purgeRequested": "true"},
     )
     assert response.status_code == 204
-    assert not Path(metadata_path).exists()
+    assert Path(metadata_path).exists()
+    record = _tombstone(settings)
+    assert record.state is TableLocationState.DROPPED
+    assert record.purge_after == record.dropped_at
+    assert _drop_reasons(settings) == ["purge"]
 
 
 def test_drop_table_over_iceberg_rest_never_drops_a_view(

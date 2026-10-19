@@ -3651,3 +3651,86 @@ def test_0042_derives_a_table_root_as_the_application_does(metadata_location: st
     assert module.table_root_from_metadata_location(
         metadata_location
     ) == table_root_from_metadata_location(metadata_location)
+
+
+_REVISION_0043 = "c2f9a5d8b4e0"
+
+
+def test_0043_adds_the_tombstone_columns_and_keeps_every_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revision `0043`: nullable `purge_started_at` and `dropped_table`; nothing else changes.
+
+    A record from before (here a `DROPPED` one, which 0042 allows) keeps its state and
+    `purge_after` across the upgrade and the downgrade, so no file's fate changes.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    """
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, _REVISION_0042)
+    ids = _seed_tables_for_0042(db_path)
+    engine = create_engine(f"sqlite:///{db_path}")
+    record_id = uuid.uuid4().hex
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                sa.text(
+                    "INSERT INTO table_locations (id, environment_id, location, state,"
+                    " claimed_at, purge_after, revoked_policy_ids)"
+                    " VALUES (:id, :env, 'file:///lake/dev/managed/gold/x-0a1b', 'DROPPED',"
+                    " :t, :t, '[]')"
+                ),
+                {"id": record_id, "env": ids["env"], "t": "2026-10-03 09:00:00"},
+            )
+    finally:
+        engine.dispose()
+
+    def read() -> list[tuple[object, ...]]:
+        engine = create_engine(f"sqlite:///{db_path}")
+        try:
+            with engine.connect() as connection:
+                return [
+                    tuple(row)
+                    for row in connection.execute(
+                        sa.text(
+                            "SELECT location, state, purge_after FROM table_locations"
+                            " ORDER BY location"
+                        )
+                    ).all()
+                ]
+        finally:
+            engine.dispose()
+
+    before = read()
+    command.upgrade(config, _REVISION_0043)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        columns = {c["name"]: c for c in inspect(engine).get_columns("table_locations")}
+        assert columns["purge_started_at"]["nullable"] is True
+        assert columns["dropped_table"]["nullable"] is True
+        with engine.connect() as connection:
+            assert connection.execute(
+                sa.text(
+                    "SELECT count(*) FROM table_locations"
+                    " WHERE purge_started_at IS NULL AND dropped_table IS NULL"
+                )
+            ).scalar_one() == len(before)
+    finally:
+        engine.dispose()
+    assert read() == before
+
+    command.downgrade(config, _REVISION_0042)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        names = {c["name"] for c in inspect(engine).get_columns("table_locations")}
+        assert "purge_started_at" not in names and "dropped_table" not in names
+    finally:
+        engine.dispose()
+    assert read() == before

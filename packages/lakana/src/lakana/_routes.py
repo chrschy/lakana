@@ -74,6 +74,12 @@ ROUTES: dict[str, Route] = {
     "tables.list": Route("GET", "/api/v1/environments/{env}/namespaces/{path}/tables"),
     "tables.get": Route("GET", "/api/v1/environments/{env}/namespaces/{path}/tables/{name}"),
     "tables.delete": Route("DELETE", "/api/v1/environments/{env}/namespaces/{path}/tables/{name}"),
+    "tables.undrop": Route(
+        "POST", "/api/v1/environments/{env}/namespaces/{path}/tables/{name}/undrop"
+    ),
+    "tables.list_dropped": Route(
+        "GET", "/api/v1/environments/{env}/namespaces/{path}/dropped-tables"
+    ),
     "tables.health": Route(
         "GET", "/api/v1/environments/{env}/namespaces/{path}/tables/{name}/health"
     ),

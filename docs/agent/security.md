@@ -1204,8 +1204,8 @@ location, unique by absolute `location`, `CLAIMED | LIVE | DROPPED | ABANDONED`,
 `claimed_at`, `purge_after`. `table_id` has no foreign key on purpose (the record outlives a dropped
 row); `environment_id` cascades, so deleting an environment leaves its directories without records,
 which nothing deletes. Migration `0042` backfills `LIVE` for every `ICEBERG` row with a metadata
-file. A drop does not change the record yet: a dropped table's record stays `LIVE` and protects its
-directory until #94 makes drops write `DROPPED`.
+file. A drop makes the record its tombstone (`DROPPED`, below); `0043` adds `dropped_table` and
+`purge_started_at`.
 
 **The claim.** `_prepare_table` ends with `claim_location`, which inserts and **commits** the
 `CLAIMED` record; validation and refusal come before it, so a refused create claims nothing. Both
@@ -1243,7 +1243,7 @@ row's metadata lies under the location, else `ABANDONED` with `purge_after = now
 `purge_after` is purged only if its location is canonical, strictly inside `managed/` of its
 environment's root and ends in `-<32 hex>`, and nothing in use is the location or lies inside it in
 **any** environment (`location_in_use`: `LIVE`/`CLAIMED` records and `tables` rows; plus
-`table_root_locations` with `nested_locations_within`, maintain's check). Before **each** delete,
+`table_root_locations` with `nested_locations_within`; maintenance uses `other_table_locations`). Before **each** delete,
 under the record's lock, the record must still be purgeable and `location_in_use` false again; only
 objects strictly inside the location with sane segments are deleted; the record goes last, with
 `TABLE_PURGED` (`files`, `bytes`, `complete`); a pass that stops part-way records `complete: false`
@@ -1257,8 +1257,89 @@ namespace created inside an abandoned location between the last check and a dele
 delete in flight can outlive the lock when the database ends the session. After a restore, a create
 that was in flight at the backup has a `CLAIMED` record: once the scheduler ends its run, the sweep
 removes its files even if the table was finished after the backup (the docs tell the operator to
-keep the sweep off and copy such directories first). A dropped table's directory is never deleted
-until #94.
+keep the sweep off and copy such directories first).
+
+### Drops are tombstones; undrop restores exactly what the drop took (#94)
+
+User documentation: `docs/site/how-to/drop-and-restore-a-table.md`. Code:
+`lakana_core.catalog.tombstones`, `CatalogService.drop_table`/`undrop_table`/`list_dropped_tables`.
+
+**The drop** (platform `DELETE`, `?purge=true`, the CLI, the Iceberg REST `DELETE` with either
+`purgeRequested`) does, in one transaction: lock the `tables` row (a no-op `UPDATE`, so a commit
+landing between the lookup and the delete is in the snapshot, not lost to it), take `now = db_now`,
+`revoke_attached(..., table_id, now=now)` (every revoked row is stamped with exactly `now`), then
+`tombstone`: only for an `ICEBERG` row whose derived root has a record that is `LIVE` **and names
+this table's id**, under `lock_location`: `DROPPED`, `dropped_at = now`, `purge_after = now +
+LAKANA_TABLES__UNDO_DAYS` (`now` for a purge or `UNDO_DAYS=0`), `revoked_policy_ids` = the
+`RevokedPolicy` list, `dropped_table` = every mapped column of the row, of its `column_descriptions`
+and of its `table_columns` (the rows its id cascades to); then `TABLE_DROPPED` and the row delete.
+The drop itself deletes no file any more (`purge=True` used to delete the metadata file in the
+request). No tombstone, files kept: an `EXTERNAL` table, a view (no location), a table whose root's
+record names another table (two legacy tables sharing a directory). A `DROPPED` record of another
+table at the same root gets the later `purge_after`, never an earlier one, so the second table's
+period is honoured too.
+
+**The undrop** authorizes `DROP_TABLE` on the namespace scope (never on the old name's table scope:
+a new table of that name must not lend its table grants) and `CREATE_TABLE` on the target name,
+then the guard as `WriteOperation.CREATE_TABLE` (not a task's operation, so every task run context
+is refused). It finds the newest `DROPPED` record of the name in the namespace, takes
+`lock_location`, re-reads it, and refuses (rolling back first): not `DROPPED` or no snapshot (404),
+`purge_started_at` set (409), `db_now >= purge_after` (409), namespace path gone (404), name taken
+(409, `--as`), metadata file gone (409, `FILES_GONE_MESSAGE`). Then, in one transaction: the row from the snapshot (same id and metadata
+location, namespace by path, the new name; an owner or description author deleted since becomes
+`NULL`), its descriptions and columns, `restore_policies`, the record back to `LIVE` (cleared),
+`TABLE_UNDROPPED` with the restored `{kind, id}` list, the guard's `record_pending`, commit. An
+`IntegrityError` (a create won the name between the check and the insert, or the namespace was
+dropped) rolls back and is reported as taken, or as a conflict to retry.
+
+**Exactly the revoked policies.** `restore_policies` un-revokes a listed id only while its
+`revoked_at` equals the record's `dropped_at` (the drop's own stamp), and sets `table_id` back (the
+foreign key set it `NULL`) and the display-only `namespace`/`table`. A row revoked before the drop
+was never listed; a row deleted since (its principal or group was deleted, cascade) is skipped; a
+row stamped again since stays revoked. Revoking an already-revoked row is a no-op in the services,
+so nothing else can change a listed row.
+
+**The purge/undrop lock.** The sweep's `purge` first checks `location_in_use` (a restored table is
+in use), then `_start`: under `lock_location`, the record must still be purgeable with
+`purge_after <= now` (an undrop and a new drop since the listing moves it out), and it commits
+`purge_started_at` before the first delete; each delete then rechecks the state under the same lock.
+Undrop takes that lock first and checks the mark. So either undrop commits first (the sweep finds
+`LIVE`, or a later `purge_after`, and deletes nothing) or the mark is committed first (undrop is
+refused, even if the pass stops part-way: a started purge is never undone). The sweep's `now` is the
+database time at its start, never later than the undrop's `db_now`, so a record the sweep finds due
+is also past its period for an undrop. Pins: `test_table_undrop.py`,
+`test_table_location_sweep.py` (`test_the_purge_is_marked_started_under_the_lock_before_its_first_delete`,
+`test_a_record_no_longer_due_when_the_purge_starts_is_left_alone`), and the two-thread Postgres
+tests in `test_table_locations_postgres_integration.py`.
+
+**A dropped table nested inside another location.** `location_in_use` counts only `LIVE` and
+`CLAIMED`, so `dropped_inside` (any `DROPPED` record strictly below the location, in any
+environment) is checked too: before the mark, and again under the lock before each delete and
+before the record goes. The outer purge then waits (`purges_waiting`, one warning per record and
+run), stays due, and is retried by every later sweep until the nested table is restored (`LIVE`,
+which blocks it as before) or purged itself. A nested `ABANDONED` record does not block: nobody can
+restore it and its own purge is already due. Maintenance reads the other tables' locations with
+`other_table_locations`: the `LIVE`, `CLAIMED` and `DROPPED` records and the roots of the other
+`tables` rows, in **one** `UNION ALL` statement, so an undrop (DROPPED to LIVE plus the row) at the
+same moment is in that snapshot either way; two queries let it fall between them. A dropped table
+nested under the maintained table's `data/` is therefore never taken for its orphans. A record
+leaves those states only through a purge, which deletes the files before the record, or as a
+claim that never published turning ABANDONED (no table's data), and a create
+claims before its first file, whose files are younger than the orphan cutoff; so maintenance does
+not re-check per file under a lock (the sweep does, because it has no cutoff). Pin:
+`test_a_nested_table_restored_while_maintenance_lists_locations_keeps_its_files`. As a last guard, undrop refuses
+with `FILES_GONE_MESSAGE` when the snapshot's metadata file no longer exists, before anything is
+written. Pins: `test_a_dropped_table_nested_inside_blocks_the_purge_until_it_is_restored`,
+`test_the_outer_purge_follows_once_the_nested_drop_is_purged_itself`,
+`test_a_table_dropped_inside_during_the_purge_stops_it`,
+`test_a_nested_dropped_tables_files_are_kept_for_its_undo_period`,
+`test_an_undrop_whose_metadata_file_is_gone_is_refused_and_restores_nothing`.
+
+**Residuals, accepted.** A purge that is blocked after its mark (something in use appeared inside)
+leaves a tombstone that can no longer be restored although its files are whole. The read history
+(`table_reads`) of a dropped table is not restored. A grant to a group or principal deleted during
+the period is gone with it. Tables dropped before this release have no tombstone; their directories
+are only counted (`unrecorded_directories`).
 
 ## Checks and the rollback (M5d-a)
 

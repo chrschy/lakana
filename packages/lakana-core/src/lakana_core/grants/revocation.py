@@ -25,7 +25,9 @@ drop itself, in the same transaction as the drop's own commit.
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Literal
 
 from sqlalchemy import ColumnExpressionArgument, select
 from sqlalchemy.orm import Session
@@ -41,6 +43,48 @@ _EVENT_TYPES: dict[type[Grant] | type[RowFilter] | type[ColumnMask], AuditEventT
     ColumnMask: AuditEventType.COLUMN_MASK_REVOKED,
 }
 
+PolicyKind = Literal["grant", "row_filter", "column_mask"]
+"""The name of each revocable model in `RevokedPolicy.kind`."""
+
+POLICY_MODELS: dict[str, type[Grant] | type[RowFilter] | type[ColumnMask]] = {
+    "grant": Grant,
+    "row_filter": RowFilter,
+    "column_mask": ColumnMask,
+}
+"""The model of each `RevokedPolicy.kind`."""
+
+_KINDS: dict[type[Grant] | type[RowFilter] | type[ColumnMask], PolicyKind] = {
+    Grant: "grant",
+    RowFilter: "row_filter",
+    ColumnMask: "column_mask",
+}
+
+
+@dataclass(frozen=True)
+class RevokedPolicy:
+    """One grant, row filter or column mask that `revoke_attached` revoked.
+
+    Parameters
+    ----------
+    kind
+        Which model it is.
+    id
+        The row's id.
+    """
+
+    kind: PolicyKind
+    id: uuid.UUID
+
+    def as_json(self) -> dict[str, str]:
+        """Write it the way a tombstone and an audit event store it.
+
+        Returns
+        -------
+        dict of str to str
+            ``{"kind": ..., "id": ...}``.
+        """
+        return {"kind": self.kind, "id": str(self.id)}
+
 
 def revoke_attached(
     session: Session,
@@ -49,7 +93,8 @@ def revoke_attached(
     environment_id: uuid.UUID | None = None,
     table_id: uuid.UUID | None = None,
     namespace: tuple[uuid.UUID, str] | None = None,
-) -> int:
+    now: datetime | None = None,
+) -> list[RevokedPolicy]:
     """Soft-revoke every active grant, row filter, and column mask attached to one dropped target.
 
     Exactly one of `environment_id`, `table_id`, or `namespace` identifies
@@ -88,11 +133,14 @@ def revoke_attached(
         `(environment_id, joined_path)` for the dropped namespace, if that
         is the target. `joined_path` is `NamespacePath.joined()`'s
         unit-separator-joined storage form, matching `Grant.namespace`.
+    now
+        The time to stamp `revoked_at` with; the Python clock when `None`. `drop_table`
+        passes its drop time, so an undrop can tell a row still as the drop left it.
 
     Returns
     -------
-    int
-        The number of rows revoked, across all three models.
+    list of RevokedPolicy
+        Every row revoked, across all three models.
 
     Raises
     ------
@@ -109,12 +157,11 @@ def revoke_attached(
     given = (environment_id is not None, table_id is not None, namespace is not None)
     if sum(given) != 1:
         raise ValueError("revoke_attached takes exactly one of environment_id/table_id/namespace.")
-    now = datetime.now(UTC)
+    now = now or datetime.now(UTC)
     audit = AuditService(session)
-    count = 0
     if namespace is not None:
         env_id, joined_path = namespace
-        count += _revoke_matching(
+        return _revoke_matching(
             session,
             audit,
             actor,
@@ -124,7 +171,7 @@ def revoke_attached(
             & (Grant.environment_id == env_id)
             & (Grant.namespace == joined_path),
         )
-        return count
+    revoked: list[RevokedPolicy] = []
     for bound in (Grant, RowFilter, ColumnMask):
         if environment_id is not None:
             predicate = bound.environment_id == environment_id
@@ -133,8 +180,8 @@ def revoke_attached(
                 "guaranteed by the ValueError raised above"
             )
             predicate = bound.table_id == table_id
-        count += _revoke_matching(session, audit, actor, now, bound, predicate)
-    return count
+        revoked += _revoke_matching(session, audit, actor, now, bound, predicate)
+    return revoked
 
 
 def _revoke_matching(
@@ -144,7 +191,7 @@ def _revoke_matching(
     now: datetime,
     model: type[Grant] | type[RowFilter] | type[ColumnMask],
     predicate: ColumnExpressionArgument[bool],
-) -> int:
+) -> list[RevokedPolicy]:
     """Soft-revoke every active row of `model` matching `predicate`.
 
     Parameters
@@ -165,8 +212,8 @@ def _revoke_matching(
 
     Returns
     -------
-    int
-        The number of rows revoked.
+    list of RevokedPolicy
+        The rows revoked.
     """
     rows = (
         session.execute(select(model).where(predicate, model.revoked_at.is_(None))).scalars().all()
@@ -185,4 +232,4 @@ def _revoke_matching(
             ),
             detail={"reason": "target_dropped", "id": str(row.id)},
         )
-    return len(rows)
+    return [RevokedPolicy(_KINDS[model], row.id) for row in rows]

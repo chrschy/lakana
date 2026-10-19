@@ -24,6 +24,7 @@ from lakana._http import HttpTransport
 from lakana._models import (
     AppendResult,
     Column,
+    DroppedTable,
     Environment,
     ExternalTable,
     Failure,
@@ -511,6 +512,85 @@ def test_tables_delete_sends_a_delete() -> None:
 
     assert seen["method"] == "DELETE"
     assert seen["path"] == "/api/v1/environments/dev/namespaces/bronze/tables/sales"
+
+
+def test_tables_delete_with_purge_sends_it_as_a_query_parameter() -> None:
+    """`purge=True` asks for `?purge=true`; without it no parameter is sent."""
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url.query, "ascii"))
+        return httpx.Response(204)
+
+    tables = Tables(_transport(handler))
+    tables.delete("dev", "bronze.sales", purge=True)
+    tables.delete("dev", "bronze.sales", purge=True, break_glass_reason="incident 1: by hand")
+
+    assert seen == ["purge=true", "purge=true&break_glass_reason=incident+1%3A+by+hand"]
+
+
+def test_tables_undrop_posts_the_new_name_and_returns_the_table() -> None:
+    """`undrop` POSTs `.../tables/{name}/undrop` with `new_name` and the break-glass reason."""
+    seen: list[tuple[str, str, dict[str, Any]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path, json.loads(request.content)))
+        return httpx.Response(
+            200,
+            json={
+                "name": "sales_before",
+                "namespace": "bronze",
+                "uuid": "u1",
+                "metadata_location": "file:///m.json",
+                "schema": [],
+            },
+        )
+
+    tables = Tables(_transport(handler))
+    restored = tables.undrop("dev", "bronze.sales", new_name="sales_before")
+    tables.undrop("dev", "bronze.sales")
+
+    assert (restored.name, restored.uuid) == ("sales_before", "u1")
+    path = "/api/v1/environments/dev/namespaces/bronze/tables/sales/undrop"
+    assert seen == [
+        ("POST", path, {"new_name": "sales_before", "break_glass_reason": None}),
+        ("POST", path, {"new_name": None, "break_glass_reason": None}),
+    ]
+
+
+def test_tables_list_dropped_reads_the_dropped_tables_route() -> None:
+    """`list_dropped` GETs `.../namespaces/{path}/dropped-tables` and parses the times."""
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "name": "sales",
+                    "namespace": "bronze",
+                    "uuid": "u1",
+                    "kind": "TABLE",
+                    "dropped_at": "2026-10-19T12:00:00Z",
+                    "purge_after": "2026-10-26T12:00:00Z",
+                    "restorable": True,
+                }
+            ],
+        )
+
+    (dropped,) = Tables(_transport(handler)).list_dropped("dev", "bronze")
+
+    assert seen == ["/api/v1/environments/dev/namespaces/bronze/dropped-tables"]
+    assert dropped == DroppedTable(
+        name="sales",
+        namespace="bronze",
+        uuid="u1",
+        kind="TABLE",
+        dropped_at=datetime.fromisoformat("2026-10-19T12:00:00+00:00"),
+        purge_after=datetime.fromisoformat("2026-10-26T12:00:00+00:00"),
+        restorable=True,
+    )
 
 
 # --- Tables: create --------------------------------------------------------

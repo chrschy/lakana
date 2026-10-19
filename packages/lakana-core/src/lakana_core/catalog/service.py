@@ -90,9 +90,10 @@ from lakana_core.catalog.locations import (
     claim_holder,
     claim_location,
     forget_location,
+    lock_location,
+    other_table_locations,
     publish_location,
     release_claim,
-    table_root_locations,
 )
 from lakana_core.catalog.maintenance import (
     DEFAULT_KEEP_DAYS,
@@ -119,6 +120,24 @@ from lakana_core.catalog.metadata import (
 )
 from lakana_core.catalog.schema_compat import SchemaDiff, arrow_to_iceberg_schema, plan_schema
 from lakana_core.catalog.schema_inference import infer_schema
+from lakana_core.catalog.tombstones import (
+    DEFAULT_UNDO_DAYS,
+    FILES_GONE_MESSAGE,
+    NAME_TAKEN_MESSAGE,
+    NAMESPACE_GONE_MESSAGE,
+    NO_TOMBSTONE_MESSAGE,
+    PERIOD_PASSED_MESSAGE,
+    PURGE_STARTED_MESSAGE,
+    DroppedTable,
+    find_tombstone,
+    list_tombstones,
+    name_holder,
+    restore_policies,
+    restore_table,
+    revive,
+    snapshot_table,
+    tombstone,
+)
 from lakana_core.catalog.watermark import Watermark, check_incremental_key, compute_watermark
 from lakana_core.catalog.writes import (
     DataFileWriter,
@@ -133,7 +152,7 @@ from lakana_core.catalog.writes import (
     target_changed_message,
 )
 from lakana_core.config import StorageConfig
-from lakana_core.db import rowcount
+from lakana_core.db import db_now, rowcount
 from lakana_core.errors import (
     AlreadyExistsError,
     CheckedSnapshotGoneError,
@@ -176,6 +195,7 @@ from lakana_core.models import (
     RollbackOutcome,
     RowFilter,
     Table,
+    TableLocationState,
     TableType,
     TaskRun,
     WriteMode,
@@ -980,6 +1000,9 @@ class CatalogService:
         Resolver used to reach an environment's storage.
     authz
         Authorization service consulted before every operation.
+    undo_days
+        `LAKANA_TABLES__UNDO_DAYS`: how many days a dropped managed table keeps its files and
+        can be restored (`undrop_table`). 0 makes every drop due at the next sweep.
     """
 
     def __init__(
@@ -987,10 +1010,13 @@ class CatalogService:
         session: Session,
         storage: StorageResolver,
         authz: AuthorizationService,
+        *,
+        undo_days: int = DEFAULT_UNDO_DAYS,
     ) -> None:
         self._session = session
         self._storage = storage
         self._authz = authz
+        self._undo_days = undo_days
         self._guard = ProtectedWriteGuard(session, authz)
         self._commit_sent = False
         self._track_writes()
@@ -5313,7 +5339,7 @@ class CatalogService:
                     root_prefix=root_prefix,
                     table_location=location,
                     nested_locations=nested_locations_within(
-                        location, self._other_table_locations(environment_id, table_id)
+                        location, self._other_table_locations(environment_id, table_id, location)
                     ),
                     referenced=referenced,
                     cutoff=cutoff,
@@ -5477,8 +5503,10 @@ class CatalogService:
             is not None
         )
 
-    def _other_table_locations(self, environment_id: uuid.UUID, table_id: uuid.UUID) -> list[str]:
-        """List every other managed table's location in an environment.
+    def _other_table_locations(
+        self, environment_id: uuid.UUID, table_id: uuid.UUID, location: str
+    ) -> list[str]:
+        """List every other table's location in an environment, dropped ones too.
 
         Parameters
         ----------
@@ -5486,15 +5514,19 @@ class CatalogService:
             The environment.
         table_id
             The table to leave out.
+        location
+            Its own location, left out.
 
         Returns
         -------
         list of str
-            Derived from each metadata location, as the worker's own
-            confinement check does (`table_root_locations`, which the location
-            sweep uses too).
+            `other_table_locations`: the records that keep files (live, claimed and dropped
+            tables) and the roots derived from the other tables' metadata files, read in one
+            statement.
         """
-        return table_root_locations(self._session, environment_id=environment_id, exclude=table_id)
+        return other_table_locations(
+            self._session, environment_id=environment_id, table_id=table_id, location=location
+        )
 
     @staticmethod
     def _delete_quietly(
@@ -6024,13 +6056,21 @@ class CatalogService:
     def drop_table(
         self, p: PrincipalRef, ref: TableRef, *, purge: bool = False, include_views: bool = True
     ) -> None:
-        """Remove a table from the catalog, optionally deleting its data.
+        """Remove a table from the catalog; a managed table's files follow after the undo period.
 
         Every active grant, row filter, and column mask bound to this
         table's id is soft-revoked first, in the same transaction
         — otherwise a table later re-created at the same location or
         under the same name would silently inherit the old table's grants
         and policies.
+
+        A managed table's location record becomes its tombstone in the same transaction
+        (`lakana_core.catalog.tombstones.tombstone`): `DROPPED`, with the row's snapshot, the
+        policies revoked here and ``purge_after`` (now plus the undo period). Its files stay
+        until then, so `undrop_table` can restore it, and the location sweep deletes them once
+        ``purge_after`` has passed. An external table, a view, and a managed table without a
+        location record of its own keep their files. One `TABLE_DROPPED` audit event records
+        the drop.
 
         Parameters
         ----------
@@ -6039,10 +6079,8 @@ class CatalogService:
         ref
             The table reference.
         purge
-            When True, delete the table's metadata file as well as the
-            catalog entry. When False, the files remain and the entry could
-            be recreated by pointing a new `create_table` call at the same
-            location.
+            When True, the files are due at once: the next sweep deletes them, and the table
+            cannot be restored. When False, they wait for the undo period.
         include_views
             `False` refuses to drop a view (`NotFoundError`), for the
             Iceberg REST surface, which does not expose views: without this, `DELETE`
@@ -6077,16 +6115,300 @@ class CatalogService:
             raise NotFoundError(
                 f"{ref.dotted()} is a view; views are not exposed over the Iceberg REST catalog."
             )
-        location = row.metadata_location
-        revoke_attached(self._session, p, table_id=row.id)
+        row = self._lock_table_row(ref, row.id)
+        now = db_now(self._session)
+        revoked = revoke_attached(self._session, p, table_id=row.id, now=now)
+        purge_after = now if purge else now + timedelta(days=self._undo_days)
+        record = tombstone(
+            self._session,
+            row,
+            snapshot=snapshot_table(self._session, row, ref.namespace),
+            revoked=revoked,
+            now=now,
+            purge_after=purge_after,
+        )
+        AuditService(self._session).record(
+            p.id,
+            AuditEventType.TABLE_DROPPED,
+            securable=Securable.table_scope(ref.environment, ref.namespace, ref.name),
+            detail={
+                "reason": "purge" if purge else "user",
+                "table_id": str(row.id),
+                "kind": row.kind,
+                "purge_after": None if record is None else purge_after.isoformat(),
+                "revoked_policies": len(revoked),
+            },
+        )
         self._session.delete(row)
         self._guard.record_pending()
         self._session.commit()
-        # The catalog row is gone before the file is touched, so a failure
-        # to delete the file leaves an orphan rather than an entry pointing
-        # at a metadata file that no longer exists.
-        if purge and location is not None:
-            self._storage.for_environment(ref.environment).file_io.delete(location)
+
+    def _lock_table_row(self, ref: TableRef, table_id: uuid.UUID) -> Table:
+        """Take a table row's lock for the rest of the transaction and read it again.
+
+        A no-op `UPDATE` (a row lock on Postgres, the write lock on SQLite), so a commit that
+        lands between the lookup and the drop is in the row the drop's snapshot records, not
+        lost to it.
+
+        Parameters
+        ----------
+        ref
+            The table, for the error.
+        table_id
+            Its id.
+
+        Returns
+        -------
+        Table
+            The row as it is now.
+
+        Raises
+        ------
+        NotFoundError
+            If the row is gone (dropped at the same moment).
+        """
+        locked = self._session.execute(
+            update(Table)
+            .where(Table.id == table_id)
+            .values(name=Table.name, updated_at=Table.updated_at)
+            .execution_options(synchronize_session=False)
+        )
+        if rowcount(locked) != 1:
+            raise NotFoundError(
+                f"Table '{shown(ref.name)}' not found in {shown(str(ref.namespace))}."
+            )
+        return self._session.scalars(
+            select(Table).where(Table.id == table_id).execution_options(populate_existing=True)
+        ).one()
+
+    def undrop_table(
+        self, p: PrincipalRef, ref: TableRef, *, new_name: str | None = None
+    ) -> LoadedTable:
+        """Restore a dropped table within its undo period: the same table, as it was.
+
+        The newest tombstone of `ref`'s name in its namespace is restored, in one transaction,
+        under the tombstone's lock (the lock the location sweep takes before each step of a
+        purge): the row with the same id and the same metadata location, its column
+        descriptions and indexed columns, the location record back to `LIVE`, and exactly the
+        grants, row filters and column masks the drop revoked, as they were. A policy revoked
+        before the drop stays revoked. One `TABLE_UNDROPPED` audit event lists what came back.
+        A second tombstone of the same name is restored by a second call, under another name.
+
+        Needs `DROP_TABLE` on the namespace and `CREATE_TABLE` on the name it comes back under,
+        and passes the protected-environment guard as a create does.
+
+        Parameters
+        ----------
+        p
+            The acting principal.
+        ref
+            The dropped table, by the name it had.
+        new_name
+            Restore it under this name in the same namespace instead.
+
+        Returns
+        -------
+        LoadedTable
+            The restored table.
+
+        Raises
+        ------
+        ValidationError
+            If `new_name` is not a valid table name.
+        PermissionDenied
+            Without either right, or in a protected environment outside a run without a
+            break-glass reason.
+        NotFoundError
+            If no dropped table of that name can be restored, or its namespace is gone.
+        AlreadyExistsError
+            If a table of the name exists now (`NAME_TAKEN_MESSAGE` names `--as`).
+        ConflictError
+            If the undo period has ended or the purge has started, the table's metadata file is
+            gone, or the write failed for another reason (the namespace dropped at the same
+            moment).
+        """
+        target = ref if new_name is None else replace(ref, name=new_name)
+        if new_name is not None:
+            validate_path_component(new_name, what="Table name")
+        self._authz.authorize(
+            p, Action.DROP_TABLE, Securable.namespace_scope(ref.environment, ref.namespace)
+        )
+        self._authz.authorize(
+            p,
+            Action.CREATE_TABLE,
+            Securable.table_scope(target.environment, target.namespace, target.name),
+        )
+        self._guard.check(p, ref.environment, WriteOperation.CREATE_TABLE, table_target(target))
+        env = self._find_environment(ref.environment)
+        record_id = find_tombstone(self._session, env.id, ref.namespace, ref.name)
+        record = None if record_id is None else lock_location(self._session, record_id)
+        snapshot = None if record is None else record.dropped_table
+        if record is None or record.state is not TableLocationState.DROPPED or not snapshot:
+            self._session.rollback()
+            raise NotFoundError(
+                NO_TOMBSTONE_MESSAGE.format(
+                    name=shown(ref.name), namespace=shown(str(ref.namespace))
+                )
+            )
+        if record.purge_started_at is not None:
+            self._session.rollback()
+            raise ConflictError(PURGE_STARTED_MESSAGE.format(table=shown(ref.dotted())))
+        assert record.purge_after is not None and record.dropped_at is not None  # nosec B101
+        if db_now(self._session) >= record.purge_after:
+            purge_after = record.purge_after.isoformat(timespec="seconds")
+            self._session.rollback()
+            raise ConflictError(
+                PERIOD_PASSED_MESSAGE.format(table=shown(ref.dotted()), purge_after=purge_after)
+            )
+        namespace = self._lookup_namespace(env, ref.namespace)
+        if namespace is None:
+            self._session.rollback()
+            raise NotFoundError(
+                NAMESPACE_GONE_MESSAGE.format(
+                    table=shown(ref.dotted()), namespace=shown(str(ref.namespace))
+                )
+            )
+        taken = self._lookup_table(namespace, target.name)
+        if taken is not None:
+            holder = taken.table_type
+            self._session.rollback()
+            raise AlreadyExistsError(self._undrop_taken_message(ref, target, holder))
+        if not self._metadata_file_exists(ref.environment, snapshot["row"]["metadata_location"]):
+            self._session.rollback()
+            raise ConflictError(FILES_GONE_MESSAGE.format(table=shown(ref.dotted())))
+        namespace_id = namespace.id
+        try:
+            row = restore_table(
+                self._session, snapshot, namespace_id=namespace_id, name=target.name
+            )
+            restored = restore_policies(
+                self._session,
+                record,
+                table_id=row.id,
+                namespace=target.namespace.joined(),
+                name=target.name,
+            )
+            AuditService(self._session).record(
+                p.id,
+                AuditEventType.TABLE_UNDROPPED,
+                securable=Securable.table_scope(target.environment, target.namespace, target.name),
+                detail={
+                    "table_id": str(row.id),
+                    "name": target.name,
+                    "dropped_name": ref.name,
+                    "dropped_at": record.dropped_at.isoformat(),
+                    "restored_policies": restored,
+                },
+            )
+            revive(record)
+            self._guard.record_pending()
+            self._session.commit()
+        except IntegrityError as exc:
+            self._session.rollback()
+            holder = self._session.scalar(
+                select(Table.table_type).where(
+                    Table.namespace_id == namespace_id, Table.name == target.name
+                )
+            )
+            if holder is not None:
+                raise AlreadyExistsError(self._undrop_taken_message(ref, target, holder)) from exc
+            logger.warning(
+                "An undrop failed on an integrity error that is not a name clash: %s",
+                type(exc).__name__,
+            )
+            raise ConflictError(
+                f"Could not restore {shown(ref.dotted())}: the write failed for a reason other "
+                "than a name collision. Check that the namespace still exists, then try again."
+            ) from exc
+        return self._to_loaded_table(target, row)
+
+    def _metadata_file_exists(self, environment: str, metadata_location: str) -> bool:
+        """Say whether a dropped table's metadata file is still in storage.
+
+        The tombstone's lock keeps the sweep from starting a purge meanwhile; this guards the
+        undrop against files deleted by anything else, so it never commits a row that points
+        at nothing.
+
+        Parameters
+        ----------
+        environment
+            The environment.
+        metadata_location
+            The snapshot's metadata location; a tombstone is only written for a table that has
+            one.
+
+        Returns
+        -------
+        bool
+            Whether the file exists.
+        """
+        resolved = self._storage.for_environment(environment)
+        return bool(resolved.file_io.new_input(metadata_location).exists())
+
+    @staticmethod
+    def _undrop_taken_message(ref: TableRef, target: TableRef, holder: TableType) -> str:
+        """Word the refusal of an undrop whose name is taken.
+
+        Parameters
+        ----------
+        ref
+            The dropped table.
+        target
+            Where it was to come back.
+        holder
+            The type of the row that holds the name.
+
+        Returns
+        -------
+        str
+            `NAME_TAKEN_MESSAGE`, filled in.
+        """
+        return NAME_TAKEN_MESSAGE.format(
+            table=shown(ref.dotted()),
+            name=shown(target.name),
+            namespace=shown(str(target.namespace)),
+            holder=name_holder(holder),
+        )
+
+    def list_dropped_tables(
+        self, p: PrincipalRef, environment: str, namespace: NamespacePath
+    ) -> list[DroppedTable]:
+        """List the dropped tables of a namespace whose files are not deleted yet.
+
+        Parameters
+        ----------
+        p
+            The acting principal.
+        environment
+            Environment name.
+        namespace
+            The namespace the tables were dropped from.
+
+        Returns
+        -------
+        list of DroppedTable
+            Newest drop first, each with its purge date and whether it can still be restored.
+            One the caller may not read by its name (a token narrowed to some tables) is left
+            out, as the table list leaves out a table.
+
+        Raises
+        ------
+        NotFoundError
+            If the environment or namespace does not exist.
+        PermissionDenied
+            If the principal may not read this namespace (the rule of `list_tables`).
+        """
+        self._authz.authorize(
+            p, Action.READ_TABLE, Securable.namespace_scope(environment, namespace)
+        )
+        env = self._find_environment(environment)
+        self._find_namespace(env, namespace)
+        dropped = list_tombstones(self._session, env.id, namespace, now=db_now(self._session))
+        return [
+            entry
+            for entry in dropped
+            if self.can_read_table(p, TableRef(environment, namespace, entry.name))
+        ]
 
     def rename_table(self, p: PrincipalRef, source: TableRef, destination: TableRef) -> LoadedTable:
         """Move a table to a new namespace or name.

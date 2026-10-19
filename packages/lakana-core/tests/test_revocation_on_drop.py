@@ -426,10 +426,10 @@ def test_already_revoked_row_is_not_re_revoked_or_re_audited(
     assert first_revoked_at is not None
 
     second_actor = _add_principal(session, "someone-else")
-    count = revoke_attached(session, second_actor, table_id=table_id)
+    revoked = revoke_attached(session, second_actor, table_id=table_id)
     session.commit()
 
-    assert count == 0
+    assert revoked == []
     assert grant.revoked_at == first_revoked_at
     assert grant.revoked_by == admin.id
     events = _audit_events(session, AuditEventType.GRANT_REVOKED)

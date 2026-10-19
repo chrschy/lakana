@@ -15,9 +15,9 @@ class TableLocationState(enum.StrEnum):
 
     `CLAIMED`: a create has reserved the location and may be writing files into it; no table
     names it yet. `LIVE`: the table that names it is published. `DROPPED`: the table was dropped
-    and its files wait for `purge_after` (written by the drop, from #94 on). `ABANDONED`: the
-    create that claimed it never published; its files are removed by the sweep from
-    `purge_after` on.
+    and its files wait for `purge_after`; until then `undrop_table` can bring it back.
+    `ABANDONED`: the create that claimed it never published; its files are removed by the sweep
+    from `purge_after` on.
     """
 
     CLAIMED = "CLAIMED"
@@ -66,8 +66,17 @@ class TableLocation(Base):
         When the table was dropped.
     purge_after : datetime.datetime or None
         From when on the sweep removes the files of a purgeable location.
+    purge_started_at : datetime.datetime or None
+        When the sweep began deleting the files, set under the record's lock before the first
+        delete; a dropped table can no longer be restored from then on.
     revoked_policy_ids : list
-        The grants, row filters and column masks a drop revoked, for an undo; empty for now.
+        The grants, row filters and column masks the drop revoked, as ``{"kind", "id"}``
+        objects (`lakana_core.grants.revocation.RevokedPolicy`); an undrop restores exactly
+        these. Empty unless `DROPPED`.
+    dropped_table : dict or None
+        What an undrop needs to rebuild the dropped table: its row, its column descriptions
+        and its indexed columns, and its namespace path (`lakana_core.catalog.tombstones`).
+        `None` unless `DROPPED`.
     """
 
     __tablename__ = "table_locations"
@@ -85,4 +94,6 @@ class TableLocation(Base):
     claimed_at: Mapped[datetime] = mapped_column(UTCDateTime)
     dropped_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     purge_after: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    purge_started_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     revoked_policy_ids: Mapped[list] = mapped_column(JSON, default=list)
+    dropped_table: Mapped[dict | None] = mapped_column(JSON, nullable=True, default=None)
