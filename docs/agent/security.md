@@ -2197,7 +2197,16 @@ not checked; a file without field ids reads as NULL in every column. The check r
 request while its database session is open; releasing it before the reads is not done.
 
 **A submitted query holds no statement but a read, at any depth.** `check_blacklist` requires
-the statement as a whole to be an `exp.Query`, and `_reject_statements_inside` then walks the
+the statement as a whole to be one of `_TOP_LEVEL_READS`: an `exp.Query` (a `SELECT`, a
+`WITH ... SELECT`, a `FROM`-first query, a set operation) or a bare `exp.Values` list
+(`VALUES (1, 'a'), (2, 'b')`, which DuckDB runs as a read). Every other check walks the whole
+tree, so the rows of a `VALUES` list are checked as a `SELECT` list is, with the same messages:
+table functions, blacklisted functions (`read_csv`, `getvariable`, `query`, `current_query`),
+placeholders, statements inside and `WITH RECURSIVE`. sqlglot builds no scope for a top-level
+`exp.Values`, so `_parse_checked` makes it `SELECT * FROM (VALUES ...) AS __lakana_values`
+(its `ORDER BY`, `LIMIT` and `OFFSET` move to the `SELECT`) before the scope-based steps run:
+the ambiguity gate, `WITH` binding resolution and the rewrite's CTEs then see the subqueries in
+its rows. `_reject_statements_inside` then walks the
 whole tree: a node of a statement class (`exp.DML`, which covers `INSERT`, `UPDATE`, `DELETE`,
 `MERGE` and `COPY`, and `CREATE`, `DROP`, `ALTER`, `ATTACH`, `SET`, `PRAGMA`, `USE`, `INSTALL`,
 a transaction, `DESCRIBE`, `SHOW`, `SUMMARIZE`, `COMMENT` and any `exp.Command`) is refused,

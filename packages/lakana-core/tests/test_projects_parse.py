@@ -51,6 +51,13 @@ def test_star_projection_has_no_explicit_columns() -> None:
     assert parsed.columns is None
 
 
+def test_a_values_list_is_a_query_with_no_explicit_columns() -> None:
+    """A bare `VALUES` asset reads nothing; DuckDB names its columns, so none are listed."""
+    [parsed] = parse_assets([_asset("VALUES (1, 'a'), (2, 'b')")], defaults=AssetDefaults())
+    assert parsed.references == ()
+    assert parsed.columns is None
+
+
 def test_with_and_set_operations_are_single_queries() -> None:
     """`WITH … SELECT` and `UNION` are allowed; CTE names are not references."""
     sql = "WITH w AS (SELECT a FROM bronze.x) SELECT a FROM w UNION ALL SELECT a FROM bronze.y"

@@ -246,7 +246,7 @@ fall back to `exp.Command`, whose `.this` is the leading keyword. `LOAD`
 pulls in an extension the connection deliberately did not load, and `CREATE
 SECRET ... PROVIDER credential_chain` re-acquires the worker's own ambient
 cloud credentials that `lakana_worker.executor` just cleared. Naming them
-gives a precise error; the `exp.Query` requirement in `check_blacklist`
+gives a precise error; the `_TOP_LEVEL_READS` requirement in `check_blacklist`
 rejects them regardless.
 """
 
@@ -383,6 +383,35 @@ _WITH_ARG = "with_"
 Read rather than assumed: `sqlglot.expressions.Query.ctes` reads this exact
 key, so a rename in sqlglot breaks `ctes` too and this module's own tests
 fail loudly rather than silently dropping the caller's CTEs.
+"""
+
+_TOP_LEVEL_READS: tuple[type[exp.Expr], ...] = (exp.Query, exp.Values)
+"""What a submitted statement as a whole may be: a query, or a bare `VALUES` list.
+
+sqlglot parses a top-level `VALUES (1), (2)` to `exp.Values`, which is not an `exp.Query`;
+DuckDB runs it as an ordinary read. Every other check walks the whole tree, so a `VALUES`
+list gets each of them exactly as a `SELECT` list does.
+"""
+
+_VALUES_ALIAS = "__lakana_values"
+"""The alias a bare `VALUES` list takes when `_parse_checked` makes it a `SELECT` of it."""
+
+_ALIASED_VALUES_MESSAGE = (
+    "A VALUES list on its own takes no alias; to name its columns, write "
+    "SELECT * FROM (VALUES ...) AS t(a, b)."
+)
+"""Why a bare `VALUES` list with an alias is refused.
+
+sqlglot reads `VALUES (1) AS t(a)` as an aliased `exp.Values`; DuckDB refuses it with a parser
+error. Making it a `SELECT` of the list would quietly run text DuckDB itself rejects, so it is
+refused here with the spelling that works.
+"""
+
+_VALUES_MODIFIERS = ("order", "limit", "offset")
+"""The `exp.Values` arguments that apply to the whole result and move to the `SELECT` around it.
+
+Read from `sqlglot.expressions.Values.arg_types`: besides these it has only `expressions` (the
+rows) and `alias`. An `ORDER BY` left inside a derived table need not order the outer result.
 """
 
 
@@ -820,6 +849,59 @@ def unreadable_view_message(dotted: str) -> str:
     return f"View {dotted!r} could not be read. Ask its owner to recreate it."
 
 
+def _select_of_values(values: exp.Values) -> exp.Select:
+    """Make a bare `VALUES` list a `SELECT * FROM (VALUES ...) AS __lakana_values`.
+
+    sqlglot builds no scope for a top-level `exp.Values` (`build_scope` returns `None`), so
+    the scope-based steps here — the ambiguity gate, `WITH` binding resolution, the rewrite's
+    CTEs — would see nothing of the subqueries inside it. As a `SELECT` of a derived table it
+    is the shape all of them already handle, with the same result: DuckDB names the columns
+    of a derived `VALUES` `col0`, `col1`, ... as it does those of a bare one. sqlglot itself
+    renders a `VALUES` inside a set operation this way.
+
+    Parameters
+    ----------
+    values
+        The parsed top-level `VALUES` list, moved into the result (not copied).
+
+    Returns
+    -------
+    sqlglot.expressions.Select
+        The `SELECT` of it, carrying its `ORDER BY`, `LIMIT` and `OFFSET`.
+
+    Raises
+    ------
+    ValidationError
+        If the list carries an alias, which DuckDB refuses on a bare `VALUES`.
+    """
+    _reject_aliased_values(values)
+    select = exp.Select(expressions=[exp.Star()])
+    for key in _VALUES_MODIFIERS:
+        modifier = values.args.get(key)
+        if modifier is not None:
+            values.set(key, None)
+            select.set(key, modifier)
+    values.set("alias", exp.TableAlias(this=exp.to_identifier(_VALUES_ALIAS)))
+    return select.from_(values, copy=False)
+
+
+def _reject_aliased_values(values: exp.Values) -> None:
+    """Refuse a bare `VALUES` list that carries an alias.
+
+    Parameters
+    ----------
+    values
+        The parsed top-level `VALUES` list. Not modified.
+
+    Raises
+    ------
+    ValidationError
+        If it has an alias; see `_ALIASED_VALUES_MESSAGE`.
+    """
+    if values.args.get("alias") is not None:
+        raise ValidationError(_ALIASED_VALUES_MESSAGE)
+
+
 def _parse_checked(sql: str, dialect: str) -> exp.Expr:
     """Parse a query and refuse it unless its references resolve unambiguously.
 
@@ -833,7 +915,8 @@ def _parse_checked(sql: str, dialect: str) -> exp.Expr:
     Returns
     -------
     sqlglot.expressions.Expr
-        The parsed statement, safe to classify with `_cte_reference_ids`.
+        The parsed statement, safe to classify with `_cte_reference_ids`. A bare `VALUES`
+        list comes back as the `SELECT` of it that `_select_of_values` builds.
 
     Raises
     ------
@@ -843,7 +926,8 @@ def _parse_checked(sql: str, dialect: str) -> exp.Expr:
         `_reject_placeholders`. Or if it contains a `WITH RECURSIVE` clause, whose scope
         bindings `_cte_reference_ids` cannot classify soundly — see
         `_reject_recursive_ctes`. Or if it holds a statement that is not a read
-        anywhere, see `_reject_statements_inside`. `check_blacklist` already refuses these
+        anywhere, see `_reject_statements_inside`. Or if it is a bare `VALUES` list with an
+        alias, see `_reject_aliased_values`. `check_blacklist` already refuses these
         first in `lakana_worker.pipeline.run_one`, so this is defence in
         depth: the promise `extract_table_refs` makes its caller is that
         every name it leaves out is genuinely not a table, and it cannot
@@ -851,6 +935,8 @@ def _parse_checked(sql: str, dialect: str) -> exp.Expr:
         caller that skips the blacklist.
     """
     parsed = sqlglot.parse_one(sql, dialect=dialect)
+    if isinstance(parsed, exp.Values):
+        parsed = _select_of_values(parsed)
     _reject_placeholders(parsed)
     _reject_statements_inside(parsed, dialect)
     _reject_recursive_ctes(parsed)
@@ -1654,7 +1740,10 @@ def check_blacklist(sql: str, dialect: str = "duckdb") -> None:
 
     Two structural rules carry the weight here, together: a submitted query
     must parse to a single `exp.Query` (a `SELECT`, a `WITH ... SELECT`, a
-    `UNION`), and `_reject_statements_inside` then refuses a statement that is
+    DuckDB `FROM`-first query, a `UNION`) or to a bare `exp.Values` list
+    (`VALUES (1, 'a'), (2, 'b')`, which reads nothing; every check below walks
+    its rows as it walks a `SELECT` list — see `_TOP_LEVEL_READS`), and
+    `_reject_statements_inside` then refuses a statement that is
     not a read anywhere inside it. The first rejects the whole *class* of
     non-query statements at the top level in one check —
     `LOAD`, `CREATE SECRET`, `SET`, `PRAGMA`, `DESCRIBE`, `EXPLAIN`,
@@ -1698,7 +1787,8 @@ def check_blacklist(sql: str, dialect: str = "duckdb") -> None:
         `exp.Install` — rather than a generic command node, confirmed against
         the pinned `sqlglot` version, not assumed); if it is a `LOAD` or
         `CREATE SECRET` command; if it contains a query parameter or
-        placeholder; if the statement as a whole is not a query; if a statement that
+        placeholder; if the statement as a whole is neither a query nor a `VALUES`
+        list, or is a `VALUES` list with an alias; if a statement that
         is not a read sits anywhere inside it; or if it
         contains a `WITH RECURSIVE` clause.
     """
@@ -1722,10 +1812,12 @@ def check_blacklist(sql: str, dialect: str = "duckdb") -> None:
         if keyword in _BLACKLISTED_COMMANDS:
             raise ValidationError(f"{keyword.upper()} is not permitted in a submitted query.")
     _reject_placeholders(parsed)
-    if not isinstance(parsed, exp.Query):
+    if not isinstance(parsed, _TOP_LEVEL_READS):
         raise ValidationError(
             f"Only a single query may be submitted, not {parsed.key.upper()}; "
             "submit one SELECT statement."
         )
+    if isinstance(parsed, exp.Values):
+        _reject_aliased_values(parsed)
     _reject_statements_inside(parsed, dialect)
     _reject_recursive_ctes(parsed)

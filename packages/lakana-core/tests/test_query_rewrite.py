@@ -1199,6 +1199,11 @@ _STATEMENT_POSITIONS = [
         "SELECT * FROM bronze.x, LATERAL (WITH b AS ({s}) SELECT * FROM b) AS l",
         id="cte-in-lateral",
     ),
+    pytest.param("VALUES ((WITH b AS ({s}) SELECT count(*) FROM b))", id="cte-in-bare-values"),
+    pytest.param(
+        "VALUES (1), ((SELECT count(*) FROM (WITH b AS ({s}) SELECT * FROM b) AS q))",
+        id="cte-in-subquery-in-bare-values",
+    ),
 ]
 """Every place sqlglot's duckdb dialect parses a statement inside a query (verified 30.22)."""
 
@@ -1520,3 +1525,212 @@ def test_only_a_type_checked_mask_is_cast_to_the_columns_structured_type() -> No
         '0 AS "id", \'***\' AS "ssn"'
         in rewrite_query("SELECT * FROM gold.t", {"gold.t": legacy}).sql
     )
+
+
+_BARE_VALUES = [
+    pytest.param("VALUES (1)", id="one-row"),
+    pytest.param("VALUES (1, 'a'), (2, 'b')", id="two-rows"),
+    pytest.param("values (2), (1) order by 1 limit 1 offset 0", id="ordered-and-limited"),
+]
+"""Queries that are only a `VALUES` list."""
+
+
+@pytest.mark.parametrize("sql", _BARE_VALUES)
+def test_a_query_that_is_only_a_values_list_is_a_read(sql: str) -> None:
+    """A bare `VALUES` reads nothing and changes nothing, so the guard lets it through.
+
+    Parameters
+    ----------
+    sql
+        A bare `VALUES` list.
+    """
+    check_blacklist(sql)
+
+    assert extract_table_refs(sql) == []
+
+
+def test_the_rewrite_turns_a_bare_values_list_into_a_select_of_it() -> None:
+    """Every later step sees the `SELECT` it already handles; the order and limit stay outside."""
+    rewritten = rewrite_query("VALUES (2), (1) ORDER BY 1 LIMIT 1 OFFSET 0", {})
+
+    assert rewritten.sql == (
+        "SELECT * FROM (VALUES (2), (1)) AS __lakana_values ORDER BY 1 LIMIT 1 OFFSET 0"
+    )
+    assert rewritten.parameters == {}
+
+
+_IN_A_VALUES_LIST = [
+    pytest.param("(SELECT * FROM read_csv('x'))", id="file-reading-table-function"),
+    pytest.param("(SELECT * FROM table(mystery('x')))", id="unknown-table-function"),
+    pytest.param("(SELECT * FROM (SELECT 1 AS a) AS b, LATERAL iceberg_scan('x'))", id="lateral"),
+    pytest.param("read_csv('x')", id="file-reading-function"),
+    pytest.param("getvariable('v_0_files')", id="getvariable"),
+    pytest.param("main.getvariable('v_0_files')", id="qualified-getvariable"),
+    pytest.param("query('SELECT 1')", id="query"),
+    pytest.param("current_query()", id="current-query"),
+    pytest.param("json_execute_serialized_sql('x')", id="serialized-sql"),
+    pytest.param("?", id="placeholder"),
+    pytest.param("$name", id="named-placeholder"),
+    pytest.param(
+        "(WITH m AS (DELETE FROM bronze.t RETURNING *) SELECT count(*) FROM m)",
+        id="statement-in-a-cte",
+    ),
+    pytest.param("(WITH m AS (CHECKPOINT) SELECT 1)", id="cte-body-not-a-query"),
+    pytest.param(
+        "(WITH RECURSIVE r AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM r WHERE n < 3) "
+        "SELECT max(n) FROM r)",
+        id="recursive-cte",
+    ),
+]
+"""Expressions the guard refuses inside a `SELECT` list, each to be put in a bare `VALUES`."""
+
+
+def _refusal(sql: str) -> str:
+    """Say why `check_blacklist` refuses a query.
+
+    Parameters
+    ----------
+    sql
+        A query the guard must refuse.
+
+    Returns
+    -------
+    str
+        The refusal's message.
+    """
+    with pytest.raises(ValidationError) as caught:
+        check_blacklist(sql)
+    return str(caught.value)
+
+
+@pytest.mark.parametrize("expression", _IN_A_VALUES_LIST)
+def test_a_bare_values_list_is_refused_for_what_a_select_is_refused_for(expression: str) -> None:
+    """`VALUES` holds expressions; each is checked as it is in a `SELECT` list, message and all.
+
+    Parameters
+    ----------
+    expression
+        An expression the guard refuses in a `SELECT` list.
+    """
+    in_a_select = _refusal(f"SELECT {expression} AS a")
+
+    assert _refusal(f"VALUES ({expression})") == in_a_select
+    assert _refusal(f"VALUES (1), (2, {expression})") == in_a_select
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "?",
+        "(WITH m AS (DELETE FROM bronze.t RETURNING *) SELECT count(*) FROM m)",
+        "(WITH RECURSIVE r AS (SELECT 1 AS n UNION ALL SELECT n FROM r) SELECT max(n) FROM r)",
+    ],
+)
+def test_the_rewrite_refuses_a_bare_values_list_on_its_own(expression: str) -> None:
+    """Defence in depth: a caller that skipped `check_blacklist` is refused all the same.
+
+    Parameters
+    ----------
+    expression
+        An expression `rewrite_query` and `extract_table_refs` refuse themselves.
+    """
+    sql = f"VALUES ({expression})"
+    with pytest.raises(ValidationError):
+        extract_table_refs(sql)
+    with pytest.raises(ValidationError):
+        rewrite_query(sql, {})
+    with pytest.raises(ValidationError):
+        expand_views(sql, lambda _dotted: None)
+
+
+def test_a_table_read_inside_a_bare_values_list_is_authorized_and_rewritten() -> None:
+    """A subquery in `VALUES` reads a catalog table: it is listed and reads its granted files."""
+    sql = "VALUES ((SELECT count(*) FROM gold.sales), 1)"
+
+    assert extract_table_refs(sql) == ["gold.sales"]
+    rewritten = rewrite_query(sql, {"gold.sales": _parquet("a.parquet")})
+
+    assert "gold.sales" not in rewritten.sql
+    assert rewritten.sql.startswith(f"WITH {_cte_alias('gold.sales')} AS (SELECT * FROM ")
+    assert _READER_CALL.search(rewritten.sql)
+    assert rewritten.parameters == {"v_0_files": ["a.parquet"]}
+
+
+def test_a_column_mask_holds_for_a_read_inside_a_bare_values_list() -> None:
+    """The masked projection replaces the read wherever the read sits, a `VALUES` row included."""
+    source = TableSource(
+        urls=["a.parquet"],
+        file_format="parquet",
+        columns={"id": "BIGINT", "ssn": "VARCHAR"},
+        column_masks={"ssn": "NULL"},
+        row_filters=("id > 1",),
+    )
+
+    sql = rewrite_query(
+        "VALUES ((SELECT max(ssn) FROM gold.customers))", {"gold.customers": source}
+    ).sql
+
+    assert 'NULL AS "ssn"' in sql
+    assert "WHERE (id > 1)" in sql
+
+
+@pytest.mark.parametrize(
+    ("sql", "refs"),
+    [
+        ("VALUES ((WITH t AS (SELECT 1 AS a) SELECT a FROM t))", []),
+        ("VALUES ((WITH t AS (SELECT 1 AS a) SELECT a FROM bronze.t))", ["bronze.t"]),
+        ("VALUES ((SELECT a FROM bronze.x WHERE a IN (SELECT a FROM silver.y)))", None),
+    ],
+)
+def test_a_bare_values_list_resolves_its_references_as_a_select_does(
+    sql: str, refs: list[str] | None
+) -> None:
+    """A `WITH` name inside `VALUES` is a binding; a qualified name beside it is a real table.
+
+    Parameters
+    ----------
+    sql
+        A bare `VALUES` list reading through a subquery.
+    refs
+        The references expected, or `None` for the same as `SELECT * FROM (<sql>) AS v`.
+    """
+    expected = refs if refs is not None else extract_table_refs(f"SELECT * FROM ({sql}) AS v")
+
+    assert extract_table_refs(sql) == expected
+
+
+def test_an_ambiguous_reference_inside_a_bare_values_list_is_refused() -> None:
+    """The scope gate sees into `VALUES`: a name that means two things is refused, as in SELECT."""
+    inner = "(WITH t AS (SELECT 1 AS a) SELECT count(*) FROM bronze.t JOIN t ON true)"
+    with pytest.raises(ValidationError, match="cannot be resolved unambiguously"):
+        extract_table_refs(f"SELECT {inner} AS a")
+    with pytest.raises(ValidationError, match="cannot be resolved unambiguously"):
+        extract_table_refs(f"VALUES ({inner})")
+
+
+def test_a_view_stored_as_a_bare_values_list_expands() -> None:
+    """A view whose stored SQL is a `VALUES` list expands like any other view."""
+    views = {"gold.v": ViewDefinition(name="gold.v", sql="VALUES (1, 'a')")}
+
+    expanded = expand_views("SELECT * FROM gold.v", views.get)
+
+    assert expanded.views == ("gold.v",)
+    assert expanded.sql == "SELECT * FROM (SELECT * FROM (VALUES (1, 'a')) AS __lakana_values) AS v"
+
+
+@pytest.mark.parametrize("sql", ["VALUES (1) AS t", "VALUES (1, 2) AS t(a, b)", "VALUES (1) t"])
+def test_a_bare_values_list_with_an_alias_is_refused_as_duckdb_refuses_it(sql: str) -> None:
+    """An alias on a bare `VALUES` is read by sqlglot, rejected by DuckDB; the guard names the fix.
+
+    Parameters
+    ----------
+    sql
+        A bare `VALUES` list with an alias.
+    """
+    message = "A VALUES list on its own takes no alias"
+    with pytest.raises(ValidationError, match=message):
+        check_blacklist(sql)
+    with pytest.raises(ValidationError, match=message):
+        extract_table_refs(sql)
+    with pytest.raises(ValidationError, match=message):
+        rewrite_query(sql, {})

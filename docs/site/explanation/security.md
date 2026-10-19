@@ -65,6 +65,12 @@ what its author may read by **credential scoping**:
 - Limits on time, memory, rows and bytes stop a query that asks for too much
   ([Stop a query](../how-to/stop-a-query.md)).
 
+A query only reads. It is one `SELECT` (also with `WITH`, or a set operation such as `UNION`), or
+a `VALUES` list such as `VALUES (1, 'a'), (2, 'b')`, whose columns are named `col0`, `col1` and
+so on. A statement that changes data or the session is refused wherever it sits, also inside a CTE
+or a subquery, and so is a query that reads files directly instead of a table: register the data
+as a table and select from it.
+
 ## What this does not protect
 
 - **One instance is one trust domain for Python code.** A Python task runs as the worker's operating
