@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from fastapi.testclient import TestClient
@@ -21,7 +22,29 @@ _DEPLOYS = "/api/v1/environments/dev/deploys"
 _T0 = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
 
 
-def _make_runs(client: TestClient, specs: list[dict[str, object]]) -> list[str]:
+@dataclass(frozen=True)
+class _Spec:
+    """What a test run should look like.
+
+    Parameters
+    ----------
+    minutes
+        Minutes after `_T0` it was created.
+    status
+        Its status.
+    trigger
+        What started it.
+    job
+        The job it belongs to.
+    """
+
+    minutes: int = 0
+    status: RunStatus = RunStatus.SUCCEEDED
+    trigger: RunTrigger | None = None
+    job: str | None = None
+
+
+def _make_runs(client: TestClient, specs: list[_Spec]) -> list[str]:
     """Start one run per spec and give each its status, time, trigger and job.
 
     Parameters
@@ -29,7 +52,7 @@ def _make_runs(client: TestClient, specs: list[dict[str, object]]) -> list[str]:
     client
         The test client.
     specs
-        Per run: `minutes` after `_T0`, `status`, `trigger`, `job`.
+        One per run.
 
     Returns
     -------
@@ -44,10 +67,10 @@ def _make_runs(client: TestClient, specs: list[dict[str, object]]) -> list[str]:
         with Session(client.app.state.engine) as session:
             run = session.get(Run, uuid.UUID(run_id))
             assert run is not None
-            run.created_at = _T0 + timedelta(minutes=int(spec.get("minutes", 0)))
-            run.status = spec.get("status", RunStatus.SUCCEEDED)
-            run.trigger = spec.get("trigger")
-            run.job = spec.get("job")
+            run.created_at = _T0 + timedelta(minutes=spec.minutes)
+            run.status = spec.status
+            run.trigger = spec.trigger
+            run.job = spec.job
             session.commit()
         ids.append(run_id)
     return ids
@@ -58,9 +81,9 @@ def test_runs_filter_by_status_trigger_job_and_since(client: TestClient) -> None
     old, bad, gone = _make_runs(
         client,
         [
-            {"minutes": 1, "trigger": RunTrigger.SCHEDULE, "job": "nightly"},
-            {"minutes": 60, "status": RunStatus.FAILED, "trigger": RunTrigger.API, "job": "x"},
-            {"minutes": 120, "status": RunStatus.CANCELLED},
+            _Spec(minutes=1, trigger=RunTrigger.SCHEDULE, job="nightly"),
+            _Spec(minutes=60, status=RunStatus.FAILED, trigger=RunTrigger.API, job="x"),
+            _Spec(minutes=120, status=RunStatus.CANCELLED),
         ],
     )
 
@@ -82,7 +105,7 @@ def test_runs_filter_by_status_trigger_job_and_since(client: TestClient) -> None
 
 def test_runs_page_with_a_header_cursor(client: TestClient) -> None:
     _deploy(client)
-    made = _make_runs(client, [{"minutes": 5}] * 3 + [{"minutes": 1}, {"minutes": 9}])
+    made = _make_runs(client, [_Spec(minutes=5)] * 3 + [_Spec(minutes=1), _Spec(minutes=9)])
     seen: list[str] = []
     headers = []
     params: dict[str, object] = {"limit": 2}
@@ -104,7 +127,7 @@ def test_runs_page_with_a_header_cursor(client: TestClient) -> None:
 
 def test_the_last_page_and_an_unpaged_list_have_no_cursor_header(client: TestClient) -> None:
     _deploy(client)
-    _make_runs(client, [{"minutes": 1}])
+    _make_runs(client, [_Spec(minutes=1)])
     response = client.get(_RUNS, headers=AUTH_HEADER)
     assert NEXT_CURSOR_HEADER not in response.headers
 
@@ -133,7 +156,7 @@ def test_invalid_run_filters_are_422_and_name_the_parameter(client: TestClient) 
 
 def test_a_cursor_of_another_list_is_refused_on_every_list(client: TestClient) -> None:
     _deploy(client)
-    _make_runs(client, [{"minutes": 1}, {"minutes": 2}])
+    _make_runs(client, [_Spec(minutes=1), _Spec(minutes=2)])
     runs = client.get(_RUNS, headers=AUTH_HEADER, params={"limit": 1})
     cursor = runs.headers[NEXT_CURSOR_HEADER]
     for url in (_QUERIES, _DEPLOYS):

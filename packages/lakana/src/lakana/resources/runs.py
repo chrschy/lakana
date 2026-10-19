@@ -188,6 +188,9 @@ class Runs:
         )
         return run_from_json(response.json())
 
+    # `list`, `list_page` and `iter` take the same filters and each documents them: a public
+    # method states its own parameters.
+    # jscpd:ignore-start
     def list(
         self,
         environment: str,
@@ -361,6 +364,8 @@ class Runs:
             if page.next_cursor is None:
                 return
             cursor = page.next_cursor
+
+    # jscpd:ignore-end
 
     def get(self, environment: str, run_id: str) -> Run:
         """Show one run with its tasks.

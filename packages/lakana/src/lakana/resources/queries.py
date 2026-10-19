@@ -349,6 +349,9 @@ class Queries:
     def __init__(self, transport: HttpTransport) -> None:
         self._transport = transport
 
+    # `list` and `list_page` take the same filters and each documents them: a public method
+    # states its own parameters.
+    # jscpd:ignore-start
     def list(
         self,
         environment: str,
@@ -470,6 +473,8 @@ class Queries:
             items=[_entry_from_json(item) for item in response.json()],
             next_cursor=response.headers.get(NEXT_CURSOR_HEADER),
         )
+
+    # jscpd:ignore-end
 
     def submit(
         self,
