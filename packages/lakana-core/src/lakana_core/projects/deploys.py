@@ -8,6 +8,7 @@ observed, so the loser of a race gets `ConflictError` and nothing moves.
 
 from __future__ import annotations
 
+import dataclasses
 import re
 import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -69,6 +70,15 @@ from lakana_core.projects.manifest import (
 )
 from lakana_core.projects.parse import ParsedAsset
 from lakana_core.runs.kept import kept_tables
+from lakana_core.runs.pools import PIPELINE
+from lakana_core.runs.waiting import (
+    WaitReason,
+    ahead_kind,
+    alive_workers,
+    count_ahead,
+    query_wait_reason,
+    with_work,
+)
 from lakana_core.secrets.uses import SecretUse, bind_command, describe_use
 
 CONFLICT_MESSAGE = "Another deploy or rollback moved this environment's deployment first; retry."
@@ -254,6 +264,9 @@ class DeployRunView:
         Things the deploy leaves for its owner to act on, as sentences: today, a removed asset
         whose table is kept after a failed check, read at the time of the request; then the
         ones the deploy stored when it changed the job schedules.
+    waiting_for
+        Why a `QUEUED` run has not started (`DeployService.get` only; `None` for any other
+        status and in a listing).
     """
 
     id: uuid.UUID
@@ -274,6 +287,7 @@ class DeployRunView:
     hidden_adopted: int = 0
     checks: dict[str, list[dict[str, str]]] | None = None
     warnings: list[str] = field(default_factory=list)
+    waiting_for: WaitReason | None = None
 
 
 @dataclass(frozen=True)
@@ -387,11 +401,17 @@ class DeployService:
         Database session; mutating methods commit.
     authz
         Authorization service.
+    lease_seconds
+        The run lease (`LAKANA_RUN__LEASE_SECONDS`): a worker whose heartbeat is older does not
+        count as alive when a queued deploy says why it waits.
     """
 
-    def __init__(self, session: Session, authz: AuthorizationService) -> None:
+    def __init__(
+        self, session: Session, authz: AuthorizationService, lease_seconds: int = 60
+    ) -> None:
         self._session = session
         self._authz = authz
+        self._lease_seconds = lease_seconds
 
     # -- lookups ---------------------------------------------------------
 
@@ -1056,7 +1076,38 @@ class DeployService:
         ).scalar_one_or_none()
         if run is None:
             raise NotFoundError(f"No deploy {run_id} in {environment}.")
-        return self._view(run, p)
+        return dataclasses.replace(self._view(run, p), waiting_for=self.waiting_for(run))
+
+    def waiting_for(self, run: DeployRun) -> WaitReason | None:
+        """Say why a run has not started, when it is still `QUEUED`.
+
+        Computed when asked and never stored, by the same rules as a queued query
+        (`lakana_core.runs.waiting`). A deploy is pipeline work and is never capped. Grants
+        nothing and reads no other run's data, only counts: the workers and what they take and
+        carry, and the queued query and deploy runs ahead of `run` in every environment. For a
+        run in any other status it issues no statement.
+
+        Parameters
+        ----------
+        run
+            A deploy run the caller may see.
+
+        Returns
+        -------
+        WaitReason or None
+            The reason, or `None` when the run is not `QUEUED`.
+        """
+        if run.status != DeployStatus.QUEUED:
+            return None
+        now = db_now(self._session)
+        snapshot = alive_workers(self._session, now, self._lease_seconds)
+        counts = snapshot.for_query(PIPELINE)
+        if counts.alive == 0 or counts.taking == 0:
+            return query_wait_reason(counts, 0, kind=PIPELINE, thing="deploy")
+        snapshot = with_work(self._session, snapshot)
+        counts = snapshot.for_query(PIPELINE)
+        ahead = count_ahead(self._session, run.created_at, ahead_kind(snapshot, PIPELINE))
+        return query_wait_reason(counts, ahead, kind=PIPELINE, thing="deploy")
 
     def history(
         self, p: PrincipalRef, environment: str, *, limit: int = 100
