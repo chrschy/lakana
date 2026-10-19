@@ -125,6 +125,19 @@ Each cell is a summary. The page named in the last column has the detail. The ch
 
 ## Notes for the next release
 
+### Search across tables, columns, runs and people
+
+Migration `0039` adds the table `table_columns`, which search reads to find columns. It starts empty
+and is written from now on in the transaction of every schema change (a created table, a commit, an
+external table, a view). Tables that exist already get their columns from the worker's housekeeping
+sweep, 50 tables per pass and one pass every `LAKANA_RUN__SWEEP_INTERVAL` seconds (3,600 by
+default): 1,000 tables take about 20 hours, and a managed table's columns are read from its metadata
+file in object storage. Until a table is filled in, search finds it by its name and description but
+not by its columns. With `LAKANA_RUN__SWEEP_INTERVAL=0` the sweep never runs; a schema change fills
+in that table. New: `GET /api/v1/environments/{env}/search`, `lakana search` and `client.search`;
+nothing is removed. See [Search](../reference/search.md) and [Find a table](../how-to/find-a-table.md).
+Going back to the previous release drops the stored columns.
+
 ### Table health: the numbers of a table, and who reads it
 
 Migration `0038` adds the table `table_reads`. It starts empty: the worker counts the reads of the

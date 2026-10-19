@@ -609,6 +609,7 @@ def _run_main(
         mock.patch("lakana_worker.__main__.SchedulerLoop") as scheduler_mock,
         mock.patch("lakana_worker.__main__.sweep_artifacts") as sweep_mock,
         mock.patch("lakana_worker.__main__.sweep_code_archives"),
+        mock.patch("lakana_worker.__main__.backfill_table_columns"),
         mock.patch("lakana_worker.__main__.signal.signal"),
     ):
         scheduler_mock.return_value.start.return_value.is_alive.return_value = False
@@ -657,6 +658,7 @@ def _housekeeping(
     code: mock.MagicMock,
     fires: mock.MagicMock | None = None,
     reads: mock.MagicMock | None = None,
+    columns: mock.MagicMock | None = None,
 ) -> None:
     """Run `main`, then the housekeeping callable it gave the scheduler, once.
 
@@ -674,6 +676,8 @@ def _housekeeping(
         Stands in for `sweep_job_fires`; a mock that succeeds when `None`.
     reads
         Stands in for `sweep_table_reads`; a mock that succeeds when `None`.
+    columns
+        Stands in for `backfill_table_columns`; a mock that succeeds when `None`.
     """
     monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{tmp_path}/lakana.db")
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
@@ -684,6 +688,7 @@ def _housekeeping(
         mock.patch("lakana_worker.__main__.sweep_code_archives", code),
         mock.patch("lakana_worker.__main__.sweep_job_fires", fires or mock.MagicMock()),
         mock.patch("lakana_worker.__main__.sweep_table_reads", reads or mock.MagicMock()),
+        mock.patch("lakana_worker.__main__.backfill_table_columns", columns or mock.MagicMock()),
         mock.patch("lakana_worker.__main__.signal.signal"),
     ):
         scheduler_mock.return_value.start.return_value.is_alive.return_value = False
@@ -778,6 +783,31 @@ def test_a_failing_table_reads_sweep_is_logged_and_does_not_raise(
     with caplog.at_level(logging.WARNING):
         _housekeeping_with_table_reads(tmp_path, monkeypatch, mock.MagicMock(side_effect=OSError))
     assert "The table reads sweep failed (OSError)" in caplog.text
+
+
+def test_housekeeping_also_stores_the_columns_of_tables_that_have_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lakana_core.storage.resolver import StorageResolver
+
+    columns = mock.MagicMock()
+    _housekeeping(tmp_path, monkeypatch, mock.MagicMock(), mock.MagicMock(), columns=columns)
+    assert columns.call_count == 1
+    assert isinstance(columns.call_args.args[1], StorageResolver)
+
+
+def test_a_failing_column_backfill_is_logged_and_does_not_raise(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.WARNING):
+        _housekeeping(
+            tmp_path,
+            monkeypatch,
+            mock.MagicMock(),
+            mock.MagicMock(),
+            columns=mock.MagicMock(side_effect=OSError),
+        )
+    assert "The table column backfill failed (OSError)" in caplog.text
 
 
 def test_the_start_up_log_says_when_nothing_collects_leftovers(

@@ -1,0 +1,205 @@
+"""The search route: what it finds, in what order, and what a caller may not see."""
+
+from __future__ import annotations
+
+from fastapi.testclient import TestClient
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from lakana_core.models import Table
+from tests.conftest import AUTH_HEADER
+from tests.server_test_helpers import create_environment
+
+_SEARCH = "/api/v1/environments/dev/search"
+
+
+def _table(client: TestClient, namespace: str, name: str, *columns: str) -> None:
+    """Create a table whose columns are all strings but the first.
+
+    Parameters
+    ----------
+    client
+        The test client.
+    namespace
+        Its namespace.
+    name
+        Its name.
+    *columns
+        Its column names.
+    """
+    created = client.post(
+        f"/api/v1/environments/dev/namespaces/{namespace}/tables",
+        headers=AUTH_HEADER,
+        json={
+            "name": name,
+            "schema": [
+                {"name": c, "type": "long" if i == 0 else "string", "nullable": True}
+                for i, c in enumerate(columns)
+            ],
+        },
+    )
+    assert created.status_code == 201, created.text
+
+
+def _person(client: TestClient, name: str, *, table: str | None) -> dict[str, str]:
+    """Create a user who may read one table, or the whole environment, and return its headers.
+
+    Parameters
+    ----------
+    client
+        The test client.
+    name
+        The principal's name.
+    table
+        The table `silver.<table>` the user may read; the whole environment when `None`.
+
+    Returns
+    -------
+    dict
+        The `Authorization` header.
+    """
+    client.post("/api/v1/principals", headers=AUTH_HEADER, json={"name": name, "type": "USER"})
+    scope = (
+        {"kind": "ENVIRONMENT", "environment": "dev"}
+        if table is None
+        else {"kind": "TABLE", "environment": "dev", "namespace": "silver", "table": table}
+    )
+    granted = client.post(
+        "/api/v1/grants", headers=AUTH_HEADER, json={"principal": name, "role": "VIEWER", **scope}
+    )
+    assert granted.status_code < 300, granted.text
+    issued = client.post(
+        f"/api/v1/principals/{name}/tokens", headers=AUTH_HEADER, json={"name": name}
+    )
+    return {"Authorization": f"Bearer {issued.json()['token']}"}
+
+
+def _setup(client: TestClient) -> None:
+    """Create `dev` with `silver.orders` and `silver.payroll`, each with a description.
+
+    Parameters
+    ----------
+    client
+        The test client.
+    """
+    create_environment(client)
+    _table(client, "silver", "orders", "order_id", "status")
+    _table(client, "silver", "payroll", "employee", "salary")
+    with Session(client.app.state.engine) as session:
+        for row in session.scalars(select(Table)):
+            row.description_project = f"About {row.name}: salary and stuff"
+        session.commit()
+
+
+def test_a_search_returns_the_documented_shape_with_tables_before_columns(
+    client: TestClient,
+) -> None:
+    _setup(client)
+
+    response = client.get(_SEARCH, headers=AUTH_HEADER, params={"q": "order", "limit": 5})
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert (body["limit"], body["offset"], body["has_more"]) == (5, 0, False)
+    assert [(h["kind"], h["name"], h["matched"]) for h in body["results"]] == [
+        ("table", "silver.orders", "name"),
+        ("column", "silver.orders.order_id", "name"),
+    ]
+    table, column = body["results"]
+    assert (table["namespace"], table["table"], table["table_kind"]) == (
+        "silver",
+        "orders",
+        "TABLE",
+    )
+    assert (column["column"], column["column_type"], column["snippet"]) == (
+        "order_id",
+        "long",
+        None,
+    )
+
+
+def test_a_description_match_carries_a_snippet(client: TestClient) -> None:
+    _setup(client)
+
+    hits = client.get(_SEARCH, headers=AUTH_HEADER, params={"q": "stuff", "kind": "table"}).json()[
+        "results"
+    ]
+
+    assert [(h["name"], h["matched"], h["snippet"]) for h in hits] == [
+        ("silver.orders", "description", "About orders: salary and stuff"),
+        ("silver.payroll", "description", "About payroll: salary and stuff"),
+    ]
+
+
+def test_a_caller_sees_only_what_they_may_read_and_nothing_leaks_through_a_snippet(
+    client: TestClient,
+) -> None:
+    _setup(client)
+    alice = _person(client, "alice", table="orders")
+    bob = _person(client, "bob", table=None)
+
+    narrow = client.get(_SEARCH, headers=alice, params={"q": "salary"}).json()["results"]
+    wide = client.get(_SEARCH, headers=bob, params={"q": "salary"}).json()["results"]
+
+    assert [h["name"] for h in narrow] == ["silver.orders"]
+    assert narrow[0]["snippet"] == "About orders: salary and stuff"
+    assert [h["name"] for h in wide] == [
+        "silver.payroll.salary",
+        "silver.orders",
+        "silver.payroll",
+    ]
+    for query in ("payroll", "employee"):
+        assert client.get(_SEARCH, headers=alice, params={"q": query}).json()["results"] == []
+
+
+def test_paging_reports_has_more(client: TestClient) -> None:
+    _setup(client)
+
+    first = client.get(_SEARCH, headers=AUTH_HEADER, params={"q": "o", "limit": 2}).json()
+    rest = client.get(
+        _SEARCH, headers=AUTH_HEADER, params={"q": "o", "limit": 2, "offset": 2}
+    ).json()
+
+    assert first["has_more"] is True and len(first["results"]) == 2
+    assert rest["offset"] == 2 and len(rest["results"]) == 2
+    assert {h["name"] for h in first["results"]}.isdisjoint(h["name"] for h in rest["results"])
+
+
+def test_principals_appear_for_an_admin_and_not_for_a_viewer(client: TestClient) -> None:
+    _setup(client)
+    bob = _person(client, "bob", table=None)
+
+    admin = client.get(_SEARCH, headers=AUTH_HEADER, params={"q": "bob"}).json()["results"]
+    viewer = client.get(_SEARCH, headers=bob, params={"q": "bob"}).json()["results"]
+
+    assert [(h["kind"], h["principal"], h["principal_type"]) for h in admin] == [
+        ("principal", "bob", "USER")
+    ]
+    assert viewer == []
+
+
+def test_a_bad_query_page_or_kind_is_422_with_the_next_step(client: TestClient) -> None:
+    _setup(client)
+
+    for params, words in (
+        ({"q": "   "}, "between 1 and 200 characters"),
+        ({"q": "x" * 201}, "between 1 and 200 characters"),
+        ({"q": "o", "limit": 0}, "limit must be between 1 and 100"),
+        ({"q": "o", "limit": 101}, "limit must be between 1 and 100"),
+        ({"q": "o", "offset": -1}, "offset must be 0 or more"),
+        ({"q": "o", "kind": "nope"}, "table"),
+        ({}, "q"),
+    ):
+        response = client.get(_SEARCH, headers=AUTH_HEADER, params=params)
+        assert response.status_code == 422, (params, response.text)
+        assert words in response.text, (params, response.text)
+
+
+def test_an_unknown_environment_is_404_and_a_missing_token_is_401(client: TestClient) -> None:
+    _setup(client)
+
+    missing = client.get("/api/v1/environments/nope/search", headers=AUTH_HEADER, params={"q": "o"})
+
+    assert missing.status_code == 404, missing.text
+    assert "nope" in missing.text
+    assert client.get(_SEARCH, params={"q": "o"}).status_code == 401

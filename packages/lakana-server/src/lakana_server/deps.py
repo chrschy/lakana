@@ -15,6 +15,7 @@ from lakana_core.audit.service import AuditService
 from lakana_core.auth import AuthorizationService, PrincipalRef
 from lakana_core.catalog.lineage_graph import LineageService
 from lakana_core.catalog.query_service import QueryService
+from lakana_core.catalog.search import CatalogSearch
 from lakana_core.catalog.service import CatalogService
 from lakana_core.errors import AuthenticationError
 from lakana_core.grants.authorization import GrantAuthorization
@@ -385,6 +386,27 @@ def get_catalog(
         A catalog service using real authorization.
     """
     return CatalogService(session, StorageResolver(session, key_provider), authz)
+
+
+def get_catalog_search(
+    session: Session = Depends(get_session),
+    authz: AuthorizationService = Depends(get_grant_authorization),
+) -> CatalogSearch:
+    """Build a CatalogSearch for the current request.
+
+    Parameters
+    ----------
+    session
+        The current request's database session.
+    authz
+        The real, grant-backed authorization service.
+
+    Returns
+    -------
+    CatalogSearch
+        A search using real authorization.
+    """
+    return CatalogSearch(session, authz)
 
 
 def get_artifact_service(

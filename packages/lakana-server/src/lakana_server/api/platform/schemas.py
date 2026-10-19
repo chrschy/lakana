@@ -2770,3 +2770,84 @@ class ArtifactUploadPage(BaseModel):
 
     items: list[ArtifactUploadItemOut]
     next_cursor: str | None
+
+
+class SearchHitOut(BaseModel):
+    """One search hit.
+
+    Parameters
+    ----------
+    kind
+        What was found: ``table``, ``column``, ``run`` or ``principal``.
+    name
+        A display name: ``namespace.table``, ``namespace.table.column``, the run id or the
+        principal's name.
+    matched
+        The field that matched: ``name``, ``description``, ``id``, ``job`` or ``repository``.
+    snippet
+        For a description match, at most 160 characters of the description around the hit.
+    namespace
+        For a table or column, its namespace, dotted.
+    table
+        For a table or column, the table's name.
+    table_kind
+        For a table, ``TABLE``, ``EXTERNAL``, ``VIEW`` or ``ARTIFACT``.
+    column
+        For a column, its name.
+    column_type
+        For a column, its type.
+    run_id
+        For a run, its id.
+    job
+        For a run, its job, if it has one.
+    repository
+        For a run, its repository.
+    status
+        For a run, its status.
+    principal
+        For a principal, its name.
+    principal_type
+        For a principal, ``USER`` or ``SERVICE_ACCOUNT``.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    kind: Literal["table", "column", "run", "principal"]
+    name: str
+    matched: Literal["name", "description", "id", "job", "repository"]
+    snippet: str | None
+    namespace: str | None
+    table: str | None
+    table_kind: str | None
+    column: str | None
+    column_type: str | None
+    run_id: uuid.UUID | None
+    job: str | None
+    repository: str | None
+    status: str | None
+    principal: str | None
+    principal_type: str | None
+
+
+class SearchOut(BaseModel):
+    """One page of search hits.
+
+    Parameters
+    ----------
+    results
+        The hits, best first: exact matches, then prefix, then substring, then description
+        matches; within each, tables before columns before runs before principals.
+    limit
+        The page size asked for.
+    offset
+        How many hits were skipped.
+    has_more
+        Whether a hit follows this page.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    results: list[SearchHitOut]
+    limit: int
+    offset: int
+    has_more: bool

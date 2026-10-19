@@ -9,7 +9,14 @@ import pyarrow as pa
 
 from lakana._config import resolve_config
 from lakana._http import HttpTransport
-from lakana._models import InstanceInfo, QueryStatus, TaskTokenScope, Whoami
+from lakana._models import (
+    InstanceInfo,
+    QueryStatus,
+    SearchHit,
+    SearchPage,
+    TaskTokenScope,
+    Whoami,
+)
 from lakana._routes import ROUTES
 from lakana._tokens import mask_token
 from lakana.errors import InvalidResponse
@@ -224,6 +231,62 @@ class Client:
             task_token=None
             if scope is None
             else TaskTokenScope(environment=scope["environment"], asset_scope=scope["asset_scope"]),
+        )
+
+    def search(
+        self,
+        environment: str,
+        q: str,
+        *,
+        kind: Literal["table", "column", "run", "principal"] | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> SearchPage:
+        """Find tables, columns, descriptions, runs and principals by a text.
+
+        Matching ignores case and finds the text anywhere in a name or description. Exact matches
+        come first, then names that start with the text, then names that contain it, then
+        descriptions; within each, tables come before columns, runs and principals. You see only
+        what you may read: tables and columns with ``READ_TABLE`` on the table, runs with
+        ``READ_ENVIRONMENT`` (found by the first four or more characters of the id, the job or the
+        repository), principals if you may list them.
+
+        Parameters
+        ----------
+        environment
+            The environment name.
+        q
+            The text, 1 to 200 characters after trimming.
+        kind
+            Only this kind of hit: ``table``, ``column``, ``run`` or ``principal``.
+        limit
+            Hits per page, 1 to 100.
+        offset
+            Hits to skip, for the next page.
+
+        Returns
+        -------
+        SearchPage
+            The page; ``has_more`` says whether to ask again with a larger ``offset``.
+
+        Raises
+        ------
+        lakana.errors.NotFound
+            If the environment does not exist.
+        lakana.errors.ValidationError
+            If the text, ``limit`` or ``offset`` is out of range; the message names the range.
+        """
+        params: dict[str, str | int] = {"q": q, "limit": limit, "offset": offset}
+        if kind is not None:
+            params["kind"] = kind
+        body = self._transport.request(
+            ROUTES["search"], path_params={"env": environment}, params=params
+        ).json()
+        return SearchPage(
+            results=[SearchHit(**hit) for hit in body["results"]],
+            limit=body["limit"],
+            offset=body["offset"],
+            has_more=body["has_more"],
         )
 
     def info(self) -> InstanceInfo:

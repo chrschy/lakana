@@ -3321,3 +3321,52 @@ def test_0038_adds_the_table_reads_table(tmp_path: Path, monkeypatch: pytest.Mon
         assert "table_reads" not in inspect(engine).get_table_names()
     finally:
         engine.dispose()
+
+
+_REVISION_0039 = "e8b5c1f4d0a6"
+
+
+def test_0039_adds_the_table_columns_table(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Revision `0039`: `table_columns` with its keys and its name index, undone on downgrade.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    """
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, _REVISION_0038)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        assert "table_columns" not in inspect(engine).get_table_names()
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, _REVISION_0039)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        inspector = inspect(engine)
+        columns = {c["name"]: c for c in inspector.get_columns("table_columns")}
+        assert set(columns) == {"id", "table_id", "name", "type", "position"}
+        assert not any(c["nullable"] for c in columns.values())
+        assert [
+            (fk["referred_table"], fk["options"].get("ondelete"))
+            for fk in inspector.get_foreign_keys("table_columns")
+        ] == [("tables", "CASCADE")]
+        assert [u["column_names"] for u in inspector.get_unique_constraints("table_columns")] == [
+            ["table_id", "name"]
+        ]
+        assert [i["column_names"] for i in inspector.get_indexes("table_columns")] == [["name"]]
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, _REVISION_0038)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        assert "table_columns" not in inspect(engine).get_table_names()
+    finally:
+        engine.dispose()

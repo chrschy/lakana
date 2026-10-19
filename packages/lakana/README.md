@@ -259,6 +259,7 @@ lakana query list --env dev [--all] [--limit N]     # queued and running; --all 
 lakana table replace gold.predictions predictions.parquet --source gold.features
 lakana table lineage gold.daily --depth 5          # --downstream for what it feeds; --output json
 lakana table maintain gold.daily --dry-run          # --keep-days 7 --keep-last 5 --older-than-hours 72
+lakana search orders --kind column --limit 10 [--offset N]  # tables, columns, descriptions, runs, people you may see; SDK: client.search(env, q)
 ```
 
 - Ctrl-C in `lakana sql` and `lakana query wait` cancels the query they wait for, says what
