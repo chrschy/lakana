@@ -74,6 +74,7 @@ from lakana_core.catalog.service import (
 from lakana_core.errors import (
     AlreadyExistsError,
     ConflictError,
+    NotFoundError,
     PermissionDenied,
     ValidationError,
 )
@@ -101,6 +102,7 @@ from lakana_core.models import (
 )
 from lakana_core.projects.manifest import MANIFEST_VERSION
 from lakana_core.runs.checks import RUN_CANCELLED_MESSAGE, RUN_STOPPED_MESSAGE
+from lakana_core.runs.failures import FailureCode
 from lakana_core.runs.selection import Selection
 from lakana_core.runs.service import RunService, task_log_path
 from lakana_core.runs.store import scheduler_tick
@@ -113,9 +115,11 @@ from lakana_core.runs.tasks import (
 from lakana_core.storage.fsspec_storage import FsspecStorage
 from lakana_core.storage.resolver import StorageResolver
 from lakana_worker.executor import (
+    OutOfMemoryQuery,
     QueryCancelled,
     QueryTimeout,
     TransientQueryError,
+    WorkerStaleQuery,
 )
 from lakana_worker.task_integrity import verify_code
 from lakana_worker.task_lease import LeaseKeeper, cancel_kind
@@ -124,6 +128,8 @@ from lakana_worker.task_outcome import (
     INTERNAL_ERROR_MESSAGE,
     RUN_ERROR_MESSAGE,
     TaskOutcome,
+    failure_code_of,
+    stop_code,
 )
 from lakana_worker.tasks import run_claimed
 
@@ -166,6 +172,8 @@ def test_a_sql_error_fails_permanently_on_the_first_attempt(world: World) -> Non
     assert (task.status, task.attempt) == (TaskStatus.FAILED, 1)
     assert "boom" in (task.error_message or "")
     assert "boom" in _log(world, run_id, "silver.clean")
+    assert task.failure_code == "query_invalid"
+    assert _attempts(world, task.id)[0].failure_code == "query_invalid"
 
 
 def test_a_task_that_reads_a_table_that_is_not_published_fails_at_once(world: World) -> None:
@@ -186,6 +194,7 @@ def test_a_task_that_reads_a_table_that_is_not_published_fails_at_once(world: Wo
 
     task = _task(world, "gold.daily")
     assert (task.status, task.attempt, task.max_attempts) == (TaskStatus.FAILED, 1, 3)
+    assert task.failure_code == "not_found"
     assert task.error_message == (
         "`silver.clean` has not been published: its first build did not finish, "
         f"or failed a check (run {marker}). It is published by the next run that builds it "
@@ -194,18 +203,59 @@ def test_a_task_that_reads_a_table_that_is_not_published_fails_at_once(world: Wo
 
 
 @pytest.mark.parametrize(
-    ("failure", "status", "attempt", "outcome"),
+    ("failure", "status", "attempt", "outcome", "code"),
     [
-        (ConnectionError("network down"), TaskStatus.PENDING, 1, AttemptOutcome.FAILED),
-        (TransientQueryError("Query failed: IO"), TaskStatus.PENDING, 1, AttemptOutcome.FAILED),
+        (
+            ConnectionError("network down"),
+            TaskStatus.PENDING,
+            1,
+            AttemptOutcome.FAILED,
+            "internal",
+        ),
+        (
+            TransientQueryError("Query failed: IO"),
+            TaskStatus.PENDING,
+            1,
+            AttemptOutcome.FAILED,
+            "internal",
+        ),
         (
             QueryTimeout("Query exceeded the time limit"),
             TaskStatus.PENDING,
             1,
             AttemptOutcome.TIMED_OUT,
+            "timeout",
         ),
-        (ConflictError("changed; retry"), TaskStatus.PENDING, 0, AttemptOutcome.FAILED),
-        (ValidationError("bad"), TaskStatus.FAILED, 1, AttemptOutcome.FAILED),
+        (
+            ConflictError("changed; retry"),
+            TaskStatus.PENDING,
+            0,
+            AttemptOutcome.FAILED,
+            "conflict",
+        ),
+        (ValidationError("bad"), TaskStatus.FAILED, 1, AttemptOutcome.FAILED, "query_invalid"),
+        (
+            PermissionDenied("not allowed"),
+            TaskStatus.FAILED,
+            1,
+            AttemptOutcome.FAILED,
+            "permission_denied",
+        ),
+        (NotFoundError("no such table"), TaskStatus.FAILED, 1, AttemptOutcome.FAILED, "not_found"),
+        (
+            OutOfMemoryQuery("out of memory"),
+            TaskStatus.FAILED,
+            1,
+            AttemptOutcome.FAILED,
+            "memory",
+        ),
+        (
+            WorkerStaleQuery("no heartbeat"),
+            TaskStatus.PENDING,
+            1,
+            AttemptOutcome.FAILED,
+            "worker_lost",
+        ),
     ],
 )
 def test_failures_are_classified(
@@ -215,8 +265,12 @@ def test_failures_are_classified(
     status: TaskStatus,
     attempt: int,
     outcome: AttemptOutcome,
+    code: str,
 ) -> None:
-    """Transient and timeout retry (counted), a conflict retries uncounted, validation fails."""
+    """Transient and timeout retry (counted), a conflict retries uncounted, validation fails.
+
+    Each failure is recorded with the code of its cause, on the task and on the attempt.
+    """
     _start(world)
     monkeypatch.setattr(tasks_module, "run_one", _fake_run_one(failure))
     claimed = _claim(world)
@@ -224,6 +278,8 @@ def test_failures_are_classified(
     task = _task(world, "silver.clean")
     assert (task.status, task.attempt) == (status, attempt)
     assert _attempts(world, claimed.task_run_id)[0].outcome is outcome
+    assert task.failure_code == code
+    assert _attempts(world, claimed.task_run_id)[0].failure_code == code
 
 
 def test_a_real_timeout_is_retried(world: World) -> None:
@@ -235,6 +291,10 @@ def test_a_real_timeout_is_retried(world: World) -> None:
     task = _task(world, "silver.slow")
     assert (task.status, task.attempt) == (TaskStatus.PENDING, 1)
     assert _attempts(world, claimed.task_run_id)[0].outcome is AttemptOutcome.TIMED_OUT
+    assert (task.failure_code, _attempts(world, claimed.task_run_id)[0].failure_code) == (
+        "timeout",
+        "timeout",
+    )
     assert not _exists(world, "silver.slow")
 
 
@@ -260,6 +320,7 @@ def test_a_cancel_request_interrupts_the_running_task(
     run_claimed(_engine(world), _claim(world))
     task = _task(world, "silver.clean")
     assert task.status is TaskStatus.CANCELLED
+    assert task.failure_code == "cancelled"
 
 
 def test_an_in_flight_permission_denial_under_cancel_is_cancelled(
@@ -373,6 +434,7 @@ def test_run_one_raising_is_a_generic_transient_failure(
     run_claimed(_engine(world), claimed)
     task = _task(world, "silver.clean")
     assert (task.status, task.error_message) == (TaskStatus.PENDING, INTERNAL_ERROR_MESSAGE)
+    assert task.failure_code == "internal"
     with world.session() as session:
         write = session.get(QueryRun, task.query_run_id)
         assert write is not None
@@ -397,6 +459,7 @@ def test_the_keeper_is_stopped_before_the_outcome_is_recorded(
         kind: FailureKind | None,
         rand: Callable[[], float],
         error_message: str | None = None,
+        failure_code: FailureCode | None = None,
         rows_written: int | None = None,
         on_committed: str | None = None,
         in_transaction: Callable[[Session], None] | None = None,
@@ -410,6 +473,7 @@ def test_the_keeper_is_stopped_before_the_outcome_is_recorded(
             kind=kind,
             rand=rand,
             error_message=error_message,
+            failure_code=failure_code,
             rows_written=rows_written,
             on_committed=on_committed,
             in_transaction=in_transaction,
@@ -524,6 +588,7 @@ def test_an_unbuilt_upstream_outside_the_selection_fails_the_task(world: World) 
         TaskStatus.FAILED,
         "upstream table 'silver.clean' has not been built",
     )
+    assert task.failure_code == "upstream_missing"
 
 
 class _HideClean(AllowAllAuthorization):
@@ -744,6 +809,7 @@ def test_a_tampered_tarball_fails_the_run_and_is_audited(world: World) -> None:
     run_claimed(_engine(world), _claim(world))
     task = _task(world, "silver.clean")
     assert task.status is TaskStatus.FAILED
+    assert task.failure_code == "code_changed"
     assert "does not match its recorded code_sha256" in (task.error_message or "")
     with world.session() as session:
         run = session.get(Run, run_id)
@@ -827,6 +893,7 @@ def test_a_storage_error_while_verifying_is_retried(
     task = _task(world, "silver.clean")
     assert (task.status, task.attempt) == (TaskStatus.PENDING, 1)
     assert "could not be read" in (task.error_message or "")
+    assert task.failure_code == "internal"
 
 
 def test_integrity_is_checked_once_per_run(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -865,6 +932,7 @@ def test_an_inactive_run_principal_fails_permanently(world: World) -> None:
         TaskStatus.FAILED,
         "the run principal is deactivated or deleted",
     )
+    assert task.failure_code == "permission_denied"
 
 
 @pytest.mark.parametrize(
@@ -884,6 +952,7 @@ def test_a_malformed_manifest_entry_fails_permanently(
     task = _task(world, "silver.clean")
     assert task.status is TaskStatus.FAILED
     assert message in (task.error_message or "")
+    assert task.failure_code == "code_changed"
 
 
 def test_an_unexpected_preparation_error_is_transient_and_generic(
@@ -899,6 +968,7 @@ def test_an_unexpected_preparation_error_is_transient_and_generic(
     run_claimed(_engine(world), _claim(world))
     task = _task(world, "silver.clean")
     assert (task.status, task.error_message) == (TaskStatus.PENDING, INTERNAL_ERROR_MESSAGE)
+    assert task.failure_code == "internal"
 
 
 def test_an_unexpected_error_while_running_an_sql_attempt_is_a_recorded_transient_failure(
@@ -920,6 +990,7 @@ def test_an_unexpected_error_while_running_an_sql_attempt_is_a_recorded_transien
     )
     assert "failed unexpectedly" in caplog.text
     assert "secret internals" not in (task.error_message or "")
+    assert task.failure_code == "internal"
 
 
 def test_a_vanished_run_is_ignored(world: World) -> None:
@@ -1133,6 +1204,7 @@ def test_an_asset_missing_from_the_manifest_fails_permanently(
         TaskStatus.FAILED,
         "the project version has no SQL for silver.clean",
     )
+    assert task.failure_code == "code_changed"
 
 
 def test_a_built_upstream_outside_the_selection_lets_the_task_run(world: World) -> None:
@@ -1348,6 +1420,7 @@ def test_an_integrity_error_for_a_missing_namespace_is_transient(
     run_claimed(_engine(world), _claim(world))
     task = _task(world, "silver.clean")
     assert (task.status, task.error_message) == (TaskStatus.PENDING, INTERNAL_ERROR_MESSAGE)
+    assert task.failure_code == "internal"
 
 
 def test_the_lease_is_renewed_while_the_tarball_is_verified(
@@ -1488,6 +1561,7 @@ def test_a_sql_task_of_a_manifest_this_worker_cannot_read_fails_permanently(
     assert _task(world, "silver.clean").status is TaskStatus.FAILED
     message = _attempts(world, claimed.task_run_id)[0].error_message
     assert message is not None and message.startswith("the project version's manifest has version ")
+    assert _attempts(world, claimed.task_run_id)[0].failure_code == "no_runtime"
 
 
 def _checks_for(declared: int) -> dict[str, object]:
@@ -1904,6 +1978,7 @@ def test_a_run_an_older_server_started_for_a_table_with_checks_is_not_built(
     task = _task(world, "silver.orders")
     assert (task.status, task.attempt) == (TaskStatus.FAILED, 1)
     assert task.error_message == _refused("`silver.orders`")
+    assert task.failure_code == "no_runtime"
     assert _writes(world, task.id) == []
     assert _results(world, task.id) == []
     assert not _exists(world, "silver.orders")
@@ -2017,3 +2092,37 @@ def test_a_run_an_older_server_started_builds_a_table_without_checks_as_before(
     assert _task(world, "silver.orders").status is TaskStatus.SUCCEEDED
     assert _exists(world, "silver.orders")
     assert _task(world, "gold.report").status is TaskStatus.FAILED
+
+
+@pytest.mark.parametrize(
+    ("cause", "expected"),
+    [
+        ("not_found", "not_found"),
+        ("permission_denied", "permission_denied"),
+        ("result_too_large", "query_invalid"),
+        ("out_of_memory", "memory"),
+        ("invalid_query", "query_invalid"),
+        ("timeout", "timeout"),
+        ("cancelled", "cancelled"),
+        ("internal", "internal"),
+        ("worker_lost", "worker_lost"),
+        (None, "internal"),
+        ("a_cause_from_a_newer_release", "internal"),
+    ],
+)
+def test_a_failed_write_run_without_an_exception_gets_the_code_of_its_stored_cause(
+    cause: str | None, expected: str
+) -> None:
+    """When `run_one` returned no exception, the cause stored on the query run decides."""
+    assert failure_code_of(None, cause).value == expected
+
+
+def test_a_conflict_is_a_conflict_whatever_the_stored_cause() -> None:
+    """A query has no code for it; a task has."""
+    assert failure_code_of(ConflictError("changed"), "internal").value == "conflict"
+
+
+def test_only_a_cancel_has_a_code_among_the_stops() -> None:
+    """A release is no failure."""
+    assert stop_code(FailureKind.CANCELLED) is not None
+    assert stop_code(FailureKind.RELEASED) is None

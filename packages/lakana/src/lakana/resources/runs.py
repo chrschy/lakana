@@ -9,6 +9,7 @@ from typing import Any
 
 from lakana._http import NEXT_CURSOR_HEADER, HttpTransport, csv_param, query_params
 from lakana._models import (
+    Failure,
     Notification,
     Run,
     RunPage,
@@ -68,6 +69,32 @@ def notification_from_json(data: dict[str, Any]) -> Notification:
     )
 
 
+def failure_from_json(data: object) -> Failure | None:
+    """Build a `Failure` from the `failure` value of a task or an attempt.
+
+    A failure is only a help for the reader, so a value that cannot be read never fails a
+    command: anything but an object with a string `code`, `cause` and `next_step` is `None`.
+
+    Parameters
+    ----------
+    data
+        The decoded value, normally an object, or `None` (a task with no error, or a server that
+        predates the field). Fields this SDK does not know are ignored; an unknown code is kept
+        as is.
+
+    Returns
+    -------
+    Failure or None
+        The failure, or `None`.
+    """
+    if not isinstance(data, dict):
+        return None
+    code, cause, next_step = data.get("code"), data.get("cause"), data.get("next_step")
+    if not (isinstance(code, str) and isinstance(cause, str) and isinstance(next_step, str)):
+        return None
+    return Failure(code, cause, next_step)
+
+
 def run_from_json(data: dict[str, Any]) -> Run:
     """Build a `Run` from a `RunOut` body.
 
@@ -116,6 +143,7 @@ def run_from_json(data: dict[str, Any]) -> Run:
                 checks=tuple(check_result_from_json(c) for c in t.get("checks", ())),
                 kept_check=t.get("kept_check", False),
                 setting_back=t.get("setting_back", False),
+                failure=failure_from_json(t.get("failure")),
             )
             for t in data["tasks"]
         ],
@@ -124,6 +152,7 @@ def run_from_json(data: dict[str, Any]) -> Run:
         scheduled_for=_when(data.get("scheduled_for")),
         missed=data.get("missed", 0),
         notifications=[notification_from_json(n) for n in data.get("notifications", ())],
+        failed_tasks=data.get("failed_tasks", 0),
     )
 
 
@@ -473,6 +502,7 @@ class Runs:
                     outcome=a["outcome"],
                     rows_written=a["rows_written"],
                     error_message=a["error_message"],
+                    failure=failure_from_json(a.get("failure")),
                 )
                 for a in data["attempts"]
             ],

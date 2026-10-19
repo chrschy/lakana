@@ -1979,6 +1979,28 @@ class CheckResultPage(BaseModel):
     next_cursor: str | None
 
 
+class FailureOut(BaseModel):
+    """Why a task or an attempt failed.
+
+    Parameters
+    ----------
+    code
+        A stable code: `build_failed`, `code_changed`, `secret_refused`, `no_runtime`,
+        `upstream_failed`, `upstream_missing`, `check_blocked`, `check_error`, `query_invalid`,
+        `permission_denied`, `not_found`, `memory`, `timeout`, `cancelled`, `worker_lost`,
+        `conflict` or `internal`; `unknown` for a failure recorded before the codes existed
+        (never stored). A client treats a code it does not know like `internal`.
+    cause
+        One sentence: what happened. The sentences may be reworded; the codes do not change.
+    next_step
+        One sentence: what to do about it.
+    """
+
+    code: str
+    cause: str
+    next_step: str
+
+
 class TaskRunOut(BaseModel):
     """One task run.
 
@@ -2001,11 +2023,15 @@ class TaskRunOut(BaseModel):
     finished_at
         Final state.
     error_message
-        Last failure.
+        Last failure, as free text: the detail of `failure`.
     query_run_id
         The write that executed the last attempt.
     rows_written
         Rows it wrote.
+    failure
+        Why the task failed, was cancelled or never ran, with its stable code, the cause and the
+        next step (`FailureOut`); `null` for a task with no error. A task that failed before the
+        codes existed has the code `unknown`.
     waiting_for
         Why a `pending` or `ready` task of a running run has not started, or `null`: a stable
         `code` (`upstream`, `retry`, `setting_back`, `no_worker`, `no_worker_of_kind`,
@@ -2053,6 +2079,7 @@ class TaskRunOut(BaseModel):
     checks: list[CheckResultOut] = Field(default_factory=list)
     kept_check: bool | None = False
     setting_back: bool = False
+    failure: FailureOut | None = None
 
 
 class NotificationOut(BaseModel):
@@ -2166,6 +2193,9 @@ class RunOut(BaseModel):
         How many earlier scheduled times this run stands in for.
     notifications
         The notifications the run queued, oldest first (empty in listings).
+    failed_tasks
+        How many tasks ended ``failed`` (not ``upstream_failed`` or ``cancelled``); also in
+        listings.
     """
 
     id: uuid.UUID
@@ -2190,6 +2220,7 @@ class RunOut(BaseModel):
     scheduled_for: datetime | None = None
     missed: int = 0
     notifications: list[NotificationOut] = Field(default_factory=list)
+    failed_tasks: int = 0
 
 
 class JobRunRequest(BaseModel):
@@ -2342,7 +2373,10 @@ class TaskAttemptOut(BaseModel):
     rows_written
         Rows written.
     error_message
-        Why it failed.
+        Why it failed, as free text.
+    failure
+        The code, cause and next step of an attempt that did not succeed (`FailureOut`);
+        `null` for an attempt that succeeded or is running.
     """
 
     attempt: int
@@ -2352,6 +2386,7 @@ class TaskAttemptOut(BaseModel):
     outcome: str | None
     rows_written: int | None
     error_message: str | None
+    failure: FailureOut | None = None
 
 
 class TaskLogOut(BaseModel):

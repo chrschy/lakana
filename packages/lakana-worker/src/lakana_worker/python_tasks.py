@@ -89,6 +89,7 @@ from lakana_core.projects.manifest import (
 from lakana_core.projects.package_indexes import registered_indexes
 from lakana_core.projects.package_sources import KnownSources, RegisteredIndex
 from lakana_core.runs.checks import RUN_CANCELLED_MESSAGE
+from lakana_core.runs.failures import FailureCode
 from lakana_core.runs.tasks import (
     Baseline,
     ClaimedTask,
@@ -133,7 +134,9 @@ from lakana_worker.task_outcome import (
     TaskFailure,
     TaskOutcome,
     classify,
+    failure_code_of,
     failure_message,
+    stop_code,
 )
 from lakana_worker.tasks import (
     RunEngine,
@@ -598,7 +601,7 @@ def _refuse_if_stopped(session: Session, keeper: LeaseKeeper, run_id: uuid.UUID)
         raise LeaseLost
     stop = cancel_kind(session, keeper, run_id)
     if stop is not None:
-        raise TaskFailure(stop[0], _stop_text(stop))
+        raise TaskFailure(stop[0], _stop_text(stop), stop_code(stop[0]))
 
 
 @dataclass
@@ -692,7 +695,14 @@ class PythonRuntime:
         TaskOutcome or None
             What to record, or `None` when the attempt is no longer ours.
         """
-        result = _Result(TaskOutcome(FailureKind.TRANSIENT, RUN_ERROR_MESSAGE, environment))
+        result = _Result(
+            TaskOutcome(
+                FailureKind.TRANSIENT,
+                RUN_ERROR_MESSAGE,
+                environment,
+                failure_code=FailureCode.INTERNAL,
+            )
+        )
 
         def body() -> None:
             """Run the attempt and hand its outcome to the main thread."""
@@ -768,6 +778,7 @@ class PythonRuntime:
             written: Written | None = None,
             kept_table: KeptTable | None = None,
             in_transaction: Callable[[Session], None] | None = None,
+            failure_code: FailureCode | None = None,
         ) -> TaskOutcome:
             """Build the outcome, with the output captured so far.
 
@@ -791,6 +802,8 @@ class PythonRuntime:
                 is cleared.
             in_transaction
                 Work to land with the attempt's record (a failed integrity check's run failure).
+            failure_code
+                Why the attempt failed; `None` for a success and a release.
 
             Returns
             -------
@@ -809,6 +822,7 @@ class PythonRuntime:
                 written=written,
                 kept_table=kept_table,
                 in_transaction=in_transaction,
+                failure_code=failure_code,
             )
 
         try:
@@ -819,16 +833,25 @@ class PythonRuntime:
                     return None
                 except TaskFailure as failure:
                     return ended(
-                        failure.kind, failure.message, in_transaction=failure.in_transaction
+                        failure.kind,
+                        failure.message,
+                        in_transaction=failure.in_transaction,
+                        failure_code=failure.code,
                     )
                 except LakanaError as exc:
                     stop = cancel_kind(session, keeper, claimed.run_id)
                     if stop is not None:
-                        return ended(stop[0], _stop_text(stop))
-                    return ended(classify(exc), failure_message(exc, str(exc)))
+                        return ended(stop[0], _stop_text(stop), failure_code=stop_code(stop[0]))
+                    return ended(
+                        classify(exc),
+                        failure_message(exc, str(exc)),
+                        failure_code=failure_code_of(exc),
+                    )
         except Exception:
             logger.exception("Python task run %s failed unexpectedly.", claimed.task_run_id)
-            return ended(FailureKind.TRANSIENT, RUN_ERROR_MESSAGE)
+            return ended(
+                FailureKind.TRANSIENT, RUN_ERROR_MESSAGE, failure_code=FailureCode.INTERNAL
+            )
 
     def _supervise(
         self,
@@ -928,6 +951,7 @@ class PythonRuntime:
                     "exist yet, so its first run can never succeed. Create the table once: "
                     "deploy a version of the asset that does not read itself, run it, then "
                     "deploy the self-reading version",
+                    FailureCode.BUILD_FAILED,
                 )
             _refuse_if_stopped(session, keeper, claimed.run_id)
             token, key_id = self._mint(session, tokens, keeper, claimed, prepared)
@@ -1076,10 +1100,12 @@ class PythonRuntime:
                 )
         stop = cancel_kind(session, keeper, claimed.run_id)
         if stop is not None:
-            return ended(stop[0], _stop_text(stop))
+            return ended(stop[0], _stop_text(stop), failure_code=stop_code(stop[0]))
         if outcome.succeeded:
             return ended(
-                FailureKind.PERMANENT, _NO_VERSION if prepared.output == "artifact" else _NO_WRITE
+                FailureKind.PERMANENT,
+                _NO_VERSION if prepared.output == "artifact" else _NO_WRITE,
+                failure_code=FailureCode.BUILD_FAILED,
             )
         if outcome.timed_out:
             kind = FailureKind.TIMEOUT
@@ -1089,7 +1115,7 @@ class PythonRuntime:
             kind = FailureKind.PERMANENT
         else:
             kind = FailureKind.TRANSIENT
-        return ended(kind, outcome.error_message or _NO_MESSAGE)
+        return ended(kind, outcome.error_message or _NO_MESSAGE, failure_code=outcome.failure_code)
 
     def _prepare(
         self, session: Session, engine: RunEngine, claimed: ClaimedTask
@@ -1122,27 +1148,34 @@ class PythonRuntime:
         version = session.get(JobVersion, run.job_version_id) if run is not None else None
         if run is None or env is None or version is None:
             raise TaskFailure(
-                FailureKind.PERMANENT, "the run or its project version no longer exists"
+                FailureKind.PERMANENT,
+                "the run or its project version no longer exists",
+                FailureCode.NOT_FOUND,
             )
         check_integrity(session, engine, run, env, version)
         check_manifest_version(version.manifest_json)
         row = session.get(Principal, run.run_as_principal_id) if run.run_as_principal_id else None
         if row is None or not row.is_active:
-            raise TaskFailure(FailureKind.PERMANENT, _INACTIVE)
+            raise TaskFailure(FailureKind.PERMANENT, _INACTIVE, FailureCode.PERMISSION_DENIED)
         entry = manifest_entry(version.manifest_json, claimed.asset)
         path = _asset_path(entry) if entry is not None and asset_kind(entry) == "python" else None
         if entry is None or path is None:
             raise TaskFailure(
                 FailureKind.PERMANENT,
                 f"the project version has no Python asset file for {claimed.asset}; redeploy",
+                FailureCode.CODE_CHANGED,
             )
         inputs = _declared_inputs(entry)
         if inputs is None:
-            raise TaskFailure(FailureKind.PERMANENT, self._bad_inputs(claimed.asset))
+            raise TaskFailure(
+                FailureKind.PERMANENT, self._bad_inputs(claimed.asset), FailureCode.CODE_CHANGED
+            )
         output = self._output_of(entry, claimed.asset)
         reason = self.support.reason()
         if reason is not None:
-            raise TaskFailure(FailureKind.PERMANENT, CANNOT_RUN.format(reason=reason))
+            raise TaskFailure(
+                FailureKind.PERMANENT, CANNOT_RUN.format(reason=reason), FailureCode.NO_RUNTIME
+            )
         try:
             ref = TableRef.from_dotted(env.name, claimed.asset)
         except ValidationError as exc:
@@ -1150,6 +1183,7 @@ class PythonRuntime:
                 FailureKind.PERMANENT,
                 f"the asset name {claimed.asset!r} is not a valid table name; "
                 "rename the asset and redeploy",
+                FailureCode.CODE_CHANGED,
             ) from exc
         if output == "artifact" and claimed.asset in inputs.values():
             raise TaskFailure(
@@ -1157,6 +1191,7 @@ class PythonRuntime:
                 f"{claimed.asset} reads its own artifact as an input, which an artifact "
                 "asset cannot do: it has no way to read its previous version. Remove that "
                 "input and redeploy",
+                FailureCode.CODE_CHANGED,
             )
         principal = PrincipalRef(
             id=row.id,
@@ -1194,11 +1229,15 @@ class PythonRuntime:
             tarball = _read_code(session, engine.key_provider, env, version)
         except OSError as exc:
             raise TaskFailure(
-                FailureKind.TRANSIENT, "the code tarball could not be read (storage error)"
+                FailureKind.TRANSIENT,
+                "the code tarball could not be read (storage error)",
+                FailureCode.INTERNAL,
             ) from exc
         except LakanaError as exc:
             raise TaskFailure(
-                FailureKind.PERMANENT, "the code tarball is missing from storage; redeploy"
+                FailureKind.PERMANENT,
+                "the code tarball is missing from storage; redeploy",
+                FailureCode.CODE_CHANGED,
             ) from exc
         timeout = min(float(claimed.timeout_seconds), engine.settings.limits.timeout_seconds)
         needed = token_ttl(timeout, self.kill_grace)
@@ -1209,6 +1248,7 @@ class PythonRuntime:
                 f"({int(timeout)} s) plus the kill grace and a margin needs {needed} s, but "
                 f"LAKANA_TASK_TOKENS__MAX_TTL_SECONDS is {self.max_ttl_seconds}; raise that "
                 f"setting to at least {needed} or lower the asset's timeout",
+                FailureCode.NO_RUNTIME,
             )
         prepared = _Prepared(
             environment=env.name,
@@ -1255,6 +1295,7 @@ class PythonRuntime:
                 f"the project version declares an output of {_shown(declared)} for {asset}, which "
                 "this worker cannot run (it runs `table` and `artifact`); run the platform version "
                 "that deployed it on this worker, or fix the asset and redeploy",
+                FailureCode.NO_RUNTIME,
             )
         return entry_output(entry)
 
@@ -1327,6 +1368,7 @@ class PythonRuntime:
                         f"{name} cannot be read by the run's principal "
                         f"{_shown(principal.name)}, or does not exist; grant read on it or "
                         "check the name",
+                        FailureCode.PERMISSION_DENIED,
                     )
                 continue
             if name not in actual_kinds:
@@ -1339,6 +1381,7 @@ class PythonRuntime:
                         FailureKind.PERMANENT,
                         f"{name} is {words}, but this deploy recorded it as an artifact; "
                         "redeploy so that the asset reads it as a table",
+                        FailureCode.CODE_CHANGED,
                     )
                 if name not in found:
                     found[name] = run_input_version(session, environment, name, run_id)
@@ -1347,6 +1390,7 @@ class PythonRuntime:
                     raise TaskFailure(
                         FailureKind.PERMANENT,
                         f"{name} has no version yet; run the asset that produces it",
+                        FailureCode.UPSTREAM_MISSING,
                     )
                 versions[parameter] = version
             elif actual == "ARTIFACT":
@@ -1354,6 +1398,7 @@ class PythonRuntime:
                     FailureKind.PERMANENT,
                     f"{name} is an artifact, but this deploy recorded it as a table; redeploy "
                     "so that the asset receives a path",
+                    FailureCode.CODE_CHANGED,
                 )
         return kinds, versions
 
@@ -1385,6 +1430,7 @@ class PythonRuntime:
                 FailureKind.PERMANENT,
                 f"{claimed.asset} is {words}, not an artifact. Drop it (`lakana table delete "
                 f"{claimed.asset}`) or give the asset another name and redeploy.",
+                FailureCode.BUILD_FAILED,
             )
 
     @staticmethod
@@ -1441,6 +1487,7 @@ class PythonRuntime:
                 FailureKind.TRANSIENT,
                 "could not create the task's working directory: "
                 f"{exc.strerror or 'filesystem error'}",
+                FailureCode.INTERNAL,
             ) from exc
         logger.warning(
             "The task directory %s is not private: it must be a real directory owned by the "
@@ -1451,6 +1498,7 @@ class PythonRuntime:
             FailureKind.PERMANENT,
             "the worker's task directory is not private; an operator must make it a real "
             "directory owned by the worker's user with mode 0700 (the worker log names it)",
+            FailureCode.NO_RUNTIME,
         )
 
     def _remove(self, attempt_dir: Path, claimed: ClaimedTask) -> None:
@@ -1506,9 +1554,9 @@ class PythonRuntime:
                 max_members=self.limits.checkout_members,
             )
         except CodeUnpackError as exc:
-            raise TaskFailure(FailureKind.PERMANENT, str(exc)) from exc
+            raise TaskFailure(FailureKind.PERMANENT, str(exc), FailureCode.CODE_CHANGED) from exc
         except CodeUnpackFailed as exc:
-            raise TaskFailure(FailureKind.TRANSIENT, str(exc)) from exc
+            raise TaskFailure(FailureKind.TRANSIENT, str(exc), FailureCode.INTERNAL) from exc
 
     @staticmethod
     def _check_lock(code_dir: Path, expected: str | None, sources: KnownSources) -> str:
@@ -1543,18 +1591,26 @@ class PythonRuntime:
             raise TaskFailure(
                 FailureKind.PERMANENT,
                 "the deployed code has no readable pyproject.toml and uv.lock; redeploy",
+                FailureCode.CODE_CHANGED,
             ) from exc
         if os.path.lexists(code_dir / UV_TOML_FILE):
-            raise TaskFailure(FailureKind.PERMANENT, f"{UV_TOML_FILE} {UV_TOML_MESSAGE}")
+            raise TaskFailure(
+                FailureKind.PERMANENT,
+                f"{UV_TOML_FILE} {UV_TOML_MESSAGE}",
+                FailureCode.BUILD_FAILED,
+            )
         if expected is None or lock_digest(lock) != expected:
             raise TaskFailure(
                 FailureKind.PERMANENT,
                 "uv.lock does not match the project version's lock_sha256; redeploy",
+                FailureCode.CODE_CHANGED,
             )
         unknown = source_issues(pyproject, lock, sources)
         if unknown:
             raise TaskFailure(
-                FailureKind.PERMANENT, f"{_listed_issues(unknown)}. {_closing_for(unknown)}"
+                FailureKind.PERMANENT,
+                f"{_listed_issues(unknown)}. {_closing_for(unknown)}",
+                FailureCode.BUILD_FAILED,
             )
         issues = lockfile_issues(
             pyproject,
@@ -1569,6 +1625,7 @@ class PythonRuntime:
                 FailureKind.PERMANENT,
                 f"{_listed_issues(issues)}. This project version was deployed for another platform "
                 "version: update the lock and redeploy.",
+                FailureCode.BUILD_FAILED,
             )
         return expected
 
@@ -1687,10 +1744,12 @@ class PythonRuntime:
         """
         try:
             return self.acquire_venv(self.venvs, lock_sha256, code_dir, sink, indexes)
-        except (VenvCacheUnsafe, VenvBuildRefused) as exc:
-            raise TaskFailure(FailureKind.PERMANENT, str(exc)) from exc
+        except VenvBuildRefused as exc:
+            raise TaskFailure(FailureKind.PERMANENT, str(exc), FailureCode.SECRET_REFUSED) from exc
+        except VenvCacheUnsafe as exc:
+            raise TaskFailure(FailureKind.PERMANENT, str(exc), FailureCode.NO_RUNTIME) from exc
         except VenvBuildError as exc:
-            raise TaskFailure(FailureKind.TRANSIENT, str(exc)) from exc
+            raise TaskFailure(FailureKind.TRANSIENT, str(exc), FailureCode.BUILD_FAILED) from exc
 
     @staticmethod
     def _target_state(session: Session, engine: RunEngine, prepared: _Prepared) -> _TargetState:
@@ -1733,12 +1792,14 @@ class PythonRuntime:
                     f"{ref.dotted()} is an artifact, and this asset produces a table. Drop the "
                     f"artifact (`lakana artifact drop {ref.dotted()}`) or give the asset "
                     "another name and redeploy.",
+                    FailureCode.BUILD_FAILED,
                 )
             if row.table_type is not TableType.ICEBERG or row.metadata_location is None:
                 raise TaskFailure(
                     FailureKind.PERMANENT,
                     f"{ref.dotted()} exists and is not a managed table; a Python asset replaces "
                     "a table. Drop or rename it, or give the asset another name and redeploy.",
+                    FailureCode.BUILD_FAILED,
                 )
             resolved = StorageResolver(session, engine.key_provider).for_environment(environment)
             try:
@@ -1747,6 +1808,7 @@ class PythonRuntime:
                 raise TaskFailure(
                     FailureKind.TRANSIENT,
                     f"the table {ref.dotted()} could not be read (storage error)",
+                    FailureCode.INTERNAL,
                 ) from exc
             return _TargetState(
                 row.id,
@@ -1809,10 +1871,14 @@ class PythonRuntime:
             raise LeaseLost from exc
         except ValidationError as exc:
             session.rollback()
-            raise TaskFailure(FailureKind.PERMANENT, self._bad_inputs(claimed.asset)) from exc
+            raise TaskFailure(
+                FailureKind.PERMANENT, self._bad_inputs(claimed.asset), FailureCode.CODE_CHANGED
+            ) from exc
         except NotFoundError as exc:
             session.rollback()
-            raise TaskFailure(FailureKind.PERMANENT, _INACTIVE) from exc
+            raise TaskFailure(
+                FailureKind.PERMANENT, _INACTIVE, FailureCode.PERMISSION_DENIED
+            ) from exc
         return minted.token, minted.key_id
 
     @staticmethod

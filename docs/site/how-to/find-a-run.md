@@ -17,7 +17,7 @@ lakana runs list --env dev --status failed --since 2026-10-18
 When nothing failed, the list is empty. Add `--job nightly` to see one job's runs, `--trigger
 schedule` for the runs the scheduler started, and `--repo analytics` for one repository.
 `--status failed,cancelled` shows both. Take the id of a run from the list and open it with
-`lakana runs show RUN_ID --env dev`.
+`lakana runs show RUN_ID --env dev`; a failed task shows its code and what to do about it ([Why did it fail?](../reference/why-did-it-fail.md)).
 
 ## Page through a long list
 

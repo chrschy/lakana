@@ -263,12 +263,14 @@ def test_a_transient_failure_of_a_count_retries_the_checks_only(
     assert _ids(world, "silver.orders") == [1, 1, 2]
     (first,) = _attempts(world, task.id)
     assert (first.outcome, first.error_message) == (AttemptOutcome.FAILED, message)
+    assert (task.failure_code, first.failure_code) == ("check_error", "check_error")
 
     monkeypatch.setattr(tasks_module, "_dispatch", lambda *a, **k: pytest.fail("built again"))
     _drain(world)
 
     task = _task(world, "silver.orders")
     assert (task.status, task.attempt) == (TaskStatus.FAILED, 2)
+    assert task.failure_code == "check_blocked"
     assert task.error_message is not None and task.error_message.startswith(
         "Check `silver.orders/unique_id` failed: 1 row"
     )
@@ -300,6 +302,7 @@ def test_a_transient_failure_on_the_last_attempt_counts_as_errored(
         RollbackOutcome.UNPUBLISHED,
     )
     assert (task.status, task.attempt, task.max_attempts) == (TaskStatus.FAILED, 1, 1)
+    assert task.failure_code == "check_error"
     assert task.error_message is not None
     assert "Alice" not in task.error_message and "SECRET" not in task.error_message
     assert _marker(world, "silver.orders") == run_id
@@ -431,6 +434,10 @@ def test_a_cancel_during_the_checks_hands_the_task_back_to_have_its_table_set_ba
     task = _task(world, "silver.orders")
     assert (task.status, task.setting_back) == (TaskStatus.READY, True)
     assert [a.outcome for a in _attempts(world, task.id)] == [AttemptOutcome.CANCELLED]
+    assert (task.failure_code, _attempts(world, task.id)[0].failure_code) == (
+        "cancelled",
+        "cancelled",
+    )
     assert _results(world, task.id) == []
     assert _ids(world, "silver.orders") == [1, 1, 2]  # still there until the set-back claim
     assert _marker(world, "silver.orders") is None
@@ -695,6 +702,12 @@ def test_a_worker_lost_after_the_rollback_ends_the_task_failed_without_building_
         AttemptOutcome.LOST,
         AttemptOutcome.FAILED,
     ]
+    assert [a.outcome for a in _attempts(world, task.id)] == [
+        AttemptOutcome.LOST,
+        AttemptOutcome.FAILED,
+    ]
+    assert [a.failure_code for a in _attempts(world, task.id)] == ["worker_lost", "check_blocked"]
+    assert task.failure_code == "check_blocked"
     assert len(_writes(world, task.id)) == 1
     assert len(_events(world, AuditEventType.TABLE_ROLLED_BACK)) == 1
     assert _ids(world, "silver.orders") == [1, 1, 2]
@@ -744,6 +757,7 @@ def test_a_set_back_claim_after_a_landed_rollback_ends_the_task_with_the_failed_
         "The table was set back to what it was before this run, and nothing downstream was "
         f"built. {_unique_rows(run_id)}{_after(run_id)}",
     )
+    assert task.failure_code == "check_blocked"
     assert _ids(world, "silver.orders") == [1, 1, 2]
     log = _log(world, run_id, "silver.orders")
     assert "  check unique_id: failed, 1 row\n  rollback: rolled_back\n" in log
@@ -928,6 +942,7 @@ def test_an_unexpected_error_outside_a_count_is_retried_and_the_next_claim_check
     # `retries: 0`: a task that awaits its checks still does not run out of attempts.
     assert (task.status, task.attempt, task.max_attempts) == (TaskStatus.PENDING, 1, 1)
     assert task.error_message == f"{RUN_ERROR_MESSAGE}. {_still_unchecked(run_id)}"
+    assert task.failure_code == "internal"
     assert task.written_table_id is not None
     assert _results(world, task.id) == []
     assert _ids(world, "silver.orders") == [1, 1, 2]
@@ -978,6 +993,7 @@ def test_what_the_phase_needs_and_cannot_read_is_retried_for_a_written_task(
         else "the project version's manifest has version 99"
     )
     assert task.error_message.endswith(_still_unchecked(run_id))
+    assert task.failure_code == ("permission_denied" if missing == "principal" else "no_runtime")
     assert task.written_table_id is not None
     assert _results(world, task.id) == []
     assert _ids(world, "silver.orders") == [1, 1, 2]
@@ -1117,6 +1133,7 @@ def test_a_failure_before_the_build_is_decided_is_retried(
 
     task = _task(world, "silver.orders")
     assert (task.status, task.error_message) == (TaskStatus.PENDING, RUN_ERROR_MESSAGE)
+    assert task.failure_code == "internal"
     assert not _exists(world, "silver.orders")
 
 
@@ -1738,6 +1755,7 @@ def test_a_stamped_task_lost_in_a_cancelled_run_is_set_back_from_its_stamp(
         TaskStatus.CANCELLED,
         f"{RUN_CANCELLED_MESSAGE} {SET_BACK_DONE}",
     )
+    assert task.failure_code == "cancelled"
     assert _ids(world, "silver.orders") == [1, 1, 2]
     assert task.written_table_id is None  # the set-back cleared the stamp
 
@@ -1785,5 +1803,6 @@ def test_a_stamped_task_whose_set_back_is_refused_ends_instead_of_going_round_ag
         TaskStatus.CANCELLED,
         set_back_failed_message(RUN_CANCELLED_MESSAGE),
     )
+    assert task.failure_code == "cancelled"
     assert task.written_table_id is not None
     assert _ids(world, "silver.orders") == [11, 11, 12]

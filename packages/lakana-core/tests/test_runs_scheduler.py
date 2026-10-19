@@ -915,3 +915,97 @@ def test_a_task_put_back_in_this_tick_is_not_cancelled_in_it() -> None:
     below = _task("a.b", TaskStatus.PENDING, upstream=("a.a",))
     out = tick([_run(task, below, cancel=True)], NOW, _fixed)
     assert _statuses(out) == {"a.a": TaskStatus.READY, "a.b": TaskStatus.CANCELLED}
+
+
+# -- failure codes ------------------------------------------------------------
+
+
+def _codes(transitions: list) -> dict[str, str | None]:
+    """Index the failure code of each task transition that has one by asset.
+
+    Parameters
+    ----------
+    transitions
+        The tick's output.
+
+    Returns
+    -------
+    dict
+        Asset name to the transition's `failure_code`, for the transitions that carry one.
+    """
+    ids = {uuid.uuid5(uuid.NAMESPACE_URL, name): name for name in ("a.a", "a.b", "a.c")}
+    return {
+        ids[t.task_id]: t.failure_code
+        for t in transitions
+        if isinstance(t, TaskTransition) and t.failure_code is not None
+    }
+
+
+def _lost_task(attempt: int = 1, max_attempts: int = 3) -> TaskSnapshot:
+    """Build a running task whose lease expired.
+
+    Parameters
+    ----------
+    attempt
+        Attempts so far.
+    max_attempts
+        Attempt limit.
+
+    Returns
+    -------
+    TaskSnapshot
+        The snapshot.
+    """
+    return _task(
+        "a.a",
+        TaskStatus.RUNNING,
+        attempt=attempt,
+        max_attempts=max_attempts,
+        lease_owner="w1",
+        lease_expires_at=NOW - timedelta(seconds=1),
+    )
+
+
+def test_a_task_that_lost_its_last_attempt_fails_with_worker_lost() -> None:
+    """The reclaim that fails a task names why."""
+    out = tick([_run(_lost_task(3, 3), _task("a.b", upstream=("a.a",)))], NOW, _fixed)
+
+    assert _codes(out) == {"a.a": "worker_lost", "a.b": "upstream_failed"}
+
+
+def test_a_task_lost_with_attempts_left_is_retried_without_a_code() -> None:
+    """The retry is no failure of the task; the store gives the attempt its `worker_lost`."""
+    assert _codes(tick([_run(_lost_task(1, 3))], NOW, _fixed)) == {}
+
+
+def test_a_cancel_gives_the_cancelled_code_whichever_loop_ends_the_task() -> None:
+    """A lost task, a waiting task and a task below a cancelled one all end `cancelled`."""
+    out = tick(
+        [
+            _run(
+                _lost_task(),
+                _task("a.b", TaskStatus.READY),
+                _task("a.c", upstream=("a.b",)),
+                cancel=True,
+            )
+        ],
+        NOW,
+        _fixed,
+    )
+
+    assert _codes(out) == {"a.a": "cancelled", "a.b": "cancelled", "a.c": "cancelled"}
+
+
+def test_a_lost_set_back_ends_with_worker_lost_or_cancelled() -> None:
+    """The end of a set-back that kept being lost fails the task, or cancels it in a cancel."""
+    task = _expired(setting_back=True, set_back_claims=MAX_SET_BACK_CLAIMS)
+
+    assert _codes(tick([_run(task)], NOW, _fixed)) == {"a.a": "worker_lost"}
+    assert _codes(tick([_run(task, cancel=True)], NOW, _fixed)) == {"a.a": "cancelled"}
+
+
+def test_a_task_put_back_to_set_its_table_back_carries_no_code() -> None:
+    """The next worker ends it with a code of its own."""
+    task = _expired(setting_back=True, set_back_claims=0)
+
+    assert _codes(tick([_run(task)], NOW, _fixed)) == {}

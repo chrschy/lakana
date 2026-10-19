@@ -717,3 +717,64 @@ def test_no_request_can_bind_a_query_to_a_check_result(client: TestClient) -> No
     for name in requested:
         fields = set(schemas[name].get("properties", {}))
         assert not {"check_result_id", "snapshot_id"} & fields, name
+
+
+def test_a_failed_task_carries_failure_with_the_detail_kept(client: TestClient) -> None:
+    """`failure` has the code, the cause and the next step; the text stays in `error_message`."""
+    from lakana_core.models import AttemptOutcome, TaskAttempt
+    from lakana_core.runs.failures import FAILURES, FailureCode
+
+    _deploy(client)
+    started = client.post(_RUNS, headers=AUTH_HEADER, json={"repository": "analytics"}).json()
+    assert [t["failure"] for t in started["tasks"]] == [None]
+    assert started["failed_tasks"] == 0
+    with Session(client.app.state.engine) as session:
+        run = session.get(Run, uuid.UUID(started["id"]))
+        assert run is not None
+        task = session.query(TaskRun).filter(TaskRun.run_id == run.id).one()
+        task.status = TaskStatus.FAILED
+        task.error_message = "timed out after 10 s"
+        task.failure_code = "timeout"
+        session.add(
+            TaskAttempt(
+                id=uuid.uuid4(),
+                task_run_id=task.id,
+                attempt=1,
+                worker="w1",
+                started_at=run.created_at,
+                outcome=AttemptOutcome.TIMED_OUT,
+                error_message="timed out after 10 s",
+                failure_code="timeout",
+            )
+        )
+        session.commit()
+
+    cause, next_step = FAILURES[FailureCode.TIMEOUT]
+    shown = client.get(f"{_RUNS}/{started['id']}", headers=AUTH_HEADER).json()
+    (task_body,) = shown["tasks"]
+    assert task_body["error_message"] == "timed out after 10 s"
+    assert task_body["failure"] == {"code": "timeout", "cause": cause, "next_step": next_step}
+    assert shown["failed_tasks"] == 1
+    listed = client.get(_RUNS, headers=AUTH_HEADER).json()
+    assert [(r["id"], r["failed_tasks"]) for r in listed] == [(started["id"], 1)]
+    log = client.get(f"{_RUNS}/{started['id']}/tasks/silver.clean/log", headers=AUTH_HEADER).json()
+    (attempt,) = log["attempts"]
+    assert attempt["failure"] == {"code": "timeout", "cause": cause, "next_step": next_step}
+
+
+def test_an_old_failed_task_without_a_code_is_unknown_over_rest(client: TestClient) -> None:
+    """A row from before the codes is `unknown`, with a generic cause and next step."""
+    _deploy(client)
+    started = client.post(_RUNS, headers=AUTH_HEADER, json={"repository": "analytics"}).json()
+    with Session(client.app.state.engine) as session:
+        task = session.query(TaskRun).filter(TaskRun.run_id == uuid.UUID(started["id"])).one()
+        task.status = TaskStatus.FAILED
+        task.error_message = "boom"
+        session.commit()
+
+    shown = client.get(f"{_RUNS}/{started['id']}", headers=AUTH_HEADER).json()
+
+    (task_body,) = shown["tasks"]
+    assert task_body["failure"]["code"] == "unknown"
+    assert task_body["failure"]["next_step"]
+    assert task_body["error_message"] == "boom"

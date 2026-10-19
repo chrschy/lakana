@@ -26,6 +26,7 @@ from lakana._models import (
     Column,
     Environment,
     ExternalTable,
+    Failure,
     Lineage,
     LineageEdge,
     LineageNode,
@@ -42,7 +43,7 @@ from lakana.errors import Conflict, QueryFailed, ValidationError
 from lakana.resources.environments import Environments
 from lakana.resources.namespaces import Namespaces
 from lakana.resources.queries import Queries, QueryRun, waiting_for_from_json
-from lakana.resources.runs import run_from_json
+from lakana.resources.runs import failure_from_json, run_from_json
 from lakana.resources.tables import Tables, _split_namespace_table
 
 _CONFIG = ResolvedConfig(url="http://api.example", token="lakana_pat_abc_supersecret")
@@ -2305,3 +2306,97 @@ def test_tables_health_with_nothing_to_show() -> None:
     health = Tables(_transport(handler)).health("dev", "bronze.sales")
 
     assert (health.last_maintenance, health.checks, health.readers) == (None, [], None)
+
+
+def _failed_task(**extra: object) -> dict[str, object]:
+    """Build the body of a task run as the server sends it.
+
+    Parameters
+    ----------
+    **extra
+        Fields to add or replace.
+
+    Returns
+    -------
+    dict
+        The task body.
+    """
+    return {
+        "asset": "gold.daily",
+        "status": "failed",
+        "attempt": 1,
+        "max_attempts": 3,
+        "timeout_seconds": 600,
+        "next_attempt_at": None,
+        "started_at": None,
+        "finished_at": None,
+        "error_message": "timed out after 600 s",
+        "query_run_id": None,
+        "rows_written": None,
+        **extra,
+    }
+
+
+def _run_body(*tasks: dict[str, object], **extra: object) -> dict[str, object]:
+    """Build the body of a run as the server sends it.
+
+    Parameters
+    ----------
+    *tasks
+        Its tasks.
+    **extra
+        Fields to add or replace.
+
+    Returns
+    -------
+    dict
+        The run body.
+    """
+    return {
+        "id": "r1",
+        "environment": "dev",
+        "repository": "analytics",
+        "project_version_id": "v1",
+        "commit_sha": "a" * 40,
+        "kind": "full",
+        "status": "failed",
+        "cancel_requested": False,
+        "triggered_by": "admin",
+        "run_as": "admin",
+        "resumed_from_run_id": None,
+        "selection": {},
+        "error_message": None,
+        "created_at": "2026-10-09T14:00:00+00:00",
+        "started_at": None,
+        "finished_at": None,
+        "tasks": list(tasks),
+        **extra,
+    }
+
+
+def test_a_run_task_parses_its_failure_and_a_run_its_failed_task_count() -> None:
+    """`failure` is the code, the cause and the next step; `error_message` stays the detail."""
+    failure = {"code": "timeout", "cause": "It ran too long.", "next_step": "Make it faster."}
+    run = run_from_json(_run_body(_failed_task(failure=failure), failed_tasks=1))
+
+    (task,) = run.tasks
+    assert task.failure == Failure("timeout", "It ran too long.", "Make it faster.")
+    assert task.error_message == "timed out after 600 s"
+    assert run.failed_tasks == 1
+
+
+def test_a_run_task_without_a_failure_and_a_run_of_an_older_server_default() -> None:
+    """A task with no error has none, and an older server sends neither field."""
+    run = run_from_json(_run_body(_failed_task(status="succeeded", error_message=None)))
+
+    assert run.tasks[0].failure is None
+    assert run.failed_tasks == 0
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [None, "timeout", 3, {"code": "timeout"}, {"code": 1, "cause": "c", "next_step": "n"}],
+)
+def test_a_failure_that_cannot_be_read_never_fails_the_command(bad: object) -> None:
+    """The failure only helps the reader, so a malformed one is no failure at all."""
+    assert failure_from_json(bad) is None

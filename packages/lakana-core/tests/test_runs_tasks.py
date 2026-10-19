@@ -32,6 +32,7 @@ from lakana_core.models import (
     TaskStatus,
 )
 from lakana_core.runs.checks import RUN_CANCELLED_MESSAGE, RUN_STOPPED_MESSAGE
+from lakana_core.runs.failures import FailureCode
 from lakana_core.runs.selection import Selection
 from lakana_core.runs.service import RunService
 from lakana_core.runs.store import scheduler_tick
@@ -1660,6 +1661,7 @@ def _ended_by_the_stop(
         kind=kind,
         rand=_half,
         error_message=message,
+        failure_code=FailureCode.MEMORY,
         on_committed="it was committed",
         stopped=True,
     )
@@ -1880,3 +1882,159 @@ def test_the_tip_of_a_task_runs_own_writes_is_read_from_the_committed_column(
         session.commit()
         assert read_own_tip(session, claimed.task_run_id) == expected
     assert OWN_TIP_NO_SNAPSHOT == 0
+
+
+# -- failure codes ------------------------------------------------------------
+
+
+def _codes(session: Session, task_run_id: uuid.UUID) -> tuple[str | None, str | None]:
+    """Read the stored failure codes of a task run and of its latest attempt.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    task_run_id
+        The task run.
+
+    Returns
+    -------
+    tuple
+        The task run's code and the latest attempt's.
+    """
+    return _task(session, task_run_id).failure_code, _attempts(session, task_run_id)[
+        -1
+    ].failure_code
+
+
+def test_a_failure_stores_its_code_on_the_task_and_on_the_attempt(
+    session: Session, run_id: uuid.UUID
+) -> None:
+    """A failure that ends the task stores the code next to the text, on both rows."""
+    claimed = _claimed(session)
+    record_attempt(
+        session,
+        claimed.task_run_id,
+        "w1",
+        claimed.claim,
+        kind=FailureKind.PERMANENT,
+        rand=_half,
+        error_message="bad SQL",
+        failure_code=FailureCode.QUERY_INVALID,
+    )
+
+    assert _codes(session, claimed.task_run_id) == ("query_invalid", "query_invalid")
+
+
+def test_a_retried_failure_keeps_the_code_of_its_attempt(
+    session: Session, run_id: uuid.UUID
+) -> None:
+    """A task that goes back to pending shows the code of the failure it will try again after."""
+    claimed = _claimed(session)
+    record_attempt(
+        session,
+        claimed.task_run_id,
+        "w1",
+        claimed.claim,
+        kind=FailureKind.TIMEOUT,
+        rand=_half,
+        error_message="too slow",
+        failure_code=FailureCode.TIMEOUT,
+    )
+
+    assert _task(session, claimed.task_run_id).status is TaskStatus.PENDING
+    assert _codes(session, claimed.task_run_id) == ("timeout", "timeout")
+
+
+def test_a_later_success_clears_the_code(session: Session, run_id: uuid.UUID) -> None:
+    """A success stores no code, and a code passed with it is dropped."""
+    claimed = _claimed(session)
+    record_attempt(
+        session,
+        claimed.task_run_id,
+        "w1",
+        claimed.claim,
+        kind=None,
+        rand=_half,
+        failure_code=FailureCode.INTERNAL,
+    )
+
+    assert _codes(session, claimed.task_run_id) == (None, None)
+
+
+def test_a_failure_without_a_code_is_internal(session: Session, run_id: uuid.UUID) -> None:
+    """Only an unexpected failure may arrive without a code, and it is recorded as `internal`."""
+    claimed = _claimed(session)
+    record_attempt(
+        session,
+        claimed.task_run_id,
+        "w1",
+        claimed.claim,
+        kind=FailureKind.PERMANENT,
+        rand=_half,
+        error_message="what",
+    )
+
+    assert _codes(session, claimed.task_run_id) == ("internal", "internal")
+
+
+def test_a_cancel_is_always_the_cancelled_code(session: Session, run_id: uuid.UUID) -> None:
+    """A cancel needs no code from the caller."""
+    claimed = _claimed(session)
+    record_attempt(
+        session, claimed.task_run_id, "w1", claimed.claim, kind=FailureKind.CANCELLED, rand=_half
+    )
+
+    assert _codes(session, claimed.task_run_id) == ("cancelled", "cancelled")
+
+
+def test_a_release_is_no_failure_and_stores_no_code(session: Session, run_id: uuid.UUID) -> None:
+    """A drain hands the task back; nothing failed."""
+    claimed = _claimed(session)
+    record_attempt(
+        session,
+        claimed.task_run_id,
+        "w1",
+        claimed.claim,
+        kind=FailureKind.RELEASED,
+        rand=_half,
+        failure_code=FailureCode.INTERNAL,
+    )
+
+    assert _codes(session, claimed.task_run_id) == (None, None)
+
+
+def test_a_failure_whose_write_committed_stores_no_code(
+    session: Session, run_id: uuid.UUID
+) -> None:
+    """The commit evidence turns the failure into a success, and the code goes with it."""
+    claimed = _claimed(session)
+    _link_write(session, claimed, 3)
+    record_attempt(
+        session,
+        claimed.task_run_id,
+        "w1",
+        claimed.claim,
+        kind=FailureKind.TRANSIENT,
+        rand=_half,
+        error_message="boom",
+        failure_code=FailureCode.INTERNAL,
+        on_committed="it was committed",
+    )
+
+    assert _codes(session, claimed.task_run_id) == (None, None)
+
+
+def test_a_drained_set_back_claim_keeps_the_code_the_task_was_handed_back_with(
+    session: Session, run_id: uuid.UUID
+) -> None:
+    """The stop's code is the reason the task ends with; a drain must not erase it."""
+    task = _running_task(session, has_checks=True, baseline=True, max_attempts=1)
+    assert _ended_by_the_stop(session, task, FailureKind.PERMANENT, "the memory text")
+    claimed = claim_task(session, _WORKER, 60)
+    assert claimed is not None and claimed.setting_back
+    record_attempt(
+        session, claimed.task_run_id, _WORKER, claimed.claim, kind=FailureKind.RELEASED, rand=_half
+    )
+
+    assert _reload(session, task.id).failure_code == "memory"

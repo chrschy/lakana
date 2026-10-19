@@ -3370,3 +3370,49 @@ def test_0039_adds_the_table_columns_table(tmp_path: Path, monkeypatch: pytest.M
         assert "table_columns" not in inspect(engine).get_table_names()
     finally:
         engine.dispose()
+
+
+_REVISION_0040 = "f9c6d2a5e1b7"
+
+
+def test_0040_adds_the_failure_codes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Revision `0040`: a nullable `failure_code` on `task_runs` and `task_attempts`, undone down.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    """
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, _REVISION_0039)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        inspector = inspect(engine)
+        for table in ("task_runs", "task_attempts"):
+            assert "failure_code" not in {c["name"] for c in inspector.get_columns(table)}
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, _REVISION_0040)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        inspector = inspect(engine)
+        for table in ("task_runs", "task_attempts"):
+            column = {c["name"]: c for c in inspector.get_columns(table)}["failure_code"]
+            assert column["nullable"]
+            assert getattr(column["type"], "length", None) == 32
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, _REVISION_0039)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        inspector = inspect(engine)
+        for table in ("task_runs", "task_attempts"):
+            assert "failure_code" not in {c["name"] for c in inspector.get_columns(table)}
+    finally:
+        engine.dispose()

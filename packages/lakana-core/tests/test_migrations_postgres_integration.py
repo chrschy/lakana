@@ -1988,3 +1988,32 @@ def test_0039_on_postgres() -> None:
         migrate.upgrade(url, revision_0039)
         assert _alembic_version(engine) == revision_0039
         engine.dispose()
+
+
+def test_0040_on_postgres() -> None:
+    """0040 adds a nullable `failure_code` to task runs and attempts; the downgrade drops them."""
+    revision_0039 = "e8b5c1f4d0a6"
+    revision_0040 = "f9c6d2a5e1b7"
+    with PostgresContainer("postgres:16", driver="pg8000") as pg:
+        url = pg.get_connection_url()
+        migrate.upgrade(url, revision_0039)
+        engine = sqlalchemy.create_engine(url)
+        for table in ("task_runs", "task_attempts"):
+            names = {c["name"] for c in sqlalchemy.inspect(engine).get_columns(table)}
+            assert "failure_code" not in names
+
+        migrate.upgrade(url, revision_0040)
+        assert _alembic_version(engine) == revision_0040
+        for table in ("task_runs", "task_attempts"):
+            columns = {c["name"]: c for c in sqlalchemy.inspect(engine).get_columns(table)}
+            assert columns["failure_code"]["nullable"]
+            assert getattr(columns["failure_code"]["type"], "length", None) == 32
+
+        migrate.downgrade(url, revision_0039)
+        assert _alembic_version(engine) == revision_0039
+        for table in ("task_runs", "task_attempts"):
+            names = {c["name"] for c in sqlalchemy.inspect(engine).get_columns(table)}
+            assert "failure_code" not in names
+        migrate.upgrade(url, revision_0040)
+        assert _alembic_version(engine) == revision_0040
+        engine.dispose()

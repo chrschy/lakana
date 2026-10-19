@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 
 import pytest
 from fastapi.testclient import TestClient
@@ -275,3 +276,47 @@ def test_the_rows_of_a_check_raise_the_sdks_errors(
     _store_failed_check(client, run.id, snapshot=None)
     with pytest.raises(Conflict, match="has no rows to show"):
         lakana_client.checks.rows(run.id, _CHECK, environment="dev")
+
+
+def test_a_failed_tasks_failure_and_a_runs_failed_task_count_reach_the_sdk(
+    lakana_client: lakana.Client, client: TestClient
+) -> None:
+    """The server's code, cause and next step come back typed, for the task and its attempt."""
+    from lakana_core.models import AttemptOutcome, TaskAttempt
+    from lakana_core.runs.failures import FAILURES, FailureCode
+
+    _deploy(client)
+    run = lakana_client.runs.start("dev", "analytics")
+    assert [t.failure for t in run.tasks] == [None]
+    with Session(client.app.state.engine) as session:
+        task = session.query(TaskRun).filter(TaskRun.run_id == uuid.UUID(run.id)).one()
+        task.status = TaskStatus.FAILED
+        task.error_message = "timed out after 10 s"
+        task.failure_code = "timeout"
+        session.add(
+            TaskAttempt(
+                id=uuid.uuid4(),
+                task_run_id=task.id,
+                attempt=1,
+                worker="w1",
+                started_at=datetime.now(UTC),
+                outcome=AttemptOutcome.TIMED_OUT,
+                failure_code="timeout",
+            )
+        )
+        session.commit()
+
+    cause, next_step = FAILURES[FailureCode.TIMEOUT]
+    shown = lakana_client.runs.get("dev", run.id)
+    (failed,) = shown.tasks
+    assert failed.failure is not None
+    assert (failed.failure.code, failed.failure.cause, failed.failure.next_step) == (
+        "timeout",
+        cause,
+        next_step,
+    )
+    assert failed.error_message == "timed out after 10 s"
+    assert shown.failed_tasks == 1
+    assert [r.failed_tasks for r in lakana_client.runs.list("dev")] == [1]
+    (attempt,) = lakana_client.runs.log("dev", run.id, "silver.clean").attempts
+    assert attempt.failure is not None and attempt.failure.code == "timeout"

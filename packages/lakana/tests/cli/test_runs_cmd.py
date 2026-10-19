@@ -1723,3 +1723,157 @@ def test_a_run_whose_only_failure_is_a_kept_check_exits_1_with_the_message(
     out = " ".join(_plain(result.stdout).split())
     assert "lakana runs resume" in out and "on_failure: keep" in out
     assert "rolled back" not in out and "set back" not in out
+
+
+_TIMEOUT_FAILURE = {
+    "code": "timeout",
+    "cause": "The task ran longer than its time limit.",
+    "next_step": "Make the task faster, or raise its timeout in the project and deploy again.",
+}
+
+
+def _failed_with_a_code(asset: str = "a.b", **extra: object) -> dict[str, object]:
+    """Build a failed task body with the `timeout` failure.
+
+    Parameters
+    ----------
+    asset
+        Dotted name.
+    **extra
+        Fields to add or replace.
+
+    Returns
+    -------
+    dict
+        The task body.
+    """
+    return {**_task(asset, "failed"), "failure": _TIMEOUT_FAILURE, **extra}
+
+
+def test_runs_show_prints_the_code_the_cause_and_the_next_step_of_a_failed_task(
+    tmp_path: Path,
+) -> None:
+    """Under the table: the code, what happened, and what to do, for each failed task."""
+    api = FakeApi()
+    api.on(
+        "GET",
+        _RUN_PATH,
+        json=_run("failed", _failed_with_a_code(), _task("a.c", "upstream_failed", 0)),
+    )
+
+    shown = _plain(
+        invoke(make_state(tmp_path, api), "runs", "show", _ID, "--env", "dev", env=_CI).stdout
+    )
+
+    assert "a.b failed: timeout" in shown
+    assert "The task ran longer than its time limit." in shown
+    assert "Next: Make the task faster, or raise its timeout in the project and deploy again." in (
+        shown
+    )
+    assert "a.c" in shown and "failed: upstream_failed" not in shown
+
+
+def test_a_task_that_failed_before_the_codes_existed_shows_unknown(tmp_path: Path) -> None:
+    """The server sends `unknown` for such a task; the CLI shows it like any other code."""
+    unknown = {
+        "code": "unknown",
+        "cause": "This failure was recorded before failure codes existed.",
+        "next_step": "Read the detail and the task's log.",
+    }
+    api = FakeApi()
+    api.on("GET", _RUN_PATH, json=_run("failed", _failed_with_a_code(failure=unknown)))
+
+    shown = _plain(
+        invoke(make_state(tmp_path, api), "runs", "show", _ID, "--env", "dev", env=_CI).stdout
+    )
+
+    assert "a.b failed: unknown" in shown
+    assert "Next: Read the detail and the task's log." in shown
+
+
+def test_a_failed_task_without_a_failure_from_an_older_server_prints_no_block(
+    tmp_path: Path,
+) -> None:
+    """Nothing is made up: the error column is all there is."""
+    api = FakeApi()
+    api.on("GET", _RUN_PATH, json=_run("failed", _task("a.b", "failed")))
+
+    shown = _plain(
+        invoke(make_state(tmp_path, api), "runs", "show", _ID, "--env", "dev", env=_CI).stdout
+    )
+
+    assert "boom" in shown
+    assert "Next:" not in shown
+
+
+def test_run_prints_the_next_step_when_a_task_fails(tmp_path: Path) -> None:
+    """`lakana run` says so under the task's progress line, once, and again in the summary."""
+    api = FakeApi()
+    api.on("POST", "/api/v1/environments/dev/runs", status=202, json=_run("queued"))
+    _sequence(
+        api,
+        "GET",
+        _RUN_PATH,
+        [
+            _run("running", _task("a.b", "running")),
+            _run("failed", _failed_with_a_code()),
+        ],
+    )
+
+    result = invoke(make_state(tmp_path, api), "run", "analytics", "--env", "dev", env=_CI)
+
+    assert result.exit_code == 1
+    lines = _plain(result.stdout)
+    progress = (
+        "a.b failed attempt 1/3 2.0s failed: timeout. Next: Make the task faster, or raise its "
+        "timeout in the project and deploy again."
+    )
+    assert progress in lines
+
+
+def test_run_prints_no_next_step_for_a_task_that_will_try_again(tmp_path: Path) -> None:
+    """A retry is not the end of the task: no next step yet."""
+    api = FakeApi()
+    api.on("POST", "/api/v1/environments/dev/runs", status=202, json=_run("queued"))
+    retrying = {**_task("a.b", "pending"), "failure": _TIMEOUT_FAILURE}
+    _sequence(
+        api,
+        "GET",
+        _RUN_PATH,
+        [_run("running", retrying), _run("succeeded", _task("a.b", "succeeded"))],
+    )
+
+    result = invoke(make_state(tmp_path, api), "run", "analytics", "--env", "dev", env=_CI)
+
+    assert "Next:" not in result.stdout
+
+
+def test_a_failure_text_cannot_inject_terminal_controls_or_lines(tmp_path: Path) -> None:
+    """The server's sentences are untrusted text: escaped and on one line."""
+    hostile = {
+        "code": "internal\x1b[31m",
+        "cause": "line one\nline two\x07",
+        "next_step": "do this\x1b]0;title\x07",
+    }
+    api = FakeApi()
+    api.on("GET", _RUN_PATH, json=_run("failed", _failed_with_a_code(failure=hostile)))
+
+    shown = invoke(make_state(tmp_path, api), "runs", "show", _ID, "--env", "dev", env=_CI).stdout
+
+    assert "\x1b[31m" not in shown and "\x07" not in shown and "\x1b]" not in shown
+    assert "line one\\nline two" in shown
+
+
+def test_runs_show_json_keeps_the_failure_and_the_failed_task_count(tmp_path: Path) -> None:
+    """JSON output is the object as the server sent it."""
+    api = FakeApi()
+    api.on("GET", _RUN_PATH, json={**_run("failed", _failed_with_a_code()), "failed_tasks": 1})
+
+    shown = json.loads(
+        invoke(
+            make_state(tmp_path, api), "--output", "json", "runs", "show", _ID, "--env", "dev"
+        ).stdout
+    )
+
+    assert shown["failed_tasks"] == 1
+    assert shown["tasks"][0]["failure"] == _TIMEOUT_FAILURE

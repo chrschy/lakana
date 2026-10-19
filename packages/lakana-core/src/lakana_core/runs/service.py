@@ -71,6 +71,7 @@ from lakana_core.runs.checks import (
     CheckResultView,
     view_of,
 )
+from lakana_core.runs.failures import Failure, attempt_failure, task_failure
 from lakana_core.runs.kept import kept_tables
 from lakana_core.runs.selection import (
     ManifestGraph,
@@ -237,6 +238,9 @@ class TaskAttemptView:
         Rows written, for a successful write.
     error_message
         Why it failed, redacted.
+    failure
+        The code, cause and next step of a failed attempt; ``unknown`` for one recorded before
+        the codes existed; `None` for an attempt that did not fail.
     """
 
     attempt: int
@@ -246,6 +250,7 @@ class TaskAttemptView:
     outcome: str | None
     rows_written: int | None
     error_message: str | None
+    failure: Failure | None = None
 
 
 @dataclass(frozen=True)
@@ -272,7 +277,7 @@ class TaskRunView:
     finished_at
         Final state reached.
     error_message
-        Last failure.
+        Last failure: the free text, the detail of `failure`.
     query_run_id
         The M5a write that executed the last attempt.
     rows_written
@@ -292,6 +297,10 @@ class TaskRunView:
         Whether the task's worker was lost after it may have written its table (or its run was
         cancelled while it waited with rows no check had passed), so that its next claim only
         sets the table back. `False` once the task has ended, although the stored flag stays.
+    failure
+        Why the task failed, was cancelled or never ran: the code with its cause and next step.
+        `None` for a task with no error; ``unknown`` for a task that failed before the codes
+        existed.
     """
 
     asset: str
@@ -310,6 +319,7 @@ class TaskRunView:
     checks: tuple[CheckResultView, ...] = ()
     kept_check: bool | None = False
     setting_back: bool = False
+    failure: Failure | None = None
 
 
 @dataclass(frozen=True)
@@ -362,6 +372,9 @@ class RunView:
         How many earlier scheduled times this run stands in for.
     notifications
         The notifications the run queued, oldest first; empty in listings.
+    failed_tasks
+        How many of its tasks ended ``failed`` (not ``upstream_failed`` or ``cancelled``), also
+        in listings.
     """
 
     id: uuid.UUID
@@ -386,6 +399,7 @@ class RunView:
     scheduled_for: datetime | None = None
     missed: int = 0
     notifications: tuple[NotificationView, ...] = ()
+    failed_tasks: int = 0
 
 
 class PreparedStart(NamedTuple):
@@ -831,7 +845,31 @@ class RunService:
                 reasons[task.id] = reason
         return reasons
 
-    def _view(self, run: Run, env: Environment, *, with_tasks: bool) -> RunView:
+    def _failed_tasks(self, run_ids: Sequence[uuid.UUID]) -> dict[uuid.UUID, int]:
+        """Count the tasks that ended ``failed``, per run, in one query.
+
+        Parameters
+        ----------
+        run_ids
+            The runs.
+
+        Returns
+        -------
+        dict
+            Run id to the count; 0 for a run with none.
+        """
+        counts = dict.fromkeys(run_ids, 0)
+        for run_id, count in self._session.execute(
+            select(TaskRun.run_id, func.count())
+            .where(TaskRun.run_id.in_(run_ids), TaskRun.status == TaskStatus.FAILED)
+            .group_by(TaskRun.run_id)
+        ):
+            counts[run_id] = count
+        return counts
+
+    def _view(
+        self, run: Run, env: Environment, *, with_tasks: bool, failed: int | None = None
+    ) -> RunView:
         """Build a run's view.
 
         Parameters
@@ -842,6 +880,9 @@ class RunService:
             Its environment.
         with_tasks
             Include the task runs.
+        failed
+            The run's failed-task count when the caller counted a page of runs in one query;
+            counted here when `None`.
 
         Returns
         -------
@@ -920,6 +961,7 @@ class RunService:
                         else task.kind == SOURCE_CHECK and task.asset in built
                     ),
                     setting_back=task.setting_back and task.status not in TERMINAL_TASK_STATUSES,
+                    failure=task_failure(task),
                 )
                 for task, rows_written in rows
             )
@@ -946,6 +988,7 @@ class RunService:
             scheduled_for=run.scheduled_for,
             missed=run.missed,
             notifications=notifications,
+            failed_tasks=failed if failed is not None else self._failed_tasks([run.id])[run.id],
         )
 
     # -- start -------------------------------------------------------------
@@ -1790,7 +1833,9 @@ class RunService:
         next_cursor = None
         if len(runs) > limit:
             next_cursor = encode_cursor("runs", page[-1].created_at, page[-1].id)
-        return [self._view(run, env, with_tasks=False) for run in page], next_cursor
+        failed = self._failed_tasks([run.id for run in page])
+        views = [self._view(run, env, with_tasks=False, failed=failed[run.id]) for run in page]
+        return views, next_cursor
 
     # -- check results -------------------------------------------------------
 
@@ -2090,6 +2135,7 @@ class RunService:
                 outcome=a.outcome.value if a.outcome is not None else None,
                 rows_written=a.rows_written,
                 error_message=a.error_message,
+                failure=attempt_failure(a),
             )
             for a in self._session.scalars(
                 select(TaskAttempt)

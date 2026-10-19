@@ -127,6 +127,7 @@ from lakana_core.runs.checks import (
     set_back_failed_message,
     set_back_result_message,
 )
+from lakana_core.runs.failures import FailureCode
 from lakana_core.runs.scheduler import LOST_MESSAGE
 from lakana_core.runs.selection import Selection
 from lakana_core.runs.service import RunService
@@ -1116,6 +1117,7 @@ def test_a_first_write_of_zero_rows_counts_as_written(py: PyWorld) -> None:
 def test_success_without_a_write_is_a_permanent_failure(py: PyWorld) -> None:
     """The worker never trusts the record: it reads the table's snapshot itself."""
     task, message = _fails(py, py.engine(_forged))
+    assert task.failure_code == "build_failed"
     assert (task.status, task.attempt) == (TaskStatus.FAILED, 1)
     assert message.startswith(_NO_WRITE)
     attempt = _attempts(py.world, task.id)[0]
@@ -1130,6 +1132,7 @@ def test_a_forged_success_on_an_existing_table_is_a_permanent_failure(py: PyWorl
         scheduler_tick(session, datetime.now(UTC), lambda: 0.5)
     forging = py.engine(_forged)
     task, message = _fails(py, forging)
+    assert task.failure_code == "build_failed"
     assert task.status is TaskStatus.FAILED
     assert message.startswith(_NO_WRITE)
 
@@ -1138,28 +1141,47 @@ def test_a_forged_success_on_an_existing_table_is_a_permanent_failure(py: PyWorl
     ("outcome", "status", "attempt", "recorded"),
     [
         pytest.param(
-            RunOutcome(succeeded=False, error_message="ValueError: boom"),
+            RunOutcome(
+                succeeded=False,
+                error_message="ValueError: boom",
+                failure_code=FailureCode.BUILD_FAILED,
+            ),
             TaskStatus.PENDING,
             1,
             AttemptOutcome.FAILED,
             id="transient",
         ),
         pytest.param(
-            RunOutcome(succeeded=False, error_message="bad return", retryable=False),
+            RunOutcome(
+                succeeded=False,
+                error_message="bad return",
+                retryable=False,
+                failure_code=FailureCode.BUILD_FAILED,
+            ),
             TaskStatus.FAILED,
             1,
             AttemptOutcome.FAILED,
             id="not-retryable",
         ),
         pytest.param(
-            RunOutcome(succeeded=False, error_message="changed", conflict=True),
+            RunOutcome(
+                succeeded=False,
+                error_message="changed",
+                conflict=True,
+                failure_code=FailureCode.CONFLICT,
+            ),
             TaskStatus.PENDING,
             0,
             AttemptOutcome.FAILED,
             id="conflict-flag",
         ),
         pytest.param(
-            RunOutcome(succeeded=False, error_message="changed", error_type="Conflict"),
+            RunOutcome(
+                succeeded=False,
+                error_message="changed",
+                error_type="Conflict",
+                failure_code=FailureCode.BUILD_FAILED,
+            ),
             TaskStatus.PENDING,
             1,
             AttemptOutcome.FAILED,
@@ -1167,7 +1189,11 @@ def test_a_forged_success_on_an_existing_table_is_a_permanent_failure(py: PyWorl
         ),
         pytest.param(
             RunOutcome(
-                succeeded=False, error_message="timed out after 900s", killed=True, timed_out=True
+                succeeded=False,
+                error_message="timed out after 900s",
+                killed=True,
+                timed_out=True,
+                failure_code=FailureCode.TIMEOUT,
             ),
             TaskStatus.PENDING,
             1,
@@ -1182,6 +1208,7 @@ def test_a_forged_success_on_an_existing_table_is_a_permanent_failure(py: PyWorl
                 timed_out=True,
                 retryable=False,
                 conflict=True,
+                failure_code=FailureCode.TIMEOUT,
             ),
             TaskStatus.PENDING,
             1,
@@ -1193,6 +1220,7 @@ def test_a_forged_success_on_an_existing_table_is_a_permanent_failure(py: PyWorl
                 succeeded=False,
                 error_message="could not supervise the task process: system error",
                 killed=True,
+                failure_code=FailureCode.INTERNAL,
             ),
             TaskStatus.PENDING,
             1,
@@ -1211,6 +1239,8 @@ def test_failures_are_classified(
     assert (task.status, task.attempt) == (status, attempt)
     row = _attempts(py.world, claimed.task_run_id)[0]
     assert (row.outcome, row.error_message) == (recorded, outcome.error_message)
+    assert outcome.failure_code is not None
+    assert (task.failure_code, row.failure_code) == (outcome.failure_code.value,) * 2
     assert py.tokens()[0].revoked_at is not None
     assert py.leases[0].descriptor is None
 
@@ -1586,6 +1616,7 @@ def test_a_failing_serve_callback_does_not_abandon_the_task(
 def test_an_instance_that_cannot_run_python_fails_permanently(py: PyWorld) -> None:
     engine = py.engine(_forged, support=PythonSupport(server_url=None, uv="/usr/local/bin/uv"))
     task, message = _fails(py, engine)
+    assert task.failure_code == "no_runtime"
     assert task.status is TaskStatus.FAILED
     assert message == "this instance cannot run Python assets: LAKANA_RUN__SERVER_URL is not set"
     assert py.tokens() == [] and py.runner.tasks == []
@@ -1596,6 +1627,7 @@ def test_a_worker_without_a_python_runtime_fails_the_task_permanently(py: PyWorl
     claimed = py.claim_python(sql_only)
     run_claimed(_engine(py.world), claimed)
     task = _task(py.world, "gold.scores")
+    assert task.failure_code == "no_runtime"
     assert task.status is TaskStatus.FAILED
     message = _attempts(py.world, claimed.task_run_id)[0].error_message
     assert message == "this instance cannot run Python assets: this worker has no Python runtime"
@@ -1607,6 +1639,7 @@ def test_an_incompatible_lock_at_run_time_fails_permanently_and_says_to_redeploy
     """The platform was upgraded after the deploy."""
     py.deploy(_lock("999.0.0"))
     task, message = _fails(py, py.engine(_forged))
+    assert task.failure_code == "build_failed"
     assert (task.status, task.attempt) == (TaskStatus.FAILED, 1)
     running = package_version("lakana-worker")
     assert f"has lakana 999.0.0, but this instance runs {running}" in message
@@ -1623,6 +1656,7 @@ def test_a_lock_that_is_not_the_deployed_one_fails_permanently(py: PyWorld) -> N
         version.manifest_json = {**version.manifest_json, "lock_sha256": "f" * 64}
         session.commit()
     task, message = _fails(py, py.engine(_forged))
+    assert task.failure_code == "code_changed"
     assert task.status is TaskStatus.FAILED
     assert message == "uv.lock does not match the project version's lock_sha256; redeploy"
 
@@ -1630,6 +1664,7 @@ def test_a_lock_that_is_not_the_deployed_one_fails_permanently(py: PyWorld) -> N
 def test_deployed_code_without_a_lock_fails_permanently(py: PyWorld) -> None:
     py.deploy(code=_code(None))
     task, message = _fails(py, py.engine(_forged))
+    assert task.failure_code == "code_changed"
     assert task.status is TaskStatus.FAILED
     assert message == "the deployed code has no readable pyproject.toml and uv.lock; redeploy"
 
@@ -1638,6 +1673,7 @@ def test_a_pyproject_that_is_not_utf8_fails_permanently(py: PyWorld) -> None:
     lock = _lock()
     py.deploy(lock, code=_code(lock, pyproject=b"\xff\xfe[project]\n"))
     task, message = _fails(py, py.engine(_forged))
+    assert task.failure_code == "code_changed"
     assert task.status is TaskStatus.FAILED
     assert message == "the deployed code has no readable pyproject.toml and uv.lock; redeploy"
 
@@ -1655,6 +1691,7 @@ def test_an_asset_that_reads_its_own_missing_table_fails_permanently_and_says_wh
     py.deploy(inputs={"prev": "gold.scores"})
     engine = py.engine(_forged)
     task, message = _fails(py, engine)
+    assert task.failure_code == "build_failed"
     assert (task.status, task.attempt) == (TaskStatus.FAILED, 1)
     assert message == _SELF_INPUT_MESSAGE
     assert py.runner.tasks == [] and py.tokens() == []
@@ -1680,6 +1717,7 @@ def test_an_asset_that_reads_its_own_existing_table_runs(py: PyWorld) -> None:
 def test_an_unsafe_code_tarball_fails_permanently(py: PyWorld) -> None:
     py.deploy(code=_code(_lock(), with_link=True))
     task, message = _fails(py, py.engine(_forged))
+    assert task.failure_code == "code_changed"
     assert task.status is TaskStatus.FAILED
     assert "links and special files are not allowed" in message
     assert list((py.root / "work").iterdir()) == []
@@ -1693,6 +1731,7 @@ def test_a_machine_failure_while_unpacking_is_retried(
 
     monkeypatch.setattr(python_tasks_module, "unpack_code", full)
     task, message = _fails(py, py.engine(_forged))
+    assert task.failure_code == "internal"
     assert (task.status, task.attempt) == (TaskStatus.PENDING, 1)
     assert message == "could not unpack the code: No space left on device"
 
@@ -1712,6 +1751,7 @@ def test_a_failed_environment_build_is_retried_and_its_output_logged(py: PyWorld
     claimed = py.claim_python(engine)
     run_claimed(engine, claimed)
     task = _task(py.world, "gold.scores")
+    assert task.failure_code == "build_failed"
     assert (task.status, task.attempt) == (TaskStatus.PENDING, 1)
     row = _attempts(py.world, claimed.task_run_id)[0]
     assert row.error_message == "environment build failed: uv exited with status 2"
@@ -1731,6 +1771,7 @@ def test_an_unsafe_venv_cache_fails_permanently(py: PyWorld) -> None:
         raise VenvCacheUnsafe("environment build failed: the venv cache directory is not private")
 
     task, message = _fails(py, py.engine(_forged, acquire_venv=unsafe))
+    assert task.failure_code == "no_runtime"
     assert (task.status, task.attempt) == (TaskStatus.FAILED, 1)
     assert message == "environment build failed: the venv cache directory is not private"
 
@@ -1755,6 +1796,7 @@ def test_a_target_that_is_a_view_fails_permanently(py: PyWorld) -> None:
         "Drop or rename it, or give the asset another name and redeploy."
     )
     assert _task(world, "gold.scores").status is TaskStatus.FAILED
+    assert _task(world, "gold.scores").failure_code == "build_failed"
     assert py.tokens() == [] and py.runner.tasks == []
 
 
@@ -1818,6 +1860,7 @@ def test_a_malformed_asset_name_fails_permanently(py: PyWorld) -> None:
         FailureKind.PERMANENT,
         "the asset name 'nodots' is not a valid table name; rename the asset and redeploy",
     )
+    assert outcome.failure_code is FailureCode.CODE_CHANGED
 
 
 def test_an_attempt_superseded_before_the_token_is_minted_records_nothing(py: PyWorld) -> None:
@@ -2268,6 +2311,7 @@ def test_an_inactive_run_principal_fails_the_python_task_permanently(py: PyWorld
     assert _task(py.world, "gold.scores").status is TaskStatus.FAILED
     message = _attempts(py.world, claimed.task_run_id)[0].error_message
     assert message == "the run principal is deactivated or deleted"
+    assert _task(py.world, "gold.scores").failure_code == "permission_denied"
 
 
 def test_an_unbuilt_upstream_outside_the_selection_fails_the_python_task(py: PyWorld) -> None:
@@ -2275,6 +2319,7 @@ def test_an_unbuilt_upstream_outside_the_selection_fails_the_python_task(py: PyW
     _start(py.world, Selection(patterns=("gold.scores",)))
     run_claimed(engine, _claim(py.world))
     task = _task(py.world, "gold.scores")
+    assert task.failure_code == "upstream_missing"
     assert (task.status, task.error_message) == (
         TaskStatus.FAILED,
         "upstream table 'silver.clean' has not been built",
@@ -2303,6 +2348,7 @@ def test_a_permission_refusal_while_preparing_fails_permanently_and_says_so(py: 
     assert task.error_message is not None
     assert task.error_message.startswith("permission denied")
     assert "CREATE_NAMESPACE" in task.error_message
+    assert task.failure_code == "permission_denied"
     assert py.tokens() == [] and py.runner.tasks == []
 
 
@@ -2633,6 +2679,7 @@ def test_a_token_cap_below_the_timeout_fails_up_front_and_names_the_setting(py: 
     """A token that cannot outlive the task is never minted: no opaque 401 mid-run."""
     engine = py.engine(_forged, max_ttl_seconds=600, kill_grace=10.0)
     task, message = _fails(py, engine)
+    assert task.failure_code == "no_runtime"
     assert (task.status, task.attempt) == (TaskStatus.FAILED, 1)
     assert message == (
         "the task's token could not outlive the task: the asset's timeout (900 s) plus the "
@@ -2658,6 +2705,7 @@ def test_a_python_attempt_that_cannot_start_is_a_generic_transient_failure(
     monkeypatch.setattr(threading.Thread, "start", no_threads)
     run_claimed(engine, claimed)
     task = _task(py.world, "gold.scores")
+    assert task.failure_code == "internal"
     assert (task.status, task.attempt) == (TaskStatus.PENDING, 1)
     assert task.error_message == "internal error while running the task; see the worker log"
 
@@ -2674,6 +2722,7 @@ def test_a_failing_kind_lookup_is_a_generic_transient_failure(
     monkeypatch.setattr(tasks_module, "_is_python", explode)
     run_claimed(engine, claimed)
     task = _task(py.world, "gold.scores")
+    assert task.failure_code == "internal"
     assert (task.status, task.attempt) == (TaskStatus.PENDING, 1)
     assert task.error_message == "internal error while running the task; see the worker log"
     assert py.runner.tasks == []
@@ -2684,6 +2733,7 @@ def test_a_deployed_uv_toml_fails_permanently_and_says_to_move_the_settings(py: 
     lock = _lock()
     py.deploy(lock, code=_code(lock, extra=(("uv.toml", b"compile-bytecode = true\n"),)))
     task, message = _fails(py, py.engine(_forged))
+    assert task.failure_code == "build_failed"
     assert task.status is TaskStatus.FAILED
     assert "uv.toml" in message and "[tool.uv]" in message and "redeploy" in message
     assert py.leases == [] and py.tokens() == [] and py.runner.tasks == []
@@ -2964,6 +3014,7 @@ def test_an_artifact_input_without_a_version_fails_permanently_and_says_what_to_
         },
     )
     task, message = _fails(py, py.engine(_writer(py.world)))
+    assert task.failure_code == "upstream_missing"
     assert (task.status, task.attempt) == (TaskStatus.FAILED, 1)
     assert message == "models.churn has no version yet; run the asset that produces it"
     assert py.runner.tasks == []
@@ -3109,6 +3160,7 @@ def test_an_input_recorded_as_an_artifact_that_is_a_table_fails_permanently(py: 
         "the asset reads it as a table"
     )
     assert (task.status, task.attempt) == (TaskStatus.FAILED, 1)
+    assert task.failure_code == "code_changed"
     assert py.runner.tasks == []
 
 
@@ -3131,6 +3183,7 @@ def test_a_table_input_that_is_an_artifact_now_fails_permanently(py: PyWorld) ->
         "the asset receives a path"
     )
     assert (task.status, task.attempt) == (TaskStatus.FAILED, 1)
+    assert task.failure_code == "code_changed"
     assert py.runner.tasks == []
 
 
@@ -3150,6 +3203,7 @@ def test_an_artifact_name_taken_by_a_table_fails_permanently(py: PyWorld) -> Non
         "gold.scores`) or give the asset another name and redeploy."
     )
     assert (task.status, task.attempt) == (TaskStatus.FAILED, 1)
+    assert task.failure_code == "build_failed"
     assert py.runner.tasks == []
 
 
@@ -4054,6 +4108,7 @@ def test_a_lock_whose_index_is_no_longer_registered_fails_permanently_and_says_s
     py.deploy(_lock() + _TEAM_PACKAGE)
     task, message = _fails(py, py.engine(_forged))
     assert (task.status, task.attempt) == (TaskStatus.FAILED, 1)
+    assert task.failure_code == "build_failed"
     assert message == (
         "uv.lock: takes team-utils from the package index https://pkgs.example.org/simple, "
         "which is not registered on this instance. Ask an administrator to register it "
@@ -4357,6 +4412,7 @@ def test_an_unbound_index_secret_fails_the_build_for_good_with_the_bind_command(
     py.deploy(_lock() + _TEAM_PACKAGE)
     task, message = _fails(py, _with_key(py.engine(_forged, acquire_venv=_building)))
     assert (task.status, task.attempt) == (TaskStatus.FAILED, 1)
+    assert task.failure_code == "secret_refused"
     assert message == (
         "environment build failed: Secret 'team-index' of environment 'dev' is not bound to a "
         "use yet, so Lakana does not send it to package index 'team'. An administrator binds "
@@ -4372,6 +4428,7 @@ def test_a_removed_secret_fails_the_next_build_for_good(py: PyWorld) -> None:
     py.deploy(_lock() + _TEAM_PACKAGE)
     task, message = _fails(py, _with_key(py.engine(_forged, acquire_venv=_building)))
     assert (task.status, task.attempt) == (TaskStatus.FAILED, 1)
+    assert task.failure_code == "secret_refused"
     assert message == (
         "environment build failed: the package index 'team' needs the secret 'team-index' in "
         "environment 'dev', which does not exist. Create it with `lakana secret create "
@@ -6082,6 +6139,7 @@ def test_a_task_lost_after_its_write_is_set_back_by_a_claim_that_builds_nothing(
     task = _task(py.world, "gold.scores")
     assert (task.status, task.attempt, task.set_back_claims) == (TaskStatus.FAILED, 1, 1)
     assert task.error_message == f"{LOST_MESSAGE} {SET_BACK_DONE}"
+    assert task.failure_code == "worker_lost"
     assert _ids(py.world, "gold.scores") == [0]
     assert py.runner.tasks == [] and len(py.tokens()) == tokens_before
     (rolled,) = _rollbacks(py)
@@ -6114,6 +6172,7 @@ def test_a_task_lost_before_it_wrote_anything_changes_nothing(
         TaskStatus.FAILED,
         f"{LOST_MESSAGE} {SET_BACK_NOTHING}",
     )
+    assert task.failure_code == "worker_lost"
     assert _ids(py.world, "gold.scores") == [0]
     assert _rollbacks(py) == []
 
@@ -6202,6 +6261,7 @@ def test_a_commit_of_another_writer_after_the_tip_is_left_alone(
         TaskStatus.FAILED,
         f"{LOST_MESSAGE} {SET_BACK_CHANGED}",
     )
+    assert task.failure_code == "worker_lost"
     assert _ids(py.world, "gold.scores") == [0, 1, 7]
 
 
@@ -6224,6 +6284,7 @@ def test_a_refused_set_back_says_that_the_table_could_not_be_set_back(
         TaskStatus.FAILED,
         set_back_failed_message(LOST_MESSAGE),
     )
+    assert task.failure_code == "worker_lost"
     assert _ids(py.world, "gold.scores") == [0, 1]
 
 
@@ -6343,6 +6404,7 @@ def _stopped_for_memory_after_a_write(
             kind=kind,
             rand=lambda: 0.5,
             error_message=message,
+            failure_code=FailureCode.MEMORY,
             on_committed=COMMITTED_BEFORE_STOPPED_MESSAGE,
             stopped=True,
         )
@@ -6372,6 +6434,7 @@ def test_a_memory_stop_on_the_last_attempt_after_a_write_is_set_back_by_the_next
     task = _task(py.world, "gold.scores")
     assert (task.status, task.attempt, task.set_back_claims) == (TaskStatus.FAILED, 1, 1)
     assert task.error_message == f"{message} {SET_BACK_DONE}"
+    assert task.failure_code == "memory"
     assert _ids(py.world, "gold.scores") == [0]
     assert [r["outcome"] for r in _rollbacks(py)] == ["rolled_back"]
 
@@ -6552,6 +6615,7 @@ def test_a_table_that_is_not_managed_any_more_has_nothing_to_set_back(
         TaskStatus.FAILED,
         f"{LOST_MESSAGE} {SET_BACK_NOTHING}",
     )
+    assert task.failure_code == "worker_lost"
 
 
 @pytest.mark.parametrize(
@@ -6590,7 +6654,7 @@ def test_a_set_back_that_cannot_be_prepared_ends_the_task_saying_so(
 
     def broken(*args: object) -> object:
         if failure == "task":
-            raise TaskFailure(FailureKind.PERMANENT, "the run is gone")
+            raise TaskFailure(FailureKind.PERMANENT, "the run is gone", FailureCode.NOT_FOUND)
         raise RuntimeError("boom")
 
     monkeypatch.setattr(task_checks_module, "_table_now", broken)
@@ -6602,6 +6666,7 @@ def test_a_set_back_that_cannot_be_prepared_ends_the_task_saying_so(
         TaskStatus.FAILED,
         set_back_failed_message(LOST_MESSAGE),
     )
+    assert task.failure_code == "worker_lost"
 
 
 def test_a_drain_noticed_while_the_catalog_refuses_releases_the_claim(
@@ -6657,3 +6722,4 @@ def test_a_task_with_neither_stamp_nor_baseline_has_nothing_to_set_back(
         TaskStatus.FAILED,
         f"{LOST_MESSAGE} {SET_BACK_NOTHING}",
     )
+    assert task.failure_code == "worker_lost"

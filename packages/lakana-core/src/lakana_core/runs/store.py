@@ -129,6 +129,7 @@ from lakana_core.models import (
 )
 from lakana_core.models.run import ACTIVE_RUN_STATUSES, TERMINAL_TASK_STATUSES
 from lakana_core.notifications.events import queue_notification
+from lakana_core.runs.failures import FailureCode
 from lakana_core.runs.scheduler import (
     COMMITTED_BEFORE_LOST_MESSAGE,
     RunSnapshot,
@@ -463,6 +464,8 @@ def _apply_task(session: Session, transition: TaskTransition, now: datetime) -> 
         values["next_attempt_at"] = transition.next_attempt_at
     if transition.error_message is not None:
         values["error_message"] = transition.error_message
+    if transition.failure_code is not None:
+        values["failure_code"] = transition.failure_code.value
     if transition.ready_at is not None:
         values["ready_at"] = transition.ready_at
     if transition.setting_back:
@@ -470,6 +473,7 @@ def _apply_task(session: Session, transition: TaskTransition, now: datetime) -> 
         # The reason the next worker ends the task with is its own: a lost worker, or the cancel.
         # Whatever an earlier attempt stored is not it (a hand-back stores the stop's text).
         values["error_message"] = transition.error_message
+        values["failure_code"] = None
     if transition.terminal:
         values["finished_at"] = now
     committed = transition.lost and transition.status is TaskStatus.SUCCEEDED
@@ -529,6 +533,7 @@ def _apply_task(session: Session, transition: TaskTransition, now: datetime) -> 
             "outcome": AttemptOutcome.LOST,
             "finished_at": now,
             "error_message": LEASE_EXPIRED_MESSAGE,
+            "failure_code": FailureCode.WORKER_LOST.value,
         }
         if committed:
             outcome = {

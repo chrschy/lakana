@@ -14,6 +14,9 @@ A query waits in the state `QUEUED` until a worker takes it. A task of a run wai
 out when you ask; it is not stored, and the numbers in it are a good estimate, not a promise (see
 [The numbers are estimates](#the-numbers-are-estimates)).
 
+A task that failed instead has a failure code and a next step: see
+[Why did it fail?](../reference/why-did-it-fail.md).
+
 ## Where you see the reason
 
 | You run | The reason appears as |
@@ -87,7 +90,7 @@ A task of a running run shows its reason. A ready task that is setting its table
 | Code | The sentence | What to do |
 |---|---|---|
 | `upstream` | `Waiting for upstream tasks: a, b.` At most five names, then `and 3 more`. | Nothing: the task starts when those tasks have succeeded. Follow them with `lakana runs show RUN_ID --env ENV`. A task behind a failed upstream task shows no reason, and becomes `upstream_failed`. |
-| `retry` | `Attempt 1 of 3 failed; the next one starts at 12:00:30 UTC.` | The task failed and tries again at that time. To see why it failed, read its log with `lakana runs logs RUN_ID --task ASSET --env ENV`. If it fails every time, fix the cause and deploy again. |
+| `retry` | `Attempt 1 of 3 failed; the next one starts at 12:00:30 UTC.` | The task failed and tries again at that time. To see why it failed, read its failure code with `lakana runs show RUN_ID --env ENV` ([Why did it fail?](../reference/why-did-it-fail.md)) and its log with `lakana runs logs RUN_ID --task ASSET --env ENV`. If it fails every time, fix the cause and deploy again. |
 | `retry` | `The table is built; its checks could not finish and run again at 12:00:30 UTC.` | The run wrote this table, but the task could not finish checking it (a worker was lost, or a check hit a transient error). It runs its checks again at that time; the table is not built again. If it never gets through, read the task's log; `lakana runs cancel RUN_ID --env ENV` ends it, after the next free worker has set the table back (the reason is then `setting_back`). |
 | `no_worker` | `No worker is running, so this task cannot start. Ask the operator to start a worker; on a local instance, start it again with 'lakana server start --local'.` | As for a query. |
 | `no_worker_of_kind` | `No worker that takes pipeline work is running (2 workers take interactive work only), so this task cannot start. Ask the operator to start a worker with LAKANA_WORKER__TAKES=pipeline or all.` | Workers are running, but none of them takes pipeline work, and a task is pipeline work. Tell the operator, as for a query: they start a worker with `LAKANA_WORKER__TAKES=pipeline` or `all`. |
