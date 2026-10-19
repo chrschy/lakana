@@ -914,6 +914,8 @@ def _compose_filter() -> re.Pattern[str]:
         "uv.lock",
         "packages/lakana/pyproject.toml",
         "scripts/compose_smoke_test.sh",
+        "docs/examples/compose-add-environment.sh",
+        "docs/examples/compose-restore.sh",
         ".github/workflows/ci.yml",
     ],
 )
@@ -931,6 +933,7 @@ def test_the_compose_smoke_test_runs_for_any_source_change(path: str) -> None:
         "packages/lakana-server/tests/test_app.py",
         "scripts/docs_only.py",
         "scripts/tests/test_workflows.py",
+        "docs/examples/getting-started/run.sh",
     ],
 )
 def test_the_compose_smoke_test_ignores_what_cannot_change_the_images(path: str) -> None:
