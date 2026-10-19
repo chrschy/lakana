@@ -20,6 +20,7 @@ from test_query_process import _child, _rows
 from test_runners import Harness, _alive
 
 from lakana_core.config import QueryLimitsConfig, parse_memory_limit
+from lakana_core.runs.failures import FailureCode
 from lakana_worker import memory
 from lakana_worker.activity import Activity, TaskClaim
 from lakana_worker.executor import OutOfMemoryQuery, execute_query
@@ -1390,7 +1391,10 @@ def test_a_growing_task_is_ended_alone_while_the_worker_and_a_query_live_on(tmp_
                 "write({'status': 'succeeded', 'snapshot_id': 1, 'rows': 1})\n"
             )
             assert outcome == RunOutcome(
-                succeeded=False, error_message=memory.task_ended_message(LIMIT), killed=True
+                succeeded=False,
+                error_message=memory.task_ended_message(LIMIT),
+                killed=True,
+                failure_code=FailureCode.MEMORY,
             )
             assert "reached the end" not in harness.output()
             assert worker_stops == []

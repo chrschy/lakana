@@ -119,6 +119,7 @@ def test_a_failing_keep_check_fails_the_task_and_keeps_the_table(world: World) -
         f"{_unique_rows(run_id)}"
         "The table keeps this run's data (`on_failure: keep`)"
     )
+    assert task.failure_code == "check_blocked"
     (result,) = results
     assert (result.outcome, result.on_failure, result.rollback_outcome) == (
         CheckOutcome.FAILED,
@@ -141,6 +142,7 @@ def test_a_keep_check_that_cannot_run_stops_the_task(world: World) -> None:
 
     task = _task(world, "silver.orders")
     assert task.status is TaskStatus.FAILED
+    assert task.failure_code == "check_error"
     (result,) = _results(world, task.id)
     assert (result.outcome, result.on_failure, result.rollback_outcome) == (
         CheckOutcome.ERRORED,

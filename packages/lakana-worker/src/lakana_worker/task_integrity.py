@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from lakana_core.errors import NotFoundError, ValidationError
 from lakana_core.models import Environment, JobVersion
 from lakana_core.projects.manifest import MANIFEST_VERSION
+from lakana_core.runs.failures import FailureCode
 from lakana_core.runs.tasks import FailureKind
 from lakana_core.secrets.keys import KeyProvider
 from lakana_core.storage.resolver import StorageResolver
@@ -95,4 +96,5 @@ def check_manifest_version(manifest: Mapping[str, object]) -> None:
         f"the project version's manifest has version {ascii(declared)[:30]}, but this worker "
         f"understands versions 1 to {MANIFEST_VERSION}; update the worker to the platform "
         "version that deployed it, or redeploy with this worker's version",
+        FailureCode.NO_RUNTIME,
     )

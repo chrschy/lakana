@@ -64,6 +64,7 @@ from lakana_core.config import DEFAULT_WORKER_MEMORY, MIN_WORKER_MEMORY, parse_m
 from lakana_core.db import db_now
 from lakana_core.identifiers import shown
 from lakana_core.models import QueryRun, QueryRunStatus
+from lakana_core.runs.failures import FailureCode
 from lakana_core.runs.scheduler import COMMITTED_BEFORE_STOPPED_MESSAGE
 from lakana_core.runs.store import committed_write
 from lakana_core.runs.tasks import FailureKind, record_attempt
@@ -1207,6 +1208,7 @@ def record_memory_failure(
                 kind=FailureKind.PERMANENT if certain and not was_ended else FailureKind.TRANSIENT,
                 rand=rand,
                 error_message=task_ended_message(limit) if was_ended else task_message(limit),
+                failure_code=FailureCode.MEMORY,
                 on_committed=COMMITTED_BEFORE_STOPPED_MESSAGE,
                 stopped=True,
             )

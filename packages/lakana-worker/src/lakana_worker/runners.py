@@ -39,6 +39,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
+from lakana_core.runs.failures import FailureCode
 from lakana_worker.git import HFS_IGNORABLE, fold_name
 from lakana_worker.processes import (
     OutputRedactor,
@@ -93,6 +94,16 @@ class StopReason(enum.StrEnum):
     LEASE_LOST = "lease lost"
     DRAIN = "worker draining"
     MEMORY = "memory limit"
+
+
+_STOP_CODES: Mapping[StopReason | None, FailureCode] = {
+    StopReason.CANCELLED: FailureCode.CANCELLED,
+    StopReason.LEASE_LOST: FailureCode.WORKER_LOST,
+    StopReason.DRAIN: FailureCode.WORKER_LOST,
+    StopReason.MEMORY: FailureCode.MEMORY,
+}
+"""The failure code of a process the supervisor stopped, by why; a stop for no reason is
+``internal``."""
 
 
 class StopSignal:
@@ -222,6 +233,8 @@ class RunOutcome:
         upload lost a compare-and-swap on the table's snapshot, or an artifact
         upload was refused with a conflict. The only conflict signal;
         `error_type` is never consulted.
+    failure_code
+        Why the process failed; `None` for a success. Every failure sets one.
     """
 
     succeeded: bool
@@ -233,6 +246,7 @@ class RunOutcome:
     error_type: str | None = None
     retryable: bool = True
     conflict: bool = False
+    failure_code: FailureCode | None = None
 
 
 class Runner(Protocol):
@@ -530,12 +544,23 @@ def _outcome_from(
             error_message=f"timed out after {_seconds(timeout_seconds)}",
             killed=True,
             timed_out=True,
+            failure_code=FailureCode.TIMEOUT,
         )
     if memory_detail is not None:
-        return RunOutcome(succeeded=False, error_message=memory_detail, killed=True)
+        return RunOutcome(
+            succeeded=False,
+            error_message=memory_detail,
+            killed=True,
+            failure_code=FailureCode.MEMORY,
+        )
     if stopped:
         reason = stop.reason.value if stop.reason is not None else "stopped"
-        return RunOutcome(succeeded=False, error_message=f"stopped: {reason}", killed=True)
+        return RunOutcome(
+            succeeded=False,
+            error_message=f"stopped: {reason}",
+            killed=True,
+            failure_code=_STOP_CODES.get(stop.reason, FailureCode.INTERNAL),
+        )
     if record is not None and record["status"] == "failed":
         kind = record.get("error_type")
         message = _clean(str(record["message"]), secrets_to_hide, MAX_ERROR_MESSAGE_CHARS)
@@ -549,16 +574,27 @@ def _outcome_from(
             ),
             retryable=record.get("retryable") is not False,
             conflict=record.get("conflict") is True,
+            failure_code=(
+                FailureCode.CONFLICT if record.get("conflict") is True else FailureCode.BUILD_FAILED
+            ),
         )
     if code < 0:
         return RunOutcome(
-            succeeded=False, error_message=f"the task process was killed by signal {-code}"
+            succeeded=False,
+            error_message=f"the task process was killed by signal {-code}",
+            failure_code=FailureCode.BUILD_FAILED,
         )
     if code == _DESCRIPTION_REFUSED:
-        return RunOutcome(succeeded=False, error_message=_DESCRIPTION_MESSAGE, retryable=False)
+        return RunOutcome(
+            succeeded=False,
+            error_message=_DESCRIPTION_MESSAGE,
+            retryable=False,
+            failure_code=FailureCode.BUILD_FAILED,
+        )
     return RunOutcome(
         succeeded=False,
         error_message=f"the task process exited with status {code} without a result",
+        failure_code=FailureCode.BUILD_FAILED,
     )
 
 
@@ -788,6 +824,7 @@ class LocalProcessRunner:
                 "harness would refuse; this is a worker defect: report it, with the worker's "
                 "version",
                 retryable=False,
+                failure_code=FailureCode.INTERNAL,
             )
         home, tmp = task.attempt_dir / "home", task.attempt_dir / "tmp"
         result_path = task.attempt_dir / RESULT_FILE
@@ -797,6 +834,7 @@ class LocalProcessRunner:
                 error_message="could not prepare the task directory: the attempt directory "
                 "is not private (it must exist, be owned by the worker and have no group "
                 "or other access)",
+                failure_code=FailureCode.INTERNAL,
             )
         try:
             home.mkdir(mode=0o700, exist_ok=True)
@@ -808,9 +846,15 @@ class LocalProcessRunner:
             return RunOutcome(
                 succeeded=False,
                 error_message=f"could not prepare the task directory: {exc.strerror or exc}",
+                failure_code=FailureCode.INTERNAL,
             )
         if not _has_module(task.venv, self._module):
-            return RunOutcome(succeeded=False, error_message=_NO_SDK, retryable=False)
+            return RunOutcome(
+                succeeded=False,
+                error_message=_NO_SDK,
+                retryable=False,
+                failure_code=FailureCode.BUILD_FAILED,
+            )
         secrets_to_hide = token_secrets(task.token)
         document = json.dumps(
             {
@@ -847,7 +891,9 @@ class LocalProcessRunner:
         except (OSError, ValueError) as exc:
             reason = getattr(exc, "strerror", None) or exc
             return RunOutcome(
-                succeeded=False, error_message=f"could not start the task process: {reason}"
+                succeeded=False,
+                error_message=f"could not start the task process: {reason}",
+                failure_code=FailureCode.INTERNAL,
             )
         running = RunningTask(process, stop, task.table, task.task_run_id)
         self._registry.add(running)
@@ -934,6 +980,7 @@ class LocalProcessRunner:
                 succeeded=False,
                 error_message=f"could not supervise the task process: {supervise_error}",
                 killed=True,
+                failure_code=FailureCode.INTERNAL,
             )
         outcome = _outcome_from(
             _read_record(result_path, task.output),
@@ -951,6 +998,7 @@ class LocalProcessRunner:
                 error_message="the log sink failed",
                 killed=sink_killed,
                 retryable=False,
+                failure_code=FailureCode.INTERNAL,
             )
         return outcome
 

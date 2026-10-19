@@ -31,7 +31,7 @@ class FailureCode(enum.StrEnum):
     """The task's code, or the Python environment it needs, failed to run."""
     CODE_CHANGED = "code_changed"
     """The deployed code is missing or no longer matches what was deployed."""
-    SECRET_REFUSED = "secret_refused"
+    SECRET_REFUSED = "secret_refused"  # nosec B105 -- a failure code, not a credential
     """A package index refused the credential, or has none registered."""
     NO_RUNTIME = "no_runtime"
     """The worker cannot run this kind of task."""
