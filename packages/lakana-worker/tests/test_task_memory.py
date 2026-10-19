@@ -114,6 +114,7 @@ def _stopped_for_memory(
                     sql_text="SELECT 1",
                     status=QueryRunStatus.RUNNING,
                     task_run_id=task_run_id,
+                    worker_id="w1",
                     rows_written=committed if run_id == registered else None,
                 )
             )
@@ -145,9 +146,9 @@ def _stopped_for_memory(
     ):
         if unrelated_query:
             with activity.query(adhoc):
-                record_memory_failure(world.session, limit, lambda: 0.0, activity, peak=peak)
+                record_memory_failure(world.session, limit, lambda: 0.0, "w1", activity, peak=peak)
         else:
-            record_memory_failure(world.session, limit, lambda: 0.0, activity, peak=peak)
+            record_memory_failure(world.session, limit, lambda: 0.0, "w1", activity, peak=peak)
     return claimed, registered, unregistered, adhoc if unrelated_query else None
 
 
@@ -193,8 +194,45 @@ def test_a_worker_stopped_for_memory_fails_its_task_and_every_query_run_of_it(
     from lakana_worker.memory import Limit, record_memory_failure
 
     before = _task(world, claimed.asset)
-    record_memory_failure(world.session, Limit(1, "x", "x"), lambda: 0.0, Activity())
+    record_memory_failure(world.session, Limit(1, "x", "x"), lambda: 0.0, "w1", Activity())
     assert _task(world, claimed.asset).error_message == before.error_message
+
+
+def test_another_workers_running_write_run_is_not_touched_by_a_stop(world: World) -> None:
+    """#171: an entry kept after its thread left cannot fail a run another worker holds.
+
+    The task run was claimed again by another worker, whose write run is `RUNNING` under the
+    same `task_run_id`; the stale claim and a stale query id still sit in this worker's registry.
+    """
+    from lakana_worker.activity import Activity, TaskClaim
+    from lakana_worker.memory import Limit, record_memory_failure
+
+    _start(world)
+    claimed = _claim(world)
+    theirs_by_task, theirs_by_id = uuid.uuid4(), uuid.uuid4()
+    with world.session() as session:
+        env = session.scalars(select(Environment)).one()
+        for run_id, task_run_id in ((theirs_by_task, claimed.task_run_id), (theirs_by_id, None)):
+            session.add(
+                QueryRun(
+                    id=run_id,
+                    environment_id=env.id,
+                    principal_id=world.admin.id,
+                    sql_text="SELECT 1",
+                    status=QueryRunStatus.RUNNING,
+                    task_run_id=task_run_id,
+                    worker_id="other-worker",
+                )
+            )
+        session.commit()
+    activity = Activity()
+    with (
+        activity.task(TaskClaim(claimed.task_run_id, "w1", claimed.claim)),
+        activity.query(theirs_by_id),
+    ):
+        record_memory_failure(world.session, Limit(1, "1B", "x"), lambda: 0.0, "w1", activity)
+    for run_id in (theirs_by_task, theirs_by_id):
+        assert _run_status(world, run_id) == (QueryRunStatus.RUNNING, None)
 
 
 @pytest.mark.parametrize("rows", [0, 3])
@@ -290,6 +328,7 @@ def _add_query_run(
                 principal_id=world.admin.id,
                 sql_text="SELECT 1",
                 status=status,
+                worker_id="w1",
             )
         )
         session.commit()
@@ -366,7 +405,7 @@ def _watchdog_over_twice(
 
     monkeypatch.setattr(memory, "stop_largest_consumer", stop_largest_consumer)
     monkeypatch.setattr(memory, "stop_worker", stop_worker)
-    dog = memory.start_watchdog("4GB", world.session, lambda: 0.0, "linux")
+    dog = memory.start_watchdog("4GB", world.session, lambda: 0.0, "w1", "linux")
     assert dog is not None
     return dog, stops
 
@@ -602,7 +641,7 @@ def test_a_task_the_watchdog_ended_that_is_still_in_flight_is_recorded_once_as_t
     )
     with activity.task(claim):
         memory_module.record_memory_failure(
-            world.session, limit, lambda: 0.0, activity, earlier_tasks=(claim,)
+            world.session, limit, lambda: 0.0, "w1", activity, earlier_tasks=(claim,)
         )
     assert writes == [True]
     task = _task(world, claimed.asset)
@@ -698,7 +737,7 @@ def test_a_task_ended_by_an_earlier_check_does_not_count_against_a_later_lone_ta
     monkeypatch.setattr(
         memory_module, "stop_worker", lambda total, limit, **steps: steps["record"]()
     )
-    dog = memory_module.start_watchdog("4GB", world.session, lambda: 0.0, "linux")
+    dog = memory_module.start_watchdog("4GB", world.session, lambda: 0.0, "w1", "linux")
     assert dog is not None
     with ACTIVITY.task(stale):
         assert dog.check_once() is True  # ends the first task; the worker goes on
@@ -735,6 +774,7 @@ def test_a_run_the_executor_already_finished_is_not_touched_by_the_earlier_snaps
         world.session,
         Limit(4 * 1024**3, "4GB", "x"),
         lambda: 0.0,
+        "w1",
         Activity(),
         earlier=(finished, running),
     )
@@ -774,7 +814,7 @@ def test_a_task_killed_by_the_watchdog_ends_with_the_memory_outcome_not_the_sign
 
     def dispatch(*args: object, **kwargs: object) -> TaskOutcome:
         ACTIVITY.stopping = True
-        record_memory_failure(world.session, Limit(4 * 1024**3, "4GB", "x"), lambda: 0.0)
+        record_memory_failure(world.session, Limit(4 * 1024**3, "4GB", "x"), lambda: 0.0, "w1")
         return _signal_outcome()
 
     monkeypatch.setattr(tasks_module, "_dispatch", dispatch)

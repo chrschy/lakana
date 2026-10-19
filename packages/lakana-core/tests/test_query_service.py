@@ -1268,6 +1268,62 @@ def test_a_capped_caller_sees_user_limit_with_their_numbers(
     }
 
 
+def test_a_principal_passed_by_after_a_lock_timeout_sees_the_lock_not_starting(
+    session: Session, principal: PrincipalRef, tmp_path: Path
+) -> None:
+    """#95: a worker is free, the claim lock timed out and the worker wrote the pass-by time."""
+    run = _queued(session, principal, tmp_path)
+    _alive_worker(session, "w1")
+    service = QueryService(session, AllowAllAuthorization())
+    first = service.waiting_for(run)
+    assert first is not None and first.code == "starting"
+
+    pools.pass_by(session, principal.id, 30)
+    reason = service.waiting_for(run)
+
+    assert reason is not None
+    body = reason.to_json()
+    assert (body["code"], body["workers"]) == ("lock_timeout", 1)
+    assert "lock that serialises the start of this user's queries" in str(body["message"])
+    assert reason.next_attempt_at is not None
+    assert reason.next_attempt_at > db_now(session)
+    stored = session.get(Principal, principal.id)
+    assert stored is not None
+    stored.query_passed_by_until = db_now(session) - timedelta(seconds=1)
+    session.commit()
+    ended = service.waiting_for(run)
+    assert ended is not None and ended.code == "starting"
+
+
+def test_the_user_limit_comes_before_the_pass_by(
+    session: Session, principal: PrincipalRef, tmp_path: Path
+) -> None:
+    """A reached limit is the truer reason while the pass-by time lasts."""
+    run = _queued(session, principal, tmp_path)
+    _alive_worker(session, "w1")
+    _alive_worker(session, "w2")
+    _running_query(session, run, principal, "w1")
+    pools.pass_by(session, principal.id, 30)
+    reason = QueryService(session, AllowAllAuthorization(), running_per_principal=1).waiting_for(
+        run
+    )
+    assert reason is not None and reason.code == "user_limit"
+
+
+def test_a_listing_shows_the_lock_for_a_principal_passed_by_and_starting_for_others(
+    session: Session, principal: PrincipalRef, tmp_path: Path
+) -> None:
+    """One extra statement for the listing, whatever the number of rows."""
+    env = _env(session, principal, tmp_path, "dev")
+    _alive_worker(session, "w")
+    mine = _add_run(session, env, principal, age=100)
+    pools.pass_by(session, principal.id, 30)
+    rows = QueryService(session, SUBMITTER).list_queries(principal, "dev")
+    reason = next(row.waiting_for for row in rows if row.id == mine.id)
+    assert reason is not None
+    assert (reason.code, reason.next_attempt_at is not None) == ("lock_timeout", True)
+
+
 def test_the_limit_under_auto_follows_the_alive_interactive_workers(
     session: Session, principal: PrincipalRef, tmp_path: Path
 ) -> None:
@@ -2061,7 +2117,7 @@ def test_a_listing_reads_the_running_counts_once(
     assert sum("count(" in s.lower() and "GROUP BY" in s for s in twenty) == 1
 
 
-def test_a_listing_of_maintenance_runs_only_reads_no_running_counts(
+def test_a_listing_of_maintenance_runs_only_reads_no_running_counts_and_no_pass_by_times(
     session: Session, principal: PrincipalRef, tmp_path: Path
 ) -> None:
     env = _env(session, principal, tmp_path, "dev")
@@ -2076,7 +2132,8 @@ def test_a_listing_of_maintenance_runs_only_reads_no_running_counts(
     for run in session.scalars(select(QueryRun).where(QueryRun.status == QueryRunStatus.QUEUED)):
         run.write_mode = WriteMode.MAINTAIN
     session.commit()
-    assert len(_statements(session, listing)) == adhoc - 1
+    # the grouped running count and the read of the principals passed by
+    assert len(_statements(session, listing)) == adhoc - 2
 
 
 def test_a_listing_names_no_worker_of_the_kind_for_each_kind_of_row(

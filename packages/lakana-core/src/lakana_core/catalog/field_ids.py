@@ -14,17 +14,18 @@ A commit through the catalog that adds a data file without field ids is refused
 
 from __future__ import annotations
 
+import io
 import logging
 import time
 from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
-from typing import TypeVar
+from typing import TypeVar, cast
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 from pyiceberg.avro.file import AvroFile
-from pyiceberg.io import FileIO, InputFile
+from pyiceberg.io import FileIO, InputFile, InputStream
 from pyiceberg.manifest import (
     DEFAULT_READ_VERSION,
     MANIFEST_ENTRY_SCHEMAS,
@@ -65,7 +66,7 @@ from pyiceberg.types import (
 )
 
 from lakana_core.errors import StorageUnavailableError, UnsupportedTableError, ValidationError
-from lakana_core.identifiers import shown
+from lakana_core.identifiers import shown, shown_path
 from lakana_core.query_rewrite import ReadField
 from lakana_core.storage.resolver import is_within_location
 
@@ -304,8 +305,12 @@ MAX_FOOTER_BYTES = 16 * 1024 * 1024
 """The largest Parquet footer the check reads; the trailer names its size before it is read."""
 
 MAX_MANIFEST_BYTES = 64 * 1024 * 1024
-"""The largest manifest or manifest list the check reads; pyiceberg reads such a file whole, so
-its size is checked, from storage, before it is opened."""
+"""The largest manifest or manifest list the check reads, the parent's included; pyiceberg
+reads such a file whole, so the check reads it itself, through a stream that stops at this many
+bytes plus one, and hands pyiceberg those bytes."""
+
+_READ_CHUNK = 1024 * 1024
+"""How much of a manifest one read asks for."""
 
 _clock = time.monotonic
 """The clock the deadline runs on; a test replaces it instead of waiting."""
@@ -329,8 +334,8 @@ _UNREADABLE_MANIFEST = (
     "applied. Write the manifests and the manifest list before the commit."
 )
 _MANIFEST_TOO_LARGE = (
-    "The commit's snapshot for `{table}` names `{file}`, a manifest file of {size:,} bytes, "
-    "which is larger than the 64 MiB Lakana reads, so nothing was applied. Split the "
+    "The commit's snapshot for `{table}` names `{file}`, a manifest file "
+    "larger than the 64 MiB Lakana reads, so nothing was applied. Split the "
     "commit into smaller ones, so that each manifest lists fewer data files."
 )
 _TOO_MANY_FILES = (
@@ -465,6 +470,75 @@ def _timed_out(table: str) -> str:
     return _TIMED_OUT.format(table=shown(table), seconds=CHECK_DEADLINE_SECONDS)
 
 
+class _HeldFile(InputFile):
+    """A file whose bytes the check has already read, in the form pyiceberg opens."""
+
+    def __init__(self, location: str, data: bytes) -> None:
+        super().__init__(location)
+        self._data = data
+
+    def __len__(self) -> int:
+        """Report the length of the bytes held.
+
+        Returns
+        -------
+        int
+            The number of bytes.
+        """
+        return len(self._data)
+
+    def exists(self) -> bool:
+        """Say that the file exists: its bytes are here.
+
+        Returns
+        -------
+        bool
+            Always `True`.
+        """
+        return True
+
+    def open(self, seekable: bool = True) -> InputStream:
+        """Open the bytes held.
+
+        Parameters
+        ----------
+        seekable
+            Ignored; the stream always seeks.
+
+        Returns
+        -------
+        InputStream
+            A stream over the bytes.
+        """
+        return cast(InputStream, io.BytesIO(self._data))
+
+
+def _read_bounded(input_file: InputFile) -> bytes | None:
+    """Read a file through a stream that stops one byte past `MAX_MANIFEST_BYTES`.
+
+    Parameters
+    ----------
+    input_file
+        The file in storage.
+
+    Returns
+    -------
+    bytes or None
+        The content, or `None` when it has more than `MAX_MANIFEST_BYTES` bytes (at most one
+        block past the limit was read).
+    """
+    chunks: list[bytes] = []
+    total = 0
+    with input_file.open(seekable=False) as stream:
+        while total <= MAX_MANIFEST_BYTES:
+            chunk = stream.read(min(_READ_CHUNK, MAX_MANIFEST_BYTES + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+    return None if total > MAX_MANIFEST_BYTES else b"".join(chunks)
+
+
 def _open_avro(
     file_io: FileIO,
     path: str,
@@ -472,11 +546,14 @@ def _open_avro(
     deadline: float,
     make: Callable[[InputFile], AvroFile[_Record]],
 ) -> AvroFile[_Record]:
-    """Open a manifest or a manifest list: check its size, then read it within the deadline.
+    """Open a manifest or a manifest list: read it within the size limit and the deadline.
 
     pyiceberg reads such a file whole when it is opened, and decodes it entry by entry
-    afterwards. The size is therefore checked before the open, and the open runs in its own
-    thread and is abandoned, like a footer read, when the deadline passes.
+    afterwards. The file is therefore read here, through a stream that stops at
+    `MAX_MANIFEST_BYTES` plus one byte (a size asked for in a separate request would let a
+    client that can write under the table's location swap the file in between), and pyiceberg
+    opens those bytes. The read runs in its own thread and is abandoned, like a footer read,
+    when the deadline passes.
 
     Parameters
     ----------
@@ -507,17 +584,12 @@ def _open_avro(
         raise ValidationError(_timed_out(table))
 
     def read() -> AvroFile[_Record]:
-        input_file = file_io.new_input(path)
-        size = len(input_file)
-        if size > MAX_MANIFEST_BYTES:
+        data = _read_bounded(file_io.new_input(path))
+        if data is None:
             raise ValidationError(
-                _MANIFEST_TOO_LARGE.format(
-                    table=shown(table),
-                    file=shown(path),
-                    size=size,
-                )
+                _MANIFEST_TOO_LARGE.format(table=shown(table), file=shown_path(path))
             )
-        return make(input_file)
+        return make(_HeldFile(path, data))
 
     pool = ThreadPoolExecutor(max_workers=1)
     try:
@@ -764,7 +836,7 @@ def check_added_files_have_field_ids(
         if data_file.file_format != FileFormat.PARQUET:
             raise ValidationError(
                 _NOT_PARQUET.format(
-                    file=shown(data_file.file_path),
+                    file=shown_path(data_file.file_path),
                     table=shown(table),
                     format=data_file.file_format.value,
                 )
@@ -784,13 +856,17 @@ def check_added_files_have_field_ids(
             if outcome == "unavailable":
                 raise StorageUnavailableError(_STORAGE_UNAVAILABLE.format(table=shown(table)))
             if outcome == "unreadable":
-                raise ValidationError(_UNREADABLE_FILE.format(file=shown(path), table=shown(table)))
+                raise ValidationError(
+                    _UNREADABLE_FILE.format(file=shown_path(path), table=shown(table))
+                )
             if outcome == "too_large":
                 raise ValidationError(
-                    _FOOTER_TOO_LARGE.format(file=shown(path), table=shown(table))
+                    _FOOTER_TOO_LARGE.format(file=shown_path(path), table=shown(table))
                 )
             if outcome == "no_ids":
-                raise ValidationError(_NO_FIELD_IDS.format(file=shown(path), table=shown(table)))
+                raise ValidationError(
+                    _NO_FIELD_IDS.format(file=shown_path(path), table=shown(table))
+                )
     finally:
         # A read that is stuck is not waited for: the commit is refused now.
         pool.shutdown(wait=False, cancel_futures=True)

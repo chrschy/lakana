@@ -8,10 +8,11 @@ import sys
 from importlib.metadata import entry_points
 from pathlib import Path
 
+import conftest
 import pytest
 import typer
 import typer.testing
-from conftest import FakeApi, make_state, write_profile_file
+from conftest import FakeApi, invoke, make_state, write_profile_file
 from typer.testing import CliRunner
 
 from lakana.cli import _profiles, _state
@@ -602,3 +603,27 @@ def test_confirm_shows_the_prompt_escaped(tmp_path: Path) -> None:
     with pytest.raises(CliError) as caught:
         confirm(make_state(tmp_path, FakeApi()), "Delete a\x1b[2Jb?", yes=False)
     assert "\x1b" not in str(caught.value) and "a\\x1b[2Jb" in str(caught.value)
+
+
+def test_the_shared_invoker_builds_the_app_once_for_any_number_of_invocations(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#101: Typer resolves every command's type hints each time it builds the click command.
+
+    `conftest.invoke` therefore builds one command per process; a test that needs a fresh app
+    (a changed registrar, say) builds its own with `build_app` and runs it itself.
+    """
+    built: list[int] = []
+    real = conftest.build_app
+
+    def counting() -> typer.Typer:
+        built.append(1)
+        return real()
+
+    monkeypatch.setattr(conftest, "build_app", counting)
+    first = invoke(make_state(tmp_path, FakeApi()), "--help")
+    second = invoke(make_state(tmp_path, FakeApi()), "--help")
+    third = invoke(make_state(tmp_path, FakeApi()), "whoami", "--help")
+
+    assert (first.exit_code, second.exit_code, third.exit_code) == (0, 0, 0)
+    assert len(built) <= 1

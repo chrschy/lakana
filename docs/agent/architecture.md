@@ -367,7 +367,7 @@ cap (`running_by_principal`), and the claim, `pipeline._start`, takes an advisor
 per principal (`pools.lock_principal`: key `CAP_LOCK_KEY` and 32 bits of the principal's id, bounded by
 `SET LOCAL lock_timeout`, `CAP_LOCK_TIMEOUT_SECONDS`) and then runs a start update that carries the
 count condition (`pools.under_cap`). A refused claim, by the condition or by the lock timeout,
-leaves the run `QUEUED` and says nothing; after a lock timeout the polling loop (`poller.PassedBy`) also passes that principal's ad-hoc runs by for 30 s. Counted: the principal's `RUNNING` interactive query runs,
+leaves the run `QUEUED` and says nothing; after a lock timeout the polling loop (`poller.PassedBy`) also passes that principal's ad-hoc runs by for 30 s, and writes that time to `principals.query_passed_by_until` (`pools.pass_by`, migration `0041`), which the wait reason reads (`lock_timeout`, #95), so that a status read names the lock instead of `starting`. Counted: the principal's `RUNNING` interactive query runs,
 in every environment. The wait reasons use the same resolution (`QueryService` reads
 `pools.cap_for`), and say `user_limit` only while a worker that takes interactive work is free.
 

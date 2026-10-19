@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import uuid
 from collections.abc import Iterable
+from datetime import datetime, timedelta
 from typing import Literal
 
 from sqlalchemy import (
@@ -23,12 +24,14 @@ from sqlalchemy import (
     or_,
     select,
     text,
+    update,
 )
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session, aliased
 from sqlalchemy.orm.util import AliasedClass
 
-from lakana_core.models import QueryRun, QueryRunStatus, WriteMode
+from lakana_core.db import db_now
+from lakana_core.models import Principal, QueryRun, QueryRunStatus, WriteMode
 
 ALL, INTERACTIVE, PIPELINE = "all", "interactive", "pipeline"
 """The values of `LAKANA_WORKER__TAKES`; the last two are also the two kinds of work."""
@@ -223,6 +226,97 @@ def running_count(session: Session, principal_id: uuid.UUID) -> int:
         The count, over every environment.
     """
     return int(session.execute(select(running_interactive(principal_id))).scalar_one())
+
+
+def running_and_passed_by(
+    session: Session, principal_id: uuid.UUID, now: datetime
+) -> tuple[int, datetime | None]:
+    """Read a principal's running ad-hoc queries and the time it is passed by until: one statement.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    principal_id
+        The principal.
+    now
+        The database's current time.
+
+    Returns
+    -------
+    tuple
+        The count (`running_count`) and `Principal.query_passed_by_until`, or `None` when none
+        is set or it is not after `now`.
+    """
+    until = (
+        select(Principal.query_passed_by_until)
+        .where(Principal.id == principal_id)
+        .scalar_subquery()
+    )
+    count, stored = session.execute(select(running_interactive(principal_id), until)).one()
+    return int(count), stored if stored is not None and stored > now else None
+
+
+def passed_by_until(
+    session: Session, principal_ids: Iterable[uuid.UUID], now: datetime
+) -> dict[uuid.UUID, datetime]:
+    """Read which of some principals are passed by now, and until when: one statement.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    principal_ids
+        The principals to ask about.
+    now
+        The database's current time.
+
+    Returns
+    -------
+    dict
+        The time per principal whose `query_passed_by_until` is after `now`; empty, with no
+        statement, for no principal.
+    """
+    ids = list(principal_ids)
+    if not ids:
+        return {}
+    rows = session.execute(
+        select(Principal.id, Principal.query_passed_by_until).where(
+            Principal.id.in_(ids),
+            Principal.query_passed_by_until.is_not(None),
+            Principal.query_passed_by_until > now,
+        )
+    )
+    return {who: until for who, until in rows if until is not None}
+
+
+def pass_by(session: Session, principal_id: uuid.UUID, seconds: float) -> None:
+    """Write the time until which workers pass a principal's ad-hoc queries by, and commit.
+
+    Called by a worker whose claim timed out on the principal's lock, so that the wait reason
+    (`waiting.LOCK_TIMEOUT`), which cannot see the worker's memory, can say so. The time is the
+    database's clock plus `seconds`. The principal's own `updated_at` is left as it is: this is
+    not a change of the principal.
+
+    Parameters
+    ----------
+    session
+        Database session; its transaction must be a fresh one (the claim was rolled back).
+    principal_id
+        The principal whose claim timed out.
+    seconds
+        How long the principal is passed by, from now.
+    """
+    session.execute(
+        update(Principal)
+        .where(Principal.id == principal_id)
+        .values(
+            query_passed_by_until=db_now(session) + timedelta(seconds=seconds),
+            updated_at=Principal.updated_at,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    session.commit()
 
 
 def running_by_principal(session: Session, at_least: int = 1) -> dict[uuid.UUID, int]:

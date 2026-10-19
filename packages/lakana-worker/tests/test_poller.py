@@ -9,6 +9,7 @@ from unittest import mock
 
 import pytest
 from sqlalchemy import delete, event, select, update
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from lakana_core.auth import AllowAllAuthorization, AuthorizationService, PrincipalRef
@@ -2168,6 +2169,102 @@ def test_after_a_cap_lock_timeout_the_principal_is_passed_by_for_30_seconds(
     clock.now += 1
     assert _poll_passing_by(session, passed_by) is True
     assert contended.tried == [first, theirs, first], "after 30 s A's query is tried again"
+
+
+def _passed_by_until(session: Session, principal_id: uuid.UUID) -> datetime | None:
+    """Read the time the database says a principal is passed by until.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    principal_id
+        The principal.
+
+    Returns
+    -------
+    datetime or None
+        `Principal.query_passed_by_until`.
+    """
+    session.expire_all()
+    return session.scalars(
+        select(Principal.query_passed_by_until).where(Principal.id == principal_id)
+    ).one()
+
+
+def test_a_cap_lock_timeout_writes_the_time_the_wait_reason_reads(
+    session: Session, dev: uuid.UUID, contended: _Contended
+) -> None:
+    """#95: the pass-by is also in the database, for 30 s by its clock; others have none."""
+    a, b = _person(session, "a"), _person(session, "b")
+    _queued(session, dev, a, age=10)
+    contended.principals.add(a)
+    before = db_now(session)
+
+    assert _poll_passing_by(session, poller.PassedBy(clock=_Clock())) is True
+
+    until = _passed_by_until(session, a)
+    assert until is not None
+    assert (
+        before + timedelta(seconds=poller.PASS_BY_SECONDS)
+        <= until
+        <= db_now(session) + timedelta(seconds=poller.PASS_BY_SECONDS)
+    )
+    assert _passed_by_until(session, b) is None
+
+
+def test_a_held_lock_ends_in_a_reason_that_names_it(
+    session: Session, dev: uuid.UUID, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#95 from end to end: the real claim times out on the lock, the real reason says so.
+
+    Another claim is simulated as holding the principal's lock (the Postgres lock itself is
+    not on SQLite): the query stays queued while a worker is free, and shows `lock_timeout`,
+    not `starting`.
+    """
+    a = _person(session, "a")
+    run_id = _queued(session, dev, a, age=10)
+    _workers(session, "interactive")
+    monkeypatch.setattr(poller.pools, "lock_principal", lambda inner, principal_id: False)
+    service = QueryService(session, AllowAllAuthorization())
+    run = session.get(QueryRun, run_id)
+    assert run is not None
+    before = service.waiting_for(run)
+    assert before is not None and before.code == "starting"
+
+    assert _poll_passing_by(session, poller.PassedBy(clock=_Clock())) is True
+
+    session.expire_all()
+    run = session.get(QueryRun, run_id)
+    assert run is not None and run.status is QueryRunStatus.QUEUED
+    reason = service.waiting_for(run)
+    assert reason is not None
+    assert reason.code == "lock_timeout"
+    assert "lock that serialises the start of this user's queries" in reason.message
+
+
+def test_a_pass_by_that_cannot_be_written_does_not_stop_the_loop(
+    session: Session,
+    dev: uuid.UUID,
+    contended: _Contended,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The worker still remembers the principal in memory; the reason just stays `starting`."""
+    a = _person(session, "a")
+    _queued(session, dev, a, age=10)
+    contended.principals.add(a)
+
+    def broken(*_args: object, **_kwargs: object) -> None:
+        raise OperationalError("UPDATE principals", {}, Exception("database is locked"))
+
+    monkeypatch.setattr(poller.pools, "pass_by", broken)
+    passed_by = poller.PassedBy(clock=_Clock())
+
+    assert _poll_passing_by(session, passed_by) is True
+    assert passed_by.active() == [a]
+    assert _passed_by_until(session, a) is None
+    assert "could not be recorded" in caplog.text
 
 
 def test_a_principal_that_timed_out_still_gets_its_pipeline_work_taken(

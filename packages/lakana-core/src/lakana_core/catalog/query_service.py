@@ -339,8 +339,10 @@ class QueryService:
         the workers and what they carry (queries, deploys, task leases), five, and: the count
         ahead (the query part by the index on `query_runs (status, created_at)`) when every
         worker of its kind is busy, 6; when one is free, for an interactive run with a
-        principal also the principal's running count, then the count ahead unless the limit is
-        reached, 7, or 6 when the limit is reached and decides. A run that is not capped
+        principal also the principal's running count (read in the same statement as the time
+        until which workers pass the principal by after a lock timeout, `lock_timeout`), then
+        the count ahead unless the limit is reached, 7, or 6 when the limit is reached and
+        decides. A run that is not capped
         (pipeline work, or without a principal) never reads the principal's count.
 
         The numbers are estimates: for up to a lease after a worker died it still counts as
@@ -373,15 +375,23 @@ class QueryService:
         snapshot = with_work(self._session, snapshot)
         counts = snapshot.for_query(kind)
         limit: UserLimit | None = None
+        passed_by: datetime | None = None
         if counts.free and kind == pools.INTERACTIVE and run.principal_id is not None:
+            running, passed_by = pools.running_and_passed_by(self._session, run.principal_id, now)
             limit = UserLimit(
-                pools.running_count(self._session, run.principal_id),
-                pools.cap_for(self._running_per_principal, snapshot.interactive()),
+                running, pools.cap_for(self._running_per_principal, snapshot.interactive())
             )
         ahead = 0
         if not settled_early(counts, limit):
             ahead = count_ahead(self._session, run.created_at, ahead_kind(snapshot, kind))
-        return query_wait_reason(counts, ahead, kind=kind, maintenance=maintenance, limit=limit)
+        return query_wait_reason(
+            counts,
+            ahead,
+            kind=kind,
+            maintenance=maintenance,
+            limit=limit,
+            passed_by_until=passed_by,
+        )
 
     def list_queries(
         self,
@@ -612,9 +622,10 @@ class QueryService:
 
         The workers and what they carry are read once; the principals at the limit once, as one
         grouped count, and only when a queued row is interactive, has a principal and a worker
-        that takes interactive work is free (the limit is said only then); the queued times once per
-        kind of queue the rows need (one while a worker takes `all`). A row of another principal
-        (a manager's listing) is not
+        that takes interactive work is free (the limit is said only then); the principals passed by
+        after a lock timeout, in one statement, under the same condition; the queued times once
+        per kind of queue the rows need (one while a worker takes `all`). A row of another
+        principal (a manager's listing) is not
         the caller's own: its reason carries the limit and never the number running.
 
         Parameters
@@ -647,6 +658,11 @@ class QueryService:
             and counts[pools.INTERACTIVE].free
         ]
         running = pools.running_by_principal(self._session, at_least=cap) if capped else {}
+        passed_by = (
+            pools.passed_by_until(self._session, {row.principal_id for row in capped}, now)
+            if capped
+            else {}
+        )
         limits = {
             row.id: UserLimit(
                 running.get(row.principal_id, 0), cap, own=row.principal_id == caller_id
@@ -668,6 +684,7 @@ class QueryService:
                 maintenance=row.write_mode is WriteMode.MAINTAIN,
                 limit=limits.get(row.id),
                 ahead_cap=MAX_AHEAD_COUNTED,
+                passed_by_until=passed_by.get(row.principal_id) if row.id in limits else None,
             )
             for row in queued
         }

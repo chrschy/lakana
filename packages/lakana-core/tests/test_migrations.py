@@ -3416,3 +3416,46 @@ def test_0040_adds_the_failure_codes(tmp_path: Path, monkeypatch: pytest.MonkeyP
             assert "failure_code" not in {c["name"] for c in inspector.get_columns(table)}
     finally:
         engine.dispose()
+
+
+_REVISION_0041 = "a0d7e3b6f2c8"
+
+
+def test_0041_adds_the_time_a_principal_is_passed_by_until(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revision `0041`: a nullable `query_passed_by_until` on `principals`, undone down.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    """
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, _REVISION_0040)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        names = {c["name"] for c in inspect(engine).get_columns("principals")}
+        assert "query_passed_by_until" not in names
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, _REVISION_0041)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        columns = {c["name"]: c for c in inspect(engine).get_columns("principals")}
+        assert columns["query_passed_by_until"]["nullable"]
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, _REVISION_0040)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        names = {c["name"] for c in inspect(engine).get_columns("principals")}
+        assert "query_passed_by_until" not in names
+    finally:
+        engine.dispose()

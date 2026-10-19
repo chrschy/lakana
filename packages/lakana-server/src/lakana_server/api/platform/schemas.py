@@ -330,14 +330,18 @@ class QueryStatusOut(BaseModel):
         (a run from before the field existed).
     waiting_for
         Why a `QUEUED` query has not started, or `null` for any other status: a stable `code`
-        (`no_worker`, `no_worker_of_kind`, `user_limit`, `starting` or `workers_busy`), one
+        (`no_worker`, `no_worker_of_kind`, `user_limit`, `lock_timeout`, `starting` or
+        `workers_busy`), one
         sentence in `message`, and the numbers the sentence uses. `workers` is the number of
         workers that take this kind of work and `ahead` the queued work those workers take
         before this query; both count the whole instance. `no_worker_of_kind` (workers are
         running and none takes this kind of work) carries `workers` (0) and `other_workers`.
         `user_limit` (the submitter already runs as many ad-hoc queries as the limit per user
         allows) carries `running`, the submitter's own number, and `limit`, and no `ahead`; a
-        manager who reads another principal's row gets `limit` only.
+        manager who reads another principal's row gets `limit` only. `lock_timeout` (a worker
+        waited too long for the lock that serialises the start of the submitter's queries, so
+        workers pass them by for a few seconds) carries `workers` and `next_attempt_at`, the end
+        of that time.
     """
 
     query_id: str

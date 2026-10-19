@@ -19,7 +19,9 @@ for a query. It claims a task only when no query and no deploy is queued and it 
 Busy and free are counted for one kind of work (`lakana_core.runs.pools`): a worker that does
 not take the kind is neither busy nor free for it. Two reasons exist only because of the kinds:
 `no_worker_of_kind` (workers are alive and none takes this kind) and `user_limit` (the
-submitter already runs as many ad-hoc queries as the cap allows).
+submitter already runs as many ad-hoc queries as the cap allows). A third, `lock_timeout`, comes
+from state in the database: a worker whose claim timed out on the submitter's lock writes a time
+until which workers pass that user's ad-hoc queries by (`pools.pass_by`).
 
 The codes are stable; the sentences may be reworded. The function cannot tell whether the
 instance is local or shared, so the `no_worker` sentence names both next steps.
@@ -53,6 +55,10 @@ NO_WORKER_OF_KIND = "no_worker_of_kind"
 """Workers are alive and none takes this kind of work."""
 USER_LIMIT = "user_limit"
 """The submitter runs as many ad-hoc queries as the limit per user allows."""
+LOCK_TIMEOUT = "lock_timeout"
+"""A worker is free, but the submitter is passed by for a few seconds: a worker waited too long
+for the lock that serialises the start of that user's queries (`Principal.query_passed_by_until`).
+"""
 UPSTREAM = "upstream"
 """A task waits for upstream tasks of its run."""
 RETRY = "retry"
@@ -178,8 +184,8 @@ class WaitReason:
     Parameters
     ----------
     code
-        `no_worker`, `no_worker_of_kind`, `user_limit`, `starting`, `workers_busy`, `upstream`,
-        `retry` or `setting_back`; for a job, `job_waits` or `no_run_principal`.
+        `no_worker`, `no_worker_of_kind`, `user_limit`, `lock_timeout`, `starting`, `workers_busy`,
+        `upstream`, `retry` or `setting_back`; for a job, `job_waits` or `no_run_principal`.
     message
         One plain sentence that names the cause and, where there is one, the next step.
     workers
@@ -197,7 +203,8 @@ class WaitReason:
     max_attempts
         Attempts allowed.
     next_attempt_at
-        When the next attempt may start, as stored (UTC).
+        When the next attempt may start, as stored (UTC); for `lock_timeout`, until when the
+        submitter is passed by.
     other_workers
         For `no_worker_of_kind`: the alive workers, all of which take only the other kind.
     running
@@ -524,15 +531,18 @@ def query_wait_reason(
     maintenance: bool = False,
     limit: UserLimit | None = None,
     ahead_cap: int | None = None,
+    passed_by_until: datetime | None = None,
 ) -> WaitReason:
     """Say why a `QUEUED` query run has not started, tested in this order.
 
     No worker alive; workers alive and none takes this kind; the principal is at or above the
     limit while a worker that takes this kind is free (the limit is then what holds the run;
     with every such worker busy the reason is `workers_busy`, as without a limit); a worker that
-    takes this kind is free (`starting`, whatever is ahead: the sentence then says how many
-    are); otherwise `workers_busy`. For up to a lease after a worker died, it
-    still counts as alive and, if it held a run, as busy; a draining worker counts as free.
+    takes this kind is free and the submitter is passed by after a lock timeout
+    (`lock_timeout`); a worker that takes this kind is free (`starting`, whatever is ahead: the
+    sentence then says how many are); otherwise `workers_busy`. For up to a lease after a worker
+    died, it still counts as alive and, if it held a run, as busy; a draining worker counts as
+    free.
 
     Parameters
     ----------
@@ -551,6 +561,10 @@ def query_wait_reason(
     ahead_cap
         For a listing that counted only up to a cap: when `ahead` is above it, the reason says
         "more than N" and `ahead` is N. `None` (the status read) counts exactly.
+    passed_by_until
+        The time, still in the future, until which workers pass the submitter's ad-hoc queries
+        by (`Principal.query_passed_by_until`), or `None`. It counts only while a worker that
+        takes this kind is free; with every such worker busy, `workers_busy` is the truth.
 
     Returns
     -------
@@ -567,6 +581,15 @@ def query_wait_reason(
         return _no_worker_of_kind(counts, kind, "maintenance run" if maintenance else "query")
     if limit is not None and limit.running >= limit.limit and counts.free > 0:
         return _user_limit(limit)
+    if passed_by_until is not None and counts.free > 0:
+        return WaitReason(
+            LOCK_TIMEOUT,
+            "A worker waited too long for the lock that serialises the start of this user's "
+            f"queries, so workers pass them by until {passed_by_until.astimezone(UTC):%H:%M:%S} "
+            "UTC. This query starts then, at the latest; nothing needs doing.",
+            workers=counts.taking,
+            next_attempt_at=passed_by_until,
+        )
     if ahead_cap is not None and ahead > ahead_cap:
         ahead = ahead_cap
         queue = f"more than {ahead_cap} queries or deploys are ahead of this one"

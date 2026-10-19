@@ -86,9 +86,10 @@ systemd-run --user --scope -q -p MemoryMax=6G -p MemorySwapMax=0 timeout 900 \
   and no more than four workers.
 - **Memory, Python 3.14: at most two workers, and `core = "ctrace"` stays.** On 3.14
   coverage.py's default core is `sysmon`, which keeps every code object the suite compiles
-  alive. The CLI tests compile about 1.7 million throwaway snippets (Typer resolves type hints
-  of a freshly built app on every `invoke`), so the serial run peaked at 4.8 GB and no parallel
-  run fitted (2026-10-10: `-n 2` killed under 6 GB, `-n 4` under 6 and 8 GB).
+  alive. The CLI tests compiled about 1.7 million throwaway snippets (Typer resolves type hints
+  of a freshly built app on every `invoke`; since #101 `tests/cli/conftest.py` builds one app per
+  process), so the serial run peaked at 4.8 GB and no parallel run fitted (2026-10-10: `-n 2`
+  killed under 6 GB, `-n 4` under 6 and 8 GB).
   `[tool.coverage.run] core = "ctrace"` in `pyproject.toml` selects the C tracer that 3.11 to
   3.13 use anyway. With it, measured 2026-10-11 under a 6 GB cap, coverage 100 % each time:
   serial 797 s / 1.9 GB; `-n 2` 397 s / 4.2 GB; `-n 3` 274 s / 5.0 GB; `-n 4` killed at 96 %.
@@ -104,6 +105,33 @@ systemd-run --user --scope -q -p MemoryMax=6G -p MemorySwapMax=0 timeout 900 \
   `-n 4 --dist loadfile` 139 s without and 185 s with `--cov --cov-report=json`; 10,818 tests
   passed, coverage 100 %, and `scripts/coverage_ratchet.py` accepts the merged report. Python
   3.11 at `-n 4`: 154 s, peak 4.77 GB.
+
+### The CLI tests share one app (#101)
+
+`invoke` in `packages/lakana/tests/cli/conftest.py` runs the CLI in-process. Typer turns an app
+into a click command, and resolves the type hints of every command while it does, on every
+call; with `from __future__ import annotations` each resolution compiles a snippet. `invoke`
+therefore builds the app and its command once per process (`functools.cache`) and hands the
+command to Typer's runner. Nothing reads state from the app between invocations: the state
+comes in through `obj`, the environment through `env`, and a command looks up what a test
+patches in its module when it runs. A test that needs an app of its own (a changed registrar,
+as `test_build_app_calls_every_registrar`) calls `build_app()` and runs it with its own
+`CliRunner`; none of the 2,343 tests needed that for `invoke`.
+
+Measured 2026-10-19, `packages/lakana/tests` alone, serial, in a 6 GB scope, with
+`/usr/bin/time -v` inside it (2,343 passed, 1 skipped). "Peak" is the `test memory` line of
+the run; "largest process" is `Maximum resident set size` of `time -v`:
+
+| Python | Coverage | Before: time | peak | largest process | After: time | peak | largest process |
+|---|---|---|---|---|---|---|---|
+| 3.14 | none | 58.5 s | 223 MB | 278 MB | 12.8 s | 205 MB | 263 MB |
+| 3.14 | `--cov` (ctrace) | 87.7 s | 229 MB | 298 MB | 17.4 s | 208 MB | 279 MB |
+| 3.13 | none | 58.0 s | 179 MB | 251 MB | 12.6 s | 168 MB | 233 MB |
+| 3.13 | `--cov` | 85.3 s | 178 MB | 247 MB | 17.3 s | 174 MB | 244 MB |
+
+The time falls to a fifth on both versions. The memory of this package alone was already low
+since `core = "ctrace"` (see "Memory, Python 3.14" above) and falls by about 5 %; the 3.14
+processes stay heavier than those of 3.13 by about 20 to 30 MB here.
 
 ## Pull requests that change documentation only
 

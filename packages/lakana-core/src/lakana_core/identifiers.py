@@ -23,6 +23,7 @@ NAMESPACE_SEPARATOR: Final[str] = "\x1f"
 _SECRET_NAME = re.compile(r"\A[^\x00-\x20\x7f:]{1,255}\Z")
 
 _SHOWN_CHARS = 200
+_SHOWN_TAIL_CHARS = 120
 
 
 NOTIFY_FORMATS = ("json", "slack", "teams")
@@ -63,6 +64,32 @@ def shown(path: object) -> str:
     if not isinstance(path, str):
         return type(path).__name__
     return ascii(path)[1:-1][:_SHOWN_CHARS]
+
+
+def shown_path(path: object) -> str:
+    """Make a storage path safe to put into a message, keeping the file's name.
+
+    Parameters
+    ----------
+    path
+        A storage URI or path, for example a data file's.
+
+    Returns
+    -------
+    str
+        The ASCII-escaped path when it has at most 200 characters. A longer one keeps its
+        start (the scheme and bucket) and its last component, cut from the front only when
+        that component alone has more than 120 characters, and loses the middle, marked by
+        ``…``. The type's name for anything that is not a string.
+    """
+    if not isinstance(path, str):
+        return type(path).__name__
+    text = ascii(path)[1:-1]
+    if len(text) <= _SHOWN_CHARS:
+        return text
+    slash = text.rfind("/")
+    tail = (text[slash:] if slash >= 0 else text)[-_SHOWN_TAIL_CHARS:]
+    return f"{text[: _SHOWN_CHARS - 1 - len(tail)]}…{tail}"
 
 
 def validate_path_component(component: str, *, what: str, allow_dots: bool = False) -> None:

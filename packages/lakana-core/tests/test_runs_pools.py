@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +13,7 @@ from sqlalchemy.orm import Session, aliased
 from sqlalchemy.sql import ClauseElement
 
 from lakana_core import config
+from lakana_core.db import db_now
 from lakana_core.models import (
     Environment,
     JobVersion,
@@ -39,6 +41,9 @@ from lakana_core.runs.pools import (
     is_pipeline,
     kind_of,
     lock_principal,
+    pass_by,
+    passed_by_until,
+    running_and_passed_by,
     running_by_principal,
     running_count,
     takes_kind,
@@ -519,3 +524,79 @@ def test_a_lock_timeout_is_a_refused_claim_and_any_other_failure_is_not() -> Non
     broken = OperationalError("SELECT 1", {}, Exception("connection reset"))
     with pytest.raises(OperationalError):
         lock_principal(_FailingLockSession(broken), uuid.uuid4())  # ty: ignore[invalid-argument-type]
+
+
+def _principal(session: Session, name: str) -> uuid.UUID:
+    """Insert a user.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    name
+        The user's name.
+
+    Returns
+    -------
+    uuid.UUID
+        The principal's id.
+    """
+    principal = Principal(id=uuid.uuid4(), type=PrincipalType.USER, name=name)
+    session.add(principal)
+    session.flush()
+    return principal.id
+
+
+def test_pass_by_writes_a_time_that_the_status_read_and_the_listing_see(session: Session) -> None:
+    """#95: the time is the database's now plus the seconds; only a future one is read."""
+    one, other, never = (_principal(session, n) for n in ("one", "other", "never"))
+    before = db_now(session)
+    pass_by(session, one, 30)
+    after = db_now(session)
+
+    count, until = running_and_passed_by(session, one, after)
+    assert count == 0 and until is not None
+    assert before + timedelta(seconds=30) <= until <= after + timedelta(seconds=30)
+    assert running_and_passed_by(session, other, after) == (0, None)
+    assert running_and_passed_by(session, one, until) == (0, None), "a time that is up is nothing"
+    assert passed_by_until(session, [one, other, never], after) == {one: until}
+    assert passed_by_until(session, [one], until) == {}
+    assert passed_by_until(session, [], after) == {}
+
+
+def test_pass_by_counts_the_running_queries_in_the_same_statement(
+    session: Session, environment_id: uuid.UUID
+) -> None:
+    """The status read pays no statement more for the time."""
+    who = _principal(session, "who")
+    session.add(
+        QueryRun(
+            id=uuid.uuid4(),
+            environment_id=environment_id,
+            principal_id=who,
+            sql_text="SELECT 1",
+            status=QueryRunStatus.RUNNING,
+        )
+    )
+    pass_by(session, who, 30)
+    seen: list[str] = []
+    event.listen(
+        session.get_bind(),
+        "before_cursor_execute",
+        lambda conn, cursor, statement, *rest: seen.append(statement),
+    )
+    count, until = running_and_passed_by(session, who, datetime.now(UTC))
+    assert (count, until is not None, len(seen)) == (1, True, 1)
+
+
+def test_pass_by_leaves_the_principals_update_time_alone(session: Session) -> None:
+    """A pass-by is not a change of the principal."""
+    who = _principal(session, "who")
+    stored = session.get(Principal, who)
+    assert stored is not None
+    stored.updated_at = datetime(2026, 1, 1, tzinfo=UTC)
+    session.commit()
+    pass_by(session, who, 30)
+    session.expire_all()
+    stored = session.get(Principal, who)
+    assert stored is not None and stored.updated_at == datetime(2026, 1, 1, tzinfo=UTC)

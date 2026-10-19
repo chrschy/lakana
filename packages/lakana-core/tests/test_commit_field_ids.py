@@ -13,6 +13,7 @@ import pyarrow.parquet as pq
 import pytest
 from core_test_helpers import _config
 from pyiceberg.avro.file import AvroFile
+from pyiceberg.io import FileIO, InputFile, OutputFile
 from pyiceberg.io.pyarrow import PyArrowFileIO
 from pyiceberg.manifest import (
     DataFile,
@@ -40,7 +41,7 @@ from lakana_core.auth import PrincipalRef
 from lakana_core.catalog import field_ids as field_ids_module
 from lakana_core.catalog.service import CatalogService, LoadedTable
 from lakana_core.errors import ConflictError, StorageUnavailableError, ValidationError
-from lakana_core.identifiers import NamespacePath, TableRef, shown
+from lakana_core.identifiers import NamespacePath, TableRef, shown_path
 from lakana_core.models import Table, WriteMode
 
 _SCHEMA = Schema(
@@ -325,8 +326,8 @@ def _no_field_ids(uri: str) -> str:
     Parameters
     ----------
     uri
-        The file; it appears as messages show it, escaped and cut at 200 characters, which
-        a long temporary directory (macOS's) reaches.
+        The file; it appears as messages show it, escaped and, when long, cut in the middle, which a
+        long temporary directory (macOS's) reaches.
 
     Returns
     -------
@@ -334,7 +335,7 @@ def _no_field_ids(uri: str) -> str:
         The message.
     """
     return (
-        f"The commit adds `{shown(uri)}` to `gold.sales`, which has no Iceberg field ids. "
+        f"The commit adds `{shown_path(uri)}` to `gold.sales`, which has no Iceberg field ids. "
         "Lakana reads Iceberg data by field id, as the Iceberg specification requires. Write "
         "the file with a client that sets field ids."
     )
@@ -356,6 +357,28 @@ def test_a_commit_that_adds_a_file_without_field_ids_is_refused_whole(
 
     assert str(caught.value) == _no_field_ids(uri)
     assert catalog.load_table(principal, ref).metadata_location == created.metadata_location
+
+
+def test_a_long_storage_root_keeps_the_file_name_in_the_refusal(
+    catalog: CatalogService, principal: PrincipalRef, tmp_path: Path
+) -> None:
+    """With a 300-character root the message stays short and still names the file."""
+    root = tmp_path.joinpath(*["r" * 100] * 3)
+    ref, created = _created(catalog, principal, root)
+    uri = _parquet(created, "plain-file-name.parquet", field_ids=False)
+    assert len(uri) > 300
+    transaction = StaticTable.from_metadata(created.metadata_location).transaction()
+    transaction.add_files([uri])
+
+    with pytest.raises(ValidationError) as caught:
+        catalog.commit_table(
+            principal, ref, requirements=transaction._requirements, updates=transaction._updates
+        )
+
+    message = str(caught.value)
+    assert "…/plain-file-name.parquet`" in message
+    assert uri not in message
+    assert len(message) < 600
 
 
 def test_a_commit_that_adds_files_with_field_ids_is_accepted(
@@ -443,9 +466,9 @@ def test_a_file_that_is_not_parquet_is_refused_without_the_readers_error_text(
         _commit_files(catalog, principal, ref, created, [uri], snapshot_id=900_000_020)
 
     assert str(caught.value) == (
-        f"The commit adds `{shown(uri)}` to `gold.sales`, which could not be read as a Parquet "
-        "file, so nothing was applied. Write the data file before the commit, as Parquet with "
-        "Iceberg field ids."
+        f"The commit adds `{shown_path(uri)}` to `gold.sales`, which could not be read as a "
+        "Parquet file, so nothing was applied. Write the data file before the commit, as Parquet "
+        "with Iceberg field ids."
     )
     assert "magic" not in str(caught.value).lower()
 
@@ -507,7 +530,7 @@ def test_an_orc_file_is_refused(
         )
 
     assert str(caught.value) == (
-        f"The commit adds `{shown(uri)}` to `gold.sales` as ORC, so nothing was applied. "
+        f"The commit adds `{shown_path(uri)}` to `gold.sales` as ORC, so nothing was applied. "
         "Lakana reads Parquet data files only; write the file as Parquet."
     )
 
@@ -537,7 +560,7 @@ def test_a_missing_data_file_is_refused(
         _commit_files(catalog, principal, ref, created, [uri], 900_000_070)
 
     assert "could not be read as a Parquet file" in str(caught.value)
-    assert shown(uri) in str(caught.value)
+    assert shown_path(uri) in str(caught.value)
 
 
 def test_a_file_name_with_a_line_break_is_escaped_in_the_refusal(
@@ -551,7 +574,7 @@ def test_a_file_name_with_a_line_break_is_escaped_in_the_refusal(
         _commit_files(catalog, principal, ref, created, [uri], 900_000_071)
 
     assert "\n" not in str(caught.value)
-    assert shown(uri) in str(caught.value)
+    assert shown_path(uri) in str(caught.value)
 
 
 def test_a_commit_of_too_many_files_is_refused_before_any_footer_is_read(
@@ -612,7 +635,7 @@ def test_a_footer_above_the_limit_is_refused(
         _commit_files(catalog, principal, ref, created, [uri], 900_000_100)
 
     assert str(caught.value) == (
-        f"The commit adds `{shown(uri)}` to `gold.sales`, whose Parquet footer is larger than "
+        f"The commit adds `{shown_path(uri)}` to `gold.sales`, whose Parquet footer is larger than "
         "16 MiB, so nothing was applied. Write the file with fewer columns and row groups."
     )
 
@@ -797,7 +820,7 @@ def test_a_garbled_footer_is_the_files_fault_not_a_storage_failure(
         _commit_files(catalog, principal, ref, created, [uri], 900_000_160)
 
     assert "could not be read as a Parquet file" in str(caught.value)
-    assert shown(uri) in str(caught.value)
+    assert shown_path(uri) in str(caught.value)
 
 
 def test_collecting_stops_once_the_cap_is_passed(
@@ -1102,9 +1125,176 @@ def test_a_manifest_above_the_byte_limit_is_refused_before_it_is_read(
         _commit_snapshots(catalog, principal, ref, [snapshot])
 
     message = str(caught.value)
-    assert shown(snapshot.manifest_list) in message
+    assert shown_path(snapshot.manifest_list) in message
     assert "64 MiB" in message
     assert "nothing was applied" in message
+
+
+class _EndlessStream:
+    """A storage stream with more bytes than anyone asks for; it counts what it served."""
+
+    def __init__(self) -> None:
+        self.served = 0
+
+    def read(self, size: int = 0) -> bytes:
+        """Serve `size` bytes of a file that never ends.
+
+        Parameters
+        ----------
+        size
+            How many bytes the reader wants; `0` is served as a large block, so a reader
+            that asks for everything is caught by the count.
+
+        Returns
+        -------
+        bytes
+            That many bytes.
+        """
+        size = size or 10**9
+        self.served += size
+        return b"x" * size
+
+    def __enter__(self) -> _EndlessStream:
+        """Enter the `with` block.
+
+        Returns
+        -------
+        _EndlessStream
+            Itself.
+        """
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        """Leave the `with` block.
+
+        Parameters
+        ----------
+        *_exc
+            The exception, if any.
+        """
+
+
+class _SwappedInput(InputFile):
+    """An input file whose size is small when asked and whose content is not."""
+
+    def __init__(self, location: str, stream: _EndlessStream) -> None:
+        super().__init__(location)
+        self.stream = stream
+
+    def __len__(self) -> int:
+        """Report a small size, as a client that swapped the file afterwards would see.
+
+        Returns
+        -------
+        int
+            One byte.
+        """
+        return 1
+
+    def exists(self) -> bool:
+        """Say that the file exists.
+
+        Returns
+        -------
+        bool
+            Always `True`.
+        """
+        return True
+
+    def open(self, seekable: bool = True) -> _EndlessStream:  # ty: ignore[invalid-method-override]
+        """Open the endless stream.
+
+        Parameters
+        ----------
+        seekable
+            Ignored.
+
+        Returns
+        -------
+        _EndlessStream
+            The stream.
+        """
+        return self.stream
+
+
+class _SwappedIO(FileIO):
+    """A FileIO that serves `_SwappedInput` for every path."""
+
+    stream = _EndlessStream()
+
+    def new_input(self, location: str) -> InputFile:
+        """Open a file that reports a small size but holds more.
+
+        Parameters
+        ----------
+        location
+            The file's URI.
+
+        Returns
+        -------
+        InputFile
+            The swapped file.
+        """
+        return _SwappedInput(location, self.stream)
+
+    def new_output(self, location: str) -> OutputFile:
+        """Refuse: the check only reads.
+
+        Parameters
+        ----------
+        location
+            The file's URI.
+
+        Raises
+        ------
+        NotImplementedError
+            Always.
+        """
+        raise NotImplementedError
+
+    def delete(self, location: str | InputFile | OutputFile) -> None:
+        """Refuse: the check only reads.
+
+        Parameters
+        ----------
+        location
+            The file's URI.
+
+        Raises
+        ------
+        NotImplementedError
+            Always.
+        """
+        raise NotImplementedError
+
+
+def test_a_manifest_list_that_grows_after_its_size_check_is_cut_at_the_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#171: the limit holds on the bytes read, not on a size asked for in another request.
+
+    The same limit applies to the parent's manifest list, which the client did not send.
+    """
+    monkeypatch.setattr(field_ids_module, "MAX_MANIFEST_BYTES", 100_000)
+    io = _SwappedIO()
+    location = "s3://bucket/gold/sales/metadata/snap-1.avro"
+
+    with pytest.raises(ValidationError) as caught:
+        list(field_ids_module._listed_manifests(io, location, "gold.sales", time.monotonic() + 60))
+
+    assert "larger than the 64 MiB" in str(caught.value)
+    assert shown_path(location) in str(caught.value)
+    assert 100_000 < io.stream.served <= 100_001 + 65_536
+
+
+def test_the_bytes_the_check_read_are_what_pyiceberg_opens() -> None:
+    """The held file reports the bytes it holds and opens them as a seekable stream."""
+    held = field_ids_module._HeldFile("s3://b/m.avro", b"abc")
+    assert (len(held), held.exists(), held.location) == (3, True, "s3://b/m.avro")
+    with held.open() as stream:
+        assert stream.read() == b"abc"
+        stream.seek(1)
+        assert stream.read(1) == b"b"
 
 
 def test_a_manifest_read_that_outlasts_the_deadline_refuses_the_commit(

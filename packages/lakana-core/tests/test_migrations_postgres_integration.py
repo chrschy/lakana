@@ -2017,3 +2017,28 @@ def test_0040_on_postgres() -> None:
         migrate.upgrade(url, revision_0040)
         assert _alembic_version(engine) == revision_0040
         engine.dispose()
+
+
+def test_0041_on_postgres() -> None:
+    """0041 adds a nullable `query_passed_by_until` to principals; the downgrade drops it."""
+    revision_0040 = "f9c6d2a5e1b7"
+    revision_0041 = "a0d7e3b6f2c8"
+    with PostgresContainer("postgres:16", driver="pg8000") as pg:
+        url = pg.get_connection_url()
+        migrate.upgrade(url, revision_0040)
+        engine = sqlalchemy.create_engine(url)
+        names = {c["name"] for c in sqlalchemy.inspect(engine).get_columns("principals")}
+        assert "query_passed_by_until" not in names
+
+        migrate.upgrade(url, revision_0041)
+        assert _alembic_version(engine) == revision_0041
+        columns = {c["name"]: c for c in sqlalchemy.inspect(engine).get_columns("principals")}
+        assert columns["query_passed_by_until"]["nullable"]
+
+        migrate.downgrade(url, revision_0040)
+        assert _alembic_version(engine) == revision_0040
+        names = {c["name"] for c in sqlalchemy.inspect(engine).get_columns("principals")}
+        assert "query_passed_by_until" not in names
+        migrate.upgrade(url, revision_0041)
+        assert _alembic_version(engine) == revision_0041
+        engine.dispose()

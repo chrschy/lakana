@@ -350,7 +350,10 @@ def main() -> None:
     _check_query_limits(settings.query_limits)
     engine = create_engine(settings.database, lease_seconds=settings.run.lease_seconds)
     session_factory = functools.partial(Session, engine)
-    start_watchdog(settings.worker.memory_limit, session_factory, secrets.SystemRandom().random)
+    worker_id = make_worker_id(socket.gethostname())
+    start_watchdog(
+        settings.worker.memory_limit, session_factory, secrets.SystemRandom().random, worker_id
+    )
     sweep_spill_directories()
     if settings.run.sweep_interval > 0:
         sweep_deploy_checkouts(max_age=DeployLimits().job_seconds)
@@ -378,7 +381,6 @@ def main() -> None:
     )
     if settings.secrets.accept_format_1:
         logger.warning(ACCEPT_FORMAT_1_WARNING)
-    worker_id = make_worker_id(socket.gethostname())
     drain = threading.Event()
     signal.signal(signal.SIGTERM, lambda signum, frame: drain.set())
     install_drain(drain, settings.run.drain_grace_seconds)

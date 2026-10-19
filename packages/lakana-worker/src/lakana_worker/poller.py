@@ -14,6 +14,7 @@ queries and leaves ad-hoc queries to an interactive worker.
 
 from __future__ import annotations
 
+import functools
 import logging
 import threading
 import time
@@ -23,6 +24,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from sqlalchemy import ColumnElement, or_, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from lakana_core.auth import AuthorizationService
@@ -99,6 +101,34 @@ class PassedBy:
         now = self._clock()
         self._until = {who: until for who, until in self._until.items() if until > now}
         return list(self._until)
+
+
+def _remember_timeout(session: Session, passed_by: PassedBy, principal_id: uuid.UUID) -> None:
+    """Pass a principal by after its cap lock timed out, in memory and in the database.
+
+    The database copy is what the wait reason reads (`waiting.LOCK_TIMEOUT`); failing to write
+    it costs only that reason, so the error is logged and the loop goes on.
+
+    Parameters
+    ----------
+    session
+        The claim's session, whose transaction the timeout rolled back.
+    passed_by
+        The polling loop's memory.
+    principal_id
+        The principal whose cap lock timed out.
+    """
+    passed_by.add(principal_id)
+    try:
+        pools.pass_by(session, principal_id, PASS_BY_SECONDS)
+    except SQLAlchemyError:
+        session.rollback()
+        logger.warning(
+            "The pass-by of principal %s could not be recorded; its queued queries show no "
+            "reason for it.",
+            principal_id,
+            exc_info=True,
+        )
 
 
 @dataclass(frozen=True)
@@ -332,7 +362,9 @@ def poll_once(
         limits=limits,
         worker_id=worker_id,
         running_cap=cap,
-        on_cap_timeout=None if passed_by is None else passed_by.add,
+        on_cap_timeout=(
+            None if passed_by is None else functools.partial(_remember_timeout, session, passed_by)
+        ),
     )
     return True
 
