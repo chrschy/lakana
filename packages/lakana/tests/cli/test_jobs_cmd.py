@@ -178,6 +178,15 @@ def test_show_lists_each_trigger_with_its_next_run(tmp_path: Path) -> None:
     assert "on demand" in out and "lakana job run daily" in out
 
 
+def test_show_of_a_waiting_job_says_why_it_waits(tmp_path: Path) -> None:
+    api = FakeApi()
+    waiting = {"code": "job_waits", "message": "A start waits for run X."}
+    api.on("GET", f"{_JOBS}/busy", json=_job("busy", state="waiting", waiting_for=waiting))
+    result = invoke(make_state(tmp_path, api), "job", "show", "busy", "--env", "dev")
+    assert result.exit_code == 0, result.output
+    assert "A start waits for run X." in _plain(result.stdout)
+
+
 def test_show_of_a_paused_schedule_and_of_a_job_without_one(tmp_path: Path) -> None:
     api = FakeApi()
     paused = {
