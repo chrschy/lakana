@@ -89,12 +89,11 @@ from lakana_core.catalog.locations import (
     CLAIM_RELEASED_MESSAGE,
     claim_holder,
     claim_location,
-    dropped_locations,
     forget_location,
     lock_location,
+    other_table_locations,
     publish_location,
     release_claim,
-    table_root_locations,
 )
 from lakana_core.catalog.maintenance import (
     DEFAULT_KEEP_DAYS,
@@ -5340,7 +5339,7 @@ class CatalogService:
                     root_prefix=root_prefix,
                     table_location=location,
                     nested_locations=nested_locations_within(
-                        location, self._other_table_locations(environment_id, table_id)
+                        location, self._other_table_locations(environment_id, table_id, location)
                     ),
                     referenced=referenced,
                     cutoff=cutoff,
@@ -5504,8 +5503,10 @@ class CatalogService:
             is not None
         )
 
-    def _other_table_locations(self, environment_id: uuid.UUID, table_id: uuid.UUID) -> list[str]:
-        """List every other managed table's location in an environment, dropped ones too.
+    def _other_table_locations(
+        self, environment_id: uuid.UUID, table_id: uuid.UUID, location: str
+    ) -> list[str]:
+        """List every other table's location in an environment, dropped ones too.
 
         Parameters
         ----------
@@ -5513,19 +5514,19 @@ class CatalogService:
             The environment.
         table_id
             The table to leave out.
+        location
+            Its own location, left out.
 
         Returns
         -------
         list of str
-            Derived from each metadata location, as the worker's own
-            confinement check does (`table_root_locations`, which the location
-            sweep uses too), and the locations of dropped tables within their undo
-            period (`dropped_locations`), whose files are kept for an undrop.
+            `other_table_locations`: the records that keep files (live, claimed and dropped
+            tables) and the roots derived from the other tables' metadata files, read in one
+            statement.
         """
-        return [
-            *table_root_locations(self._session, environment_id=environment_id, exclude=table_id),
-            *dropped_locations(self._session, environment_id),
-        ]
+        return other_table_locations(
+            self._session, environment_id=environment_id, table_id=table_id, location=location
+        )
 
     @staticmethod
     def _delete_quietly(

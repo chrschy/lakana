@@ -27,7 +27,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import delete, exists, or_, select, update
+from sqlalchemy import delete, exists, literal, or_, select, union_all, update
 from sqlalchemy.orm import Session
 
 from lakana_core.auth import PrincipalRef
@@ -35,6 +35,9 @@ from lakana_core.db import db_now, rowcount
 from lakana_core.models import Namespace, Table, TableLocation, TableLocationState
 from lakana_core.models.table_location import IN_USE_STATES, PURGEABLE_STATES
 from lakana_core.storage.resolver import table_root_from_metadata_location
+
+PROTECTED_STATES = IN_USE_STATES | {TableLocationState.DROPPED}
+"""Records whose files maintenance of another table must never take for its orphans."""
 
 CLAIM_RELEASED_MESSAGE = (
     "{table} was not created: the clean-up released the storage location this create had "
@@ -321,11 +324,17 @@ def dropped_inside(session: Session, location: str) -> bool:
     )
 
 
-def dropped_locations(session: Session, environment_id: uuid.UUID) -> list[str]:
-    """List the locations of an environment's dropped tables that are not purged yet.
+def other_table_locations(
+    session: Session, *, environment_id: uuid.UUID, table_id: uuid.UUID, location: str
+) -> list[str]:
+    """List every other table's location in an environment, read in one statement.
 
-    Maintenance treats them as other tables' directories, so the files of a dropped table
-    nested inside the table it maintains are never taken for orphans during the undo period.
+    The locations of `LIVE`, `CLAIMED` and `DROPPED` records, and the roots derived from every
+    other managed table's metadata file (a table from before records). One statement reads one
+    snapshot, so a table that moves between these states at the same moment (an undrop makes a
+    `DROPPED` record `LIVE` and inserts the row) is in the answer either way, never in neither.
+    A location stays in one of these states until its files are gone (a purge deletes the files
+    first and the record last), so the answer stays true while maintenance deletes.
 
     Parameters
     ----------
@@ -333,20 +342,36 @@ def dropped_locations(session: Session, environment_id: uuid.UUID) -> list[str]:
         Database session.
     environment_id
         The environment.
+    table_id
+        The table being maintained, left out.
+    location
+        Its own location, left out.
 
     Returns
     -------
     list of str
-        The `DROPPED` records' locations.
+        The locations; a metadata location that does not derive contributes nothing.
     """
-    return list(
-        session.scalars(
-            select(TableLocation.location).where(
-                TableLocation.environment_id == environment_id,
-                TableLocation.state == TableLocationState.DROPPED,
-            )
+    records = select(TableLocation.location.label("path"), literal(False).label("derive")).where(
+        TableLocation.environment_id == environment_id,
+        TableLocation.state.in_(PROTECTED_STATES),
+        TableLocation.location != location,
+    )
+    rows = (
+        select(Table.metadata_location.label("path"), literal(True).label("derive"))
+        .join(Namespace, Table.namespace_id == Namespace.id)
+        .where(
+            Namespace.environment_id == environment_id,
+            Table.id != table_id,
+            Table.metadata_location.is_not(None),
         )
     )
+    found = []
+    for path, derive in session.execute(union_all(records, rows)).all():
+        root = table_root_from_metadata_location(path) if derive else path
+        if root is not None:
+            found.append(root)
+    return found
 
 
 def table_root_locations(

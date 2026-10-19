@@ -1318,9 +1318,15 @@ environment) is checked too: before the mark, and again under the lock before ea
 before the record goes. The outer purge then waits (`purges_waiting`, one warning per record and
 run), stays due, and is retried by every later sweep until the nested table is restored (`LIVE`,
 which blocks it as before) or purged itself. A nested `ABANDONED` record does not block: nobody can
-restore it and its own purge is already due. Maintenance adds the `DROPPED` locations of its
-environment to the other tables' locations (`_other_table_locations`), so a dropped table nested
-under the maintained table's `data/` is not taken for its orphans. As a last guard, undrop refuses
+restore it and its own purge is already due. Maintenance reads the other tables' locations with
+`other_table_locations`: the `LIVE`, `CLAIMED` and `DROPPED` records and the roots of the other
+`tables` rows, in **one** `UNION ALL` statement, so an undrop (DROPPED to LIVE plus the row) at the
+same moment is in that snapshot either way; two queries let it fall between them. A dropped table
+nested under the maintained table's `data/` is therefore never taken for its orphans. A record
+leaves those states only through a purge, which deletes the files before the record, and a create
+claims before its first file, whose files are younger than the orphan cutoff; so maintenance does
+not re-check per file under a lock (the sweep does, because it has no cutoff). Pin:
+`test_a_nested_table_restored_while_maintenance_lists_locations_keeps_its_files`. As a last guard, undrop refuses
 with `FILES_GONE_MESSAGE` when the snapshot's metadata file no longer exists, before anything is
 written. Pins: `test_a_dropped_table_nested_inside_blocks_the_purge_until_it_is_restored`,
 `test_the_outer_purge_follows_once_the_nested_drop_is_purged_itself`,

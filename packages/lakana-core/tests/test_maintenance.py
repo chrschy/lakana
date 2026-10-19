@@ -22,6 +22,7 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from lakana_core.auth import Action, AllowAllAuthorization, PrincipalRef
+from lakana_core.catalog import service as service_module
 from lakana_core.catalog.json_schema import ColumnSpec
 from lakana_core.catalog.maintenance import (
     FAILED_SNAPSHOT_KEEP_DAYS,
@@ -476,6 +477,59 @@ def test_a_nested_dropped_tables_files_are_kept_for_its_undo_period(
 
     assert sorted(Path(nested_location.removeprefix("file://")).rglob("*")) == nested_files
     catalog.undrop_table(principal, nested)
+
+
+def test_a_nested_table_restored_while_maintenance_lists_locations_keeps_its_files(
+    session: Session,
+    principal: PrincipalRef,
+    catalog: CatalogService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An undrop right after maintenance's first read of other tables' locations loses nothing.
+
+    The other tables' locations are read in one statement, so the nested table is in that one
+    snapshot as DROPPED or as LIVE, never in neither. The undrop is made to commit right after
+    the first location read maintenance makes (whichever function makes it).
+    """
+    outer = catalog.load_table(principal, _ref("gold.daily")).metadata.location
+    outer_dir = outer.rsplit("/", 1)[-1]
+    for parts in (["gold", outer_dir], ["gold", outer_dir, "data"]):
+        catalog.create_namespace(principal, "dev", NamespacePath.from_parts(parts))
+    nested = TableRef(
+        environment="dev", namespace=NamespacePath.from_parts(["gold", outer_dir, "data"]), name="n"
+    )
+    catalog.write_batches(
+        principal,
+        nested,
+        mode=WriteMode.CREATE,
+        schema=_ids([1]).schema,
+        batches=_ids([1]).to_batches(),
+    )
+    nested_location = catalog.load_table(principal, nested).metadata.location
+    nested_files = sorted(Path(nested_location.removeprefix("file://")).rglob("*"))
+    catalog.drop_table(principal, nested)
+    done: list[int] = []
+
+    def undrop_after(read: Callable[..., list[str]]) -> Callable[..., list[str]]:
+        def racing(*args: object, **kwargs: object) -> list[str]:
+            found = read(*args, **kwargs)
+            if not done:
+                done.append(1)
+                catalog.undrop_table(principal, nested)
+            return found
+
+        return racing
+
+    for name in ("table_root_locations", "other_table_locations"):
+        if hasattr(service_module, name):
+            monkeypatch.setattr(service_module, name, undrop_after(getattr(service_module, name)))
+
+    catalog.maintain(principal, _ref("gold.daily"), keep_last=1, now=_later(30))
+
+    assert done == [1]
+    assert sorted(Path(nested_location.removeprefix("file://")).rglob("*")) == nested_files
+    rows = StaticTable.from_metadata(catalog.load_table(principal, nested).metadata_location)
+    assert rows.scan().to_arrow().column("id").to_pylist() == [1]
 
 
 def test_orphan_removal_waits_while_a_write_into_the_table_is_running(
