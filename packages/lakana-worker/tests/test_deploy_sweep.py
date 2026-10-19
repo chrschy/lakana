@@ -159,8 +159,8 @@ def test_a_directory_replaced_between_check_and_removal_stays(
     real = os.open
     swapped: list[bool] = []
 
-    def open_and_swap(path: str | os.PathLike[str], flags: int, *args: int) -> int:
-        descriptor = real(path, flags, *args)
+    def open_and_swap(path: str | os.PathLike[str], flags: int, *args: int, **kwargs: int) -> int:
+        descriptor = real(path, flags, *args, **kwargs)
         if Path(path) == old and not swapped:
             swapped.append(True)
             old.rename(temp / "moved")
@@ -275,14 +275,14 @@ def test_a_directory_swapped_for_a_young_one_before_it_is_opened_stays(
     real = os.open
     swapped: list[bool] = []
 
-    def swap_then_open(path: str | os.PathLike[str], flags: int, *args: int) -> int:
+    def swap_then_open(path: str | os.PathLike[str], flags: int, *args: int, **kwargs: int) -> int:
         if Path(path) == old and not swapped:
             swapped.append(True)
             old.rename(temp / "moved")
             old.mkdir(mode=0o700)
             (old / "live").write_text("x")
             os.utime(old, (_NOW - 10, _NOW - 10))
-        return real(path, flags, *args)
+        return real(path, flags, *args, **kwargs)
 
     monkeypatch.setattr(os, "open", swap_then_open)
     assert _sweeper(temp).sweep() == 0
@@ -298,11 +298,11 @@ def test_a_symlink_swapped_in_before_it_is_opened_is_not_followed(
     os.utime(target, (_NOW - _OLD, _NOW - _OLD))
     real = os.open
 
-    def swap_then_open(path: str | os.PathLike[str], flags: int, *args: int) -> int:
+    def swap_then_open(path: str | os.PathLike[str], flags: int, *args: int, **kwargs: int) -> int:
         if Path(path) == old and old.is_dir() and not old.is_symlink():
             old.rename(temp / "moved")
             old.symlink_to(target, target_is_directory=True)
-        return real(path, flags, *args)
+        return real(path, flags, *args, **kwargs)
 
     monkeypatch.setattr(os, "open", swap_then_open)
     assert _sweeper(temp).sweep() == 0

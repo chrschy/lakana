@@ -1863,10 +1863,10 @@ def test_tree_size_counts_files_and_tolerates_vanishing_ones(
     assert module._tree_size(tmp_path / "missing") == 0
     real = os.lstat
 
-    def vanishing(path: str) -> os.stat_result:
+    def vanishing(path: str, **kwargs: object) -> os.stat_result:
         if str(path).endswith("/b"):
             raise FileNotFoundError(path)
-        return real(path)
+        return real(path, **kwargs)  # ty: ignore[invalid-argument-type]
 
     monkeypatch.setattr(module.os, "lstat", vanishing)
     assert module._tree_size(tmp_path) == 10 + len(str(tmp_path / "b"))
