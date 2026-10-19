@@ -13,7 +13,7 @@ from lakana.cli import _output
 from lakana.cli._paging import more_results
 from lakana.cli._project import find_project_root, is_dirty, project_repo
 from lakana.cli._state import CliError, CliState, confirm, resolve_environment, state_of
-from lakana.cli.queries import _clock, _WaitLine
+from lakana.cli._waiting import WaitLine, clock
 from lakana.client import Client
 from lakana.errors import LakanaError, NotFound
 
@@ -191,7 +191,7 @@ def _wait(
 ) -> Deploy:
     """Wait for a run, turning a timeout into a message with the id to poll.
 
-    While the run is queued, a line on standard error says why (see `_WaitLine`).
+    While the run is queued, a line on standard error says why (see `WaitLine`).
 
     Parameters
     ----------
@@ -218,7 +218,7 @@ def _wait(
     """
     try:
         return client.deploys.wait(
-            environment, deploy_id, timeout=timeout, on_update=_WaitLine(state, monotonic=_clock)
+            environment, deploy_id, timeout=timeout, on_update=WaitLine(state, monotonic=clock)
         )
     except TimeoutError as exc:
         typer.echo(

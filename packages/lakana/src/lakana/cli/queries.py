@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import contextlib
 import sys
-import time
 from collections.abc import Callable, Generator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -14,11 +13,12 @@ from typing import Annotated
 import pyarrow as pa
 import typer
 
-from lakana._models import Deploy, QueryListEntry, QueryStatus, WaitingFor
+from lakana._models import QueryListEntry, QueryStatus, WaitingFor
 from lakana.cli import _files, _output
 from lakana.cli._break_glass import BREAK_GLASS, REASON, break_glass_reason
 from lakana.cli._paging import more_results
 from lakana.cli._state import CliError, CliState, resolve_environment, state_of
+from lakana.cli._waiting import WAIT_LINE_LIMIT, WaitLine, clock
 from lakana.errors import (
     AuthenticationError,
     Conflict,
@@ -311,25 +311,8 @@ def _interrupted(run: QueryRun, environment: str) -> str:
     return f"Interrupted. Query {query} had already ended ({_output.inline(status.status)})."
 
 
-WAIT_LINE_AFTER_SECONDS = 3.0
-"""How long a query must have been QUEUED before `lakana sql` and `query wait` say why."""
-
-_WAIT_LINE_LIMIT = 400
-"""The most characters of a reason's sentence the wait line keeps, before a ``…``."""
-
 _STATUS_COLUMNS = ["id", "status", "waiting_for", "error_message"]
 """What `query status` and `query wait` show; the reason is empty for a query not waiting."""
-
-
-def _clock() -> float:
-    """Read the clock the wait line counts its seconds on (a seam for the tests).
-
-    Returns
-    -------
-    float
-        A monotonic time in seconds.
-    """
-    return time.monotonic()
 
 
 def _cut(reason: WaitingFor | None) -> str:
@@ -343,10 +326,10 @@ def _cut(reason: WaitingFor | None) -> str:
     Returns
     -------
     str
-        The sentence on one line, escaped and cut at `_WAIT_LINE_LIMIT` characters; nothing
+        The sentence on one line, escaped and cut at `WAIT_LINE_LIMIT` characters; nothing
         for no reason.
     """
-    return "" if reason is None else _output.inline(reason.message, _WAIT_LINE_LIMIT)
+    return "" if reason is None else _output.inline(reason.message, WAIT_LINE_LIMIT)
 
 
 def _reason(status: QueryStatus) -> str:
@@ -365,59 +348,10 @@ def _reason(status: QueryStatus) -> str:
     return _cut(status.waiting_for)
 
 
-class _WaitLine:
-    """Say on standard error why a query or a deploy still waits, once per reason.
-
-    Used as the `on_update` of `QueryRun.wait` and `Deploys.wait`: it prints
-    ``Waiting: <message>`` after the query or deploy has been queued for
-    `WAIT_LINE_AFTER_SECONDS`, and again only when the reason's *code* changes. The numbers in
-    the sentence change on every poll and never print it again, and the decision never reads the
-    sentence. Nothing is printed with ``--output json``, for a status that is not QUEUED or has
-    no reason, or for an empty sentence. The seconds count from the first QUEUED status this
-    command saw, so the CLI compares no clock of its own with the server's. Standard output is
-    never touched.
-
-    Parameters
-    ----------
-    state
-        The CLI state (for the output mode).
-    monotonic
-        The clock, in seconds.
-    """
-
-    def __init__(self, state: CliState, monotonic: Callable[[], float] = time.monotonic) -> None:
-        self._state = state
-        self._monotonic = monotonic
-        self._queued_since: float | None = None
-        self._printed: str | None = None
-
-    def __call__(self, status: QueryStatus | Deploy) -> None:
-        """Print the reason if it is time and it is a new one.
-
-        Parameters
-        ----------
-        status
-            The status just polled: a query's (``QUEUED``) or a deploy run (``queued``).
-        """
-        if self._state.output == "json" or status.status.upper() != "QUEUED":
-            return
-        now = self._monotonic()
-        if self._queued_since is None:
-            self._queued_since = now
-        reason = status.waiting_for
-        if reason is None or now - self._queued_since < WAIT_LINE_AFTER_SECONDS:
-            return
-        if reason.code == self._printed or not reason.message.strip():
-            return
-        self._printed = reason.code
-        message = _output.inline(reason.message, _WAIT_LINE_LIMIT)
-        typer.echo(_output.safe_text(f"Waiting: {message}"), err=True)
-
-
 def _wait(run: QueryRun, environment: str, timeout: float | None, state: CliState) -> QueryStatus:
     """Wait for a query; on Ctrl-C cancel it, say so on standard error, and exit with 130.
 
-    While the query is queued, a line on standard error says why (see `_WaitLine`).
+    While the query is queued, a line on standard error says why (see `WaitLine`).
 
     Parameters
     ----------
@@ -441,7 +375,7 @@ def _wait(run: QueryRun, environment: str, timeout: float | None, state: CliStat
         With status 130 after a Ctrl-C.
     """
     try:
-        return run.wait(timeout=timeout, on_update=_WaitLine(state, monotonic=_clock))
+        return run.wait(timeout=timeout, on_update=WaitLine(state, monotonic=clock))
     except KeyboardInterrupt as exc:
         typer.echo(_output.safe_text(_interrupted(run, environment)), err=True)
         raise typer.Exit(_INTERRUPTED) from exc

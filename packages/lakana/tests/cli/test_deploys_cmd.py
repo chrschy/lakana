@@ -1155,7 +1155,7 @@ def _slow_clock(monkeypatch: pytest.MonkeyPatch) -> _Clock:
         The clock.
     """
     clock = _Clock()
-    monkeypatch.setattr("lakana.cli.deploys._clock", clock)
+    monkeypatch.setattr("lakana.cli.deploys.clock", clock)
     monkeypatch.setattr(
         "lakana.resources.deploys.time.sleep",
         lambda _seconds: setattr(clock, "now", clock.now + 5.0),
