@@ -65,7 +65,7 @@ def test_env_list_and_get(tmp_path: Path) -> None:
 
     assert listed.exit_code == 0, listed.stderr
     assert "file:///data" in listed.stdout
-    assert json.loads(got.stdout) == _DEV
+    assert json.loads(got.stdout) == {**_DEV, "retention_days": None}
 
 
 def test_env_delete_requires_confirmation(tmp_path: Path) -> None:

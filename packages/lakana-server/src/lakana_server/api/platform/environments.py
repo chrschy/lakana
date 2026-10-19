@@ -11,6 +11,7 @@ from lakana_server.api.platform.schemas import (
     EnvironmentCreate,
     EnvironmentOut,
     EnvironmentPatch,
+    EnvironmentRetentionIn,
     EnvironmentStorageUpdate,
 )
 from lakana_server.api.routing import AuthenticateFirstRoute
@@ -127,6 +128,42 @@ def set_environment_protection(
         Mapped to 404 by `install_exception_handlers`.
     """
     env = catalog.set_environment_protection(principal, name, body.is_protected)
+    return EnvironmentOut.model_validate(env)
+
+
+@router.put("/{name}/retention", response_model=EnvironmentOut)
+def set_environment_retention(
+    name: str,
+    body: EnvironmentRetentionIn,
+    principal: PrincipalRef = Depends(get_principal),
+    catalog: CatalogService = Depends(get_catalog),
+) -> EnvironmentOut:
+    """Set the retention of an environment's tables that set none of their own, or turn it off.
+
+    Parameters
+    ----------
+    name
+        Environment name.
+    body
+        The days, or `null` for off.
+    principal
+        The authenticated caller; needs `MANAGE_ENVIRONMENT` on the environment.
+    catalog
+        The catalog service for this request.
+
+    Returns
+    -------
+    EnvironmentOut
+        The environment.
+
+    Raises
+    ------
+    lakana_core.errors.NotFoundError
+        Mapped to 404.
+    lakana_core.errors.ValidationError
+        Mapped to 422: days out of range, or a protected environment.
+    """
+    env = catalog.set_environment_retention(principal, name, body.days)
     return EnvironmentOut.model_validate(env)
 
 

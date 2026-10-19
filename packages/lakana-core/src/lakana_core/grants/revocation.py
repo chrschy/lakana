@@ -88,7 +88,7 @@ class RevokedPolicy:
 
 def revoke_attached(
     session: Session,
-    actor: PrincipalRef,
+    actor: PrincipalRef | None,
     *,
     environment_id: uuid.UUID | None = None,
     table_id: uuid.UUID | None = None,
@@ -124,7 +124,8 @@ def revoke_attached(
         Database session.
     actor
         The principal performing the drop; recorded as `revoked_by` and as
-        the audit events' `principal_id`.
+        the audit events' `principal_id`. `None` for a drop by the system (an expiry), which
+        records no principal.
     environment_id
         The dropped environment's id, if that is the target.
     table_id
@@ -187,7 +188,7 @@ def revoke_attached(
 def _revoke_matching(
     session: Session,
     audit: AuditService,
-    actor: PrincipalRef,
+    actor: PrincipalRef | None,
     now: datetime,
     model: type[Grant] | type[RowFilter] | type[ColumnMask],
     predicate: ColumnExpressionArgument[bool],
@@ -201,7 +202,7 @@ def _revoke_matching(
     audit
         The audit service to record one event per revoked row through.
     actor
-        The principal performing the drop.
+        The principal performing the drop; `None` for the system.
     now
         The timestamp to stamp `revoked_at` with.
     model
@@ -218,11 +219,12 @@ def _revoke_matching(
     rows = (
         session.execute(select(model).where(predicate, model.revoked_at.is_(None))).scalars().all()
     )
+    actor_id = None if actor is None else actor.id
     for row in rows:
         row.revoked_at = now
-        row.revoked_by = actor.id
+        row.revoked_by = actor_id
         audit.record(
-            actor.id,
+            actor_id,
             _EVENT_TYPES[model],
             securable=Securable(
                 kind=row.kind if isinstance(row, Grant) else SecurableKind.TABLE,

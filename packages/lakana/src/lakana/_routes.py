@@ -66,6 +66,7 @@ ROUTES: dict[str, Route] = {
     "environments.delete": Route("DELETE", "/api/v1/environments/{name}"),
     "environments.update_storage": Route("PATCH", "/api/v1/environments/{name}/storage"),
     "environments.set_protection": Route("PATCH", "/api/v1/environments/{name}"),
+    "environments.set_retention": Route("PUT", "/api/v1/environments/{name}/retention"),
     "namespaces.create": Route("POST", "/api/v1/environments/{env}/namespaces"),
     "namespaces.get": Route("GET", "/api/v1/environments/{env}/namespaces/{path}"),
     "namespaces.list": Route("GET", "/api/v1/environments/{env}/namespaces"),
@@ -74,6 +75,13 @@ ROUTES: dict[str, Route] = {
     "tables.list": Route("GET", "/api/v1/environments/{env}/namespaces/{path}/tables"),
     "tables.get": Route("GET", "/api/v1/environments/{env}/namespaces/{path}/tables/{name}"),
     "tables.delete": Route("DELETE", "/api/v1/environments/{env}/namespaces/{path}/tables/{name}"),
+    "tables.retention": Route(
+        "GET", "/api/v1/environments/{env}/namespaces/{path}/tables/{name}/retention"
+    ),
+    "tables.set_retention": Route(
+        "PUT", "/api/v1/environments/{env}/namespaces/{path}/tables/{name}/retention"
+    ),
+    "tables.expiring": Route("GET", "/api/v1/environments/{env}/expiring-tables"),
     "tables.undrop": Route(
         "POST", "/api/v1/environments/{env}/namespaces/{path}/tables/{name}/undrop"
     ),

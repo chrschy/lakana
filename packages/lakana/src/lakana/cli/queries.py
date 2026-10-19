@@ -14,7 +14,7 @@ import pyarrow as pa
 import typer
 
 from lakana._models import QueryListEntry, QueryStatus, WaitingFor
-from lakana.cli import _files, _output
+from lakana.cli import _files, _output, _retention
 from lakana.cli._break_glass import BREAK_GLASS, REASON, break_glass_reason
 from lakana.cli._paging import more_results
 from lakana.cli._state import CliError, CliState, resolve_environment, state_of
@@ -505,10 +505,14 @@ def sql(
     mode: _MODE = None,
     incremental_key: _INCREMENTAL_KEY = None,
     evolve_schema: _EVOLVE_SCHEMA = False,
+    expire_after: _retention.EXPIRE_AFTER = None,
     break_glass: BREAK_GLASS = False,
     reason: REASON = None,
 ) -> None:
     """Run SQL and print (or save) the result, or write it into a table.
+
+    With `--into T --mode create --expire-after N` the new table expires N days after its last
+    write or read.
 
     A query that stays queued for 3 seconds prints a line on standard error that says why
     ('Waiting: ...'), and again when the reason changes; the result still goes to standard
@@ -538,6 +542,8 @@ def sql(
         With `--mode append`, the incremental key.
     evolve_schema
         Let the target adopt the result's schema.
+    expire_after
+        `--expire-after`, with `--mode create`.
     break_glass
         `--break-glass`.
     reason
@@ -546,12 +552,23 @@ def sql(
     Raises
     ------
     CliError
-        If `--break-glass` is given without `--into` (exit 2).
+        If `--break-glass` is given without `--into`, or `--expire-after` without `--mode
+        create` or with `--break-glass` (exit 2).
     """
     state = state_of(ctx)
+    if expire_after is not None and mode != "create":
+        raise CliError(
+            "--expire-after needs --mode create: it sets the retention of the table the write "
+            "creates. Set an existing table's with `lakana table retention`."
+        )
     _check_write_flags(into, mode, incremental_key, evolve_schema, out)
     if break_glass and into is None:
         raise CliError("--break-glass applies only to writes (--into)")
+    if expire_after is not None and break_glass:
+        raise CliError(
+            "--expire-after cannot go with --break-glass: tables in a protected environment "
+            "never expire. Leave out --expire-after."
+        )
     fmt = out_format(out, file_format)
     text = sys.stdin.read() if query == "-" else query
     environment = resolve_environment(state, env)
@@ -569,7 +586,12 @@ def sql(
                 break_glass_reason=glass,
             )
         status = _wait(run, environment, timeout, state)
-        _output.done(state, _written(environment, into, mode, status), status)
+        message = _written(environment, into, mode, status)
+        if expire_after is not None:
+            message += _retention.set_expiry(
+                client, environment, into, expire_after, created=message
+            )
+        _output.done(state, message, status)
         return
     show_result(
         state,

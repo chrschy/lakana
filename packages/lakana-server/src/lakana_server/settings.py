@@ -119,7 +119,8 @@ class Settings(BaseSettings):
         Artifact-store bounds (`LAKANA_ARTIFACTS__*`): file size, total size, file
         count and upload lifetime.
     tables
-        How many days a dropped table can be restored (`LAKANA_TABLES__UNDO_DAYS`).
+        How many days a dropped table can be restored (`LAKANA_TABLES__UNDO_DAYS`), and how
+        many days ahead an expiry is shown (`LAKANA_TABLES__EXPIRY_WARNING_DAYS`).
     table_reads
         How long the reads of a table are kept and how far back its health shows them
         (`LAKANA_TABLE_READS__KEEP_DAYS`, `LAKANA_TABLE_READS__DEFAULT_DAYS`); the worker reads

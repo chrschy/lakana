@@ -2,13 +2,16 @@
 
 import enum
 import uuid
+from datetime import date, datetime
 
 from sqlalchemy import (
     JSON,
     BigInteger,
     Boolean,
+    Date,
     Enum,
     ForeignKey,
+    Integer,
     String,
     Text,
     UniqueConstraint,
@@ -18,7 +21,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from lakana_core.models.base import Base, TimestampMixin
+from lakana_core.models.base import Base, TimestampMixin, UTCDateTime
 
 
 class TableType(enum.StrEnum):
@@ -196,6 +199,25 @@ class Table(Base, TimestampMixin):
     Written only by `lakana_core.catalog.descriptions`; `None` once reset. A deploy never
     changes it.
     """
+
+    retention_days: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    """Days after its last activity this table expires (`lakana table retention --days`).
+
+    At most one of `retention_days`, `retention_on` and `retention_never` is set; with none,
+    the environment's retention applies. Written only by `CatalogService.set_table_retention`.
+    """
+    retention_on: Mapped[date | None] = mapped_column(Date, nullable=True, default=None)
+    """The UTC day from which on this table expires (`--on`), whatever its activity."""
+    retention_never: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    """Whether this table never expires, whatever its environment's retention says (`--never`)."""
+    retention_set_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("principals.id", ondelete="SET NULL"), nullable=True, default=None
+    )
+    """Who last changed the table's retention; `NULL` once that principal is deleted."""
+    retention_set_at: Mapped[datetime | None] = mapped_column(
+        UTCDateTime, nullable=True, default=None
+    )
+    """When the table's retention was last changed; `None` if it never was."""
 
     @property
     def kind(self) -> str:

@@ -622,9 +622,11 @@ def test_undrop_restores_the_same_table_and_exactly_the_policies_its_drop_revoke
         {"id": 3, "region": "eu"},
     ]
     row = _fresh(session, Table, table_id)
-    assert {
-        column.key: getattr(row, column.key) for column in Table.__table__.columns
-    } == snapshot_before
+    restored_columns = {column.key: getattr(row, column.key) for column in Table.__table__.columns}
+    # The restore is the table's last activity (its retention counts from it), so only
+    # `updated_at` moves on.
+    assert restored_columns.pop("updated_at") >= snapshot_before.pop("updated_at")
+    assert restored_columns == snapshot_before
     assert (
         sorted(
             (c.name, c.type, c.position)

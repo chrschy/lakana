@@ -789,5 +789,8 @@ and `LAKANA_APPEND__READ_TIMEOUT_SECONDS` with table appends; downloads have a l
   without a record. A drop makes the record a tombstone in the transaction that deletes the row
   (`lakana_core.catalog.tombstones`): due after `LAKANA_TABLES__UNDO_DAYS`, with the row's snapshot
   and the ids of the policies it revoked, which `undrop_table` restores under the record's lock.
+  An expiry (`lakana_core.catalog.retention`, step 1 of the location sweep) is the same drop
+  (`tombstones.drop_row`) by the system, decided again under the environment's and the table's row
+  locks.
 - **SQLite and Postgres both work** for `lakana-core` — no dialect-specific SQL, so the unit
   tier can run against in-memory SQLite while the integration tier uses real Postgres.

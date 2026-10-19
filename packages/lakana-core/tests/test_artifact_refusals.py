@@ -320,6 +320,21 @@ def test_an_undrop_cannot_take_an_artifacts_name_and_never_lists_one(
     assert [d.name for d in catalog.list_dropped_tables(p, "dev", _REF.namespace)] == ["other"]
 
 
+def test_an_artifact_has_no_retention_and_is_never_listed_as_expiring(
+    session: Session, tmp_path: Path
+) -> None:
+    catalog, p = _catalog(session, tmp_path)
+    catalog.set_environment_retention(p, "dev", 1)
+    for call in (
+        lambda: catalog.table_retention(p, _REF),
+        lambda: catalog.set_table_retention(p, _REF, days=3),
+    ):
+        with pytest.raises(ValidationError) as caught:
+            call()
+        assert "artifacts never expire" in str(caught.value)
+    assert catalog.list_expiring_tables(p, "dev", within_days=3650) == []
+
+
 def test_a_namespace_with_an_artifact_is_not_dropped(session: Session, tmp_path: Path) -> None:
     catalog, p = _catalog(session, tmp_path)
     with pytest.raises(ConflictError) as caught:
@@ -718,6 +733,9 @@ _ARTIFACT_HANDLING = {
         "rename_table": "refuses",
         "undrop_table": "name-taken",
         "list_dropped_tables": "hides",
+        "table_retention": "refuses",
+        "set_table_retention": "refuses",
+        "list_expiring_tables": "hides",
         "create_table": "name-taken",
         "create_external_table": "name-taken",
         "create_or_replace_view": "refuses",

@@ -868,9 +868,9 @@ class TableReadsConfig(BaseModel):
 
 
 class TablesConfig(BaseModel):
-    """How the worker cleans up after creates of managed tables that never finished.
+    """How the worker cleans up after creates that never finished, and expires tables.
 
-    Read from ``LAKANA_TABLES__ABANDONED_GRACE_HOURS``.
+    Read from ``LAKANA_TABLES__*``.
 
     Parameters
     ----------
@@ -880,15 +880,26 @@ class TablesConfig(BaseModel):
         8,760). A create made by a run keeps it until that run has ended. The sweep runs every
         `LAKANA_RUN__SWEEP_INTERVAL` seconds and never removes a table that exists. Raise it if
         a create can take longer than a day.
+    undo_days
+        The worker reads it too, for the tables its sweep drops because their retention has
+        passed; such a table can always be restored for at least one day, even with 0. Set the
+        same value for the server and every worker.
+    max_expiries_per_sweep
+        The most tables one sweep drops because their retention has passed (default 100; 1 to
+        10,000), the most overdue first; the rest follow at the next sweep. It bounds what one
+        mistaken retention can remove at once, so lower it if that worries you.
     """
 
     abandoned_grace_hours: int = Field(default=24, ge=1, le=8760)
+    undo_days: int = Field(default=7, ge=0, le=365)
+    max_expiries_per_sweep: int = Field(default=100, ge=1, le=10_000)
 
 
 class TableUndoConfig(BaseModel):
-    """How long the server keeps a dropped table restorable.
+    """How long the server keeps a dropped table restorable, and warns of an expiry.
 
-    Read from ``LAKANA_TABLES__UNDO_DAYS`` by the server, which stamps the period on each drop.
+    Read from ``LAKANA_TABLES__UNDO_DAYS`` by the server, which stamps the period on each drop,
+    and ``LAKANA_TABLES__EXPIRY_WARNING_DAYS``.
 
     Parameters
     ----------
@@ -897,10 +908,17 @@ class TableUndoConfig(BaseModel):
         undrop` (default 7; 0 to 365). After that the worker's sweep deletes its files, at the
         latest one sweep (`LAKANA_RUN__SWEEP_INTERVAL`) later. 0 deletes them at the next sweep
         and allows no undrop. A drop with `--purge` ignores it. Each drop records its own end
-        of the period, so a change applies to later drops only.
+        of the period, so a change applies to later drops only. The workers read it too, for the
+        tables they drop because their retention has passed, which keep at least one day; set
+        the same value for the server and every worker.
+    expiry_warning_days
+        Days ahead `lakana table list` and `lakana table get` warn that a table expires because
+        of its retention, and the default window of `lakana table expiring` (default 7; 0 to
+        3,650). 0 turns the warning off.
     """
 
     undo_days: int = Field(default=7, ge=0, le=365)
+    expiry_warning_days: int = Field(default=7, ge=0, le=3650)
 
 
 DEFAULT_MAX_STATEMENT_CHARS = 100_000

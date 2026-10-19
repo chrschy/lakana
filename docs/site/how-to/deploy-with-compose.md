@@ -315,6 +315,15 @@ table inside it, …` at each sweep. An external table's files are never deleted
 bucket's own rules decide when a deleted file is gone. See
 [Drop and restore a table](drop-and-restore-a-table.md).
 
+**Tables whose retention has passed.** Before anything else, the same sweep drops the managed
+tables that their retention (`lakana table retention`, `lakana env retention`) lets expire, at most
+`LAKANA_TABLES__MAX_EXPIRIES_PER_SWEEP` (100) per sweep, the most overdue first. Each is dropped like
+a drop by a person, with an undo period of at least a day, and the audit log records
+`TABLE_DROPPED` with `reason: retention` and no principal. It never drops a table in a protected
+environment, one a deployed project builds, or one a write is running on (the summary line counts
+those as `expiries postponed`). Nothing has a retention unless someone sets one. See
+[Let tables expire](let-tables-expire.md).
+
 **The worker's log.** The worker prints INFO and above to its standard error, with the time, the
 level and the logger name on each line; read it with `docker compose logs worker`. That includes
 the start-up notices (whether Python assets are enabled, and that the sweeps are off when

@@ -993,9 +993,11 @@ def test_the_start_rotates_between_environments_and_records(
     order: list[str] = []
     real = sweep_module._Run.environment
 
-    def record(self: sweep_module._Run, environment_id: uuid.UUID, rotate: int) -> None:
+    def record(
+        self: sweep_module._Run, environment_id: uuid.UUID, rotate: int, expiries: int
+    ) -> None:
         order.append(self._environment)
-        real(self, environment_id, rotate)
+        real(self, environment_id, rotate, expiries)
 
     with mock.patch.object(sweep_module._Run, "environment", record):
         _sweep(session, rotation=0)
@@ -1022,7 +1024,9 @@ def test_a_busy_run_writes_one_summary_line(
     caplog.set_level(logging.INFO, logger=sweep_module.__name__)
     _sweep(session)
     (line,) = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
-    assert line.startswith("Table location sweep: 1 claims abandoned")
+    assert line.startswith(
+        "Table location sweep: 0 tables expired, 0 expiries postponed, 1 claims abandoned"
+    )
 
 
 def test_no_transaction_is_left_open(

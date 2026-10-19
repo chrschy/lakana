@@ -3734,3 +3734,72 @@ def test_0043_adds_the_tombstone_columns_and_keeps_every_record(
     finally:
         engine.dispose()
     assert read() == before
+
+
+_REVISION_0044 = "d3a0b6e9c5f1"
+
+
+def test_0044_adds_retention_columns_and_sets_no_retention_on_any_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revision `0044`: retention columns on tables and environments, empty on every old row.
+
+    Nothing expires because of an upgrade: no table and no environment comes out of it with a
+    retention, and the downgrade removes the columns again without touching a row.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    """
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, _REVISION_0042)
+    ids = _seed_tables_for_0042(db_path)
+    command.upgrade(config, _REVISION_0043)
+    command.upgrade(config, _REVISION_0044)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        tables = {c["name"]: c for c in inspect(engine).get_columns("tables")}
+        for name in ("retention_days", "retention_on", "retention_set_by", "retention_set_at"):
+            assert tables[name]["nullable"] is True
+        assert tables["retention_never"]["nullable"] is False
+        environments = {c["name"]: c for c in inspect(engine).get_columns("environments")}
+        for name in ("retention_days", "retention_set_by", "retention_set_at"):
+            assert environments[name]["nullable"] is True
+        with engine.connect() as connection:
+            assert (
+                connection.execute(
+                    sa.text(
+                        "SELECT count(*) FROM tables WHERE retention_days IS NULL"
+                        " AND retention_on IS NULL AND retention_never = 0"
+                        " AND retention_set_by IS NULL AND retention_set_at IS NULL"
+                    )
+                ).scalar_one()
+                == len(ids) - 1
+            )
+            assert (
+                connection.execute(
+                    sa.text("SELECT count(*) FROM environments WHERE retention_days IS NULL")
+                ).scalar_one()
+                == 1
+            )
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, _REVISION_0043)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        names = {c["name"] for c in inspect(engine).get_columns("tables")}
+        assert not {n for n in names if n.startswith("retention_")}
+        names = {c["name"] for c in inspect(engine).get_columns("environments")}
+        assert not {n for n in names if n.startswith("retention_")}
+        with engine.connect() as connection:
+            assert connection.execute(sa.text("SELECT count(*) FROM tables")).scalar_one() == (
+                len(ids) - 1
+            )
+    finally:
+        engine.dispose()

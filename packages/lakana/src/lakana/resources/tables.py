@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import io
 from collections.abc import Mapping, Sequence
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Protocol
 
 import httpx
@@ -38,6 +38,7 @@ from lakana._models import (
     Table,
     TableHealth,
     TableReference,
+    TableRetention,
     WriteResult,
 )
 from lakana._routes import ROUTES
@@ -226,6 +227,38 @@ def _table_from_json(data: dict[str, Any]) -> Table:
         row_count=data.get("row_count"),
         size_bytes=data.get("size_bytes"),
         file_count=data.get("file_count"),
+        expires_at=_when(data.get("expires_at")),
+        expires_soon=data.get("expires_soon", False),
+    )
+
+
+def _retention_from_json(data: dict[str, Any]) -> TableRetention:
+    """Build a `TableRetention` from the platform API's JSON response body.
+
+    Parameters
+    ----------
+    data
+        The decoded `TableRetentionOut` JSON body.
+
+    Returns
+    -------
+    TableRetention
+        The parsed retention.
+    """
+    on = data.get("on")
+    return TableRetention(
+        name=data["name"],
+        namespace=data["namespace"],
+        uuid=data["uuid"],
+        source=data.get("source"),
+        days=data.get("days"),
+        on=None if on is None else date.fromisoformat(on),
+        never=data.get("never", False),
+        set_by=data.get("set_by"),
+        set_at=_when(data.get("set_at")),
+        last_activity_at=datetime.fromisoformat(data["last_activity_at"]),
+        expires_at=_when(data.get("expires_at")),
+        kept=data.get("kept"),
     )
 
 
@@ -290,6 +323,9 @@ def _write_result_from_json(data: dict[str, Any]) -> WriteResult:
 
 _DroppedList = list[DroppedTable]
 """Alias for `list[DroppedTable]`, resolved at module scope for the reason of `_TableList`."""
+
+_RetentionList = list[TableRetention]
+"""Alias for `list[TableRetention]`, resolved at module scope for the reason of `_TableList`."""
 
 _TableList = list[Table]
 """Alias for `list[Table]`, resolved at module scope.
@@ -651,6 +687,118 @@ class Tables:
             json={"new_name": new_name, "break_glass_reason": break_glass_reason},
         )
         return _table_from_json(response.json())
+
+    def retention(self, environment: str, qualified_name: str) -> TableRetention:
+        """Show a managed table's retention, where it comes from and when the table expires.
+
+        Parameters
+        ----------
+        environment
+            The environment name.
+        qualified_name
+            Dot-joined `"namespace.table"` name.
+
+        Returns
+        -------
+        TableRetention
+            The retention; `expires_at` is `None` when the table never expires.
+
+        Raises
+        ------
+        lakana.errors.NotFound
+            If no such table exists.
+        lakana.errors.ValidationError
+            For a view, an external table or an artifact, which have no retention.
+        """
+        namespace, name = _split_namespace_table(qualified_name)
+        response = self._transport.request(
+            ROUTES["tables.retention"],
+            path_params={"env": environment, "path": namespace, "name": name},
+        )
+        return _retention_from_json(response.json())
+
+    def set_retention(
+        self,
+        environment: str,
+        qualified_name: str,
+        *,
+        days: int | None = None,
+        on: date | None = None,
+        never: bool = False,
+    ) -> TableRetention:
+        """Set when a managed table expires. Give exactly one of `days`, `on` and `never`.
+
+        An expired table is dropped by the server's sweep and can be restored with `undrop`
+        during the undo period. The table's owner may always set it. Anyone else needs
+        `DROP_TABLE` to make the table expire earlier (or at all), and `WRITE_TABLE` to make it
+        expire later or never.
+
+        Parameters
+        ----------
+        environment
+            The environment name.
+        qualified_name
+            Dot-joined `"namespace.table"` name.
+        days
+            Expire this many days (1 to 3,650) after the table's last activity: the later of its
+            last change and its last recorded read.
+        on
+            Expire from midnight UTC of this day on; it must be after today.
+        never
+            Never expire, whatever the environment's retention says.
+
+        Returns
+        -------
+        TableRetention
+            The retention now.
+
+        Raises
+        ------
+        lakana.errors.NotFound
+            If no such table exists.
+        lakana.errors.PermissionDenied
+            Without the right the change needs.
+        lakana.errors.ValidationError
+            Unless exactly one valid rule is given; for anything but a managed table; and in a
+            protected environment, whose tables never expire.
+        """
+        namespace, name = _split_namespace_table(qualified_name)
+        response = self._transport.request(
+            ROUTES["tables.set_retention"],
+            path_params={"env": environment, "path": namespace, "name": name},
+            json={"days": days, "on": None if on is None else on.isoformat(), "never": never},
+        )
+        return _retention_from_json(response.json())
+
+    def expiring(self, environment: str, *, within_days: int | None = None) -> _RetentionList:
+        """List the managed tables of an environment that expire soon, soonest first.
+
+        Parameters
+        ----------
+        environment
+            The environment name.
+        within_days
+            The window, 1 to 3,650 days; the server's warning window (7 days by default) when
+            `None`.
+
+        Returns
+        -------
+        list of TableRetention
+            The tables you may read that expire within the window, with who set the retention.
+
+        Raises
+        ------
+        lakana.errors.NotFound
+            If the environment does not exist.
+        lakana.errors.ValidationError
+            If `within_days` is out of range.
+        """
+        response = self._transport.request(
+            ROUTES["tables.expiring"],
+            path_params={"env": environment},
+            params=None if within_days is None else {"within_days": within_days},
+        )
+        return [_retention_from_json(item) for item in response.json()]
 
     def list_dropped(self, environment: str, namespace: str) -> _DroppedList:
         """List the dropped tables of a namespace whose files are not deleted yet.

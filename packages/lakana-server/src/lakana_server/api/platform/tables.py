@@ -35,6 +35,7 @@ from lakana_core.auth import PrincipalRef
 from lakana_core.catalog.json_schema import ColumnSpec, from_iceberg_schema, to_iceberg_schema
 from lakana_core.catalog.lineage_graph import LineageDirection, LineageService
 from lakana_core.catalog.query_service import QueryService
+from lakana_core.catalog.retention import TableRetention
 from lakana_core.catalog.service import CatalogService, LoadedTable, TableDescription
 from lakana_core.catalog.writes import (
     ExpectedSnapshot,
@@ -61,6 +62,8 @@ from lakana_server.api.platform.schemas import (
     TableHealthOut,
     TableOut,
     TableReferenceOut,
+    TableRetentionIn,
+    TableRetentionOut,
     UndropIn,
 )
 from lakana_server.api.routing import AuthenticateFirstRoute
@@ -93,6 +96,12 @@ dropped_router = APIRouter(
     tags=["tables"],
 )
 """The dropped tables of a namespace: a path of its own, so no table name can shadow it."""
+expiring_router = APIRouter(
+    route_class=AuthenticateFirstRoute,
+    prefix="/api/v1/environments/{env}/expiring-tables",
+    tags=["tables"],
+)
+"""The managed tables of an environment that their retention makes expire soon."""
 
 _ARROW_STREAM_MEDIA_TYPE = "application/vnd.apache.arrow.stream"
 
@@ -611,6 +620,37 @@ def _describe_out(namespace: str, description: TableDescription) -> TableOut:
         row_count=description.row_count,
         size_bytes=description.size_bytes,
         file_count=description.file_count,
+        expires_at=description.expires_at,
+        expires_soon=description.expires_soon,
+    )
+
+
+def _retention_out(retention: TableRetention) -> TableRetentionOut:
+    """Build the response body of a table's retention.
+
+    Parameters
+    ----------
+    retention
+        From `CatalogService.table_retention` and its kin.
+
+    Returns
+    -------
+    TableRetentionOut
+        The body.
+    """
+    return TableRetentionOut(
+        name=retention.ref.name,
+        namespace=".".join(retention.ref.namespace.parts),
+        uuid=str(retention.table_id),
+        source=retention.source,
+        days=retention.days,
+        on=retention.on,
+        never=retention.never,
+        set_by=retention.set_by,
+        set_at=retention.set_at,
+        last_activity_at=retention.last_activity_at,
+        expires_at=retention.expires_at,
+        kept=retention.kept,
     )
 
 
@@ -1304,6 +1344,141 @@ def undrop_table(
         new_name=body.new_name,
     )
     return _to_out(path, loaded)
+
+
+@router.get("/{name}/retention", response_model=TableRetentionOut)
+def get_table_retention(
+    env: str,
+    path: str,
+    name: str,
+    principal: PrincipalRef = Depends(get_principal),
+    catalog: CatalogService = Depends(get_catalog),
+) -> TableRetentionOut:
+    """Show a managed table's retention, where it comes from and when the table expires.
+
+    Parameters
+    ----------
+    env
+        Environment name.
+    path
+        Dot-joined namespace path.
+    name
+        Table name.
+    principal
+        The authenticated caller; needs `READ_TABLE`.
+    catalog
+        The catalog service for this request.
+
+    Returns
+    -------
+    TableRetentionOut
+        The retention.
+
+    Raises
+    ------
+    lakana_core.errors.NotFoundError
+        Mapped to 404.
+    lakana_core.errors.ValidationError
+        Mapped to 422 for a view, an external table or an artifact.
+    """
+    ref = TableRef(environment=env, namespace=NamespacePath.from_parts(path.split(".")), name=name)
+    return _retention_out(catalog.table_retention(principal, ref))
+
+
+@router.put("/{name}/retention", response_model=TableRetentionOut)
+def set_table_retention(
+    env: str,
+    path: str,
+    name: str,
+    body: TableRetentionIn,
+    principal: PrincipalRef = Depends(get_principal),
+    catalog: CatalogService = Depends(get_catalog),
+) -> TableRetentionOut:
+    """Set when a managed table expires: `days` after its last activity, `on` a day, or `never`.
+
+    The table's owner may always. Anyone else needs `DROP_TABLE` for a retention that makes the
+    table expire earlier than now (or at all), and `WRITE_TABLE` to make it expire later or
+    never.
+
+    Parameters
+    ----------
+    env
+        Environment name.
+    path
+        Dot-joined namespace path.
+    name
+        Table name.
+    body
+        Exactly one of `days`, `on` and `never`.
+    principal
+        The authenticated caller.
+    catalog
+        The catalog service for this request.
+
+    Returns
+    -------
+    TableRetentionOut
+        The retention now.
+
+    Raises
+    ------
+    lakana_core.errors.NotFoundError
+        Mapped to 404.
+    lakana_core.errors.PermissionDenied
+        Mapped to 403, without the right the change needs; audited.
+    lakana_core.errors.ValidationError
+        Mapped to 422: not exactly one valid rule, not a managed table, or `days` or `on` in a
+        protected environment.
+    """
+    ref = TableRef(environment=env, namespace=NamespacePath.from_parts(path.split(".")), name=name)
+    retention = catalog.set_table_retention(
+        principal, ref, days=body.days, on=body.on, never=body.never
+    )
+    return _retention_out(retention)
+
+
+@expiring_router.get("", response_model=list[TableRetentionOut])
+def list_expiring_tables(
+    env: str,
+    request: Request,
+    within_days: int | None = Query(default=None),
+    principal: PrincipalRef = Depends(get_principal),
+    catalog: CatalogService = Depends(get_catalog),
+) -> list[TableRetentionOut]:
+    """List the managed tables of an environment that expire within some days, soonest first.
+
+    Parameters
+    ----------
+    env
+        Environment name.
+    request
+        The current request, for `LAKANA_TABLES__EXPIRY_WARNING_DAYS`.
+    within_days
+        The window, 1 to 3,650 days; the server's warning window (7 days by default), or 1
+        when that is 0, when absent.
+    principal
+        The authenticated caller; needs `READ_ENVIRONMENT`, and sees the tables it may read.
+    catalog
+        The catalog service for this request.
+
+    Returns
+    -------
+    list of TableRetentionOut
+        Each with its expiry, the rule and who set it; a table already due is listed too.
+
+    Raises
+    ------
+    lakana_core.errors.NotFoundError
+        Mapped to 404, if the environment does not exist.
+    lakana_core.errors.ValidationError
+        Mapped to 422 when `within_days` is out of range.
+    """
+    if within_days is None:
+        within_days = max(request.app.state.settings.tables.expiry_warning_days, 1)
+    return [
+        _retention_out(entry)
+        for entry in catalog.list_expiring_tables(principal, env, within_days=within_days)
+    ]
 
 
 @dropped_router.get("", response_model=list[DroppedTableOut])

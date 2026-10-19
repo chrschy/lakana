@@ -432,7 +432,7 @@ def main() -> None:
     sweeps = itertools.count()
 
     def housekeeping(now: datetime, stop: threading.Event) -> None:
-        """Sweep the artifact store, table locations, code archives, old job fires and table reads.
+        """Sweep artifacts, table locations (and expire tables), code archives, job fires and reads.
 
         Also stores the columns of up to 50 tables that have none stored yet, so search finds them.
 
@@ -465,6 +465,8 @@ def main() -> None:
                     StorageResolver(session, key_provider),
                     now=now,
                     grace_hours=settings.tables.abandoned_grace_hours,
+                    undo_days=settings.tables.undo_days,
+                    max_expiries=settings.tables.max_expiries_per_sweep,
                     rotation=rotation,
                     should_stop=stop.is_set,
                 )
@@ -504,7 +506,8 @@ def main() -> None:
     if settings.run.sweep_interval <= 0:
         logger.info(
             "LAKANA_RUN__SWEEP_INTERVAL=0: the sweeps are off, so expired artifact uploads, "
-            "artifact files nothing names, the files of tables whose create never finished, "
+            "artifact files nothing names, tables whose retention has passed, the files of "
+            "dropped tables and of tables whose create never finished, "
             "code archives of failed deploys, table read counts past "
             "their kept period and attempt directories and deploy checkouts of dead workers are "
             "not removed, and the columns of tables that existed before search are not stored "

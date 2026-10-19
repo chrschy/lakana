@@ -214,6 +214,101 @@ def unprotect(ctx: typer.Context, name: str, yes: _YES = False) -> None:
     _output.done(state, f"Unprotected environment {_output.inline(name)}", environment)
 
 
+@env_app.command("retention")
+def retention(
+    ctx: typer.Context,
+    name: str,
+    days: Annotated[
+        int | None,
+        typer.Option(
+            "--days",
+            min=1,
+            max=3650,
+            help="Tables that set no retention expire N days after their last write or read.",
+        ),
+    ] = None,
+    off: Annotated[
+        bool, typer.Option("--off", help="Turn the environment's retention off.")
+    ] = False,
+    yes: _YES = False,
+) -> None:
+    """Show environment NAME's retention, or set it with --days or turn it off with --off.
+
+    The retention applies to every managed table in the environment that sets none of its own
+    (`lakana table retention`). Such a table expires N days after its last activity, and never
+    sooner than N days after this command, so turning it on gives every table its full period.
+    Expired tables are dropped by the worker's clean-up and can be restored with `lakana table
+    undrop` during the undo period. Off unless set. Needs MANAGE_ENVIRONMENT; refused for a
+    protected environment, whose tables never expire.
+
+    Parameters
+    ----------
+    ctx
+        The Typer context.
+    name
+        The environment.
+    days
+        `--days`.
+    off
+        `--off`.
+    yes
+        Skip the confirmation prompt of `--days`.
+
+    Raises
+    ------
+    CliError
+        With both options (exit 2).
+    """
+    state = state_of(ctx)
+    environments = state.client().environments
+    if days is not None and off:
+        raise CliError("Give --days or --off, not both.")
+    if days is None and not off:
+        shown = environments.get(name)
+        if state.output == "json":
+            _output.emit(state, shown)
+            return
+        _output.emit(state, _retention_line(shown.name, shown.retention_days, now=False))
+        return
+    if days is not None:
+        confirm(
+            state,
+            f"Let every table in {name!r} that sets no retention of its own expire {days} days "
+            "after its last write or read?",
+            yes,
+        )
+    changed = environments.set_retention(name, days)
+    _output.done(state, _retention_line(changed.name, changed.retention_days, now=True), changed)
+
+
+def _retention_line(name: str, days: int | None, *, now: bool) -> str:
+    """Say what an environment's retention does.
+
+    Parameters
+    ----------
+    name
+        The environment.
+    days
+        Its retention, or `None` for off.
+    now
+        Whether it was just changed.
+
+    Returns
+    -------
+    str
+        One sentence.
+    """
+    shown = _output.inline(name)
+    if days is None:
+        return f"{shown} has no retention: its tables expire only if they set a retention."
+    verb = "now expire" if now else "expire"
+    return (
+        f"Tables in {shown} that set no retention of their own {verb} {days} days after their "
+        "last write or read. See what expires soon with: lakana table expiring --env "
+        f"{shown}"
+    )
+
+
 def register(app: typer.Typer) -> None:
     """Add the `env` group to the root app.
 

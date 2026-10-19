@@ -1235,7 +1235,7 @@ although it raised returns the table.
 
 **The sweep** (`lakana_core.catalog.location_sweep`, in the worker's housekeeping, single-flight,
 the artifact sweep's deadline, rotation and failure cap; `LAKANA_RUN__SWEEP_INTERVAL=0` turns it off
-and the start-up line names it). Step 1 (expiries) is #87's. Step 2: a claim is resolved only when
+and the start-up line names it). Step 1 (expiries) is retention's: see "Retention" below. Step 2: a claim is resolved only when
 its holder (a `QueryRun` or `TaskRun`) is in a final state, or, with no holder or one the catalog
 does not know, after `LAKANA_TABLES__ABANDONED_GRACE_HOURS`; under the lock, `LIVE` if a `tables`
 row's metadata lies under the location, else `ABANDONED` with `purge_after = now` and
@@ -1340,6 +1340,73 @@ leaves a tombstone that can no longer be restored although its files are whole. 
 (`table_reads`) of a dropped table is not restored. A grant to a group or principal deleted during
 the period is gone with it. Tables dropped before this release have no tombstone; their directories
 are only counted (`unrecorded_directories`).
+
+### Retention: who may shorten, and the expiry by the system (#87)
+
+User documentation: `docs/site/how-to/let-tables-expire.md`. Code: `lakana_core.catalog.retention`,
+`CatalogService.set_table_retention`/`table_retention`/`set_environment_retention`/
+`list_expiring_tables`, step 1 of the location sweep (`expire_due`).
+
+**Rights (Q8 A).** `set_table_retention` computes the expiry before (`planned_expiry`, the rule
+that applies now, exclusions ignored) and after (the new rule counted from now, since the change
+bumps the row's `updated_at`). Shortened means: the new rule gives an expiry and the old one gave
+none or a later one. The owner (`owner_id == p.id`) may do anything; otherwise a shortened change
+authorizes `DROP_TABLE` on the table and any other change (later, or `never`) `WRITE_TABLE`. The
+authorization goes through `authorize`, so a refusal is audited `AUTHORIZATION_DENIED` like every
+other. A name with no table authorizes `WRITE_TABLE` before the 404, so a caller without it learns
+nothing. The protected-environment refusal (`days`/`on` there) and the not-managed refusal come after
+the authorization. `never` is allowed in a protected environment; like descriptions, retention is
+catalog metadata, not data, so `ProtectedWriteGuard` is not called (an expiry never happens there
+anyway). `set_environment_retention` authorizes `MANAGE_ENVIRONMENT` on the environment scope (so an
+instance grant covers it), refuses `days` in a protected environment, and audits
+`ENVIRONMENT_RETENTION_SET`. Audits: `TABLE_RETENTION_SET` (`days`/`on`), `TABLE_RETENTION_CLEARED`
+(`never`), each with `shortened`, `previous` and `expires_at`, in the change's transaction.
+
+**The clock (Q2 B).** Last activity = max(`created_at`, `updated_at`, the newest
+`TableRead.last_read_at`). `updated_at` is the row's own `onupdate`: every commit's compare-and-swap
+(`catalog/commit.py`) moves it, so do maintenance, a description or retention change, and an undrop
+(which sets it to now). The snapshot's `timestamp-ms` is **not** used: the committing client writes
+it, and a client that wrote an old one could make a table due at once. A rule by days counts from
+the later of the activity and the rule's `retention_set_at` (the table's, or the environment's for
+the default), so enabling a retention gives every table its full period. `on` is midnight UTC of the
+day, whatever the activity; `check_rule` refuses today or earlier. Reads through Iceberg REST are not
+recorded, and reads older than `LAKANA_TABLE_READS__KEEP_DAYS` are swept, so neither keeps a table.
+
+**The expiry.** `expire_due` lists the candidates of one environment (managed, not `never`, with a
+rule of their own or the environment's), computes each expiry with one query for reads, one for the
+deployed manifests and one for names, and calls `expire_table` for the due ones, most overdue first,
+up to the run's remaining `LAKANA_TABLES__MAX_EXPIRIES_PER_SWEEP` (shared by every environment), each
+behind the sweep's `_tick` (deadline, shutdown) and `_guarded` (failure count). `expire_table` takes
+the **environment's** row lock and then the **table's** (`lock_row`, a no-op `UPDATE` that keeps
+`updated_at`), so a protection, a retention change or a commit in another transaction either
+committed first and is seen, or waits for the drop. Under the locks it decides again from the
+database: environment not protected; row still `ICEBERG`; `describe_retention` (with the deployed
+assets read again) says due at the sweep's `now`; no `QueryRun` with a `write_mode` that is `QUEUED`
+or `RUNNING` and names the table by `target_table_id` or `target_name` in the environment; no
+non-terminal `TaskRun` of the table's dotted name in a run of the environment; and the location record
+at the table's root is `LIVE` **and names this table** (`owns_live_record`), so the drop always leaves
+a tombstone. A due table that fails one of the last two is counted `expiries_postponed`. Then
+`tombstones.drop_row` (the code `drop_table` runs too: revoke with one stamp, tombstone, audit, row
+delete) with `actor=None` (no `revoked_by`, no audit principal), `reason: retention`, the rule in the
+detail, and `purge_after = now + max(LAKANA_TABLES__UNDO_DAYS, 1 day)`: an expiry can always be undone
+for a day. The worker reads `LAKANA_TABLES__UNDO_DAYS` for this (the server and the worker must agree).
+
+**Undrop of an expired table.** The restored row's `updated_at` is set to now, so it counts as
+active and is not dropped again at the next sweep; an `on` day that has passed is removed (set by the
+undropping principal, `retention_cleared: true` in `TABLE_UNDROPPED`). The snapshot carries the
+retention columns; a `retention_set_by` deleted since becomes `NULL`.
+
+**Never expired.** Protected environments (checked under the environment's lock, so protection wins
+even over a retention set before it); assets of the current project version of any deployment in the
+environment (dotted name in `manifest_assets`; a legacy dotted component can only make more tables
+match, never fewer); a write queued or running; external tables, views, artifacts (only `ICEBERG` rows
+are candidates); a table whose record is not its own `LIVE` one. Pins: `test_table_retention.py`.
+
+**Residuals, accepted.** A write submitted after the check and before the drop's commit fails against
+a missing table (the drop is undoable). A long REST append (no query run) that commits after the drop
+is refused the same way. A deploy that adds the table as an asset concurrently can lose the race; the
+table is a tombstone that undrop restores. The expiring listing and `table list` compute the clock per
+request; the sweep decides again under the locks, so a listing can be stale but never makes a drop.
 
 ## Checks and the rollback (M5d-a)
 

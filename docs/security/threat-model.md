@@ -723,6 +723,16 @@ lies inside its location, and maintenance treats a dropped table's directory as 
 neither deletes a nested tombstone's files during its undo period; an undrop whose metadata file
 is gone anyway is refused before it writes anything.
 
+A retention (#87) lets the sweep drop a table with no person in the loop, so a retention is a
+delayed drop and is guarded like one: making a table expire sooner (or at all) needs `DROP_TABLE` or
+ownership, while anyone who may write a table may keep it (a later expiry, or `never`), and every
+change and refusal is audited. The expiry decides again under the environment's and the table's row
+locks and runs the ordinary drop path, so it leaves a tombstone with at least a day of undo period;
+a protected environment, a deployed project's asset, a table with a write queued or running, and a
+table without its own `LIVE` location record are never dropped. The clock uses the catalog's own
+time of the last commit and the recorded reads, never the client-written snapshot timestamp, so a
+client cannot backdate a table into expiry.
+
 ## M3 exit criteria
 
 The M3 epic defines three exit criteria:

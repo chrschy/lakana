@@ -24,6 +24,7 @@ Pages:
 - [Mask a column for some people](mask-a-column.md): show a replacement value instead of a column, and what masks do not protect.
 - [Describe a table](describe-a-table.md): write a description for a table and its columns, in the project or by hand, and go back to the project's text.
 - [Drop and restore a table](drop-and-restore-a-table.md): drop a table, restore it with its data and access rules during the undo period, or delete its files now.
+- [Let tables expire](let-tables-expire.md): let a development table, or every table of an environment, be dropped once nobody has used it for a while; see what expires soon, and keep a table.
 - [Find a table](find-a-table.md): search tables, columns, descriptions, runs and people from one text, and what you are allowed to see.
 - [Find a run, a query or a deploy](find-a-run.md): filter the lists by status, trigger, job, time, submitter or repository, and page through a long one.
 - [Stop a query](stop-a-query.md): cancel one with Ctrl-C or a command, who may, and what else ends a query.
