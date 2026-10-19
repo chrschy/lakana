@@ -34,8 +34,11 @@ _WRAPPERS = (
     "SELECT 1 AS a UNION ALL ({inner})",
     "SELECT * FROM bronze.x, LATERAL ({inner}) AS l{n}",
     "SELECT * FROM bronze.x WHERE a IN (SELECT a FROM ({inner}) AS i{n})",
+    "VALUES ((SELECT count(*) FROM ({inner}) AS v{n}))",
+    "VALUES (1), ((WITH w{n} AS ({inner}) SELECT count(*) FROM w{n}))",
 )
-"""Read shapes that put their inner text in a CTE body, a derived table or a set operation."""
+"""Read shapes that put their inner text in a CTE body, a derived table, a set operation or a
+bare `VALUES` list."""
 
 
 def _flip_case(text: str, flips: list[bool]) -> str:
