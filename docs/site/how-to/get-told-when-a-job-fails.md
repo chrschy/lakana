@@ -47,7 +47,7 @@ environments:
 ```
 
 The full rules for the keys and for a deploy that refuses a mistake are in
-[Notify a webhook](projects.md#notify-a-webhook).
+[Notify a webhook](../reference/lakana-yaml.md#notify-a-webhook).
 
 ## Create the secret
 
@@ -296,12 +296,12 @@ These are for the person who runs the instance; a user sees only the reasons abo
   Fix the path or the file mode before you start it again.
 - **Upgrade order.** Upgrade every worker before the first deploy that declares `notify:`.
 
-The settings, with their defaults, are in [Webhook network settings](projects.md#webhook-network-settings)
+The settings, with their defaults, are in [Webhook network settings](../reference/network-settings.md#webhook-network-settings)
 and [Settings](deploy-with-compose.md#settings).
 
 ## See also
 
-- [Notify a webhook](projects.md#notify-a-webhook): the keys of `notify:` and what a deploy checks.
+- [Notify a webhook](../reference/lakana-yaml.md#notify-a-webhook): the keys of `notify:` and what a deploy checks.
 - [Manage secrets](manage-secrets.md): how a webhook secret is stored.
 - [What leaves the machine](../explanation/what-leaves-the-machine.md): what a message contains and
   where it goes.

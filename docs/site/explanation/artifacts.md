@@ -93,7 +93,7 @@ In an asset, that code runs inside the consuming task:
   task's own output.
 - It runs as the worker's operating-system user, and the local runner is not a sandbox. What the
   worker can read, such as its settings and credentials, the code can read too. One Lakana instance
-  is one trust domain: see "Isolation" in [Projects and deploys](../how-to/projects.md).
+  is one trust domain: see [Isolation](python-assets.md#isolation-one-instance-is-one-trust-domain).
 
 So declare only artifacts as inputs whose producers you trust, and think about who holds
 `WRITE_TABLE` on them (see above). The same holds when you load a downloaded copy on your own

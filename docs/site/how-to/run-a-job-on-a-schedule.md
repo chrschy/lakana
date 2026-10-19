@@ -51,7 +51,7 @@ environments:
 - A job without `schedule:` has no timer: it starts only by hand or through the API.
 - The time zone is an IANA name such as `Europe/Berlin`; `UTC` when you leave it out.
 
-The full list of keys and the messages for a mistake are in [Jobs](projects.md#jobs). The rules for
+The full list of keys and the messages for a mistake are in [Jobs](../reference/lakana-yaml.md#jobs). The rules for
 the `cron:` text, for daylight saving time and for the two day fields are in
 [Cron and time zones](#cron-and-time-zones) below.
 

@@ -48,7 +48,7 @@ checks:
 5. When every check has its own value, remove the default or set it to `block`.
 
 The default takes `block` or `warn`, and an environment can override it (see
-[`lakana.yaml`](projects.md#the-default-of-the-checks)). It does not take `keep`: `keep` leaves
+[`lakana.yaml`](../reference/lakana-yaml.md#the-default-of-the-checks)). It does not take `keep`: `keep` leaves
 failing data where readers find it, so you choose it check by check. A deploy that sets it
 anyway is refused with this message, which names the way out:
 

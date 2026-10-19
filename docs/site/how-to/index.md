@@ -4,7 +4,7 @@ A how-to guide solves one task by the shortest path, for someone who knows what 
 
 Pages:
 
-- [Projects and deploys](projects.md): assets, `lakana.yaml`, deploys, CI setup and Python assets.
+- [Projects and deploys](projects.md): start a project, deploy it, run it, set up CI and write a first Python asset. The layout, the keys and the rules are in the reference.
 - [Check your data](check-your-data.md): state in SQL what must be true of a table, and what happens to the table when it is not.
 - [Run a job on a schedule](run-a-job-on-a-schedule.md): declare a job and its cron schedule, bind a run principal, pause it, start it from CI, and what happens when the project is busy or the platform was down.
 - [Get told when a job fails](get-told-when-a-job-fails.md): send a message to your chat tool or a webhook when a run fails and when the job works again, test it, and verify its signature.

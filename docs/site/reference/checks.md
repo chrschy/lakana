@@ -31,7 +31,7 @@ ones. A file without the comment takes the project's default.
 
 The value in force for a check is, in this order: its own `on_failure`, then `checks.on_failure`
 in `lakana.yaml` (`block` or `warn`, also in an environment's override; see
-[Projects and deploys](../how-to/projects.md#the-default-of-the-checks)), then `block`. A deploy
+[Projects and deploys](lakana-yaml.md#the-default-of-the-checks)), then `block`. A deploy
 stores the resolved value on every check, so nothing reads `lakana.yaml` at run time, and
 `lakana check list` shows the value that was in force. `keep` cannot be a default.
 

@@ -209,7 +209,7 @@ permission only to people you would trust with the index's own credential. This 
 redirection by an index manager, not code that runs in the worker: under the current runner a
 person who may deploy and run Python code reads what the worker reads anyway
 (see
-[Isolation: one instance is one trust domain](../how-to/projects.md#isolation-one-instance-is-one-trust-domain)).
+[Isolation: one instance is one trust domain](../explanation/python-assets.md#isolation-one-instance-is-one-trust-domain)).
 `MANAGE_REPOSITORY` follows the same rules for a repository: its holder can name only a secret
 bound to that repository and cannot move its URL while a secret is bound without
 `MANAGE_SECRET`. A holder without `DEPLOY` can still stop projects: a changed URL and a removed
