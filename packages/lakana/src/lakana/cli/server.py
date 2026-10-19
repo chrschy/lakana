@@ -459,6 +459,8 @@ def _child_env(
         never lets a later run silently re-bootstrap. `LAKANA_REPO_ROOTS`
         defaults to the user's home directory (resolved), so a local
         repository anywhere under it can be deployed; an inherited value wins.
+        `LAKANA_BOOTSTRAP_TOKEN_FILE` defaults to a file in the data directory, for the one later
+        run that has to mint a token (a first run whose migration failed); an inherited value wins.
         `LAKANA_RUN__SERVER_URL` defaults to this instance's own address, so the
         local worker can run Python assets when `uv` is on the `PATH`; an
         inherited value wins.
@@ -477,6 +479,7 @@ def _child_env(
     else:
         for name in _BOOTSTRAP_ENV_VARS:
             env.pop(name, None)
+    env.setdefault("LAKANA_BOOTSTRAP_TOKEN_FILE", str(data_dir.bootstrap_token_path))
     if not log_requests:
         env.setdefault("LAKANA_LOG__ACCESS", "false")
     env.setdefault("LAKANA_RUN__SERVER_URL", f"http://127.0.0.1:{port}")

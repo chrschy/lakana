@@ -1,5 +1,7 @@
 """Runtime settings for lakana-server."""
 
+from pathlib import Path
+
 from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -88,17 +90,26 @@ class Settings(BaseSettings):
         Metadata database configuration, in the same shape `lakana-core` uses.
     bootstrap_admin
         Name of the administrator created the first time the server starts, if no principal of
-        that name exists. Its credential is shown once at the first start. Change it only before
-        the first start.
+        that name exists. Its credential is supplied (`LAKANA_BOOTSTRAP_PAT_KEY_ID`) or written to
+        `LAKANA_BOOTSTRAP_TOKEN_FILE`, never logged. Change it only before the first start.
     bootstrap_pat_key_id
         The key id half of a fixed credential for the bootstrap administrator, for tests and
         local development; set it together with `LAKANA_BOOTSTRAP_PAT_SECRET`. Unset (the
-        default), a random credential is created at the first start and shown once. The Compose
-        bundle sets both in its `.env` file.
+        default), a random credential is created at the first start and written to
+        `LAKANA_BOOTSTRAP_TOKEN_FILE`. A key id an earlier token already used stops the start-up.
+        The Compose bundle sets both in its `.env` file.
     bootstrap_pat_secret
         The secret half of a fixed credential for the bootstrap administrator; set it together
         with `LAKANA_BOOTSTRAP_PAT_KEY_ID`. Unset (the default), a random credential is created
-        at the first start and shown once. Treat it like a password.
+        at the first start and written to `LAKANA_BOOTSTRAP_TOKEN_FILE`. Treat it like a
+        password.
+    bootstrap_token_file
+        Where the server writes the token of a first administrator it had to create without a
+        supplied credential: a new file, mode 0600, never overwritten (an existing file stops the
+        start-up; remove it after use). The server logs this path, never the token. No default,
+        because the server has no data directory of its own; required only in that case, where
+        start-up fails naming this setting if it is unset. Not used when
+        `LAKANA_BOOTSTRAP_PAT_KEY_ID` is set.
     secrets
         Secrets subsystem configuration, in the same shape `lakana-core` uses.
     task_tokens
@@ -148,6 +159,7 @@ class Settings(BaseSettings):
     bootstrap_admin: str = "admin"
     bootstrap_pat_key_id: str | None = None
     bootstrap_pat_secret: str | None = None
+    bootstrap_token_file: Path | None = None
     secrets: SecretsConfig = SecretsConfig()
     task_tokens: TaskTokensConfig = TaskTokensConfig()
     artifacts: ArtifactsConfig = ArtifactsConfig()

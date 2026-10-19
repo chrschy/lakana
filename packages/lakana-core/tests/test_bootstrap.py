@@ -1,7 +1,11 @@
 """Tests for bootstrap principal creation and admin lockout recovery."""
 
+import logging
+import os
+import stat
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 from unittest import mock
 
 import pytest
@@ -18,7 +22,7 @@ from lakana_core.bootstrap import (
     ensure_bootstrap_admin_grant,
     ensure_bootstrap_principal,
 )
-from lakana_core.errors import ConflictError
+from lakana_core.errors import ConflictError, ValidationError
 from lakana_core.grants.admin import holds_instance_admin
 from lakana_core.grants.authorization import GrantAuthorization
 from lakana_core.grants.roles import Role
@@ -305,10 +309,10 @@ def test_bootstrap_if_needed_records_bootstrap_admin_restored(session: Session) 
 
 
 def test_bootstrap_if_needed_mints_a_random_pat_when_no_fixed_credential_is_given(
-    session: Session,
+    session: Session, tmp_path: Path
 ) -> None:
     """Production configuration (key_id/secret both None) still gets a usable PAT."""
-    token = bootstrap_if_needed(session, "admin")
+    token = bootstrap_if_needed(session, "admin", token_file=tmp_path / "token")
 
     assert token is not None
     assert token.startswith("lakana_pat_")
@@ -330,36 +334,223 @@ def test_bootstrap_if_needed_raises_if_the_principal_vanishes_immediately(
         bootstrap_if_needed(session, "admin", key_id="testkey", secret="testsecret")
 
 
-def test_bootstrap_if_needed_falls_back_to_a_random_pat_when_the_configured_key_id_is_taken(
-    session: Session,
+def test_bootstrap_if_needed_refuses_when_the_configured_key_id_is_taken(
+    session: Session, tmp_path: Path
 ) -> None:
-    """A later recovery reusing the first boot's fixed key_id mints a random PAT instead.
+    """A later recovery reusing the first boot's fixed key id fails; it mints nothing.
 
-    Fix round 1: revoking a PAT never frees its `key_id` in the
-    unique index, so a second recovery blindly retrying the same
-    configured (key_id, secret) pair used to raise `IntegrityError` and
-    fail the whole recovery outright. It now falls back to a random
-    credential, and the recovery still succeeds and returns a usable
-    token.
+    Revoking a PAT never frees its `key_id` in the unique index, so the supplied pair cannot be
+    issued again. Before #208 a random token was minted and logged instead; now start-up fails
+    with a message that names the key id and the next step, and no file is written.
     """
     first_token = bootstrap_if_needed(session, "admin", key_id="testkey", secret="testsecret")
     assert first_token == "lakana_pat_testkey_testsecret"
-
-    # Wipe the admin grant directly, simulating the lockout without
-    # touching the PAT row already minted for "testkey".
     [grant] = session.execute(select(Grant)).scalars().all()
     grant.revoked_at = datetime.now(UTC)
     session.commit()
+    token_file = tmp_path / "token"
 
-    second_token = bootstrap_if_needed(session, "admin", key_id="testkey", secret="testsecret")
+    with pytest.raises(ConflictError, match=r"testkey.*LAKANA_BOOTSTRAP_PAT_KEY_ID"):
+        bootstrap_if_needed(
+            session, "admin", key_id="testkey", secret="testsecret", token_file=token_file
+        )
+    session.rollback()
 
-    assert second_token is not None
-    assert second_token != first_token
-    assert not second_token.startswith("lakana_pat_testkey_")
-    assert admin_exists(session) is True
+    assert not token_file.exists()
+    assert admin_exists(session) is False
+    assert len(session.execute(select(PersonalAccessToken)).scalars().all()) == 1
 
 
-def test_bootstrap_if_needed_revokes_the_principals_earlier_pats(session: Session) -> None:
+def test_a_minted_token_is_written_to_a_private_file(session: Session, tmp_path: Path) -> None:
+    """The file holds the token and nothing else, readable by the owner only (mode 0600)."""
+    token_file = tmp_path / "private" / "bootstrap-token"
+
+    token = bootstrap_if_needed(session, "admin", token_file=token_file)
+
+    assert token is not None and token.startswith("lakana_pat_")
+    assert token_file.read_text() == token + "\n"
+    assert stat.S_IMODE(token_file.stat().st_mode) == 0o600
+
+
+def test_the_token_file_is_0600_whatever_the_umask(session: Session, tmp_path: Path) -> None:
+    """A permissive umask cannot widen the file's mode."""
+    token_file = tmp_path / "token"
+    old = os.umask(0)
+    try:
+        bootstrap_if_needed(session, "admin", token_file=token_file)
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE(token_file.stat().st_mode) == 0o600
+
+
+def test_minting_without_a_token_file_fails_before_changing_anything(session: Session) -> None:
+    """Neither a supplied key id nor a file: refuse, naming the setting, with no state changed."""
+    with pytest.raises(ValidationError, match="LAKANA_BOOTSTRAP_TOKEN_FILE"):
+        bootstrap_if_needed(session, "admin")
+
+    assert session.execute(select(Principal)).scalars().all() == []
+
+
+def test_an_existing_token_file_is_refused_and_left_alone(session: Session, tmp_path: Path) -> None:
+    """A file already at the path is never overwritten; the message says to remove it after use."""
+    token_file = tmp_path / "token"
+    token_file.write_text("older secret\n")
+
+    with pytest.raises(ConflictError, match="remove it after use"):
+        bootstrap_if_needed(session, "admin", token_file=token_file)
+    session.rollback()
+
+    assert token_file.read_text() == "older secret\n"
+    assert admin_exists(session) is False
+    assert session.execute(select(PersonalAccessToken)).scalars().all() == []
+
+
+def test_a_symlink_at_the_token_path_is_refused(session: Session, tmp_path: Path) -> None:
+    """A symlink (dangling or not) is never followed: its target stays untouched."""
+    target = tmp_path / "victim"
+    link = tmp_path / "token"
+    link.symlink_to(target)
+
+    with pytest.raises(ConflictError, match="remove it after use"):
+        bootstrap_if_needed(session, "admin", token_file=link)
+    session.rollback()
+
+    assert not target.exists()
+    assert link.is_symlink()
+
+
+def test_a_token_file_that_cannot_be_written_is_a_clear_error(
+    session: Session, tmp_path: Path
+) -> None:
+    """Any other write failure names the path and the cause, and nothing is committed."""
+    blocker = tmp_path / "file"
+    blocker.write_text("x")
+
+    with pytest.raises(ConflictError, match="Could not write"):
+        bootstrap_if_needed(session, "admin", token_file=blocker / "token")
+    session.rollback()
+
+    assert admin_exists(session) is False
+
+
+@pytest.mark.parametrize(
+    ("key_id", "secret"),
+    [("testkey", None), (None, "testsecret")],
+    ids=["key-id-only", "secret-only"],
+)
+def test_half_a_supplied_credential_is_refused_before_anything_changes(
+    session: Session, tmp_path: Path, key_id: str | None, secret: str | None
+) -> None:
+    """A key id without its secret (or the reverse) would silently lose the minted token."""
+    with pytest.raises(
+        ValidationError, match=r"LAKANA_BOOTSTRAP_PAT_KEY_ID.*LAKANA_BOOTSTRAP_PAT_SECRET"
+    ):
+        bootstrap_if_needed(
+            session, "admin", key_id=key_id, secret=secret, token_file=tmp_path / "token"
+        )
+
+    assert session.execute(select(Principal)).scalars().all() == []
+    assert not (tmp_path / "token").exists()
+
+
+def test_a_directory_the_server_cannot_write_to_is_a_clear_error(
+    session: Session, tmp_path: Path
+) -> None:
+    """A read-only directory names the path and the cause."""
+    locked = tmp_path / "locked"
+    locked.mkdir(mode=0o500)
+    try:
+        with pytest.raises(ConflictError, match="Could not write"):
+            bootstrap_if_needed(session, "admin", token_file=locked / "token")
+    finally:
+        locked.chmod(0o700)
+
+
+def test_a_failed_commit_with_a_supplied_credential_leaves_files_alone(
+    session: Session, tmp_path: Path
+) -> None:
+    """With nothing written, a failing commit has no file to remove and still raises."""
+    real_commit = Session.commit
+    calls: list[int] = []
+
+    def _second_commit_raises(self: Session) -> None:
+        calls.append(1)
+        if len(calls) > 1:
+            raise RuntimeError("boom")
+        real_commit(self)
+
+    with (
+        mock.patch.object(Session, "commit", _second_commit_raises),
+        pytest.raises(RuntimeError, match="boom"),
+    ):
+        bootstrap_if_needed(
+            session, "admin", key_id="testkey", secret="testsecret", token_file=tmp_path / "t"
+        )
+
+    assert not (tmp_path / "t").exists()
+
+
+def test_a_failed_write_leaves_no_half_written_token_file(session: Session, tmp_path: Path) -> None:
+    """If the content cannot be flushed to disk, the empty file is removed and the error named."""
+    token_file = tmp_path / "token"
+
+    with (
+        mock.patch("lakana_core.bootstrap.os.fsync", side_effect=OSError(28, "No space left")),
+        pytest.raises(ConflictError, match="Could not write"),
+    ):
+        bootstrap_if_needed(session, "admin", token_file=token_file)
+
+    assert not token_file.exists()
+    assert admin_exists(session) is False
+
+
+def test_the_token_file_is_removed_when_the_commit_fails(session: Session, tmp_path: Path) -> None:
+    """A file for a token the database never stored would mislead the operator; it is removed."""
+    token_file = tmp_path / "token"
+    real_commit = Session.commit
+    calls: list[int] = []
+
+    def _commit_or_raise(self: Session) -> None:
+        calls.append(1)
+        if token_file.exists():
+            raise RuntimeError("boom")
+        real_commit(self)
+
+    with (
+        mock.patch.object(Session, "commit", _commit_or_raise),
+        pytest.raises(RuntimeError, match="boom"),
+    ):
+        bootstrap_if_needed(session, "admin", token_file=token_file)
+
+    assert not token_file.exists()
+
+
+def test_a_supplied_credential_writes_no_file(session: Session, tmp_path: Path) -> None:
+    """The caller already knows the token, so nothing is written even when a path is given."""
+    token_file = tmp_path / "token"
+
+    token = bootstrap_if_needed(
+        session, "admin", key_id="testkey", secret="testsecret", token_file=token_file
+    )
+
+    assert token == "lakana_pat_testkey_testsecret"
+    assert not token_file.exists()
+
+
+def test_bootstrap_logs_no_token_at_any_level(
+    session: Session, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """No log record, at any level, from any logger, holds a `lakana_pat_` string."""
+    with caplog.at_level(logging.DEBUG):
+        bootstrap_if_needed(session, "admin", token_file=tmp_path / "token")
+
+    assert "lakana_pat_" not in caplog.text
+    assert not [r for r in caplog.records if "lakana_pat_" in r.getMessage()]
+
+
+def test_bootstrap_if_needed_revokes_the_principals_earlier_pats(
+    session: Session, tmp_path: Path
+) -> None:
     """Recovery revokes every unrevoked PAT the principal already had.
 
     So the freshly minted, freshly logged PAT is the only working
@@ -382,7 +573,7 @@ def test_bootstrap_if_needed_revokes_the_principals_earlier_pats(session: Sessio
     grant.revoked_at = datetime.now(UTC)
     session.commit()
 
-    bootstrap_if_needed(session, "admin")
+    bootstrap_if_needed(session, "admin", token_file=tmp_path / "token")
 
     session.refresh(first_pat)
     assert first_pat.revoked_at is not None
@@ -480,9 +671,11 @@ def test_bootstrap_if_needed_rolls_back_a_real_issue_commit_false_pat_too(
     assert admin_exists(session) is True
 
 
-def test_the_bootstrap_still_creates_the_first_administrator(session: Session) -> None:
+def test_the_bootstrap_still_creates_the_first_administrator(
+    session: Session, tmp_path: Path
+) -> None:
     """The bootstrap principal grants itself ADMIN before it holds it."""
-    token = bootstrap_if_needed(session, "admin")
+    token = bootstrap_if_needed(session, "admin", token_file=tmp_path / "token")
     assert token is not None and token.startswith("lakana_pat_")
     row = session.execute(select(Principal).where(Principal.name == "admin")).scalar_one()
     assert holds_instance_admin(session, row.id)

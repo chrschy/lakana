@@ -259,9 +259,9 @@ the `LAKANA_IMAGE` line of `.env`.
 SQL or the data if either is private.
 
 **4. The relevant log lines**, with secrets removed. This writes the last hour of both logs to a
-file and replaces two kinds of secret: an access token (it starts `lakana_pat_`), which the
-server prints once if it has to create the first administrator itself, and a password in a
-connection address:
+file and replaces two kinds of secret: an access token (it starts `lakana_pat_`; the server never
+logs one itself, but a tool or a person may have pasted one), and a password in a connection
+address:
 
 <!-- not tested: reads the logs of a running Docker Compose stack, and the example runner has no Docker -->
 ```bash

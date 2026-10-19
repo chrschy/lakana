@@ -1857,13 +1857,40 @@ def test_port_free_reflects_a_real_socket(tmp_path: Path) -> None:
     assert server.port_free(bound_port) is True
 
 
+def test_child_env_points_the_token_file_into_the_data_directory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A later run that must mint (a first run whose migrate failed) writes into the data dir.
+
+    The server has no default path of its own (#208); local mode supplies one inside the 0700
+    data directory so that recovery needs no setting. An inherited value wins.
+    """
+    from typing import cast
+
+    data_dir = cast(
+        "DataDir",
+        SimpleNamespace(database_url="sqlite:///x.db", bootstrap_token_path=Path("/d/token")),
+    )
+    monkeypatch.delenv("LAKANA_BOOTSTRAP_TOKEN_FILE", raising=False)
+    env = server._child_env(data_dir, 8765, "k", key_id=None, secret=None)
+    assert env["LAKANA_BOOTSTRAP_TOKEN_FILE"] == "/d/token"
+    monkeypatch.setenv("LAKANA_BOOTSTRAP_TOKEN_FILE", "/elsewhere")
+    given = server._child_env(data_dir, 8765, "k", key_id=None, secret=None)
+    assert given["LAKANA_BOOTSTRAP_TOKEN_FILE"] == "/elsewhere"
+
+
 def test_local_mode_sets_repo_roots_to_home_unless_given(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Local repositories under $HOME are deployable in local mode by default."""
     from typing import cast
 
-    data_dir = cast("DataDir", SimpleNamespace(database_url="sqlite:///x.db"))
+    data_dir = cast(
+        "DataDir",
+        SimpleNamespace(
+            database_url="sqlite:///x.db", bootstrap_token_path=Path("/d/bootstrap-token")
+        ),
+    )
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("LAKANA_REPO_ROOTS", raising=False)
     env = server._child_env(data_dir, 8765, "k", key_id=None, secret=None)
@@ -1879,7 +1906,12 @@ def test_child_env_passes_the_log_level_to_the_server_and_the_worker(
     """Both local children get `LAKANA_LOG__LEVEL` from the environment."""
     from typing import cast
 
-    data_dir = cast("DataDir", SimpleNamespace(database_url="sqlite:///x.db"))
+    data_dir = cast(
+        "DataDir",
+        SimpleNamespace(
+            database_url="sqlite:///x.db", bootstrap_token_path=Path("/d/bootstrap-token")
+        ),
+    )
     monkeypatch.setenv("LAKANA_LOG__LEVEL", "debug")
     env = server._child_env(data_dir, 8765, "k", key_id=None, secret=None)
     assert env["LAKANA_LOG__LEVEL"] == "debug"
@@ -1891,7 +1923,12 @@ def test_child_env_tells_the_worker_where_the_server_is(
     """Local mode can run Python assets; a value the user set wins."""
     from typing import cast
 
-    data_dir = cast("DataDir", SimpleNamespace(database_url="sqlite:///x.db"))
+    data_dir = cast(
+        "DataDir",
+        SimpleNamespace(
+            database_url="sqlite:///x.db", bootstrap_token_path=Path("/d/bootstrap-token")
+        ),
+    )
     monkeypatch.delenv("LAKANA_RUN__SERVER_URL", raising=False)
     env = server._child_env(data_dir, 8765, "k", key_id=None, secret=None)
     assert env["LAKANA_RUN__SERVER_URL"] == "http://127.0.0.1:8765"
@@ -1906,7 +1943,12 @@ def test_child_env_turns_off_the_request_log_unless_asked(
     """Local mode drops the per-request line only; the log level is left alone."""
     from typing import cast
 
-    data_dir = cast("DataDir", SimpleNamespace(database_url="sqlite:///x.db"))
+    data_dir = cast(
+        "DataDir",
+        SimpleNamespace(
+            database_url="sqlite:///x.db", bootstrap_token_path=Path("/d/bootstrap-token")
+        ),
+    )
     monkeypatch.delenv("LAKANA_LOG__LEVEL", raising=False)
     monkeypatch.delenv("LAKANA_LOG__ACCESS", raising=False)
     quiet = server._child_env(data_dir, 8765, "k", key_id=None, secret=None)
