@@ -779,7 +779,7 @@ the definition of `worker`, so give it the anchors `&worker` and, on its `enviro
 `&worker-env` as the new file does), then add `LAKANA_WORKERS_INTERACTIVE` and
 `LAKANA_WORKERS_PIPELINE` to `.env`.
 
-**Bundles generated before M5b** have no `repos/` mount, so the server and workers refuse
+**Bundles generated before local repositories were supported** have no `repos/` mount, so the server and workers refuse
 every local repository ("LAKANA_REPO_ROOTS is empty"); remote (`https`, `ssh`) repositories work
 without it. To use local repositories, create `repos/` next to `compose.yaml` and add both of
 these to the `server` and the `worker` service by hand (the block shows the `server` in the context
@@ -799,11 +799,11 @@ services:
     volumes: ["./repos:/repos:ro"]
 ```
 
-A pre-M5b `worker` has the bare alias `environment: *lakana-env`; change that line to
+In such a bundle the `worker` has the bare alias `environment: *lakana-env`; change that line to
 `environment: {<<: *lakana-env, LAKANA_REPO_ROOTS: '["/repos"]'}` (a bare alias cannot take a
 second key).
 
-**Bundles generated before M5c2a** cannot run Python assets: add these to the `worker` service
+**Bundles generated before Python assets were supported** cannot run Python assets: add these to the `worker` service
 (an older `stop_grace_period` of 30 s should become `45s` at the same time) and add
 `worker-cache:`
 under the top-level `volumes:`:

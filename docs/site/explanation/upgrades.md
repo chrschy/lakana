@@ -104,7 +104,7 @@ migration also exists, and its page says what it loses: see
 
 ## What v1.0.0 changes
 
-v1.0.0 is the API freeze, planned for the hardening milestone (M10) of the
+v1.0.0 is the API freeze, planned for the hardening milestone of the
 [roadmap](roadmap.md), which also lists upgrade paths. From then on the API stops changing in ways
 that break your code ([Support](support.md)). This page has nothing more to say about it yet.
 

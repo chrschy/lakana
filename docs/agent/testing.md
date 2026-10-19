@@ -311,6 +311,9 @@ the strict build fails on a broken link or anchor.
   is checked. Inline code is for names (a file, an option, a table).
 - **Output blocks show real output.** Run the command and paste what it printed. Do not
   write what you expect.
+- **No milestone names.** A reader does not know `M5c1` or `M7b`; say what the work is or "in a
+  later release". Only `explanation/scope.md` and `explanation/roadmap.md`, which define the
+  milestones, may use them; `scripts/tests/test_docs_site.py` fails on any other page.
 - **No feature that loads from a CDN.** The site must work on an internal network. Do not use
   mermaid diagrams, image zoom, editable or runnable code blocks, `repo_url` (it queries the
   GitHub API), analytics, or a font, image or script from a URL. Two things check this.

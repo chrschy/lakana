@@ -2,7 +2,7 @@
 
 A Lakana **project** is a git repository of SQL and Python assets. Deploying a commit validates
 it and records an immutable **project version** for one environment; runs execute it via
-`lakana run` (M5c1). Data quality checks are described in [Check your data](check-your-data.md);
+`lakana run`. Data quality checks are described in [Check your data](check-your-data.md);
 jobs and their schedules are declared in `lakana.yaml` (see [Jobs](../reference/lakana-yaml.md#jobs)).
 
 This page is the steps. The facts you look up are in the reference: the

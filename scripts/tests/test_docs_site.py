@@ -1,5 +1,6 @@
 """Tests for the documentation site's configuration."""
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -339,3 +340,31 @@ def test_the_front_matter_in_a_sql_block_is_valid() -> None:
                 parse_front_matter(block.body, path=f"{page.name}:{block.line}")
                 seen += 1
     assert seen >= 4, "expected the front-matter examples of the asset pages to be found"
+
+
+MILESTONE = re.compile(r"\bM[0-9]+(?:[a-z][0-9]*)*\b")
+MILESTONE_PAGES = ("explanation/scope.md", "explanation/roadmap.md")
+"""The pages that define the milestones; every other page says it in plain words."""
+
+
+def test_a_milestone_name_appears_only_on_the_pages_that_define_it() -> None:
+    """A reader does not know "M5c1" or "M7b"; say "in a later release" or what the work is."""
+    found = [
+        f"{page.relative_to(SITE).as_posix()}:{number}: {match.group(0)}"
+        for page in sorted(SITE.rglob("*.md"))
+        if page.relative_to(SITE).as_posix() not in MILESTONE_PAGES
+        for number, line in enumerate(page.read_text(encoding="utf-8").splitlines(), 1)
+        for match in MILESTONE.finditer(line)
+    ]
+    assert found == [], (
+        "replace each milestone name with plain words (the release that brought the change, or "
+        f"'in a later release'); only {', '.join(MILESTONE_PAGES)} may use them: {found}"
+    )
+
+
+def test_the_milestone_pattern_matches_the_names_it_is_meant_to_catch() -> None:
+    """M5c1, M7b, M10 and M5c2a match; a word that merely starts with M does not."""
+    for name in ("M5c1", "M7b", "M10", "M5c2a", "M8"):
+        assert MILESTONE.fullmatch(name), name
+    for text in ("Mb", "MB", "M5MB", "Memory", "M"):
+        assert MILESTONE.search(text) is None, text
