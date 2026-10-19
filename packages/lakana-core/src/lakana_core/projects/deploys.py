@@ -1101,11 +1101,13 @@ class DeployService:
             return None
         now = db_now(self._session)
         snapshot = alive_workers(self._session, now, self._lease_seconds)
-        counts = snapshot.for_query(PIPELINE)
+        # A worker that supervises a task claims no deploy (`poller.poll_once`), so the counts
+        # are those of a task: busy also for the holder of a task lease.
+        counts = snapshot.for_task()
         if counts.alive == 0 or counts.taking == 0:
             return query_wait_reason(counts, 0, kind=PIPELINE, thing="deploy")
         snapshot = with_work(self._session, snapshot)
-        counts = snapshot.for_query(PIPELINE)
+        counts = snapshot.for_task()
         ahead = count_ahead(self._session, run.created_at, ahead_kind(snapshot, PIPELINE))
         return query_wait_reason(counts, ahead, kind=PIPELINE, thing="deploy")
 

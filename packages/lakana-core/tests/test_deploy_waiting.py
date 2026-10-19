@@ -7,7 +7,7 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
-from core_test_helpers import _prepared_catalog
+from core_test_helpers import _prepared_catalog, python_task_run
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from test_projects_deploys import _repo
@@ -200,3 +200,14 @@ def test_the_history_does_not_compute_reasons(
     _queued(session, env)
     service = DeployService(session, AllowAllAuthorization())
     assert [v.waiting_for for v in service.history_page(principal, "dev")[0]] == [None]
+
+
+def test_a_pipeline_worker_that_holds_a_task_is_busy_for_a_deploy(
+    session: Session, env: Environment, principal: PrincipalRef
+) -> None:
+    """The poller claims no deploy while it supervises a task, so the deploy waits."""
+    _worker(session, "w1", takes="pipeline")
+    python_task_run(session, principal.id)
+    reason = _reason(session, _queued(session, env), principal)
+    assert reason is not None
+    assert (reason.code, reason.workers) == ("workers_busy", 1)
