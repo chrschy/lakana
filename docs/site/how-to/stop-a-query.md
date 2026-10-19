@@ -15,8 +15,9 @@ storing its result or committing its write when the cancel arrived is not interr
 then the queued ones in the order the workers will take them, with the reason each one waits
 (see [Why is my query or task waiting?](why-is-it-waiting.md)).
 `--all` adds the queries that ended in the last 24 hours, the newest first, after the others;
-`--limit N` (1 to 200, default 100) cuts the list, and a list that was cut says so and
-names the next step. This is the list for a query you
+`--limit N` (1 to 200, default 100) cuts the list, and a list that was cut ends with the
+command for the next page. `--status` and `--submitter` narrow it (see
+[Find a run, a query or a deploy](find-a-run.md)). This is the list for a query you
 started with `lakana query submit`, or one whose `lakana sql` you closed before it printed an id:
 
 <!-- source: docs/examples/getting-started/run.sh#query-list -->

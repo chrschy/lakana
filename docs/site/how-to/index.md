@@ -21,6 +21,7 @@ Pages:
 - [Mask a column for some people](mask-a-column.md): show a replacement value instead of a column, and what masks do not protect.
 - [Describe a table](describe-a-table.md): write a description for a table and its columns, in the project or by hand, and go back to the project's text.
 - [Find a table](find-a-table.md): search tables, columns, descriptions, runs and people from one text, and what you are allowed to see.
+- [Find a run, a query or a deploy](find-a-run.md): filter the lists by status, trigger, job, time, submitter or repository, and page through a long one.
 - [Stop a query](stop-a-query.md): cancel one with Ctrl-C or a command, who may, and what else ends a query.
 - [Why is my query or task waiting?](why-is-it-waiting.md): read the reason a query or a task has not started and what to do about it.
 - [List and withdraw an open upload](withdraw-an-artifact-upload.md): free the place that an upload left by a killed process holds.
