@@ -196,7 +196,7 @@ For example, with the `lakana.yaml` above an asset without run settings gets 2 r
 (the default operator maximum). An asset
 that calls a flaky upstream can override just what it needs in its front-matter:
 
-<!-- not tested: moved as is; sorted in the second pull request -->
+<!-- not tested: SQL is not parsed by the block checker; a test in `scripts/tests/test_docs_site.py` parses this header with the front-matter reader -->
 ```sql
 /* lakana
 retries: 5

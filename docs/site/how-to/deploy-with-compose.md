@@ -38,7 +38,7 @@ has no attestation, and the command says that no attestation was found.
 
 ## Quickstart
 
-<!-- not tested: moved as is; sorted in the second pull request -->
+<!-- not tested: starts a Docker Compose stack, and the example runner has no Docker -->
 ```bash
 lakana bundle init
 cd lakana-deploy && docker compose up -d --wait
@@ -348,7 +348,7 @@ Put TLS in front of it with a reverse proxy instead of binding it to the network
 
 **A proxy that handles TLS by itself, in one block:**
 
-<!-- not tested: moved as is; sorted in the second pull request -->
+<!-- not tested: configuration of a reverse proxy (Caddy), which is not Lakana's and not parsed here -->
 ```
 lakana.example.com {
     reverse_proxy 127.0.0.1:8000
@@ -357,7 +357,7 @@ lakana.example.com {
 
 **A proxy with explicit limits:**
 
-<!-- not tested: moved as is; sorted in the second pull request -->
+<!-- not tested: configuration of a reverse proxy (nginx), which is not Lakana's and not parsed here -->
 ```
 server {
     server_name lakana.example.com;
@@ -389,7 +389,7 @@ port mapping must be an IP literal, not the word `localhost`.
 
 ## Scaling workers
 
-<!-- not tested: moved as is; sorted in the second pull request -->
+<!-- not tested: scales the services of a running Docker Compose stack, and the example runner has no Docker -->
 ```bash
 docker compose up -d --scale worker=4
 ```
@@ -705,7 +705,7 @@ Two things to check before editing `.env`:
 1. **Pull the new tag first, before editing anything.** Pulling first fails loudly if the tag
    does not exist, rather than mid-upgrade with the old container already stopped.
 
-   <!-- not tested: moved as is; sorted in the second pull request -->
+   <!-- not tested: pulls the image of a release from the registry; `<new version>` is the reader's own -->
    ```bash
    docker pull ghcr.io/lakana-labs/lakana:<new version>
    ```
@@ -715,7 +715,7 @@ Two things to check before editing `.env`:
    would generate** (a new service, a changed healthcheck, and so on). Compare your bundle's
    copy against a fresh one before assuming a tag bump is the whole upgrade:
 
-   <!-- not tested: moved as is; sorted in the second pull request -->
+   <!-- not tested: needs Docker and a published image; `<new version>` is the reader's own -->
    ```bash
    lakana --profile upgrade-check bundle init /tmp/lakana-upgrade-check --image ghcr.io/lakana-labs/lakana:<new version>
    diff lakana-deploy/compose.yaml /tmp/lakana-upgrade-check/compose.yaml
@@ -784,7 +784,7 @@ every local repository ("LAKANA_REPO_ROOTS is empty"); remote (`https`, `ssh`) r
 without it. To use local repositories, create `repos/` next to `compose.yaml` and add both of
 these to the `server` and the `worker` service by hand:
 
-<!-- not tested: moved as is; sorted in the second pull request -->
+<!-- not tested: the alias resolves in the generated compose.yaml; shown with its anchor in the next change -->
 ```yaml
     environment:
       <<: *lakana-env
@@ -811,7 +811,7 @@ under the top-level `volumes:`:
 
 Then edit `LAKANA_IMAGE` in `.env` to the new tag and:
 
-<!-- not tested: moved as is; sorted in the second pull request -->
+<!-- not tested: pulls an image from the registry and restarts a running Docker Compose stack -->
 ```bash
 docker compose pull && docker compose up -d --wait
 ```
@@ -828,14 +828,14 @@ other.
 
 **Postgres (the catalog):**
 
-<!-- not tested: moved as is; sorted in the second pull request -->
+<!-- not tested: dumps the Postgres of a running Docker Compose stack, and the example runner has no Docker -->
 ```bash
 docker compose exec postgres pg_dump -U lakana lakana > lakana.sql
 ```
 
 **SeaweedFS (object storage):**
 
-<!-- not tested: moved as is; sorted in the second pull request -->
+<!-- not tested: archives a Docker volume of a running stack, and the example runner has no Docker -->
 ```bash
 docker run --rm -v lakana_seaweed:/data -v "$PWD":/backup busybox tar czf /backup/seaweed.tgz /data
 ```
@@ -1096,7 +1096,7 @@ bootstrap admin principal (named `admin` by default) — it stays valid until yo
 Create a named admin to replace it, then revoke the bootstrap one. To add an ordinary user instead,
 see [Give a second person access](give-a-second-person-access.md):
 
-<!-- not tested: moved as is; sorted in the second pull request -->
+<!-- not tested: revokes the bootstrap token of a Docker Compose bundle; `<LAKANA_BOOTSTRAP_PAT_KEY_ID>` is in the reader's own `.env` -->
 ```bash
 lakana principal create alice --type user
 lakana token issue alice alice-laptop                        # shown once — save it
@@ -1140,7 +1140,7 @@ This is for a Compose deployment. For the instance on your own machine, stop it 
 `lakana server reset --local` (see "Getting started"); that command refuses a Compose or remote
 instance.
 
-<!-- not tested: moved as is; sorted in the second pull request -->
+<!-- not tested: deletes the volumes of a Docker Compose stack, and the example runner has no Docker -->
 ```bash
 docker compose down -v
 ```

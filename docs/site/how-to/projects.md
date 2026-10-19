@@ -14,7 +14,7 @@ This page is the steps. The facts you look up are in the reference: the
 
 ## Start a project
 
-<!-- not tested: moved as is; sorted in the second pull request -->
+<!-- source: docs/examples/projects/run.sh#init -->
 ```bash
 lakana init analytics          # lakana.yaml, a sample (three assets, one check), tests/,
                                # pyproject.toml, .github/workflows/lakana-deploy.yml,
@@ -68,7 +68,7 @@ input tables.
 
 **1. Create the project** (see [Start a project](#start-a-project)):
 
-<!-- not tested: moved as is; sorted in the second pull request -->
+<!-- source: docs/examples/projects/run.sh#create -->
 ```bash
 lakana init analytics --no-sample && cd analytics
 ```
@@ -76,7 +76,7 @@ lakana init analytics --no-sample && cd analytics
 **2. Add two small SQL assets** that hold the data. They are ordinary SQL assets with literal
 rows. `assets/bronze/readings.sql`:
 
-<!-- not tested: moved as is; sorted in the second pull request -->
+<!-- source: docs/examples/projects/project/assets/bronze/readings.sql -->
 ```sql
 /* lakana
 description: A few hand-written temperature readings.
@@ -89,7 +89,7 @@ UNION ALL SELECT 'B2', TIMESTAMP '2026-01-07 00:00:00', 6.0
 
 and `assets/bronze/stations.sql`:
 
-<!-- not tested: moved as is; sorted in the second pull request -->
+<!-- source: docs/examples/projects/project/assets/bronze/stations.sql -->
 ```sql
 /* lakana
 description: The stations that report.
@@ -162,7 +162,7 @@ source of `lakana`: a `[[tool.uv.index]]` table with `name = "lakana"`, `url = "
 `uv` is the Python package manager from Astral. Its lock file, `uv.lock`, pins every package and
 its hash. You create it and commit it; Lakana never resolves versions for you:
 
-<!-- not tested: moved as is; sorted in the second pull request -->
+<!-- source: docs/examples/train-and-predict/run.sh#lock -->
 ```bash
 uv lock
 ```
@@ -172,7 +172,7 @@ admin registers the repository once ("Register the repository (admin)"). For a l
 is a repository under one of the instance's `LAKANA_REPO_ROOTS` (in local mode, your home
 directory); for a hosted repository it is a pushed commit.
 
-<!-- not tested: moved as is; sorted in the second pull request -->
+<!-- not tested: commits and deploys the page's Python asset, whose environment needs a lock and the public package index; the steps run in the example `train-and-predict` -->
 ```bash
 git init && git add -A && git commit -m "Add station scores"
 lakana repo add analytics --kind local --url "$PWD"      # once, admin
@@ -181,7 +181,7 @@ lakana deploy --env dev
 
 **6. Run it and read the result:**
 
-<!-- not tested: moved as is; sorted in the second pull request -->
+<!-- not tested: runs the page's Python asset, whose environment needs a lock and the public package index; the steps run in the example `train-and-predict` -->
 ```bash
 lakana run --env dev
 lakana sql "SELECT * FROM gold.station_scores" --env dev
@@ -206,7 +206,7 @@ So deploy A first, run it once, then deploy B.
 
 ## Register the repository (admin)
 
-<!-- not tested: moved as is; sorted in the second pull request -->
+<!-- not tested: registers a repository at a hosted git service with a token (`ghp_…`) that is the reader's own -->
 ```bash
 lakana secret create github-token --env prod --value token=ghp_…   # per environment
 lakana secret create github-token --env dev  --value token=ghp_…
@@ -238,7 +238,7 @@ environment has a current deployment from it: undeploy it there first.
 
 ## Deploy, dry-run, roll back
 
-<!-- not tested: moved as is; sorted in the second pull request -->
+<!-- not tested: the optional parts in brackets and `<id>` are for the reader to fill in; the plain commands run in the examples `getting-started` and `projects` -->
 ```bash
 lakana deploy --env dev [--ref main] [--dry-run]
 lakana rollback --env dev --to-previous      # or --to <full sha>
@@ -306,7 +306,7 @@ another is therefore not an orphan once the new owner has deployed it.
 
 ## Run
 
-<!-- not tested: moved as is; sorted in the second pull request -->
+<!-- not tested: the optional parts in brackets and `RUN_ID` are for the reader to fill in; the plain commands run in the examples `getting-started` and `check-your-data` -->
 ```bash
 lakana run --env dev                                   # the whole DAG, waits, exit 0/1
 lakana run --env dev --select 'gold.*' --upstream      # gold and everything it reads
@@ -451,7 +451,7 @@ limit: keep inputs narrow. Polars 1 does not spill in this way and ignores the s
 
 ## Undeploy
 
-<!-- not tested: moved as is; sorted in the second pull request -->
+<!-- source: docs/examples/projects/run.sh#undeploy -->
 ```bash
 lakana undeploy analytics --env dev --yes
 ```
@@ -472,7 +472,7 @@ guarantee holds only while no human holds `ADMIN` there. Use **two** principals,
 request runs the workflow file from its own branch: anyone who can push a branch can edit it, so
 whatever token a PR job sees must be worthless on prod.
 
-<!-- not tested: moved as is; sorted in the second pull request -->
+<!-- not tested: needs a protected `prod` environment and a CI system, which the one-instance examples do not set up -->
 ```bash
 lakana principal create ci-dev  --type service-account
 lakana principal create ci-prod --type service-account
@@ -531,7 +531,7 @@ is tracked in #15.
 In a protected environment a run writes as the service account bound to the deployment — never as
 whoever triggered it:
 
-<!-- not tested: moved as is; sorted in the second pull request -->
+<!-- not tested: needs a service account `etl-prod` and a protected `prod` environment, which the one-instance examples do not set up -->
 ```bash
 lakana deployments set-run-as analytics --env prod --principal etl-prod
 lakana deployments --env prod            # shows run_as per repository
@@ -559,7 +559,7 @@ secrets, repositories, deployments and table maintenance are unaffected.
 
 For an incident, a holder of `MANAGE_ENVIRONMENT` can make exactly one write anyway:
 
-<!-- not tested: moved as is; sorted in the second pull request -->
+<!-- not tested: writes to a table of a protected `prod` environment, which the one-instance examples do not set up -->
 ```bash
 lakana table append bronze.events fix.csv --env prod --break-glass --reason "INC-42: replay lost rows"
 ```

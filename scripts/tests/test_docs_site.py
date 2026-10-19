@@ -5,7 +5,7 @@ from pathlib import Path
 
 import yaml
 
-from scripts.docs_blocks import check
+from scripts.docs_blocks import check, find_blocks
 
 ROOT = Path(__file__).resolve().parents[2]
 SITE = ROOT / "docs" / "site"
@@ -15,7 +15,7 @@ EXEMPT = (
     "scripts/tests/test_docs_site.py",
     "scripts/tests/test_docs_only.py",
 )
-NOT_TESTED_CEILING = 55
+NOT_TESTED_CEILING = 49
 """Blocks marked as not tested; it only goes down, apart from the rises below.
 
 The artifact pages left six when they were written: the `artifact uploads abort` command,
@@ -88,6 +88,14 @@ for real in `docs/examples/bind-a-secret/run.sh` and, for the index case, in
 The "Verify a download" block of `deploy-with-compose.md` rose it from 53 to 54 (#130): it runs
 `pip download` and `gh attestation verify` against a published, attested release, which needs
 the network, the GitHub CLI and a release that exists, none of which the example harness has.
+
+The sorting of the pages (#55) removed the 28 blocks marked "moved as is" and the count fell from
+55 to 49. Six became tested: `uv lock` is synced from `train-and-predict`; the project start, the
+two SQL assets of the first example and `lakana undeploy` from the new example `projects`. Twenty-two
+others stayed and now say why: Docker (the Compose commands, backups and the bundle's teardown),
+a reverse proxy's own configuration, a protected `prod` environment or a hosted repository's token
+that the one-instance examples do not set up, a command with optional parts or an id in brackets,
+and the two SQL headers that `test_the_front_matter_in_a_sql_block_is_valid` parses instead.
 """
 SECTIONS = ("tutorials", "how-to", "reference", "explanation")
 
@@ -294,3 +302,38 @@ def test_the_number_of_not_tested_blocks_does_not_rise() -> None:
         "parse); if it truly cannot be tested, raise NOT_TESTED_CEILING in "
         "scripts/tests/test_docs_site.py in the same pull request and say why."
     )
+
+
+def test_no_block_is_marked_as_moved_as_is() -> None:
+    """The placeholder reason of the first sorting pass is gone: every reason is a real one."""
+    left = [
+        f"{page.relative_to(ROOT).as_posix()}:{block.line}"
+        for page in sorted(SITE.rglob("*.md"))
+        for block in find_blocks(page)
+        if block.marker is not None
+        and block.marker.kind == "not-tested"
+        and "moved as is" in block.marker.value
+    ]
+    assert left == [], f"give each of these blocks a real reason, or sync or parse it: {left}"
+
+
+def test_the_front_matter_in_a_sql_block_is_valid() -> None:
+    """A SQL block of an asset page that opens with `/* lakana` carries a header Lakana accepts.
+
+    The block checker does not parse SQL, so this test hands the header to the parser that
+    reads the front matter of a real asset. A header with an unknown key or a bad value fails.
+    """
+    from lakana_core.projects.frontmatter import parse_front_matter
+
+    seen = 0
+    for name in (
+        "reference/asset-front-matter.md",
+        "reference/lakana-yaml.md",
+        "how-to/projects.md",
+    ):
+        page = SITE / name
+        for block in find_blocks(page):
+            if block.lang == "sql" and block.body.startswith("/* lakana"):
+                parse_front_matter(block.body, path=f"{page.name}:{block.line}")
+                seen += 1
+    assert seen >= 4, "expected the front-matter examples of the asset pages to be found"
