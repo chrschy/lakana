@@ -15,7 +15,7 @@ EXEMPT = (
     "scripts/tests/test_docs_site.py",
     "scripts/tests/test_docs_only.py",
 )
-NOT_TESTED_CEILING = 49
+NOT_TESTED_CEILING = 48
 """Blocks marked as not tested; it only goes down, apart from the rises below.
 
 The artifact pages left six when they were written: the `artifact uploads abort` command,
@@ -90,8 +90,9 @@ The "Verify a download" block of `deploy-with-compose.md` rose it from 53 to 54 
 the network, the GitHub CLI and a release that exists, none of which the example harness has.
 
 The sorting of the pages (#55) removed the 28 blocks marked "moved as is" and the count fell from
-55 to 49. Six became tested: `uv lock` is synced from `train-and-predict`; the project start, the
-two SQL assets of the first example and `lakana undeploy` from the new example `projects`. Twenty-two
+55 to 48. Seven became tested: the `*lakana-env` block of `deploy-with-compose.md` shows its
+anchor and is parsed; `uv lock` is synced from `train-and-predict`; the project start, the
+two SQL assets of the first example and `lakana undeploy` from the new example `projects`. Twenty-one
 others stayed and now say why: Docker (the Compose commands, backups and the bundle's teardown),
 a reverse proxy's own configuration, a protected `prod` environment or a hosted repository's token
 that the one-instance examples do not set up, a command with optional parts or an id in brackets,

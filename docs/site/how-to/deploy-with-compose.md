@@ -782,10 +782,17 @@ the definition of `worker`, so give it the anchors `&worker` and, on its `enviro
 **Bundles generated before M5b** have no `repos/` mount, so the server and workers refuse
 every local repository ("LAKANA_REPO_ROOTS is empty"); remote (`https`, `ssh`) repositories work
 without it. To use local repositories, create `repos/` next to `compose.yaml` and add both of
-these to the `server` and the `worker` service by hand:
+these to the `server` and the `worker` service by hand (the block shows the `server` in the context
+of the file, so that the `*lakana-env` alias resolves; the `worker` gets the same two lines):
 
-<!-- not tested: the alias resolves in the generated compose.yaml; shown with its anchor in the next change -->
 ```yaml
+x-lakana-env: &lakana-env
+  # ... the lines that are already here stay ...
+  LAKANA_DATABASE__URL: postgresql+pg8000://lakana:${POSTGRES_PASSWORD}@postgres:5432/lakana
+
+services:
+  server:
+    # ... the lines that are already here stay ...
     environment:
       <<: *lakana-env
       LAKANA_REPO_ROOTS: '["/repos"]'
