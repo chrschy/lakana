@@ -44,6 +44,23 @@ _KINDS: dict[TableType, str] = {
 """The API's `kind` for each `table_type`."""
 
 
+def table_kind(table_type: TableType) -> str:
+    """Name a table type the way the API does.
+
+    Parameters
+    ----------
+    table_type
+        The row's type.
+
+    Returns
+    -------
+    str
+        ``"TABLE"`` for a managed (Iceberg) table, ``"EXTERNAL"`` for a raw-zone table,
+        ``"VIEW"`` for a view, ``"ARTIFACT"`` for an artifact.
+    """
+    return _KINDS[table_type]
+
+
 class Table(Base, TimestampMixin):
     """A catalog entry for one table.
 
@@ -190,4 +207,4 @@ class Table(Base, TimestampMixin):
             ``"TABLE"`` for a managed (Iceberg) table, ``"EXTERNAL"`` for a
             raw-zone table, ``"VIEW"`` for a view, ``"ARTIFACT"`` for an artifact.
         """
-        return _KINDS[self.table_type]
+        return table_kind(self.table_type)

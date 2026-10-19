@@ -161,3 +161,85 @@ def test_info_returns_the_instances_version() -> None:
     http = httpx.Client(transport=httpx.MockTransport(handler), base_url="http://x")
     with Client(url="http://x", token="lakana_pat_k_s", http_client=http) as client:
         assert client.info() == InstanceInfo(version="1.2.3")
+
+
+_SEARCH_BODY = {
+    "results": [
+        {
+            "kind": "table",
+            "name": "silver.orders",
+            "matched": "description",
+            "snippet": "Purchases",
+            "namespace": "silver",
+            "table": "orders",
+            "table_kind": "TABLE",
+            "column": None,
+            "column_type": None,
+            "run_id": None,
+            "job": None,
+            "repository": None,
+            "status": None,
+            "principal": None,
+            "principal_type": None,
+        },
+        {
+            "kind": "run",
+            "name": "0b0e3c5e-6a7e-4f26-9d1e-0a3f0f5f6a11",
+            "matched": "job",
+            "snippet": None,
+            "namespace": None,
+            "table": None,
+            "table_kind": None,
+            "column": None,
+            "column_type": None,
+            "run_id": "0b0e3c5e-6a7e-4f26-9d1e-0a3f0f5f6a11",
+            "job": "nightly",
+            "repository": "analytics",
+            "status": "succeeded",
+            "principal": None,
+            "principal_type": None,
+        },
+    ],
+    "limit": 20,
+    "offset": 0,
+    "has_more": True,
+}
+
+
+def test_search_gets_the_search_route_with_only_the_arguments_given_and_parses_it() -> None:
+    """`Client.search` GETs `/environments/{env}/search`, sending `kind` only when given."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json=_SEARCH_BODY)
+
+    http = httpx.Client(transport=httpx.MockTransport(handler), base_url="http://x")
+    with Client(url="http://x", token="lakana_pat_k_s", http_client=http) as client:
+        page = client.search("dev", "order")
+        client.search("dev", "order", kind="table", limit=5, offset=10)
+
+    assert seen[0].method == "GET"
+    assert seen[0].url.path == "/api/v1/environments/dev/search"
+    assert dict(seen[0].url.params) == {"q": "order", "limit": "20", "offset": "0"}
+    assert dict(seen[1].url.params) == {
+        "q": "order",
+        "kind": "table",
+        "limit": "5",
+        "offset": "10",
+    }
+    assert (page.limit, page.offset, page.has_more) == (20, 0, True)
+    table, run = page.results
+    assert (table.kind, table.name, table.matched, table.snippet) == (
+        "table",
+        "silver.orders",
+        "description",
+        "Purchases",
+    )
+    assert (table.namespace, table.table, table.table_kind) == ("silver", "orders", "TABLE")
+    assert (run.run_id, run.job, run.repository, run.status) == (
+        "0b0e3c5e-6a7e-4f26-9d1e-0a3f0f5f6a11",
+        "nightly",
+        "analytics",
+        "succeeded",
+    )

@@ -20,6 +20,7 @@ from lakana_core.artifacts.sweep import DEFAULT_MAX_SECONDS, sweep_artifacts
 from lakana_core.audit.authorization import AuditingAuthorization, flush_suppressed
 from lakana_core.audit.denial_limiter import DenialAuditLimiter
 from lakana_core.auth import AuthorizationService
+from lakana_core.catalog.columns import backfill_table_columns
 from lakana_core.catalog.health import sweep_table_reads
 from lakana_core.config import QueryLimitsConfig, Settings, warn_about_tokens_in_url_paths
 from lakana_core.db import create_engine
@@ -425,6 +426,8 @@ def main() -> None:
     def housekeeping(now: datetime, stop: threading.Event) -> None:
         """Sweep the artifact store, the code archives, the old job fires and the old table reads.
 
+        Also stores the columns of up to 50 tables that have none stored yet, so search finds them.
+
         One sweep failing does not stop the others.
 
         Parameters
@@ -468,13 +471,21 @@ def main() -> None:
                 sweep_table_reads(session, keep_days=settings.table_reads.keep_days, now=now)
         except Exception as exc:
             logger.warning("The table reads sweep failed (%s).", type(exc).__name__, exc_info=True)
+        try:
+            with session_factory() as session:
+                backfill_table_columns(session, StorageResolver(session, key_provider))
+        except Exception as exc:
+            logger.warning(
+                "The table column backfill failed (%s).", type(exc).__name__, exc_info=True
+            )
 
     if settings.run.sweep_interval <= 0:
         logger.info(
             "LAKANA_RUN__SWEEP_INTERVAL=0: the sweeps are off, so expired artifact uploads, "
             "artifact files nothing names, code archives of failed deploys, table read counts past "
             "their kept period and attempt directories and deploy checkouts of dead workers are "
-            "not removed. Set it to a number "
+            "not removed, and the columns of tables that existed before search are not stored "
+            "for it. Set it to a number "
             "of seconds (3600 is the default) to turn them on."
         )
     scheduler = SchedulerLoop(

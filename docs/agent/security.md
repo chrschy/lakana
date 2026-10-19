@@ -291,6 +291,24 @@ Audited in the same transaction (`TABLE_DESCRIBED`, `COLUMN_DESCRIBED`; `detail`
 
 `table_reads` holds who read what, by day; it is written only by the worker, in the transaction that completes a succeeded query (`catalog/health.py`, `record_table_reads`), and deleted by the housekeeping sweep after `LAKANA_TABLE_READS__KEEP_DAYS`. Python tasks read through the Iceberg REST catalog and record nothing. Pins: `test_table_health.py`, `test_tables_health.py`.
 
+## Search: what a result may reveal
+
+`GET .../environments/{env}/search` (`catalog/search.py`, `CatalogSearch`) ranks candidates in one SQL
+union and applies the listings' rights to each row afterwards, in chunks, so nothing it returns, and
+no text inside it, is read out for a caller who may not read it.
+
+| Result | Needs | Notes |
+|---|---|---|
+| table, column | `READ_TABLE` on the table | `authz.permits` per table (cached per search), as `CatalogService.can_read_table` asks it. A column's name, type and description and a table's description are in the row only after this check; a snippet is cut from the shown description of a permitted row. |
+| run | `READ_ENVIRONMENT` | Decided once, before the runs are looked for. |
+| principal | `MANAGE_PRINCIPAL` at instance scope | The principal listing's rule as a yes or no; no results, not an error. |
+
+An environment that does not exist is `404` only for a caller who passes `READ_ENVIRONMENT`; others get an
+empty page, the same as for one that exists. `MAX_SCANNED` (5,000) bounds the candidates examined per
+search so a caller with few rights cannot make one search read an environment. `table_columns` holds
+names and types only, in the same transaction as the schema change; a column mask hides values, not
+names, as `table get` does. Pins: `test_catalog_search.py`, `test_search.py`.
+
 ## Jobs: who may start, pause and resume (M5d-b)
 
 A job is a named selection in the manifest; starting one is starting a run, so it has the run's

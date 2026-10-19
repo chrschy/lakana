@@ -1961,3 +1961,30 @@ def test_0038_on_postgres() -> None:
         migrate.upgrade(url, revision_0038)
         assert _alembic_version(engine) == revision_0038
         engine.dispose()
+
+
+def test_0039_on_postgres() -> None:
+    """0039 creates `table_columns` with its unique key; the downgrade drops it."""
+    revision_0038 = "d7a4b0e3c9f5"
+    revision_0039 = "e8b5c1f4d0a6"
+    with PostgresContainer("postgres:16", driver="pg8000") as pg:
+        url = pg.get_connection_url()
+        migrate.upgrade(url, revision_0038)
+        engine = sqlalchemy.create_engine(url)
+        assert "table_columns" not in sqlalchemy.inspect(engine).get_table_names()
+
+        migrate.upgrade(url, revision_0039)
+        assert _alembic_version(engine) == revision_0039
+        inspector = sqlalchemy.inspect(engine)
+        columns = {c["name"]: c for c in inspector.get_columns("table_columns")}
+        assert type(columns["type"]["type"]).__name__ == "TEXT"
+        assert [u["column_names"] for u in inspector.get_unique_constraints("table_columns")] == [
+            ["table_id", "name"]
+        ]
+
+        migrate.downgrade(url, revision_0038)
+        assert _alembic_version(engine) == revision_0038
+        assert "table_columns" not in sqlalchemy.inspect(engine).get_table_names()
+        migrate.upgrade(url, revision_0039)
+        assert _alembic_version(engine) == revision_0039
+        engine.dispose()

@@ -62,6 +62,7 @@ from lakana_core.catalog.append import (
     strip_field_metadata,
     validate_arrow_schema,
 )
+from lakana_core.catalog.columns import sync_table_columns
 from lakana_core.catalog.commit import commit_metadata_pointer
 from lakana_core.catalog.datafiles import list_data_files
 from lakana_core.catalog.descriptions import (
@@ -1996,6 +1997,7 @@ class CatalogService:
         )
         self._session.add(row)
         sync_created_table(self._session, prepared.environment_id, row, ref.dotted())
+        sync_table_columns(self._session, row.id, from_iceberg_schema(metadata.schema()))
         try:
             self._guard.record_pending()
             self._commit_sent = True
@@ -2164,6 +2166,11 @@ class CatalogService:
             external_claim=loc.claim,
         )
         self._session.add(row)
+        sync_table_columns(
+            self._session,
+            row.id,
+            [ColumnSpec(name=n, type=t, nullable=True) for n, t in schema.items()],
+        )
         try:
             self._guard.record_pending()
             self._session.commit()
@@ -3553,6 +3560,7 @@ class CatalogService:
             new_location=written,
             publish=not maintenance and updated.current_snapshot_id is not None,
         )
+        sync_table_columns(self._session, table_id, from_iceberg_schema(updated.schema()))
         if after_swap is not None:
             after_swap()
         # A maintenance commit never passed the guard's `check`, so whatever
@@ -5061,6 +5069,7 @@ class CatalogService:
             row.view_definition = definition
             self._session.execute(delete(LineageEdge).where(LineageEdge.target_table_id == row.id))
         view_id, environment_id = row.id, env.id
+        sync_table_columns(self._session, view_id, columns)
         self._add_lineage_edges(
             environment_id=environment_id,
             sources=[

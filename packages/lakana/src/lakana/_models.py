@@ -2002,3 +2002,86 @@ class ArtifactDownload:
     manifest_sha256: str
     size_bytes: int
     file_count: int
+
+
+# jscpd:ignore-start
+# The SDK depends on no other package, so these mirror the server's response models.
+@dataclass(frozen=True)
+class SearchHit:
+    """One search hit.
+
+    Parameters
+    ----------
+    kind
+        What was found: ``table``, ``column``, ``run`` or ``principal``.
+    name
+        A display name: ``namespace.table``, ``namespace.table.column``, the run id or the
+        principal's name.
+    matched
+        The field that matched: ``name``, ``description``, ``id``, ``job`` or ``repository``.
+    snippet
+        For a description match, at most 160 characters of the description around the hit.
+    namespace
+        For a table or column, its namespace, dotted.
+    table
+        For a table or column, the table's name.
+    table_kind
+        For a table, ``TABLE``, ``EXTERNAL``, ``VIEW`` or ``ARTIFACT``.
+    column
+        For a column, its name.
+    column_type
+        For a column, its type.
+    run_id
+        For a run, its id.
+    job
+        For a run, its job, if it has one.
+    repository
+        For a run, its repository.
+    status
+        For a run, its status.
+    principal
+        For a principal, its name.
+    principal_type
+        For a principal, ``USER`` or ``SERVICE_ACCOUNT``.
+    """
+
+    kind: str
+    name: str
+    matched: str
+    snippet: str | None = None
+    namespace: str | None = None
+    table: str | None = None
+    table_kind: str | None = None
+    column: str | None = None
+    column_type: str | None = None
+    run_id: str | None = None
+    job: str | None = None
+    repository: str | None = None
+    status: str | None = None
+    principal: str | None = None
+    principal_type: str | None = None
+
+
+@dataclass(frozen=True)
+class SearchPage:
+    """One page of search hits.
+
+    Parameters
+    ----------
+    results
+        The hits, best first.
+    limit
+        The page size asked for.
+    offset
+        How many hits were skipped.
+    has_more
+        Whether a hit follows this page; ask again with a larger `offset`.
+    """
+
+    results: list[SearchHit]
+    limit: int
+    offset: int
+    has_more: bool
+
+
+# jscpd:ignore-end
