@@ -122,12 +122,10 @@ she do that?", use [Why may (or may not) someone do this?](why-may-someone-do-th
 The catalog and the storage are one state. A backup of one without the other taken at another
 time leaves them disagreeing.
 
-**In which order.** The commands are in [Backups](deploy-with-compose.md#backups). The safe way
-is to stop the stack (`docker compose stop`), take both backups and start it again: then the
-order does not matter. If you cannot stop it, take the catalog dump first and the storage
-backup after it: storage that is newer than the catalog holds files the catalog has not heard of,
-which the next section shows is harmless, while a catalog newer than the storage can list files
-that are not there.
+**How.** The steps and commands are in [Backups](deploy-with-compose.md#backups): stop the server and the
+workers, dump the catalog, stop the storage and archive its volume, start everything again. Only
+that procedure gives a consistent backup. A backup taken while the stack runs can lose or invent
+files whatever the order, so do not rely on one.
 
 **How to restore.** Restore both from backups of the same moment, with the `.env` of the same bundle
 (a new master key cannot read the old secrets). In outline:
@@ -146,8 +144,9 @@ never run is a guess.
 uploads (the sweep). After a restore the catalog and the storage can disagree, and the sweep is
 built to remove little then: it keeps a directory the catalog does not know, keeps the files that
 a manifest it does not know names, and says so in the worker's log. A file with no record at all
-goes after seven days. If you are unsure, set `LAKANA_RUN__SWEEP_INTERVAL=0` on the workers
-before you restore and set it back after you have checked. What each log line means and what to do
+goes after seven days. If you are unsure, set `LAKANA_RUN__SWEEP_INTERVAL: "0"` in the `x-lakana-env`
+block of `compose.yaml` before you restore (the bundle's workers do not read it from `.env`) and set it
+back after you have checked. What each log line means and what to do
 is in [After a restore](deploy-with-compose.md#after-a-restore), and the sweep itself in
 [The sweep](deploy-with-compose.md#the-sweep).
 
@@ -206,7 +205,7 @@ commands show, and what to do when a query waits:
 
 **Logs worth alerting on.** The server and the workers print to standard error:
 `docker compose logs server` and `docker compose logs worker`. Set the level with
-`LAKANA_LOG__LEVEL`. Three messages deserve an alert: a worker that stops for its memory limit
+`LAKANA_LOG__LEVEL` in the `x-lakana-env` block of `compose.yaml` ([the steps](deploy-with-compose.md#the-sweep)). Three messages deserve an alert: a worker that stops for its memory limit
 (`Memory limit exceeded`; see [Memory limits](deploy-with-compose.md#memory-limits)), a sweep
 that "left an artifact whole" (see [After a restore](deploy-with-compose.md#after-a-restore)),
 and a start-up that stops with a message that names a setting. [The sweep](deploy-with-compose.md#the-sweep)
@@ -258,6 +257,9 @@ lakana --profile acme sql "SELECT 42"
 lakana --profile berg sql "SELECT 42"
 ```
 
+The two `sql` lines work only once the proxy and the DNS name of that client exist, because the profile
+uses the public address you gave `--public-url`.
+
 Each `bundle init` saves a profile of the given name, so `--profile acme` or `--profile berg` before
 a command picks the instance. Check that the two stacks are separate:
 
@@ -270,7 +272,7 @@ Upgrade one client and leave the other alone: change `LAKANA_IMAGE` in that clie
 pull and start from that client's directory. Do the same backup first, as in
 [Upgrading](deploy-with-compose.md#upgrading).
 
-<!-- not tested: pulls a new image and restarts one of two Docker Compose stacks; `<new version>` is the reader's own -->
+<!-- not tested: pulls a new image and restarts one of two Docker Compose stacks -->
 ```bash
 cd clients/acme
 docker compose pull && docker compose up -d --wait

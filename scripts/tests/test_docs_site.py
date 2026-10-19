@@ -16,7 +16,7 @@ EXEMPT = (
     "scripts/tests/test_docs_site.py",
     "scripts/tests/test_docs_only.py",
 )
-NOT_TESTED_CEILING = 51
+NOT_TESTED_CEILING = 50
 """Blocks marked as not tested; it only goes down, apart from the rises below.
 
 The artifact pages left six when they were written: the `artifact uploads abort` command,
@@ -103,7 +103,7 @@ and the two SQL headers that `test_the_front_matter_in_a_sql_block_is_valid` par
 The operator's guide (#57) rose it from 48 to 51 with the three blocks of its recipe "One instance
 per client": generating and starting two Compose stacks on one host, listing the Compose projects,
 and upgrading one of the two. Each needs Docker and two complete stacks, which the example runner
-does not have. The guide's other command blocks are synced from `give-access` and `getting-started`.
+does not have. The one backup block of `deploy-with-compose.md` replaced two (it is now a single procedure), so the count is 50. The guide's other command blocks are synced from `give-access` and `getting-started`.
 """
 SECTIONS = ("tutorials", "how-to", "reference", "explanation")
 
