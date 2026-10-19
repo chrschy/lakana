@@ -1463,8 +1463,8 @@ def test_a_project_that_names_another_host_gives_that_host_no_credential(
                 row = session.execute(
                     select(Environment).where(Environment.name == env)
                 ).scalar_one()
-                # Other tests of this module leave their own indexes, each with a secret of its
-                # own in its own environment: only this test's index has one here.
+                # Each test removes its index when it ends, but keep the filter: only this
+                # test's index has a secret in this environment.
                 ours = [found for found in sources.registered if found.name == "team"]
                 (access,) = resolve_index_access(
                     session, stack.engine.key_provider, row.id, row.name, ours
