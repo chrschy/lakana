@@ -1239,3 +1239,174 @@ def test_a_table_nested_inside_a_claim_does_not_resolve_it(
     assert record is not None
     assert (record.state, record.table_id) == (TableLocationState.ABANDONED, None)
     assert "metadata/00000-a.metadata.json" in _files(outer)
+
+
+# --- dropped tables (#94) --------------------------------------------------------------------
+
+
+def test_the_purge_is_marked_started_under_the_lock_before_its_first_delete(
+    session: Session, catalog: CatalogService, store: Path
+) -> None:
+    """An undrop that comes after the mark sees it; the mark is committed before any file goes."""
+    location = _location(store)
+    _put(location, "data/a.parquet")
+    _claim(session, location, state=TableLocationState.DROPPED, purge_after=_NOW)
+    marks: list[datetime | None] = []
+    real = sweep_module.delete_quietly
+
+    def look_first(storage: object, path: str) -> bool:
+        with Session(session.get_bind()) as other:
+            marks.append(
+                other.scalar(
+                    select(TableLocation.purge_started_at).where(TableLocation.location == location)
+                )
+            )
+        return real(storage, path)  # ty: ignore[invalid-argument-type]
+
+    with mock.patch.object(sweep_module, "delete_quietly", look_first):
+        report = _sweep(session)
+
+    assert report.locations_purged == 1
+    assert marks == [_NOW]
+
+
+def test_a_record_no_longer_due_when_the_purge_starts_is_left_alone(
+    session: Session, catalog: CatalogService, store: Path
+) -> None:
+    """Undropped and dropped again with a new period after the listing: nothing goes, no mark."""
+    location = _location(store)
+    _put(location, "data/a.parquet")
+    _claim(session, location, state=TableLocationState.DROPPED, purge_after=_NOW)
+    real = sweep_module._Run._in_use
+
+    def dropped_again(run: object, checked: str) -> bool:
+        with Session(session.get_bind()) as other:
+            other.execute(update(TableLocation).values(purge_after=_NOW + timedelta(days=7)))
+            other.commit()
+        return real(run, checked)  # ty: ignore[invalid-argument-type]
+
+    with mock.patch.object(sweep_module._Run, "_in_use", dropped_again):
+        report = _sweep(session)
+
+    assert (report.locations_purged, report.files_deleted) == (0, 0)
+    assert _files(location) == ["data/a.parquet"]
+    record = _record(session, location)
+    assert record is not None and record.purge_started_at is None
+
+
+def test_a_record_undropped_when_the_purge_starts_is_left_alone(
+    session: Session, catalog: CatalogService, store: Path
+) -> None:
+    """The record went back to LIVE after the listing: the mark is not set, nothing goes."""
+    location = _location(store)
+    _put(location, "data/a.parquet")
+    _claim(session, location, state=TableLocationState.DROPPED, purge_after=_NOW)
+
+    def undropped(run: object, checked: str) -> bool:
+        with Session(session.get_bind()) as other:
+            other.execute(update(TableLocation).values(state=TableLocationState.LIVE))
+            other.commit()
+        return False
+
+    with mock.patch.object(sweep_module._Run, "_in_use", undropped):
+        report = _sweep(session)
+
+    assert report.files_deleted == 0
+    assert _files(location) == ["data/a.parquet"]
+
+
+def _metadata_root(catalog: CatalogService, principal: PrincipalRef, dotted: str) -> str:
+    """Return a table's location, from its metadata file.
+
+    Parameters
+    ----------
+    catalog
+        The catalog.
+    principal
+        The reader.
+    dotted
+        The table.
+
+    Returns
+    -------
+    str
+        Its root location.
+    """
+    metadata_location = catalog.load_table(principal, _ref(dotted)).metadata_location
+    return metadata_location.rsplit("/metadata/", 1)[0]
+
+
+def test_a_dropped_table_is_purged_after_its_undo_period_and_not_before(
+    session: Session, catalog: CatalogService, store: Path, principal: PrincipalRef
+) -> None:
+    """Before `purge_after` everything stays; after it the files and the record go, audited."""
+    catalog.create_table(principal, _ref("gold.orders"), schema=_schema())
+    location = _metadata_root(catalog, principal, "gold.orders")
+    _put(location, "data/a.parquet")
+    catalog.drop_table(principal, _ref("gold.orders"))
+    record = _record(session, location)
+    assert record is not None and record.purge_after is not None
+
+    early = _sweep(session, now=record.purge_after - timedelta(seconds=1))
+
+    assert early.files_deleted == 0
+    assert "data/a.parquet" in _files(location)
+
+    late = _sweep(session, now=record.purge_after)
+
+    assert late.locations_purged == 1
+    assert _files(location) == []
+    assert _record(session, location) is None
+    (purged,) = _events(session, AuditEventType.TABLE_PURGED)
+    assert purged.detail["state"] == "DROPPED"
+    assert purged.detail["complete"] is True
+    assert purged.detail["files"] == 2
+
+
+def test_an_undropped_table_is_never_purged(
+    session: Session, catalog: CatalogService, store: Path, principal: PrincipalRef
+) -> None:
+    """Restored within the period, the record is LIVE again and the sweep leaves it."""
+    catalog.create_table(principal, _ref("gold.orders"), schema=_schema())
+    location = _metadata_root(catalog, principal, "gold.orders")
+    catalog.drop_table(principal, _ref("gold.orders"))
+    catalog.undrop_table(principal, _ref("gold.orders"))
+
+    report = _sweep(session, now=_NOW + timedelta(days=3650))
+
+    assert report.files_deleted == 0
+    assert len(_files(location)) == 1
+    catalog.load_table(principal, _ref("gold.orders"))
+
+
+def test_with_no_undo_period_the_next_sweep_purges_a_drop(
+    session: Session, store: Path, principal: PrincipalRef, catalog: CatalogService
+) -> None:
+    """`LAKANA_TABLES__UNDO_DAYS=0`: due at the drop's own time."""
+    catalog.create_table(principal, _ref("gold.orders"), schema=_schema())
+    location = _metadata_root(catalog, principal, "gold.orders")
+    immediate = CatalogService(session, StorageResolver(session), catalog._authz, undo_days=0)
+    immediate.drop_table(principal, _ref("gold.orders"))
+    record = _record(session, location)
+    assert record is not None and record.purge_after is not None
+    assert record.purge_after == record.dropped_at
+
+    assert _sweep(session, now=record.purge_after).locations_purged == 1
+    assert _files(location) == []
+
+
+def test_an_external_tables_files_are_never_purged(
+    session: Session, catalog: CatalogService, store: Path, principal: PrincipalRef
+) -> None:
+    """It has no record, so no sweep, however late, deletes its raw files."""
+    raw = store / "raw" / "events" / "a.csv"
+    raw.parent.mkdir(parents=True)
+    raw.write_text("id\n1\n")
+    ref = _ref("bronze.events")
+    catalog.create_external_table(principal, ref, location_pattern="raw/events/*.csv", format="csv")
+    catalog.drop_table(principal, ref, purge=True)
+
+    report = _sweep(session, now=_NOW + timedelta(days=3650))
+
+    assert report.files_deleted == 0
+    assert raw.read_text() == "id\n1\n"

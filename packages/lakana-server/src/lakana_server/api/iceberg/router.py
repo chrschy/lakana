@@ -415,7 +415,7 @@ def drop_table(
     principal: PrincipalRef = Depends(get_principal),
     catalog: CatalogService = Depends(get_catalog),
 ) -> None:
-    """Drop a table.
+    """Drop a table; its files follow after the undo period, or at the next sweep with a purge.
 
     Parameters
     ----------
@@ -426,8 +426,10 @@ def drop_table(
     table
         Table name.
     purgeRequested
-        When `true`, also delete the metadata file. A query parameter, not
-        a body field — confirmed against a real client, which sends
+        When `true`, the table's files are due at once: the worker's next sweep deletes them,
+        and the table cannot be restored. When `false` (the default) they are kept for
+        `LAKANA_TABLES__UNDO_DAYS` and the table can be restored with `lakana table undrop`.
+        A query parameter, not a body field — confirmed against a real client, which sends
         `DELETE .../tables/{table}?purgeRequested=<bool>`.
     principal
         The authenticated caller.

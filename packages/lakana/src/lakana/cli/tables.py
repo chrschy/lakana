@@ -11,7 +11,7 @@ from typing import Annotated
 import typer
 
 import lakana
-from lakana._models import CheckHealth, Column, Lineage, Table, TableHealth
+from lakana._models import CheckHealth, Column, DroppedTable, Lineage, Table, TableHealth
 from lakana.cli import _files, _output
 from lakana.cli._break_glass import BREAK_GLASS, REASON, break_glass_reason
 from lakana.cli._state import CliError, CliState, confirm, resolve_environment, state_of
@@ -213,9 +213,39 @@ _GET_COLUMNS = ["name", "namespace", "kind", "state", "uuid"]
 _DERIVED = {"state": _state_cell}
 
 
+def _restorable_cell(dropped: DroppedTable) -> str:
+    """Say whether a dropped table can still be restored, for the `restorable` column.
+
+    Parameters
+    ----------
+    dropped
+        A dropped table as the server described it.
+
+    Returns
+    -------
+    str
+        ``yes``, or ``no`` once its undo period has ended or its files are being deleted.
+    """
+    return "yes" if dropped.restorable else "no"
+
+
 @table_app.command("list")
-def list_tables(ctx: typer.Context, namespace: str, env: _ENV = None) -> None:
-    """List the tables in NAMESPACE.
+def list_tables(
+    ctx: typer.Context,
+    namespace: str,
+    dropped: Annotated[
+        bool,
+        typer.Option(
+            "--dropped",
+            help="List the dropped tables that can still be restored, and until when.",
+        ),
+    ] = False,
+    env: _ENV = None,
+) -> None:
+    """List the tables in NAMESPACE, or with --dropped the tables dropped from it.
+
+    A dropped table keeps its files until `purge_after` (the server's undo period, 7 days by
+    default); until then `lakana table undrop` restores it.
 
     Parameters
     ----------
@@ -223,11 +253,23 @@ def list_tables(ctx: typer.Context, namespace: str, env: _ENV = None) -> None:
         The Typer context.
     namespace
         The dotted namespace.
+    dropped
+        List the dropped tables instead.
     env
         The environment.
     """
     state = state_of(ctx)
-    tables = state.client().tables.list(resolve_environment(state, env), namespace)
+    environment = resolve_environment(state, env)
+    if dropped:
+        _output.emit(
+            state,
+            state.client().tables.list_dropped(environment, namespace),
+            columns=["name", "namespace", "dropped_at", "purge_after", "restorable", "uuid"],
+            droppable=["uuid", "namespace"],
+            derived={"restorable": _restorable_cell},
+        )
+        return
+    tables = state.client().tables.list(environment, namespace)
     _output.emit(
         state,
         tables,
@@ -544,12 +586,24 @@ def describe(
 def delete(
     ctx: typer.Context,
     name: str,
+    purge: Annotated[
+        bool,
+        typer.Option(
+            "--purge",
+            help="Delete its files at the next clean-up instead; it cannot be restored.",
+        ),
+    ] = False,
     env: _ENV = None,
     yes: _YES = False,
     break_glass: BREAK_GLASS = False,
     reason: REASON = None,
 ) -> None:
-    """Drop table NAME.
+    """Drop table NAME. Its files are kept for the undo period, then deleted.
+
+    Within the server's undo period (`LAKANA_TABLES__UNDO_DAYS`, 7 days by default), `lakana
+    table undrop NAME` restores the table with its data and its grants, row filters and column
+    masks. `--purge` skips the period: the worker deletes the files at its next clean-up. An
+    external table's files are never deleted.
 
     Parameters
     ----------
@@ -557,6 +611,8 @@ def delete(
         The Typer context.
     name
         The qualified table name.
+    purge
+        Make the files due at once.
     env
         The environment.
     yes
@@ -569,9 +625,77 @@ def delete(
     state = state_of(ctx)
     environment = resolve_environment(state, env)
     glass = break_glass_reason(break_glass, reason, environment)
-    confirm(state, f"Delete table {environment}/{name}?", yes)
-    state.client().tables.delete(environment, name, break_glass_reason=glass)
-    _output.done(state, f"Deleted table {_output.inline(environment)}/{_output.inline(name)}")
+    target = f"{environment}/{name}"
+    if purge:
+        question = (
+            f"Delete table {target} and its files at the next clean-up? This cannot be undone."
+        )
+    else:
+        question = f"Delete table {target}? It can be restored during the undo period."
+    confirm(state, question, yes)
+    state.client().tables.delete(environment, name, purge=purge, break_glass_reason=glass)
+    deleted = f"Deleted table {_output.inline(environment)}/{_output.inline(name)}"
+    if purge:
+        _output.done(
+            state,
+            f"{deleted}. Its files are deleted at the next clean-up; it cannot be restored.",
+        )
+        return
+    namespace = name.rsplit(".", 1)[0]
+    _output.done(
+        state,
+        f"{deleted}. Restore it during the undo period with "
+        f"`lakana table undrop {_output.inline(name)} --env {_output.inline(environment)}`; "
+        f"`lakana table list {_output.inline(namespace)} --env {_output.inline(environment)} "
+        "--dropped` shows until when.",
+    )
+
+
+@table_app.command("undrop")
+def undrop(
+    ctx: typer.Context,
+    name: str,
+    new_name: Annotated[
+        str | None,
+        typer.Option(
+            "--as", help="Restore it under this name, when a table of its own name exists now."
+        ),
+    ] = None,
+    env: _ENV = None,
+    break_glass: BREAK_GLASS = False,
+    reason: REASON = None,
+) -> None:
+    """Restore the dropped table NAME, with its data, grants, row filters and column masks.
+
+    Works until the end of the undo period that `lakana table list NAMESPACE --dropped` shows.
+    Needs the rights to drop and to create tables in the namespace. When NAME was dropped more
+    than once, the newest comes back; restore an older one with `--as`.
+
+    Parameters
+    ----------
+    ctx
+        The Typer context.
+    name
+        The qualified name the table had.
+    new_name
+        `--as`: the name to restore it under, in the same namespace.
+    env
+        The environment.
+    break_glass
+        `--break-glass`.
+    reason
+        `--reason`.
+    """
+    state = state_of(ctx)
+    environment = resolve_environment(state, env)
+    glass = break_glass_reason(break_glass, reason, environment)
+    table = state.client().tables.undrop(
+        environment, name, new_name=new_name, break_glass_reason=glass
+    )
+    message = f"Restored table {_output.inline(environment)}/{_output.inline(name)}"
+    if new_name is not None:
+        message += f" as {_output.inline(f'{table.namespace}.{table.name}')}"
+    _output.done(state, message, table)
 
 
 def _table_columns(client: lakana.Client, environment: str, name: str) -> list[Column]:

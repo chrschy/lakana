@@ -48,6 +48,7 @@ from lakana_server.api.platform.schemas import (
     AppendOut,
     ColumnOut,
     DescriptionIn,
+    DroppedTableOut,
     ExternalTableCreate,
     ExternalTableOut,
     LineageEdgeOut,
@@ -60,6 +61,7 @@ from lakana_server.api.platform.schemas import (
     TableHealthOut,
     TableOut,
     TableReferenceOut,
+    UndropIn,
 )
 from lakana_server.api.routing import AuthenticateFirstRoute
 from lakana_server.body_limit import streams_its_own_body
@@ -85,6 +87,12 @@ router = APIRouter(
     prefix="/api/v1/environments/{env}/namespaces/{path}/tables",
     tags=["tables"],
 )
+dropped_router = APIRouter(
+    route_class=AuthenticateFirstRoute,
+    prefix="/api/v1/environments/{env}/namespaces/{path}/dropped-tables",
+    tags=["tables"],
+)
+"""The dropped tables of a namespace: a path of its own, so no table name can shadow it."""
 
 _ARROW_STREAM_MEDIA_TYPE = "application/vnd.apache.arrow.stream"
 
@@ -1211,17 +1219,16 @@ def drop_table(
     env: str,
     path: str,
     name: str,
+    purge: bool = False,
     principal: PrincipalRef = Depends(get_write_principal),
     catalog: CatalogService = Depends(get_catalog),
 ) -> None:
-    """Drop a table, leaving its files in place.
+    """Drop a table. A managed table keeps its files for the undo period, then they are deleted.
 
-    `purge` is not exposed as a parameter here. The Iceberg router accepts
-    `purgeRequested` because its client sends it; this administrative
-    surface has no caller that needs it, and irreversibly deleting data
-    files is not a capability to add before something asks for it. The
-    catalog entry is removed and the metadata file is orphaned, which is
-    also what the Iceberg surface does by default.
+    The catalog entry goes at once, with the table's grants, row filters and column masks.
+    A managed table's files stay for `LAKANA_TABLES__UNDO_DAYS` (7 by default), during which
+    `POST .../tables/{name}/undrop` restores it; then the worker's sweep deletes them. An
+    external table's files and a view are never deleted.
 
     Parameters
     ----------
@@ -1231,6 +1238,9 @@ def drop_table(
         Dot-joined namespace path.
     name
         Table name.
+    purge
+        `true` makes the files due at once: the next sweep deletes them, and the table cannot be
+        restored.
     principal
         The authenticated caller, with any `?break_glass_reason=` attached.
     catalog
@@ -1242,7 +1252,103 @@ def drop_table(
         Mapped to 404 by `install_exception_handlers`.
     """
     ns = NamespacePath.from_parts(path.split("."))
-    catalog.drop_table(principal, TableRef(environment=env, namespace=ns, name=name), purge=False)
+    catalog.drop_table(principal, TableRef(environment=env, namespace=ns, name=name), purge=purge)
+
+
+@router.post("/{name}/undrop", response_model=TableOut)
+def undrop_table(
+    env: str,
+    path: str,
+    name: str,
+    body: UndropIn,
+    principal: PrincipalRef = Depends(get_principal),
+    catalog: CatalogService = Depends(get_catalog),
+) -> TableOut:
+    """Restore a dropped table within its undo period: the same table, data and policies.
+
+    Parameters
+    ----------
+    env
+        Environment name.
+    path
+        Dot-joined namespace path the table was dropped from.
+    name
+        The name it had.
+    body
+        A new name, if its own is taken, and a break-glass reason.
+    principal
+        The authenticated caller.
+    catalog
+        The catalog service for this request.
+
+    Returns
+    -------
+    TableOut
+        The restored table.
+
+    Raises
+    ------
+    lakana_core.errors.NotFoundError
+        Mapped to 404: no dropped table of that name can be restored, or its namespace is gone.
+    lakana_core.errors.AlreadyExistsError
+        Mapped to 409: a table of the name exists; send `new_name`.
+    lakana_core.errors.ConflictError
+        Mapped to 409: the undo period has ended, or the sweep has started deleting the files.
+    lakana_core.errors.PermissionDenied
+        Mapped to 403, without `DROP_TABLE` and `CREATE_TABLE` on the namespace.
+    """
+    ns = NamespacePath.from_parts(path.split("."))
+    loaded = catalog.undrop_table(
+        with_break_glass(principal, body.break_glass_reason),
+        TableRef(environment=env, namespace=ns, name=name),
+        new_name=body.new_name,
+    )
+    return _to_out(path, loaded)
+
+
+@dropped_router.get("", response_model=list[DroppedTableOut])
+def list_dropped_tables(
+    env: str,
+    path: str,
+    principal: PrincipalRef = Depends(get_principal),
+    catalog: CatalogService = Depends(get_catalog),
+) -> list[DroppedTableOut]:
+    """List the dropped tables of a namespace whose files are not deleted yet.
+
+    Parameters
+    ----------
+    env
+        Environment name.
+    path
+        Dot-joined namespace path.
+    principal
+        The authenticated caller; needs `READ_TABLE` on the namespace.
+    catalog
+        The catalog service for this request.
+
+    Returns
+    -------
+    list of DroppedTableOut
+        Newest drop first, with the time each one's files are deleted.
+
+    Raises
+    ------
+    lakana_core.errors.NotFoundError
+        Mapped to 404, if the namespace does not exist.
+    """
+    ns = NamespacePath.from_parts(path.split("."))
+    return [
+        DroppedTableOut(
+            name=dropped.name,
+            namespace=path,
+            uuid=str(dropped.table_id),
+            kind=dropped.kind,
+            dropped_at=dropped.dropped_at,
+            purge_after=dropped.purge_after,
+            restorable=dropped.restorable,
+        )
+        for dropped in catalog.list_dropped_tables(principal, env, ns)
+    ]
 
 
 @router.post("/external", response_model=ExternalTableOut, status_code=201)

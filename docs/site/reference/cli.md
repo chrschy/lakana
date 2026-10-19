@@ -379,11 +379,14 @@ Register external table NAME over files under raw/.
 
 Usage: `lakana table list [OPTIONS] {namespace}`
 
-List the tables in NAMESPACE.
+List the tables in NAMESPACE, or with --dropped the tables dropped from it.
+
+A dropped table keeps its files until `purge_after` (the server's undo period, 7 days by default); until then `lakana table undrop` restores it.
 
 | Name | Type | Default | Description |
 |---|---|---|---|
 | `NAMESPACE` | text | required |  |
+| `--dropped` | flag | off | List the dropped tables that can still be restored, and until when. |
 | `--env` | text | none | Environment (default: the profile's). |
 
 ### `lakana table get`
@@ -433,13 +436,32 @@ The text you set is shown instead of the `description:` in the asset's header, a
 
 Usage: `lakana table delete [OPTIONS] {name}`
 
-Drop table NAME.
+Drop table NAME. Its files are kept for the undo period, then deleted.
+
+Within the server's undo period (`LAKANA_TABLES__UNDO_DAYS`, 7 days by default), `lakana table undrop NAME` restores the table with its data and its grants, row filters and column masks. `--purge` skips the period: the worker deletes the files at its next clean-up. An external table's files are never deleted.
 
 | Name | Type | Default | Description |
 |---|---|---|---|
 | `NAME` | text | required |  |
+| `--purge` | flag | off | Delete its files at the next clean-up instead; it cannot be restored. |
 | `--env` | text | none | Environment (default: the profile's). |
 | `--yes` | flag | off | Don't ask for confirmation. |
+| `--break-glass` | flag | off | Write to a protected environment outside a run (needs MANAGE_ENVIRONMENT; audited). |
+| `--reason` | text | none | Why, 10-500 characters on one line (with --break-glass). |
+
+### `lakana table undrop`
+
+Usage: `lakana table undrop [OPTIONS] {name}`
+
+Restore the dropped table NAME, with its data, grants, row filters and column masks.
+
+Works until the end of the undo period that `lakana table list NAMESPACE --dropped` shows. Needs the rights to drop and to create tables in the namespace. When NAME was dropped more than once, the newest comes back; restore an older one with `--as`.
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `NAME` | text | required |  |
+| `--as` | text | none | Restore it under this name, when a table of its own name exists now. |
+| `--env` | text | none | Environment (default: the profile's). |
 | `--break-glass` | flag | off | Write to a protected environment outside a run (needs MANAGE_ENVIRONMENT; audited). |
 | `--reason` | text | none | Why, 10-500 characters on one line (with --break-glass). |
 

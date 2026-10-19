@@ -364,10 +364,27 @@ def get_key_provider(request: Request) -> KeyProvider:
     return EnvKeyProvider(secrets.master_key, accept_format_1=secrets.accept_format_1)
 
 
+def get_undo_days(request: Request) -> int:
+    """Read how many days a dropped table stays restorable.
+
+    Parameters
+    ----------
+    request
+        The current request, used to reach `app.state.settings`.
+
+    Returns
+    -------
+    int
+        `LAKANA_TABLES__UNDO_DAYS`.
+    """
+    return request.app.state.settings.tables.undo_days
+
+
 def get_catalog(
     session: Session = Depends(get_session),
     authz: AuthorizationService = Depends(get_grant_authorization),
     key_provider: KeyProvider = Depends(get_key_provider),
+    undo_days: int = Depends(get_undo_days),
 ) -> CatalogService:
     """Build a CatalogService for the current request.
 
@@ -379,13 +396,17 @@ def get_catalog(
         The real, grant-backed authorization service.
     key_provider
         Decrypts a secret-backed environment's storage credentials.
+    undo_days
+        How long a table dropped in this request stays restorable.
 
     Returns
     -------
     CatalogService
         A catalog service using real authorization.
     """
-    return CatalogService(session, StorageResolver(session, key_provider), authz)
+    return CatalogService(
+        session, StorageResolver(session, key_provider), authz, undo_days=undo_days
+    )
 
 
 def get_catalog_search(

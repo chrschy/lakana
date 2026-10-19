@@ -1019,3 +1019,18 @@ def test_the_grace_period_is_between_one_hour_and_one_year(hours: int) -> None:
 
     with pytest.raises(PydanticValidationError, match="abandoned_grace_hours"):
         TablesConfig(abandoned_grace_hours=hours)
+
+
+def test_a_dropped_table_can_be_restored_for_seven_days_by_default() -> None:
+    from lakana_core.catalog.tombstones import DEFAULT_UNDO_DAYS
+    from lakana_core.config import TableUndoConfig
+
+    assert TableUndoConfig().undo_days == DEFAULT_UNDO_DAYS == 7
+
+
+@pytest.mark.parametrize("days", [-1, 366])
+def test_the_undo_period_is_between_zero_days_and_one_year(days: int) -> None:
+    from lakana_core.config import TableUndoConfig
+
+    with pytest.raises(PydanticValidationError, match="undo_days"):
+        TableUndoConfig(undo_days=days)

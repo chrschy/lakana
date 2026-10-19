@@ -704,14 +704,21 @@ there is no in-place migration for an existing table's location.
 The worker's location sweep deletes table data with no person in the loop, so what it may delete
 is decided by catalog records, never by the absence of one: a create commits its location's record
 before its first file, the commit that publishes the table moves that record to `LIVE` behind a
-row-locked fence, and the sweep deletes only a location whose record is `ABANDONED` (or, from #94
-on, `DROPPED`). It deletes only inside an id-suffixed directory under `managed/` of the record's
+row-locked fence, and the sweep deletes only a location whose record is `ABANDONED`, or `DROPPED`
+by a drop whose undo period (`LAKANA_TABLES__UNDO_DAYS`) has passed. It deletes only inside an id-suffixed directory under `managed/` of the record's
 environment root, and before every delete it checks again, under the record's lock, that nothing in
 use in any environment is that location or lies inside it. A directory without a record is counted
 and never deleted, so a restored or replaced database cannot make the sweep delete what it forgot.
 Residuals (a writer that wakes up after its claim was abandoned, a namespace created inside an
 abandoned location between the check and a delete, a create in flight at a backup's moment after a
 restore) are listed in `docs/agent/security.md`, "Table locations".
+
+An undrop restores a dropped table's grants, row filters and column masks, so it must not restore
+more than the drop took: it un-revokes only the ids the drop recorded, and only while each is still
+stamped with the drop's own time, and it needs `DROP_TABLE` on the namespace (never the table grants
+of a new table that took the name) plus `CREATE_TABLE`. The sweep marks a purge as started under the
+record's lock before its first delete, and an undrop under the same lock refuses a marked record, so
+a table is never restored with some of its files gone.
 
 ## M3 exit criteria
 

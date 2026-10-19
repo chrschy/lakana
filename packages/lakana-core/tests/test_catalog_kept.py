@@ -901,6 +901,11 @@ _NOTHING_OF_A_KEPT_TABLE = {
     ),
     "maintain": "maintenance is never a task's run, and returns a report of counts",
     "drop_table": "a delete; returns nothing",
+    "undrop_table": (
+        "a restore for a caller holding DROP_TABLE and CREATE_TABLE; the write guard refuses it "
+        "from every task's run context, since creating a table is not what a task may do"
+    ),
+    "list_dropped_tables": "names and dates of dropped tables; no rows, no file locations",
 }
 """Every other public method, with why a task gets no kept data from it."""
 

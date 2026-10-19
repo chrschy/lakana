@@ -22,11 +22,14 @@ from pyiceberg.exceptions import CommitFailedException, NamespaceNotEmptyError
 from pyiceberg.schema import Schema
 from pyiceberg.table.update import AssertTableUUID
 from pyiceberg.types import LongType, NestedField, StringType
+from sqlalchemy.orm import Session
 from testcontainers.postgres import PostgresContainer
 
+from lakana_core.catalog.location_sweep import sweep_table_locations
 from lakana_core.config import DatabaseConfig
-from lakana_core.db import create_engine
+from lakana_core.db import create_engine, db_now
 from lakana_core.models import Base
+from lakana_core.storage.resolver import StorageResolver
 from lakana_server.app import create_app
 from lakana_server.settings import Settings
 from tests.server_test_helpers import SeaweedFsContainer
@@ -191,12 +194,24 @@ def test_an_external_pyiceberg_client_creates_and_reads_a_table() -> None:
 
             catalog.drop_table(("gold", "sales", "monthly_v2"), purge_requested=True)
             assert catalog.list_tables(("gold", "sales")) == []
-            # `purge_requested=True` must actually remove the object, not
-            # merely uncatalog it. Checked through the object store's own
+            # `purge_requested=True` makes the files due at once; the worker's location sweep
+            # must then actually remove the object, not merely uncatalog it. Run here against
+            # the same database and storage, and checked through the object store's own
             # client, the same way lakana-core's own exit criterion
-            # (`test_the_full_table_lifecycle_on_postgres_and_seaweedfs`)
-            # checks it, so a `file_io.delete` that silently no-ops cannot
-            # satisfy this assertion.
+            # (`test_the_full_table_lifecycle_on_postgres_and_seaweedfs`) checks it, so a
+            # delete that silently no-ops cannot satisfy this assertion.
+            sweep_engine = create_engine(settings.database)
+            try:
+                with Session(sweep_engine) as session:
+                    report = sweep_table_locations(
+                        session,
+                        StorageResolver(session),
+                        now=db_now(session),
+                        grace_hours=24,
+                    )
+            finally:
+                sweep_engine.dispose()
+            assert report.locations_purged == 1
             with pytest.raises(S3Error):
                 bucket_client.stat_object(
                     "lakana", purged_metadata_location.removeprefix("s3://lakana/")

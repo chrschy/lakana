@@ -147,6 +147,30 @@ they are left alone.` A later release adds a command to remove them on request. 
 `TABLE_LOCATION_ABANDONED` and `TABLE_PURGED`; see [The sweep](../how-to/deploy-with-compose.md#the-sweep).
 Going back to the previous release drops the records and keeps every file.
 
+### A dropped table's files are deleted after an undo period
+
+**This changes what a drop does.** Until now a drop removed the table from the catalog and kept its
+files for ever. From this release a drop of a managed table keeps its files for the undo period
+(`LAKANA_TABLES__UNDO_DAYS`, new, 7 days by default), and then the worker's sweep deletes them: no
+earlier than the end of the period, and no later than one sweep after it. Within the period
+`lakana table undrop NAMESPACE.TABLE` restores the table with its data and with exactly the grants,
+row filters and column masks the drop took away; `lakana table list NAMESPACE --dropped` shows what
+can be restored and until when. `lakana table delete --purge`, the REST `?purge=true` and the Iceberg
+REST `purgeRequested=true` make the files due at the next sweep, and no longer delete the current
+metadata file in the request itself. An external table's files are never deleted. Every drop now
+writes a `TABLE_DROPPED` audit event, and a restore `TABLE_UNDROPPED`. See
+[Drop and restore a table](../how-to/drop-and-restore-a-table.md).
+
+To keep a dropped table's data, restore it within the undo period, or set
+`LAKANA_TABLES__UNDO_DAYS` higher on the server (up to 365) **before** you drop it: each drop
+records the end of its own period. Migration `0043` adds two columns to `table_locations`; it
+deletes nothing.
+
+Tables dropped before this release have no undo period and are not deleted: their directories stay
+and are counted in the worker's log as directories without a record. A later release adds a command
+to remove them on request. Going back to the previous release drops the records, as above, and keeps
+every file; a table dropped in the meantime can no longer be restored.
+
 ## Notes for 0.16.0
 
 ### Grants, principals and groups are listed in pages

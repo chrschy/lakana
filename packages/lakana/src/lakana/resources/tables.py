@@ -28,6 +28,7 @@ from lakana._models import (
     AppendResult,
     CheckHealth,
     Column,
+    DroppedTable,
     ExternalTable,
     LastMaintenance,
     Lineage,
@@ -286,6 +287,9 @@ def _write_result_from_json(data: dict[str, Any]) -> WriteResult:
         schema_diff=data.get("schema_diff"),
     )
 
+
+_DroppedList = list[DroppedTable]
+"""Alias for `list[DroppedTable]`, resolved at module scope for the reason of `_TableList`."""
 
 _TableList = list[Table]
 """Alias for `list[Table]`, resolved at module scope.
@@ -561,9 +565,18 @@ class Tables:
         return _table_from_json(response.json())
 
     def delete(
-        self, environment: str, qualified_name: str, *, break_glass_reason: str | None = None
+        self,
+        environment: str,
+        qualified_name: str,
+        *,
+        purge: bool = False,
+        break_glass_reason: str | None = None,
     ) -> None:
-        """Drop a table, leaving its files in place.
+        """Drop a table. A managed table's files are kept for the undo period, then deleted.
+
+        Within the server's undo period (`LAKANA_TABLES__UNDO_DAYS`, 7 days by default)
+        `undrop` restores the table with its data, grants, row filters and column masks.
+        An external table's files and a view are never deleted.
 
         Parameters
         ----------
@@ -571,6 +584,8 @@ class Tables:
             The environment name.
         qualified_name
             Dot-joined `"namespace.table"` name.
+        purge
+            Delete the files at the server's next sweep instead; the table cannot be restored.
         break_glass_reason
             Write to a protected environment outside a run: 10-500 characters, needs
             `MANAGE_ENVIRONMENT`, audited. The next run of the deployed code may overwrite
@@ -582,13 +597,96 @@ class Tables:
             If no such table exists.
         """
         namespace, name = _split_namespace_table(qualified_name)
+        params = {"purge": "true"} if purge else {}
+        if break_glass_reason is not None:
+            params["break_glass_reason"] = break_glass_reason
         self._transport.request(
             ROUTES["tables.delete"],
             path_params={"env": environment, "path": namespace, "name": name},
-            params={"break_glass_reason": break_glass_reason}
-            if break_glass_reason is not None
-            else None,
+            params=params or None,
         )
+
+    def undrop(
+        self,
+        environment: str,
+        qualified_name: str,
+        *,
+        new_name: str | None = None,
+        break_glass_reason: str | None = None,
+    ) -> Table:
+        """Restore a dropped table within its undo period: the same table, data and policies.
+
+        Needs `DROP_TABLE` and `CREATE_TABLE` on the namespace. When the name was dropped more
+        than once, the newest drop comes back; restore an older one under another name.
+
+        Parameters
+        ----------
+        environment
+            The environment name.
+        qualified_name
+            Dot-joined `"namespace.table"` name the table had.
+        new_name
+            Restore it under this name in the same namespace, when its own name is taken.
+        break_glass_reason
+            Write to a protected environment outside a run: 10-500 characters, needs
+            `MANAGE_ENVIRONMENT`, audited.
+
+        Returns
+        -------
+        Table
+            The restored table.
+
+        Raises
+        ------
+        lakana.errors.NotFound
+            If no dropped table of that name can be restored, or its namespace is gone.
+        lakana.errors.Conflict
+            If a table of the name exists (pass `new_name`), the undo period has ended, or the
+            files are being deleted.
+        """
+        namespace, name = _split_namespace_table(qualified_name)
+        response = self._transport.request(
+            ROUTES["tables.undrop"],
+            path_params={"env": environment, "path": namespace, "name": name},
+            json={"new_name": new_name, "break_glass_reason": break_glass_reason},
+        )
+        return _table_from_json(response.json())
+
+    def list_dropped(self, environment: str, namespace: str) -> _DroppedList:
+        """List the dropped tables of a namespace whose files are not deleted yet.
+
+        Parameters
+        ----------
+        environment
+            The environment name.
+        namespace
+            Dot-joined namespace path.
+
+        Returns
+        -------
+        list of DroppedTable
+            Newest drop first, each with the time its files are deleted.
+
+        Raises
+        ------
+        lakana.errors.NotFound
+            If the namespace does not exist.
+        """
+        response = self._transport.request(
+            ROUTES["tables.list_dropped"], path_params={"env": environment, "path": namespace}
+        )
+        return [
+            DroppedTable(
+                name=item["name"],
+                namespace=item["namespace"],
+                uuid=item["uuid"],
+                kind=item["kind"],
+                dropped_at=datetime.fromisoformat(item["dropped_at"]),
+                purge_after=datetime.fromisoformat(item["purge_after"]),
+                restorable=item["restorable"],
+            )
+            for item in response.json()
+        ]
 
     def create(
         self,

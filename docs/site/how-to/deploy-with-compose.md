@@ -301,7 +301,16 @@ they are left alone.` (see "After a restore" below). The audit log records `TABL
 when the sweep gives up a create (detail: `location`, `holder_run_id`, `claimed_at`) and
 `TABLE_PURGED` when it removes files (detail: `location`, `state`, `files`, `bytes`, and `complete`,
 which is `false` for a pass that stopped part-way and is continued by the next sweep). Both have no
-principal: the sweep does them. A dropped table's files are not removed by this sweep yet.
+principal: the sweep does them.
+
+**Dropped tables.** A drop keeps a managed table's files for the undo period
+(`LAKANA_TABLES__UNDO_DAYS`, 7 days by default), during which `lakana table undrop` restores the
+table. The same sweep deletes them afterwards: no earlier than the end of the undo period, and no
+later than one sweep after it; a drop with `--purge` is due at once. Before it deletes the first
+file it marks the record, so a restore after that is refused instead of bringing back a table with
+files missing. An external table's files are never deleted. With versioning on the bucket, the
+bucket's own rules decide when a deleted file is gone. See
+[Drop and restore a table](drop-and-restore-a-table.md).
 
 **The worker's log.** The worker prints INFO and above to its standard error, with the time, the
 level and the logger name on each line; read it with `docker compose logs worker`. That includes

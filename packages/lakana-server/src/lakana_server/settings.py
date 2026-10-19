@@ -12,6 +12,7 @@ from lakana_core.config import (
     RunConfig,
     SecretsConfig,
     TableReadsConfig,
+    TableUndoConfig,
     TaskTokensConfig,
     validate_repo_roots,
 )
@@ -106,6 +107,8 @@ class Settings(BaseSettings):
     artifacts
         Artifact-store bounds (`LAKANA_ARTIFACTS__*`): file size, total size, file
         count and upload lifetime.
+    tables
+        How many days a dropped table can be restored (`LAKANA_TABLES__UNDO_DAYS`).
     table_reads
         How long the reads of a table are kept and how far back its health shows them
         (`LAKANA_TABLE_READS__KEEP_DAYS`, `LAKANA_TABLE_READS__DEFAULT_DAYS`); the worker reads
@@ -151,6 +154,7 @@ class Settings(BaseSettings):
     secrets: SecretsConfig = SecretsConfig()
     task_tokens: TaskTokensConfig = TaskTokensConfig()
     artifacts: ArtifactsConfig = ArtifactsConfig()
+    tables: TableUndoConfig = TableUndoConfig()
     table_reads: TableReadsConfig = TableReadsConfig()
     append: AppendConfig = AppendConfig()
     request_body: RequestBodyConfig = RequestBodyConfig()

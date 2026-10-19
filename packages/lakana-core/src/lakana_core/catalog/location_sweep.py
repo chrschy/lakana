@@ -31,7 +31,9 @@ What it does, per environment:
    and that nothing in use lies inside, and only objects strictly inside the location. The
    record goes last, with a `TABLE_PURGED` event (``complete``); a pass that stops part-way
    records what it deleted with ``complete: false``, keeps the record, and the next run
-   resumes.
+   resumes. Before the first delete it marks the record ``purge_started_at`` under the lock,
+   after checking again that the record is purgeable and due; an undrop of a dropped table
+   takes the same lock and is refused once the mark is set.
 
 Bounds: one run has a deadline (`max_seconds`) shared between the environments, and ends at the
 next decision past it or at shutdown; the starting environment and record rotate from run to
@@ -501,6 +503,8 @@ class _Run:
         if self._in_use(location):
             self._blocked(relative)
             return
+        if not self._start(record_id):
+            return
         tally = _Tally()
         finished = False
         try:
@@ -511,6 +515,39 @@ class _Run:
         finally:
             if tally.files and not finished:
                 self._record_purge(location, state, tally, complete=False)
+
+    def _start(self, record_id: uuid.UUID) -> bool:
+        """Mark a purge as started, under the record's lock, before its first delete.
+
+        An undrop takes the same lock: one that came first has made the record `LIVE` (or given
+        it a later ``purge_after``), and the purge does not start; one that comes later sees
+        ``purge_started_at`` and is refused, so a table is never restored with files missing.
+
+        Parameters
+        ----------
+        record_id
+            The record.
+
+        Returns
+        -------
+        bool
+            Whether the record is still purgeable and due; the mark is committed then.
+        """
+        try:
+            record = lock_location(self._session, record_id)
+            if (
+                record is None
+                or record.state not in PURGEABLE_STATES
+                or record.purge_after is None
+                or record.purge_after > self._now
+            ):
+                return False
+            if record.purge_started_at is None:
+                record.purge_started_at = self._now
+                self._session.commit()
+            return True
+        finally:
+            self._session.rollback()
 
     def _blocked(self, relative: str) -> None:
         """Count and report a purge that something in use stopped.

@@ -381,6 +381,111 @@ def test_table_list_and_delete(tmp_path: Path) -> None:
     assert "Deleted table dev/bronze.sales" in deleted.stdout
 
 
+def test_table_delete_says_how_to_undo_and_purge_asks_for_it(tmp_path: Path) -> None:
+    """The confirmation names `undrop`; `--purge` sends `purge=true` and says it is final."""
+    api = FakeApi()
+    api.on("DELETE", f"{_BASE}/sales", status=204)
+
+    kept = invoke(
+        make_state(tmp_path, api), "table", "delete", "bronze.sales", "--env", "dev", "--yes"
+    )
+    purged = invoke(
+        make_state(tmp_path, api),
+        "table",
+        "delete",
+        "bronze.sales",
+        "--env",
+        "dev",
+        "--purge",
+        "--yes",
+    )
+
+    assert kept.exit_code == 0, kept.stderr
+    assert "lakana table undrop bronze.sales --env dev" in _plain(kept.stdout)
+    assert "lakana table list bronze --env dev --dropped" in _plain(kept.stdout)
+    assert purged.exit_code == 0, purged.stderr
+    assert "cannot be restored" in _plain(purged.stdout)
+    assert [str(r.url.query, "ascii") for r in api.requests] == ["", "purge=true"]
+
+
+def test_table_delete_with_purge_asks_a_harder_question(tmp_path: Path) -> None:
+    """Without `--yes`, the prompt for `--purge` says the files go at the next sweep."""
+    api = FakeApi()
+    result = invoke(
+        make_state(tmp_path, api), "table", "delete", "bronze.sales", "--purge", "--env", "dev"
+    )
+    assert result.exit_code == 2
+    assert "cannot be undone" in _plain(result.stderr + result.stdout)
+    assert api.requests == []
+
+
+def test_table_list_dropped_shows_the_tombstones(tmp_path: Path) -> None:
+    """`--dropped` lists what can be restored and until when."""
+    api = FakeApi()
+    api.on(
+        "GET",
+        "/api/v1/environments/dev/namespaces/bronze/dropped-tables",
+        json=[
+            {
+                "name": "sales",
+                "namespace": "bronze",
+                "uuid": "u1",
+                "kind": "TABLE",
+                "dropped_at": "2026-10-19T12:00:00Z",
+                "purge_after": "2026-10-26T12:00:00Z",
+                "restorable": True,
+            }
+        ],
+    )
+
+    result = invoke(
+        make_state(tmp_path, api), "table", "list", "bronze", "--dropped", "--env", "dev"
+    )
+    as_json = invoke(
+        make_state(tmp_path, api),
+        "--output",
+        "json",
+        "table",
+        "list",
+        "bronze",
+        "--dropped",
+        "--env",
+        "dev",
+    )
+
+    assert result.exit_code == 0, result.stderr
+    text = _plain(result.stdout)
+    assert "sales" in text and "2026-10-26" in text and "yes" in text
+    assert json.loads(as_json.stdout)[0]["restorable"] is True
+
+
+def test_table_undrop_restores_and_names_the_new_name(tmp_path: Path) -> None:
+    """`undrop` POSTs to the route; `--as` sends `new_name` and the line names both."""
+    api = FakeApi()
+    api.on("POST", f"{_BASE}/sales/undrop", json={**_TABLE, "name": "sales_before"})
+
+    plain = invoke(make_state(tmp_path, api), "table", "undrop", "bronze.sales", "--env", "dev")
+    renamed = invoke(
+        make_state(tmp_path, api),
+        "table",
+        "undrop",
+        "bronze.sales",
+        "--as",
+        "sales_before",
+        "--env",
+        "dev",
+    )
+
+    assert plain.exit_code == 0, plain.stderr
+    assert "Restored table dev/bronze.sales" in _plain(plain.stdout)
+    assert renamed.exit_code == 0, renamed.stderr
+    assert "as bronze.sales_before" in _plain(renamed.stdout)
+    assert [json.loads(r.content) for r in api.requests] == [
+        {"new_name": None, "break_glass_reason": None},
+        {"new_name": "sales_before", "break_glass_reason": None},
+    ]
+
+
 def test_table_create_external(tmp_path: Path) -> None:
     """`create-external` forwards the location pattern and format."""
     api = FakeApi()

@@ -725,12 +725,14 @@ def test_deleting_an_environment_removes_its_records_and_keeps_every_file(
     assert len(list(store.rglob("*.metadata.json"))) == 1
 
 
-def test_a_dropped_table_keeps_its_live_record_until_drops_record_themselves(
+def test_a_drop_makes_the_record_a_tombstone_in_its_own_transaction(
     session: Session, other: Session, principal: PrincipalRef, store: Path
 ) -> None:
-    """A drop leaves the files today; the record stays LIVE and so protects them."""
+    """Seen from another connection, the row is gone and the record DROPPED at the same time."""
     catalog = _catalog(session, principal, store)
-    catalog.create_table(principal, _ref("gold.orders"), schema=_schema())
+    created = catalog.create_table(principal, _ref("gold.orders"), schema=_schema())
     catalog.drop_table(principal, _ref("gold.orders"))
     (record,) = _records(other)
-    assert record.state is TableLocationState.LIVE
+    assert record.state is TableLocationState.DROPPED
+    assert record.table_id == created.uuid
+    assert other.scalar(select(Table.id)) is None

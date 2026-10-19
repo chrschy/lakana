@@ -282,6 +282,7 @@ _WRITES: dict[str, Callable[[CatalogService, PrincipalRef], object]] = {
     ),
     "drop_table": lambda c, p: c.drop_table(p, _EVENTS),
     "rename_table": lambda c, p: c.rename_table(p, _EVENTS, TableRef("dev", _BRONZE, "moved")),
+    "undrop_table": lambda c, p: c.undrop_table(p, _EVENTS, new_name="back"),
 }
 
 
@@ -329,6 +330,7 @@ def test_a_running_task_may_create_its_assets_namespace(
         ("bronze.events", TaskStatus.PENDING, "append"),
         ("bronze.events", TaskStatus.RUNNING, "drop_table"),
         ("bronze.events", TaskStatus.RUNNING, "rename_table"),
+        ("bronze.back", TaskStatus.RUNNING, "undrop_table"),
         ("bronze.events", TaskStatus.RUNNING, "drop_namespace"),
         ("bronze.events", TaskStatus.RUNNING, "create_external_table"),
         ("bronze.t2", TaskStatus.RUNNING, "create_table"),

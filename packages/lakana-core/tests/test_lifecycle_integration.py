@@ -20,9 +20,10 @@ from testcontainers.postgres import PostgresContainer
 
 from lakana_core.auth import AllowAllAuthorization
 from lakana_core.bootstrap import ensure_bootstrap_principal
+from lakana_core.catalog.location_sweep import sweep_table_locations
 from lakana_core.catalog.service import CatalogService
 from lakana_core.config import DatabaseConfig, StorageConfig
-from lakana_core.db import create_engine
+from lakana_core.db import create_engine, db_now
 from lakana_core.errors import ConflictError, NotFoundError
 from lakana_core.identifiers import NamespacePath, TableRef
 from lakana_core.models import Base
@@ -134,17 +135,28 @@ def test_the_full_table_lifecycle_on_postgres_and_seaweedfs() -> None:
 
             assert _object_size(client, committed.metadata_location) > 0
 
-            catalog.drop_table(principal, destination, purge=True)
+            catalog.drop_table(principal, destination)
             assert catalog.table_exists(principal, destination) is False
-            # `purge=True` must actually remove the object. Asserted through
-            # the object store's own client rather than `file_io`, so a
-            # `file_io.delete` that silently no-ops cannot satisfy the exit
-            # criterion. The earlier metadata file is deliberately still
-            # there: `purge` deletes the current pointer's target, not the
-            # whole history.
-            with pytest.raises(S3Error):
-                _object_size(client, committed.metadata_location)
-            assert _object_size(client, created.metadata_location) > 0
+            # A drop keeps the files for the undo period, and an undrop brings the same table
+            # back with the same metadata.
+            assert _object_size(client, committed.metadata_location) > 0
+            restored = catalog.undrop_table(principal, destination)
+            assert restored.uuid == created.uuid
+            assert restored.metadata_location == committed.metadata_location
+
+            catalog.drop_table(principal, destination, purge=True)
+            assert _object_size(client, committed.metadata_location) > 0
+            # `purge=True` makes the files due at once, and the location sweep must actually
+            # remove every object of the table, the older metadata file too. Asserted through
+            # the object store's own client rather than `file_io`, so a delete that silently
+            # no-ops cannot satisfy the exit criterion.
+            report = sweep_table_locations(
+                session, StorageResolver(session), now=db_now(session), grace_hours=24
+            )
+            assert report.locations_purged == 1
+            for gone in (committed.metadata_location, created.metadata_location):
+                with pytest.raises(S3Error):
+                    _object_size(client, gone)
 
             catalog.drop_namespace(principal, "dev", ns)
             with pytest.raises(NotFoundError):

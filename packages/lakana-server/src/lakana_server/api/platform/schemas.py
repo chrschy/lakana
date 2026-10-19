@@ -770,6 +770,56 @@ class DescriptionIn(BaseModel):
     description: str | None
 
 
+class UndropIn(BaseModel):
+    """Request body that restores a dropped table.
+
+    Parameters
+    ----------
+    new_name
+        Restore it under this name in the same namespace, for when a table of its own name
+        exists now; `null` (the default) restores it under the name it had.
+    break_glass_reason
+        Write to a protected environment outside a run; needs `MANAGE_ENVIRONMENT`,
+        audited.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    new_name: str | None = Field(default=None, max_length=255)
+    break_glass_reason: str | None = Field(default=None, max_length=500)
+
+
+class DroppedTableOut(BaseModel):
+    """One dropped table whose files are not deleted yet.
+
+    Parameters
+    ----------
+    name
+        The table's name when it was dropped.
+    namespace
+        Dot-joined namespace path it was dropped from.
+    uuid
+        The table's id, which a restore keeps.
+    kind
+        ``TABLE``: only managed tables can be restored.
+    dropped_at
+        When it was dropped.
+    purge_after
+        From when on the worker's sweep deletes its files; it can be restored until then.
+    restorable
+        Whether `POST .../tables/{name}/undrop` would still restore it: `false` once
+        `purge_after` has passed or the sweep has started deleting its files.
+    """
+
+    name: str
+    namespace: str
+    uuid: str
+    kind: str
+    dropped_at: datetime
+    purge_after: datetime
+    restorable: bool
+
+
 class LineageNodeOut(BaseModel):
     """One node of a lineage graph.
 
