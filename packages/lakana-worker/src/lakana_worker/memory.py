@@ -57,7 +57,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from sqlalchemy import false, or_, select, update
+from sqlalchemy import and_, false, or_, select, update
 from sqlalchemy.orm import Session
 
 from lakana_core.config import DEFAULT_WORKER_MEMORY, MIN_WORKER_MEMORY, parse_memory_limit
@@ -1097,6 +1097,7 @@ def record_memory_failure(
     session_factory: Callable[[], Session],
     limit: Limit,
     rand: Callable[[], float],
+    worker_id: str,
     activity: Activity = ACTIVITY,
     peak: bool = False,
     earlier: tuple[uuid.UUID, ...] = (),
@@ -1133,6 +1134,10 @@ def record_memory_failure(
         The limit that was exceeded.
     rand
         Jitter source for the retry backoff.
+    worker_id
+        This worker's id. Only query runs it holds (`QueryRun.worker_id`) are ended: an entry
+        kept after its thread left can name a run that another worker has since claimed, which
+        the stop window of about 2 s must not fail (#171).
     activity
         What is in flight.
     peak
@@ -1173,6 +1178,7 @@ def record_memory_failure(
         mine = QueryRun.id.in_(queries) if queries else false()
         if task_ids:
             mine = or_(mine, QueryRun.task_run_id.in_(task_ids))
+        mine = and_(mine, QueryRun.worker_id == worker_id)
         if queries or task_ids:
             now = db_now(session)
             # A write whose commit left its evidence on the run (`rows_written`) landed, so it
@@ -1218,6 +1224,7 @@ def start_watchdog(
     configured: str | None,
     session_factory: Callable[[], Session],
     rand: Callable[[], float],
+    worker_id: str,
     platform: str = sys.platform,
 ) -> MemoryWatchdog | None:
     """Resolve the limit, say which applies and start the watchdog.
@@ -1230,6 +1237,8 @@ def start_watchdog(
         Opens a database session for recording the failure.
     rand
         Jitter source for the retry backoff.
+    worker_id
+        This worker's id, handed to `record_memory_failure`.
     platform
         `sys.platform`; on macOS the measurement is a peak.
 
@@ -1301,6 +1310,7 @@ def start_watchdog(
                 session_factory,
                 limit,
                 rand,
+                worker_id,
                 peak=platform == "darwin",
                 earlier=before_kill[0],
                 earlier_tasks=ended_tasks[0],

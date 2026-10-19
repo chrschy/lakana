@@ -587,7 +587,7 @@ FAKE_SESSIONS: Any = _FakeSessions()
 def test_nothing_in_flight_records_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     """An idle worker over its limit touches no row."""
     monkeypatch.setattr(memory, "record_attempt", lambda *a, **k: pytest.fail("no task"))
-    record_memory_failure(FAKE_SESSIONS, LIMIT, lambda: 0.5, Activity())
+    record_memory_failure(FAKE_SESSIONS, LIMIT, lambda: 0.5, "w1", Activity())
 
 
 def test_the_activity_registry_marks_and_clears() -> None:
@@ -679,7 +679,7 @@ def test_start_watchdog_logs_the_limit_and_starts(
     monkeypatch.setattr(memory, "read_cgroup_limit", lambda: None)
     monkeypatch.setattr(memory, "tools", lambda *a: (lambda: 0, lambda: None))
     with caplog.at_level(logging.INFO):
-        dog = start_watchdog("4GB", FAKE_SESSIONS, lambda: 0.5, platform="linux")
+        dog = start_watchdog("4GB", FAKE_SESSIONS, lambda: 0.5, "w1", platform="linux")
     assert dog is not None and started == [1]
     assert "Memory limit: 4GB (LAKANA_WORKER__MEMORY_LIMIT)." in caplog.messages
 
@@ -692,7 +692,9 @@ def test_on_macos_the_start_up_line_says_the_limit_covers_the_worker_only(
     monkeypatch.setattr(memory, "read_cgroup_limit", lambda: None)
     monkeypatch.setattr(memory, "tools", lambda *a: (lambda: 0, lambda: None))
     with caplog.at_level(logging.INFO):
-        assert start_watchdog("4GB", FAKE_SESSIONS, lambda: 0.5, platform="darwin") is not None
+        assert (
+            start_watchdog("4GB", FAKE_SESSIONS, lambda: 0.5, "w1", platform="darwin") is not None
+        )
     assert (
         "Memory limit: 4GB (LAKANA_WORKER__MEMORY_LIMIT); on macOS it covers the worker "
         "process only." in caplog.messages
@@ -707,7 +709,7 @@ def test_a_derived_limit_below_the_floor_warns_with_the_minimum(
     monkeypatch.setattr(memory, "read_cgroup_limit", lambda: 256 * MB)
     monkeypatch.setattr(memory, "tools", lambda *a: (lambda: 0, lambda: None))
     with caplog.at_level(logging.INFO):
-        assert start_watchdog(None, FAKE_SESSIONS, lambda: 0.5, platform="linux") is not None
+        assert start_watchdog(None, FAKE_SESSIONS, lambda: 0.5, "w1", platform="linux") is not None
     assert "Memory limit: 230 MB, 90% of the container's 256 MB." in caplog.messages
     assert any(
         "at least 512 MB" in m and "LAKANA_WORKER_MEMORY to at least 1g" in m
@@ -720,9 +722,9 @@ def test_start_watchdog_with_the_limit_off_or_nothing_to_measure_with(
 ) -> None:
     """`off` and Windows start nothing and say so in one line."""
     with caplog.at_level(logging.INFO):
-        assert start_watchdog("off", FAKE_SESSIONS, lambda: 0.5) is None
+        assert start_watchdog("off", FAKE_SESSIONS, lambda: 0.5, "w1") is None
         monkeypatch.setattr(memory, "tools", lambda *a: None)
-        assert start_watchdog("4GB", FAKE_SESSIONS, lambda: 0.5) is None
+        assert start_watchdog("4GB", FAKE_SESSIONS, lambda: 0.5, "w1") is None
     assert "Memory limit: off (LAKANA_WORKER__MEMORY_LIMIT)." in caplog.messages
     assert any("not enforced on this platform" in m for m in caplog.messages)
 
@@ -747,9 +749,11 @@ def test_the_handler_start_watchdog_installs_stops_the_worker(
     monkeypatch.setattr(
         memory,
         "record_memory_failure",
-        lambda sf, limit, rand, peak=False, earlier=(), earlier_tasks=(): recorded.append(limit),
+        lambda sf, limit, rand, worker_id, peak=False, earlier=(), earlier_tasks=(): (
+            recorded.append(limit)
+        ),
     )
-    start_watchdog("1GB", FAKE_SESSIONS, lambda: 0.5)
+    start_watchdog("1GB", FAKE_SESSIONS, lambda: 0.5, "w1")
     handler = handlers[0]
     assert callable(handler)
     handler(2 * GB)
@@ -965,11 +969,13 @@ def test_on_macos_the_measurement_is_a_peak_so_the_blame_is_never_certain(
     monkeypatch.setattr(
         memory,
         "record_memory_failure",
-        lambda sf, limit, rand, peak=False, earlier=(), earlier_tasks=(): peaks.append(peak),
+        lambda sf, limit, rand, worker_id, peak=False, earlier=(), earlier_tasks=(): peaks.append(
+            peak
+        ),
     )
     monkeypatch.setattr(memory, "stop_worker", lambda total, limit, **steps: steps["record"]())
     for platform in ("linux", "darwin"):
-        start_watchdog("1GB", FAKE_SESSIONS, lambda: 0.5, platform)
+        start_watchdog("1GB", FAKE_SESSIONS, lambda: 0.5, "w1", platform)
         handler = handlers[-1]
         assert callable(handler)
         handler(2 * GB)
@@ -1279,8 +1285,8 @@ def test_start_watchdog_relieves_on_linux_and_not_on_macos(
         "stop_largest_consumer",
         lambda total, limit: asked.append((total, limit)) or memory.Ended(1),
     )
-    linux = start_watchdog("1GB", FAKE_SESSIONS, lambda: 0.5, "linux")
-    darwin = start_watchdog("1GB", FAKE_SESSIONS, lambda: 0.5, "darwin")
+    linux = start_watchdog("1GB", FAKE_SESSIONS, lambda: 0.5, "w1", "linux")
+    darwin = start_watchdog("1GB", FAKE_SESSIONS, lambda: 0.5, "w1", "darwin")
     assert linux is not None and darwin is not None
     assert darwin._relieve is None
     assert linux._relieve is not None

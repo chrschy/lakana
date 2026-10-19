@@ -13,6 +13,7 @@ import pyarrow.parquet as pq
 import pytest
 from core_test_helpers import _config
 from pyiceberg.avro.file import AvroFile
+from pyiceberg.io import FileIO, InputFile, OutputFile
 from pyiceberg.io.pyarrow import PyArrowFileIO
 from pyiceberg.manifest import (
     DataFile,
@@ -1127,6 +1128,176 @@ def test_a_manifest_above_the_byte_limit_is_refused_before_it_is_read(
     assert shown_path(snapshot.manifest_list) in message
     assert "64 MiB" in message
     assert "nothing was applied" in message
+
+
+class _EndlessStream:
+    """A storage stream with more bytes than anyone asks for; it counts what it served."""
+
+    def __init__(self) -> None:
+        self.served = 0
+
+    def read(self, size: int = 0) -> bytes:
+        """Serve `size` bytes of a file that never ends.
+
+        Parameters
+        ----------
+        size
+            How many bytes the reader wants; `0` is served as a large block, so a reader
+            that asks for everything is caught by the count.
+
+        Returns
+        -------
+        bytes
+            That many bytes.
+        """
+        size = size or 10**9
+        self.served += size
+        return b"x" * size
+
+    def __enter__(self) -> _EndlessStream:
+        """Enter the `with` block.
+
+        Returns
+        -------
+        _EndlessStream
+            Itself.
+        """
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        """Leave the `with` block.
+
+        Parameters
+        ----------
+        *_exc
+            The exception, if any.
+        """
+
+
+class _SwappedInput(InputFile):
+    """An input file whose size is small when asked and whose content is not."""
+
+    def __init__(self, location: str, stream: _EndlessStream) -> None:
+        super().__init__(location)
+        self.stream = stream
+
+    def __len__(self) -> int:
+        """Report a small size, as a client that swapped the file afterwards would see.
+
+        Returns
+        -------
+        int
+            One byte.
+        """
+        return 1
+
+    def exists(self) -> bool:
+        """Say that the file exists.
+
+        Returns
+        -------
+        bool
+            Always `True`.
+        """
+        return True
+
+    def open(self, seekable: bool = True) -> _EndlessStream:  # ty: ignore[invalid-method-override]
+        """Open the endless stream.
+
+        Parameters
+        ----------
+        seekable
+            Ignored.
+
+        Returns
+        -------
+        _EndlessStream
+            The stream.
+        """
+        return self.stream
+
+
+class _SwappedIO(FileIO):
+    """A FileIO that serves `_SwappedInput` for every path."""
+
+    stream = _EndlessStream()
+
+    def new_input(self, location: str) -> InputFile:
+        """Open a file that reports a small size but holds more.
+
+        Parameters
+        ----------
+        location
+            The file's URI.
+
+        Returns
+        -------
+        InputFile
+            The swapped file.
+        """
+        return _SwappedInput(location, self.stream)
+
+    def new_output(self, location: str) -> OutputFile:
+        """Refuse: the check only reads.
+
+        Parameters
+        ----------
+        location
+            The file's URI.
+
+        Raises
+        ------
+        NotImplementedError
+            Always.
+        """
+        raise NotImplementedError
+
+    def delete(self, location: str | InputFile | OutputFile) -> None:
+        """Refuse: the check only reads.
+
+        Parameters
+        ----------
+        location
+            The file's URI.
+
+        Raises
+        ------
+        NotImplementedError
+            Always.
+        """
+        raise NotImplementedError
+
+
+def test_a_manifest_list_that_grows_after_its_size_check_is_cut_at_the_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#171: the limit holds on the bytes read, not on a size asked for in another request.
+
+    The same limit applies to the parent's manifest list, which the client did not send.
+    """
+    monkeypatch.setattr(field_ids_module, "MAX_MANIFEST_BYTES", 100_000)
+    io = _SwappedIO()
+    location = "s3://bucket/gold/sales/metadata/snap-1.avro"
+
+    with pytest.raises(ValidationError) as caught:
+        list(field_ids_module._listed_manifests(io, location, "gold.sales", time.monotonic() + 60))
+
+    assert "larger than the 64 MiB" in str(caught.value)
+    assert shown_path(location) in str(caught.value)
+    assert 100_000 < io.stream.served <= 100_001 + 65_536
+
+
+def test_the_storage_reads_of_the_check_use_shorter_timeouts() -> None:
+    """The check's FileIO is a copy with S3 timeouts; the table's own FileIO is untouched."""
+    own = PyArrowFileIO({"s3.endpoint": "http://x", "s3.request-timeout": "600"})
+    bounded = field_ids_module._with_short_timeouts(own)
+    assert isinstance(bounded, PyArrowFileIO)
+    assert bounded.properties["s3.endpoint"] == "http://x"
+    assert bounded.properties["s3.request-timeout"] == str(field_ids_module.STORAGE_REQUEST_SECONDS)
+    assert bounded.properties["s3.connect-timeout"] == str(field_ids_module.STORAGE_CONNECT_SECONDS)
+    assert own.properties["s3.request-timeout"] == "600"
+    shorter = PyArrowFileIO({"s3.request-timeout": "2"})
+    assert field_ids_module._with_short_timeouts(shorter).properties["s3.request-timeout"] == "2"
 
 
 def test_a_manifest_read_that_outlasts_the_deadline_refuses_the_commit(

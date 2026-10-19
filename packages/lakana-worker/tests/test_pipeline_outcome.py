@@ -521,13 +521,15 @@ def test_a_worker_stopped_for_memory_fails_its_running_query_for_good(
     running = _run(session, principal.id, "SELECT 1")
     queued = _run(session, principal.id, "SELECT 2")
     session.execute(
-        update(QueryRun).where(QueryRun.id == running).values(status=QueryRunStatus.RUNNING)
+        update(QueryRun)
+        .where(QueryRun.id == running)
+        .values(status=QueryRunStatus.RUNNING, worker_id="w1")
     )
     session.commit()
     activity = Activity()
     with activity.query(running), activity.query(queued):
         record_memory_failure(
-            lambda: session, Limit(4 * 1024**3, "4GB", "x"), lambda: 0.5, activity
+            lambda: session, Limit(4 * 1024**3, "4GB", "x"), lambda: 0.5, "w1", activity
         )
     session.expire_all()
     stored = session.get(QueryRun, running)
@@ -1260,10 +1262,12 @@ def _stopped_for_memory(session: Session, run_id: uuid.UUID) -> QueryRun:
     from lakana_worker.activity import Activity
     from lakana_worker.memory import Limit, record_memory_failure
 
+    session.execute(update(QueryRun).where(QueryRun.id == run_id).values(worker_id="w1"))
+    session.commit()
     activity = Activity()
     with activity.query(run_id):
         record_memory_failure(
-            lambda: session, Limit(4 * 1024**3, "4GB", "x"), lambda: 0.5, activity
+            lambda: session, Limit(4 * 1024**3, "4GB", "x"), lambda: 0.5, "w1", activity
         )
     session.expire_all()
     stored = session.get(QueryRun, run_id)

@@ -1609,7 +1609,9 @@ def test_a_worker_stopped_for_memory_while_it_counts_a_check_leaves_the_task_to_
     memory_module.stop_worker(
         5 * 1024**3,
         _FOUR_GB,
-        record=lambda: memory_module.record_memory_failure(world.session, _FOUR_GB, lambda: 0.0),
+        record=lambda: memory_module.record_memory_failure(
+            world.session, _FOUR_GB, lambda: 0.0, "w1"
+        ),
         kill_children=kill_children,
         exit_process=exits.append,
     )
