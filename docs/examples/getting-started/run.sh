@@ -157,6 +157,26 @@ lakana scheduler status
 out=$(lakana --output json scheduler status)
 python3 -c 'import json,sys; s=json.loads(sys.argv[1]); assert set(s) == {"holder", "heartbeat_at", "active_runs", "pending", "ready", "running"} and s["active_runs"] == 0, s' "$out"
 
+# The how-to "Is my instance healthy?" shows the health route, the queue and the open runs. The
+# address is the one the profile holds, as an operator has it at hand. Every query and run of this
+# instance has ended, so both listings are empty.
+URL=$(lakana --output json profile list | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["url"])')
+# docs:start healthz
+curl -s "$URL/healthz"
+# docs:end healthz
+out=$(curl -s "$URL/healthz")
+test "$out" = '{"status":"ok"}'
+# docs:start queue-length
+lakana query list --env dev --status queued
+# docs:end queue-length
+out=$(lakana --output json query list --env dev --status queued)
+python3 -c 'import json,sys; assert json.loads(sys.argv[1]) == [], sys.argv[1]' "$out"
+# docs:start open-runs
+lakana runs list --env dev --status queued,running
+# docs:end open-runs
+out=$(lakana --output json runs list --env dev --status queued,running)
+python3 -c 'import json,sys; assert json.loads(sys.argv[1]) == [], sys.argv[1]' "$out"
+
 # The how-to "Use a private package index" shows how an index and its secret are registered. That
 # never contacts the index, and a local instance has a secrets master key, so the commands run
 # as the page shows them (the index's address is the page's own example).
