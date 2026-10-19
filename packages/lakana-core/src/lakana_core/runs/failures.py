@@ -159,7 +159,8 @@ FAILURES: Mapping[FailureCode, tuple[str, str]] = {
     ),
     FailureCode.CANCELLED: (
         "The run was cancelled or stopped before the task finished.",
-        "Nothing is wrong; start the run again when you want it.",
+        "If a person cancelled it, start the run again when you want it; if another task of the run"
+        " failed with `code_changed`, deploy the project again first.",
     ),
     FailureCode.WORKER_LOST: (
         "The worker running the task stopped before it finished.",
