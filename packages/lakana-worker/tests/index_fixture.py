@@ -8,10 +8,11 @@ import http.server
 import io
 import tarfile
 import threading
+import uuid
 import zipfile
 from collections.abc import Generator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import cast
 
 USERNAME = "builder"
@@ -187,13 +188,16 @@ class Index:
     """A running index."""
 
     server: _Server
+    prefix: str = field(default_factory=lambda: f"/{uuid.uuid4().hex[:12]}")
+    """The path in front of `/simple` in the default URL: unique per index, so that a port the
+    system hands out again never gives two tests the same registered URL."""
 
     @property
     def port(self) -> int:
         """The loopback port."""
         return self.server.server_address[1]
 
-    def url(self, host: str = "127.0.0.1", prefix: str = "") -> str:
+    def url(self, host: str = "127.0.0.1", prefix: str | None = None) -> str:
         """Build the index URL to register or to write into a lock.
 
         Parameters
@@ -201,14 +205,15 @@ class Index:
         host
             The host name to write into the URL.
         prefix
-            A path prefix in front of ``/simple``.
+            A path prefix in front of ``/simple``; the index's own unique one by default.
 
         Returns
         -------
         str
             The URL.
         """
-        return f"http://{host}:{self.port}{prefix}/simple"
+        path = self.prefix if prefix is None else prefix
+        return f"http://{host}:{self.port}{path}/simple"
 
     @property
     def credentials_received(self) -> list[str]:

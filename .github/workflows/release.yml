@@ -241,7 +241,7 @@ jobs:
   five-minute-release:
     needs: [release-please, publish-sdk]
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     permissions: {contents: read}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
@@ -249,6 +249,10 @@ jobs:
       - id: version
         run: echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
         env: {TAG: "${{ needs.release-please.outputs.tag }}"}
+      - name: Wait until PyPI shows the release
+        # PyPI's index can lag an upload by several minutes; wait (at most 10) before the
+        # first install instead of failing it. The install's own retries stay for blips.
+        run: python3 scripts/wait_for_pypi.py "${{ steps.version.outputs.version }}"
       - name: Five-minute test against PyPI
         # PyPI can lag a few seconds behind the upload, so the pip
         # install inside the script can fail transiently right after

@@ -5,6 +5,7 @@ An explanation says why things are the way they are, and what was weighed.
 Pages:
 
 - [Scope and philosophy](scope.md): what Lakana is for, what it is not, and who it is for.
+- [Where Lakana fits, and why Apache Iceberg](where-lakana-fits.md): what Lakana adds to a stack you assemble yourself, what it lacks, why Apache Iceberg and what that costs, and when to stay with what you have.
 - [Roadmap](roadmap.md): the milestone sequence to v1.0.0.
 - [Support](support.md): what to expect when you use Lakana, and where to ask.
 - [Upgrade policy](upgrades.md): what a release may break, where it is announced, and what every upgrade asks.

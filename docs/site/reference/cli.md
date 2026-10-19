@@ -405,7 +405,7 @@ Usage: `lakana table health [OPTIONS] {name}`
 
 Show table NAME's last maintenance, the newest result of each check, and who reads it.
 
-Readers are counted from the queries that succeeded, per person and day. You see them only with the ADMIN role. Python tasks that read through the Iceberg catalog are not counted yet. Use --output json for every field.
+Readers are counted from the queries that succeeded, per person and day. You see them only with the ADMIN role. A Python task's reads of its inputs count too. Use --output json for every field.
 
 | Name | Type | Default | Description |
 |---|---|---|---|

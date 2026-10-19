@@ -82,6 +82,7 @@ from lakana_worker.python_tasks import PythonRuntime
 from lakana_worker.runners import LocalProcessRunner, PythonTask, Runner, RunOutcome, StopSignal
 from lakana_worker.tasks import RunEngine, TaskSettings
 from lakana_worker.venvs import VenvSettings, acquire
+from tests.index_registration import registered_index
 from tests.integration_helpers import commit_files, unique_name
 from tests.python_asset_helpers import (
     MASTER_KEY,
@@ -1085,6 +1086,41 @@ def test_a_default_dependency_group_is_not_installed_for_a_task(
     ]
 
 
+@pytest.fixture
+def register_index(stack: _Stack) -> Iterator[Callable[..., None]]:
+    """Register package indexes for one test and remove them when it ends, also on a failure.
+
+    The server outlives the test, and an index left behind keeps its URL.
+
+    Parameters
+    ----------
+    stack
+        The stack.
+
+    Yields
+    ------
+    Callable
+        ``register_index(name, url, credential_secret=None)``.
+    """
+    with contextlib.ExitStack() as cleanup:
+
+        def register(name: str, url: str, *, credential_secret: str | None = None) -> None:
+            """Register one index.
+
+            Parameters
+            ----------
+            name
+                The index's name.
+            url
+                The index's URL.
+            credential_secret
+                The secret that holds the index's credential, if it needs one.
+            """
+            cleanup.enter_context(registered_index(stack.admin, name, url, credential_secret))
+
+        yield register
+
+
 def _index_fixture() -> ModuleType:
     """Load the worker tests' package index fixture by path.
 
@@ -1175,13 +1211,15 @@ def _files_holding(root: Path, secret: str) -> list[str]:
     ]
 
 
-def test_a_private_package_deploys_builds_and_runs(stack: _Stack, wheelhouse: Path) -> None:
+def test_a_private_package_deploys_builds_and_runs(
+    stack: _Stack, wheelhouse: Path, register_index: Callable[..., None]
+) -> None:
     """The milestone's test: neither the project nor the task ever holds the password."""
     fixture = _index_fixture()
     admin, name, env = stack.admin, unique_name(), _environment_with_events(stack)
     secret = f"idx-{name}"
     with fixture.serving() as indexes:
-        admin.package_indexes.create(name, indexes.registered.url(), credential_secret=secret)
+        register_index(name, indexes.registered.url(), credential_secret=secret)
         admin.secrets.create(
             env,
             secret,
@@ -1240,13 +1278,13 @@ def test_a_private_package_deploys_builds_and_runs(stack: _Stack, wheelhouse: Pa
 
 
 def test_a_deploy_without_the_secret_stops_and_names_the_command(
-    stack: _Stack, wheelhouse: Path
+    stack: _Stack, wheelhouse: Path, register_index: Callable[..., None]
 ) -> None:
     fixture = _index_fixture()
-    admin, name, env = stack.admin, unique_name(), _environment_with_events(stack)
+    name, env = unique_name(), _environment_with_events(stack)
     secret = f"idx-{name}"
     with fixture.serving() as indexes:
-        admin.package_indexes.create(name, indexes.registered.url(), credential_secret=secret)
+        register_index(name, indexes.registered.url(), credential_secret=secret)
         project = _deploy(
             stack,
             wheelhouse,
@@ -1265,14 +1303,14 @@ def test_a_deploy_without_the_secret_stops_and_names_the_command(
 
 
 def test_a_wrong_password_fails_for_good_and_a_rotated_secret_recovers(
-    stack: _Stack, wheelhouse: Path
+    stack: _Stack, wheelhouse: Path, register_index: Callable[..., None]
 ) -> None:
     """One attempt, the message with the command, and no new deploy afterwards."""
     fixture = _index_fixture()
     admin, name, env = stack.admin, unique_name(), _environment_with_events(stack)
     secret = f"idx-{name}"
     with fixture.serving() as indexes:
-        admin.package_indexes.create(name, indexes.registered.url(), credential_secret=secret)
+        register_index(name, indexes.registered.url(), credential_secret=secret)
         admin.secrets.create(
             env,
             secret,
@@ -1306,12 +1344,14 @@ def test_a_wrong_password_fails_for_good_and_a_rotated_secret_recovers(
         stack.succeed(env, again.id)
 
 
-def test_a_removed_index_stops_the_next_run_and_says_so(stack: _Stack, wheelhouse: Path) -> None:
+def test_a_removed_index_stops_the_next_run_and_says_so(
+    stack: _Stack, wheelhouse: Path, register_index: Callable[..., None]
+) -> None:
     fixture = _index_fixture()
     admin, name, env = stack.admin, unique_name(), _environment_with_events(stack)
     with fixture.serving() as indexes:
         url = indexes.registered.url()
-        admin.package_indexes.create(name, url)
+        register_index(name, url)
         project = _deploy(
             stack,
             wheelhouse,
@@ -1334,14 +1374,14 @@ def test_a_removed_index_stops_the_next_run_and_says_so(stack: _Stack, wheelhous
 
 
 def test_a_package_without_a_wheel_fails_the_build_for_good(
-    stack: _Stack, wheelhouse: Path
+    stack: _Stack, wheelhouse: Path, register_index: Callable[..., None]
 ) -> None:
     """R6.2: a project with a credential installs wheels only; the message is the how-to's."""
     fixture = _index_fixture()
     admin, name, env = stack.admin, unique_name(), _environment_with_events(stack)
     secret = f"idx-{name}"
     with fixture.serving() as indexes:
-        admin.package_indexes.create(name, indexes.registered.url(), credential_secret=secret)
+        register_index(name, indexes.registered.url(), credential_secret=secret)
         admin.secrets.create(
             env,
             secret,
@@ -1370,7 +1410,7 @@ def test_a_package_without_a_wheel_fails_the_build_for_good(
 
 
 def test_a_project_that_names_another_host_gives_that_host_no_credential(
-    stack: _Stack, wheelhouse: Path
+    stack: _Stack, wheelhouse: Path, register_index: Callable[..., None]
 ) -> None:
     """The invariant end to end: the lock rule refuses, and a bypassed rule still leaks nothing.
 
@@ -1382,7 +1422,7 @@ def test_a_project_that_names_another_host_gives_that_host_no_credential(
     secret = f"idx-{unique_name()}"
     with fixture.serving() as indexes:
         registered, other = indexes.registered.url(), indexes.other.url()
-        admin.package_indexes.create("team", registered, credential_secret=secret)
+        register_index("team", registered, credential_secret=secret)
         try:
             admin.secrets.create(
                 env,
@@ -1423,8 +1463,8 @@ def test_a_project_that_names_another_host_gives_that_host_no_credential(
                 row = session.execute(
                     select(Environment).where(Environment.name == env)
                 ).scalar_one()
-                # Other tests of this module leave their own indexes, each with a secret of its
-                # own in its own environment: only this test's index has one here.
+                # Each test removes its index when it ends, but keep the filter: only this
+                # test's index has a secret in this environment.
                 ours = [found for found in sources.registered if found.name == "team"]
                 (access,) = resolve_index_access(
                     session, stack.engine.key_provider, row.id, row.name, ours
