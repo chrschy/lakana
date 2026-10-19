@@ -487,6 +487,18 @@ def test_only_the_python_3_14_run_measures_coverage() -> None:
     assert steps["Coverage ratchet"]["if"] == measured["if"]
 
 
+def test_the_3_14_run_uploads_its_coverage_report_also_when_the_ratchet_fails() -> None:
+    """A missed line can be looked up in the report the ratchet read, without a new run."""
+    steps = _test_steps()
+    names = list(steps)
+    upload = steps["Upload the coverage report"]
+    assert upload["if"] == "always() && " + steps["Unit tests (with coverage)"]["if"]
+    assert upload["uses"].startswith("actions/upload-artifact@")
+    assert upload["with"]["name"] == "coverage-report"
+    assert upload["with"]["path"] == "coverage.json"
+    assert names.index("Upload the coverage report") > names.index("Coverage ratchet")
+
+
 def test_both_unit_runs_are_parallel_and_3_14_measures_with_the_c_tracer() -> None:
     """3.11 runs with up to four processes, the 3.14 coverage run with up to two.
 
