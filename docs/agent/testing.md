@@ -44,6 +44,14 @@ directory to `sys.path`.
 pytest's base temp directory writable at the end, so pytest can rotate `/tmp/pytest-of-$USER`.
 After a run that was killed, `chmod -R u+w /tmp/pytest-of-$USER` does the same by hand.
 
+**Only a failed test keeps its `tmp_path`** (`tmp_path_retention_policy = "failed"` in
+`pyproject.toml`): pytest removes a passed test's directory at its teardown. `/tmp` is a RAM disk
+and its files count against the scope's memory cap, so kept for every test they grew to about 1 GB
+in a run over all packages at `-n 3`; with the workers' 1.3 GB each and the controller's 1.1 GB
+that ran into a 6G cap (the kernel's reclaim made the run crawl, then killed a worker). A test that
+patches `os.open`, `os.lstat` or a similar function must forward every argument (`dir_fd`
+included): the removal runs while a test's `monkeypatch` may still be in place.
+
 **Git providers are emulated in the unit tier (M5b).** `packages/lakana-worker/tests/worker_git_helpers.py`
 serves bare repositories with `git http-backend` behind an in-process HTTPS server (self-signed
 certificate, basic auth; any-username, fixed-username and 401/403/404 modes; protocol v2 or v0 for

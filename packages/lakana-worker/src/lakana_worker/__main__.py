@@ -22,6 +22,10 @@ from lakana_core.audit.denial_limiter import DenialAuditLimiter
 from lakana_core.auth import AuthorizationService
 from lakana_core.catalog.columns import backfill_table_columns
 from lakana_core.catalog.health import sweep_table_reads
+from lakana_core.catalog.location_sweep import (
+    DEFAULT_MAX_SECONDS as LOCATION_SWEEP_MAX_SECONDS,
+)
+from lakana_core.catalog.location_sweep import sweep_table_locations
 from lakana_core.config import QueryLimitsConfig, Settings, warn_about_tokens_in_url_paths
 from lakana_core.db import create_engine
 from lakana_core.errors import LakanaError
@@ -319,8 +323,10 @@ def main() -> None:
     the worker records why against what it runs, kills its tasks and exits with
     `lakana_worker.memory.EXIT_CODE`. While it holds the scheduler role it
     also sweeps the artifact store every `LAKANA_RUN__SWEEP_INTERVAL` seconds (expired uploads,
-    files and manifest objects no version names), in a thread of its own, taking turns between
-    environments; at 0 nothing sweeps, and the start-up log says so. When the worker stops it writes
+    files and manifest objects no version names) and the table locations (the files of creates
+    that never finished, after `LAKANA_TABLES__ABANDONED_GRACE_HOURS` or the end of their run),
+    in a thread of its own, taking turns between environments; at 0 nothing sweeps, and the
+    start-up log says so. When the worker stops it writes
     the denial counts the audit limiter held back as summary rows (`flush_suppressed`).
     The worker registers in the `workers` table and keeps a heartbeat there every
     `LAKANA_RUN__RENEW_SECONDS`, in a thread of its own that starts with the scheduler;
@@ -426,7 +432,7 @@ def main() -> None:
     sweeps = itertools.count()
 
     def housekeeping(now: datetime, stop: threading.Event) -> None:
-        """Sweep the artifact store, the code archives, the old job fires and the old table reads.
+        """Sweep the artifact store, table locations, code archives, old job fires and table reads.
 
         Also stores the columns of up to 50 tables that have none stored yet, so search finds them.
 
@@ -452,6 +458,20 @@ def main() -> None:
                 )
         except Exception as exc:
             logger.warning("The artifact sweep failed (%s).", type(exc).__name__, exc_info=True)
+        try:
+            with session_factory() as session:
+                sweep_table_locations(
+                    session,
+                    StorageResolver(session, key_provider),
+                    now=now,
+                    grace_hours=settings.tables.abandoned_grace_hours,
+                    rotation=rotation,
+                    should_stop=stop.is_set,
+                )
+        except Exception as exc:
+            logger.warning(
+                "The table location sweep failed (%s).", type(exc).__name__, exc_info=True
+            )
         try:
             with session_factory() as session:
                 sweep_code_archives(
@@ -484,7 +504,8 @@ def main() -> None:
     if settings.run.sweep_interval <= 0:
         logger.info(
             "LAKANA_RUN__SWEEP_INTERVAL=0: the sweeps are off, so expired artifact uploads, "
-            "artifact files nothing names, code archives of failed deploys, table read counts past "
+            "artifact files nothing names, the files of tables whose create never finished, "
+            "code archives of failed deploys, table read counts past "
             "their kept period and attempt directories and deploy checkouts of dead workers are "
             "not removed, and the columns of tables that existed before search are not stored "
             "for it. Set it to a number "
@@ -496,7 +517,9 @@ def main() -> None:
         interval=settings.run.scheduler_interval_seconds,
         housekeeping=housekeeping,
         housekeeping_interval=settings.run.sweep_interval,
-        housekeeping_limit=DEFAULT_MAX_SECONDS + CODE_SWEEP_MAX_SECONDS,
+        housekeeping_limit=DEFAULT_MAX_SECONDS
+        + LOCATION_SWEEP_MAX_SECONDS
+        + CODE_SWEEP_MAX_SECONDS,
         lease_seconds=settings.run.lease_seconds,
         renew_seconds=settings.run.renew_seconds,
         caps=RunCaps.from_config(settings.query_limits, settings.run),

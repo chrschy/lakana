@@ -97,6 +97,10 @@ markers = [
 # packages/conftest.py and scripts/conftest.py load `scripts.pytest_memory_limit`, which stops
 # a test run that uses too much resident memory (docs/agent/testing.md, "Memory limit").
 addopts = "-m 'not integration'"
+# /tmp is a RAM disk on the machines this runs on, and its pages count against the memory cap
+# of the test run: kept for every passed test, the temp directories of a run over all packages
+# grew to about 1 GB. Only a failed test's directory is kept.
+tmp_path_retention_policy = "failed"
 # Makes `scripts` importable for the two conftest.py files that load the plugin.
 pythonpath = ["."]
 filterwarnings = [

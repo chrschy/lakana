@@ -287,6 +287,22 @@ A deleted version's files are removed in the request that deletes it, up to abou
 five seconds, and the sweep removes the rest. A drop can leave the empty directories `blobs` and
 `manifests` behind, because the storage interface cannot remove a directory.
 
+**Tables whose create never finished.** Every managed table's directory under `managed/` has a
+location record in the catalog, written before the first file of the table. When a create fails,
+it removes its own files at once if it knows that nothing was committed. When it cannot know (the
+database did not confirm the commit), it keeps them, and the same sweep decides later: once the
+run that made the create has ended, or, for a create outside a run, once
+`LAKANA_TABLES__ABANDONED_GRACE_HOURS` (24 by default) have passed, it checks under a lock whether
+the table exists. If it does, everything is kept. If not, the sweep removes the files and then the
+record. It never removes a directory that has no record, nor one that holds or lies around a table
+that exists, in any environment that shares the storage root: it counts such directories and logs
+`<n> table directories under managed/ in the storage of environment <env> have no location record;
+they are left alone.` (see "After a restore" below). The audit log records `TABLE_LOCATION_ABANDONED`
+when the sweep gives up a create (detail: `location`, `holder_run_id`, `claimed_at`) and
+`TABLE_PURGED` when it removes files (detail: `location`, `state`, `files`, `bytes`, and `complete`,
+which is `false` for a pass that stopped part-way and is continued by the next sweep). Both have no
+principal: the sweep does them. A dropped table's files are not removed by this sweep yet.
+
 **The worker's log.** The worker prints INFO and above to its standard error, with the time, the
 level and the logger name on each line; read it with `docker compose logs worker`. That includes
 the start-up notices (whether Python assets are enabled, and that the sweeps are off when
@@ -1014,7 +1030,7 @@ bring an artifact back into the catalog or to make it forget one on purpose; iss
 ## After a restore
 
 Restore the catalog (Postgres) and the object storage from backups of the **same moment**, as
-under "Backups". Artifacts are where a mismatch shows: storage may hold artifact files and
+under "Backups". Artifacts, and tables that were being created, are where a mismatch shows: storage may hold artifact files and
 manifests that the restored catalog has never heard of, or the catalog may list versions whose files
 are gone. This section assumes that the catalog came from a consistent backup, a database dump or
 point-in-time recovery.
@@ -1040,6 +1056,24 @@ names it, while a listed version or an upload in progress names it, and while it
 catalog entry and no marker. A file with no record, in a directory the catalog knows, that none of
 these names, can go. If your bucket keeps old object versions, a file that
 Lakana removed stays in the bucket until the bucket's own rule removes it.
+
+**Tables and their storage locations.** The catalog keeps a record of every managed table's
+directory, and the sweep removes a table's files only when its record says that a create never
+finished. So a restored catalog cannot make the sweep remove the files of a table it lists, and it
+never removes a directory it has no record of:
+
+- A table created after the backup has no record in the restored catalog. Its directory under
+  `managed/` is left alone and counted in the line `<n> table directories under managed/ in the
+  storage of environment <env> have no location record; they are left alone. ...` (logger
+  `lakana_core.catalog.location_sweep`). Nothing reads those files. **Keep the directory**; there
+  is no command yet to bring such a table back into the catalog or to remove the directory.
+- A table that was **being created at the moment of the backup** has a record that says the create
+  had not finished. The restored catalog shows its run as running, the scheduler ends it about a
+  minute after the start, and the next sweep then removes the files. If that table was in fact
+  finished after the backup and you need its data, copy its directory out of storage before you
+  set `LAKANA_RUN__SWEEP_INTERVAL` back: it is a directory under `managed/` whose name is the
+  table's name, a hyphen and 32 hexadecimal digits, and whose table `lakana table list` does not
+  show.
 
 **What the sweep keeps, and the log lines that say so**
 

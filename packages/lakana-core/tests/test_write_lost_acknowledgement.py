@@ -32,7 +32,7 @@ from lakana_core.catalog.writes import WriteResult
 from lakana_core.config import DatabaseConfig
 from lakana_core.db import create_engine
 from lakana_core.errors import ConflictError, WriteOutcomeUnknownError
-from lakana_core.models import Base, Table, WriteMode
+from lakana_core.models import Base, Table, TableLocation, WriteMode
 from lakana_core.runs.lockdown import ProtectedWriteGuard
 from lakana_core.storage.resolver import StorageResolver
 
@@ -145,6 +145,47 @@ def _readable(observer: Session, principal: PrincipalRef, dotted: str) -> list[i
     return sorted(table.scan().to_arrow().column("id").to_pylist())
 
 
+def _claims(session: Session) -> bool:
+    """Say whether the session is about to commit a create's claim of its location.
+
+    Parameters
+    ----------
+    session
+        The writer's session.
+
+    Returns
+    -------
+    bool
+        Whether a new `TableLocation` is pending.
+    """
+    return any(isinstance(item, TableLocation) for item in session.new)
+
+
+def _failing_commit(session: Session, error: Exception) -> mock._patch[Callable[[], None]]:
+    """Patch the session's `commit` to raise `error`, except for a create's claim.
+
+    Parameters
+    ----------
+    session
+        The writer's session.
+    error
+        What the commit raises.
+
+    Returns
+    -------
+    unittest.mock._patch
+        A patch to use as a context manager.
+    """
+    real = session.commit
+
+    def commit() -> None:
+        if not _claims(session):
+            raise error
+        real()
+
+    return mock.patch.object(session, "commit", commit)
+
+
 def _acknowledgement_lost(session: Session) -> mock._patch[Callable[[], None]]:
     """Patch the session's `commit` to apply the commit and then fail, once.
 
@@ -162,6 +203,9 @@ def _acknowledgement_lost(session: Session) -> mock._patch[Callable[[], None]]:
     calls: list[int] = []
 
     def commit() -> None:
+        if _claims(session):
+            real()  # a create's claim of its location, before any file: not the commit under test
+            return
         real()
         if not calls:
             calls.append(1)
@@ -312,7 +356,7 @@ def test_a_create_that_failed_inside_its_commit_keeps_its_files_and_says_unknown
     """Nothing shows a table that is still inside its commit: the location is not emptied."""
     catalog, _ = _setup(session, principal, store, WriteMode.CREATE)
     with (
-        mock.patch.object(session, "commit", side_effect=RuntimeError("inside the commit")),
+        _failing_commit(session, RuntimeError("inside the commit")),
         pytest.raises(WriteOutcomeUnknownError) as raised,
     ):
         _write(catalog, principal, "gold.daily", WriteMode.CREATE, _orders([5, 6], ["us", "us"]))
@@ -321,7 +365,7 @@ def test_a_create_that_failed_inside_its_commit_keeps_its_files_and_says_unknown
     assert any(path.startswith("managed/") for path in _files(store))
     message = str(raised.value)
     assert "may or may not" in message
-    assert "cannot remove them" in message  # there is no table for `lakana table maintain`
+    assert "proven that the commit did not land" in message  # the location sweep decides
     assert not session.in_transaction()
 
 

@@ -2042,3 +2042,91 @@ def test_0041_on_postgres() -> None:
         migrate.upgrade(url, revision_0041)
         assert _alembic_version(engine) == revision_0041
         engine.dispose()
+
+
+def test_0042_on_postgres() -> None:
+    """0042 creates `table_locations` and backfills a LIVE record per managed table; down drops it.
+
+    A managed table with a metadata file gets one record at its root location; an external
+    table and a managed table without a metadata file get none. The downgrade keeps the tables,
+    and a second upgrade backfills the same location again.
+    """
+    revision_0041 = "a0d7e3b6f2c8"
+    revision_0042 = "b1e8f4c7a3d9"
+    with PostgresContainer("postgres:16", driver="pg8000") as pg:
+        url = pg.get_connection_url()
+        migrate.upgrade(url, revision_0041)
+        engine = sqlalchemy.create_engine(url)
+        now = datetime.now(UTC)
+        env_id, ns_id = uuid.uuid4(), uuid.uuid4()
+        orders_id, bare_id, raw_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+        location = f"s3://bucket/dev/managed/gold/orders-{orders_id.hex}"
+        with engine.begin() as conn:
+            conn.execute(
+                sqlalchemy.text(
+                    "INSERT INTO environments (id, name, storage_root, storage_options, "
+                    "is_protected, properties, created_at, updated_at) "
+                    "VALUES (:id, 'dev', 's3://bucket/dev', '{}', false, '{}', :now, :now)"
+                ),
+                {"id": env_id, "now": now},
+            )
+            conn.execute(
+                sqlalchemy.text(
+                    "INSERT INTO namespaces (id, environment_id, path, properties) "
+                    "VALUES (:id, :env, 'gold', '{}')"
+                ),
+                {"id": ns_id, "env": env_id},
+            )
+            for table_id, name, kind, meta in (
+                (orders_id, "orders", "ICEBERG", f"{location}/metadata/00001-a.metadata.json"),
+                (bare_id, "bare", "ICEBERG", None),
+                (raw_id, "raw", "EXTERNAL", None),
+            ):
+                conn.execute(
+                    sqlalchemy.text(
+                        "INSERT INTO tables (id, namespace_id, name, table_type, "
+                        "metadata_location, created_at, updated_at) "
+                        "VALUES (:id, :ns, :name, :kind, :meta, :now, :now)"
+                    ),
+                    {
+                        "id": table_id,
+                        "ns": ns_id,
+                        "name": name,
+                        "kind": kind,
+                        "meta": meta,
+                        "now": now,
+                    },
+                )
+
+        def records() -> list[tuple[object, ...]]:
+            with engine.connect() as conn:
+                return [
+                    tuple(row)
+                    for row in conn.execute(
+                        sqlalchemy.text(
+                            "SELECT table_id, environment_id, location, state, holder_run_id "
+                            "FROM table_locations"
+                        )
+                    ).all()
+                ]
+
+        migrate.upgrade(url, revision_0042)
+        assert _alembic_version(engine) == revision_0042
+        assert records() == [(orders_id, env_id, location, "LIVE", None)]
+        with pytest.raises(IntegrityError), engine.begin() as conn:
+            conn.execute(
+                sqlalchemy.text(
+                    "INSERT INTO table_locations (id, environment_id, location, state, "
+                    "claimed_at, revoked_policy_ids) "
+                    "VALUES (:id, :env, :loc, 'CLAIMED', :now, '[]')"
+                ),
+                {"id": uuid.uuid4(), "env": env_id, "loc": location, "now": now},
+            )
+
+        migrate.downgrade(url, revision_0041)
+        assert _alembic_version(engine) == revision_0041
+        assert "table_locations" not in sqlalchemy.inspect(engine).get_table_names()
+        migrate.upgrade(url, revision_0042)
+        assert _alembic_version(engine) == revision_0042
+        assert records() == [(orders_id, env_id, location, "LIVE", None)]
+        engine.dispose()

@@ -124,6 +124,29 @@ Each cell is a summary. The page named in the last column has the detail. The ch
 | 0.10.0 | A package index URL with a query string is refused; move a `uv.toml` into `pyproject.toml`; lineage and failure causes changed. | This row |
 | 0.9.0 | Upgrade every worker before you deploy Python assets; rewrite `asset(deps=...)` as `asset(inputs=...)`; move helper modules out of `assets/`; an older bundle needs three additions. | [Upgrading](../how-to/deploy-with-compose.md#upgrading), [Projects and deploys](../how-to/projects.md) |
 
+## Notes for the next release
+
+### Table locations are recorded, and a create that never finished is cleaned up
+
+Migration `0042` adds the table `table_locations`: one record for the storage directory of each
+managed table. The migration writes a record for every managed table that exists, with the
+directory its metadata file lies in; external tables, views and artifacts get none. **Nothing is
+deleted by the upgrade.**
+
+From now on a create records its table's directory before it writes the first file. When a create
+fails and Lakana cannot tell whether its commit landed, the files stay as before, and the error now
+says that the worker's sweep removes them once it has proven that the commit did not land: after
+the run that made the create has ended, or, for a create outside a run, after
+`LAKANA_TABLES__ABANDONED_GRACE_HOURS` (new, 24 by default). A create known to have failed removes
+its files at once, as before; one that lost a race for its name now removes its metadata file too.
+The sweep runs with the others every `LAKANA_RUN__SWEEP_INTERVAL` seconds and never removes a table
+that exists or a directory that has no record: directories that an earlier release left behind
+(from a failed create, or from a drop) are only counted and reported in the worker's log, as
+`<n> table directories under managed/ in the storage of environment <env> have no location record;
+they are left alone.` A later release adds a command to remove them on request. The audit log gains
+`TABLE_LOCATION_ABANDONED` and `TABLE_PURGED`; see [The sweep](../how-to/deploy-with-compose.md#the-sweep).
+Going back to the previous release drops the records and keeps every file.
+
 ## Notes for 0.16.0
 
 ### Grants, principals and groups are listed in pages

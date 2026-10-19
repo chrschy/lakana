@@ -47,7 +47,7 @@ from lakana_core.errors import (
 from lakana_core.grants.service import GrantService
 from lakana_core.identifiers import NamespacePath, TableRef
 from lakana_core.identity.principals import PrincipalService
-from lakana_core.models import Principal, PrincipalType, Table, TableType
+from lakana_core.models import Principal, PrincipalType, Table, TableLocation, TableType
 from lakana_core.policy.column_masks import ColumnMaskService
 from lakana_core.policy.row_filters import RowFilterService
 
@@ -167,28 +167,31 @@ def test_create_table_race_on_the_unique_constraint_raises_already_exists(
     row that is, in fact, already there, forcing the insert itself to hit
     the constraint.
 
-    The orphan-file count pins the ordering itself, not just the outcome: a
-    losing writer that wrote its metadata file before losing the insert
-    race leaves that file behind as an orphan. A build that reversed
-    Constraint 3 — inserting the row before writing the file — would never
-    reach the write on the losing attempt, leaving only one file total; this
-    is the discriminating assertion, not merely ``is_file()``. Since the id binding
-    each `create_table` call generates its own id, so the losing
-    writer's orphan lands in its own sibling ``sales-<hex>`` directory
-    rather than the winner's — the two metadata files are counted across
-    both, not within one directory as before that change.
+    The count of metadata files written pins the ordering itself, not just
+    the outcome: a losing writer writes its metadata file before it loses
+    the insert race. A build that reversed Constraint 3 — inserting the row
+    before writing the file — would never reach the write on the losing
+    attempt. Each `create_table` call generates its own id, so the losing
+    writer's file lands in its own sibling ``sales-<hex>`` directory, and
+    since a create claims its location the loser, known not to have
+    committed, deletes that file and its claim again: only the winner's
+    file is left.
     """
     ref = _prepared_ref(catalog, principal, tmp_path)
     created = catalog.create_table(principal, ref, schema=_schema())
 
     with (
         mock.patch.object(CatalogService, "_lookup_table", return_value=None),
+        mock.patch.object(
+            service_module, "write_metadata", wraps=service_module.write_metadata
+        ) as written,
         pytest.raises(AlreadyExistsError),
     ):
         catalog.create_table(principal, ref, schema=_schema())
 
+    assert written.call_count == 1  # the loser wrote its file before it lost the insert
     sales_root = Path(created.metadata_location.removeprefix("file://")).parent.parent.parent
-    assert len(list(sales_root.glob("sales-*/metadata/*.metadata.json"))) == 2
+    assert len(list(sales_root.glob("sales-*/metadata/*.metadata.json"))) == 1
 
 
 def test_create_table_reports_conflict_when_the_integrity_error_is_not_a_name_collision(
@@ -208,7 +211,12 @@ def test_create_table_reports_conflict_when_the_integrity_error_is_not_a_name_co
     """
     ref = _prepared_ref(catalog, principal, tmp_path)
 
+    real = Session.commit
+
     def _fail(self: Session) -> None:
+        if any(isinstance(item, TableLocation) for item in self.new):
+            real(self)  # the create's claim of its location, which comes first
+            return
         raise IntegrityError(
             "INSERT INTO tables (id, name) VALUES (?, ?)",
             {"id": "secret-uuid", "name": "sales"},
@@ -1495,6 +1503,8 @@ def test_no_new_catalog_method_builds_a_loaded_table_without_a_decision() -> Non
         # `describe_table` reads through it, then adds the descriptions.
         "_describe_row",
         "append",
+        # A writer's: a create whose commit raised but landed returns the table it created.
+        "create_table",
         "load_table",
         # A reader that names one snapshot a check result recorded, never the current state.
         "load_table_at_check",

@@ -451,9 +451,10 @@ class RunConfig(BaseModel):
         Seconds between asking a Python task to stop and ending its process by force.
     sweep_interval
         Seconds between the worker's sweeps of attempt directories a dead worker left
-        behind (also at worker start), and between the sweeps of the artifact store that the
-        worker holding the scheduler role runs (expired uploads, files and manifest objects
-        no version names); 0 turns both off, and then nothing collects those leftovers.
+        behind (also at worker start), and between the sweeps that the worker holding the
+        scheduler role runs of the artifact store (expired uploads, files and manifest objects
+        no version names) and of table locations (the files of creates that never finished);
+        0 turns them off, and then nothing collects those leftovers.
     maintenance_timeout
         Seconds one `lakana table maintain` run may take. The worker checks the time between
         steps and between files, stops at the first safe point, and fails the run with the
@@ -864,6 +865,24 @@ class TableReadsConfig(BaseModel):
                 "lower the window or raise the kept period."
             )
         return self
+
+
+class TablesConfig(BaseModel):
+    """How the worker cleans up after creates of managed tables that never finished.
+
+    Read from ``LAKANA_TABLES__ABANDONED_GRACE_HOURS``.
+
+    Parameters
+    ----------
+    abandoned_grace_hours
+        Hours a create that did not finish, and was not made by a pipeline run, keeps its
+        storage location before the worker's sweep removes the files it left (default 24; 1 to
+        8,760). A create made by a run keeps it until that run has ended. The sweep runs every
+        `LAKANA_RUN__SWEEP_INTERVAL` seconds and never removes a table that exists. Raise it if
+        a create can take longer than a day.
+    """
+
+    abandoned_grace_hours: int = Field(default=24, ge=1, le=8760)
 
 
 DEFAULT_MAX_STATEMENT_CHARS = 100_000
@@ -1278,6 +1297,9 @@ class Settings(BaseSettings):
     table_reads
         How long the reads of a table are kept and how far back its health shows them
         (`LAKANA_TABLE_READS__*`).
+    tables
+        How long the storage location of a create that did not finish is kept
+        (`LAKANA_TABLES__*`).
     repo_roots
         Absolute directories that local repositories must lie under, as a JSON list, for example
         `["/repos"]`. Empty (the default) refuses every local repository.
@@ -1300,6 +1322,7 @@ class Settings(BaseSettings):
     denial_audit: DenialAuditConfig = DenialAuditConfig()
     artifacts: ArtifactsConfig = ArtifactsConfig()
     table_reads: TableReadsConfig = TableReadsConfig()
+    tables: TablesConfig = TablesConfig()
     repo_roots: list[str] = []
 
     @field_validator("repo_roots")
