@@ -2177,8 +2177,7 @@ bounded: at most 2,000 added files per commit, and 60 seconds for all reads toge
 (`MAX_CHECKED_FILES`, `CHECK_DEADLINE_SECONDS`, `MAX_FOOTER_BYTES`); a commit over either bound
 is refused whole (the deadline also covers the manifest reads, and a commit past the cap stops being
 read at that manifest). Reads already running when the deadline passes are abandoned and end at the
-storage client's own timeout, which the check shortens on a copy of the FileIO
-(`STORAGE_CONNECT_SECONDS`, `STORAGE_REQUEST_SECONDS`; only S3 backends have the property). A
+storage client's own timeout (the check sets none of its own). A
 manifest or manifest list (the parent's included: the limit does not distinguish what the client
 sent from what it did not) is read through a stream that stops at `MAX_MANIFEST_BYTES` + 1 and
 handed to pyiceberg as bytes; no separate size request exists to swap the file after (#171). A snapshot's parent is looked up only among the table's snapshots

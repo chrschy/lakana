@@ -1297,19 +1297,6 @@ def test_the_bytes_the_check_read_are_what_pyiceberg_opens() -> None:
         assert stream.read(1) == b"b"
 
 
-def test_the_storage_reads_of_the_check_use_shorter_timeouts() -> None:
-    """The check's FileIO is a copy with S3 timeouts; the table's own FileIO is untouched."""
-    own = PyArrowFileIO({"s3.endpoint": "http://x", "s3.request-timeout": "600"})
-    bounded = field_ids_module._with_short_timeouts(own)
-    assert isinstance(bounded, PyArrowFileIO)
-    assert bounded.properties["s3.endpoint"] == "http://x"
-    assert bounded.properties["s3.request-timeout"] == str(field_ids_module.STORAGE_REQUEST_SECONDS)
-    assert bounded.properties["s3.connect-timeout"] == str(field_ids_module.STORAGE_CONNECT_SECONDS)
-    assert own.properties["s3.request-timeout"] == "600"
-    shorter = PyArrowFileIO({"s3.request-timeout": "2"})
-    assert field_ids_module._with_short_timeouts(shorter).properties["s3.request-timeout"] == "2"
-
-
 def test_a_manifest_read_that_outlasts_the_deadline_refuses_the_commit(
     catalog: CatalogService,
     principal: PrincipalRef,

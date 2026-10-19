@@ -25,7 +25,7 @@ from typing import TypeVar, cast
 import pyarrow as pa
 import pyarrow.parquet as pq
 from pyiceberg.avro.file import AvroFile
-from pyiceberg.io import S3_CONNECT_TIMEOUT, S3_REQUEST_TIMEOUT, FileIO, InputFile, InputStream
+from pyiceberg.io import FileIO, InputFile, InputStream
 from pyiceberg.manifest import (
     DEFAULT_READ_VERSION,
     MANIFEST_ENTRY_SCHEMAS,
@@ -309,13 +309,6 @@ MAX_MANIFEST_BYTES = 64 * 1024 * 1024
 reads such a file whole, so the check reads it itself, through a stream that stops at this many
 bytes plus one, and hands pyiceberg those bytes."""
 
-STORAGE_CONNECT_SECONDS = 5
-"""How long a storage connection of the check may take to open (S3: `s3.connect-timeout`)."""
-
-STORAGE_REQUEST_SECONDS = 10
-"""How long one storage request of the check may take (S3 backends: `s3.request-timeout`), so an
-abandoned read ends sooner than the storage client's own timeout."""
-
 _READ_CHUNK = 1024 * 1024
 """How much of a manifest one read asks for."""
 
@@ -518,31 +511,6 @@ class _HeldFile(InputFile):
             A stream over the bytes.
         """
         return cast(InputStream, io.BytesIO(self._data))
-
-
-def _with_short_timeouts(file_io: FileIO) -> FileIO:
-    """Copy a FileIO with shorter storage timeouts for the check's own reads.
-
-    Only the S3 backends have such a property (`s3.connect-timeout`, `s3.request-timeout`);
-    the others ignore it. A timeout the FileIO already has and that is shorter is kept.
-
-    Parameters
-    ----------
-    file_io
-        The table's FileIO, which is left as it is.
-
-    Returns
-    -------
-    FileIO
-        A FileIO of the same class and properties, with the two timeouts.
-    """
-    properties = dict(file_io.properties)
-    for key, seconds in (
-        (S3_CONNECT_TIMEOUT, STORAGE_CONNECT_SECONDS),
-        (S3_REQUEST_TIMEOUT, STORAGE_REQUEST_SECONDS),
-    ):
-        properties[key] = str(min(float(properties.get(key, seconds)), seconds)).removesuffix(".0")
-    return type(file_io)(properties)
 
 
 def _read_bounded(input_file: InputFile) -> bytes | None:
@@ -863,7 +831,6 @@ def check_added_files_have_field_ids(
         If storage failed while reading a footer or a manifest.
     """
     deadline = _clock() + CHECK_DEADLINE_SECONDS
-    file_io = _with_short_timeouts(file_io)
     files = _added_data_files(snapshots, metadata, file_io, table, deadline)
     for data_file in files:
         if data_file.file_format != FileFormat.PARQUET:
