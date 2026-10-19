@@ -33,7 +33,7 @@ from pyiceberg.utils.properties import property_as_int
 
 from lakana_core.catalog.append import root_relative_path
 from lakana_core.catalog.schema_compat import SchemaDiff
-from lakana_core.errors import UnsupportedTableError, ValidationError
+from lakana_core.errors import NotFoundError, UnsupportedTableError, ValidationError
 from lakana_core.identifiers import TableRef
 from lakana_core.storage.resolver import ResolvedStorage
 
@@ -519,13 +519,14 @@ def stage_snapshot(
     return requirements, updates, snapshot
 
 
-def cleanup_location(resolved: ResolvedStorage, location: str) -> None:
+def cleanup_location(resolved: ResolvedStorage, location: str) -> bool:
     """Best-effort delete everything under a location nothing references yet.
 
     Only for a brand-new table's id-suffixed location after a failed
     create: nothing else can live there. Every failure is logged by its
     exception class alone and swallowed, so it never replaces the caller's
-    real error.
+    real error. Only objects strictly below ``location/`` are deleted: a
+    listing that also names a sibling sharing the text as a prefix leaves it.
 
     Parameters
     ----------
@@ -533,17 +534,30 @@ def cleanup_location(resolved: ResolvedStorage, location: str) -> None:
         The environment's resolved storage.
     location
         The absolute location to empty.
+
+    Returns
+    -------
+    bool
+        Whether the location is known to be empty now: `False` when it is not under the
+        storage root, the listing failed or a file could not be deleted.
     """
     relative = root_relative_path(resolved.config.root, location)
     if relative is None:
-        return
+        return False
     try:
         paths = list(resolved.storage.list(relative))
     except Exception as exc:
         logger.warning("Failed to list a failed create's files: %s", type(exc).__name__)
-        return
+        return False
+    emptied = True
     for path in paths:
+        if not path.startswith(relative.rstrip("/") + "/"):
+            continue
         try:
             resolved.storage.delete(path)
+        except NotFoundError:
+            continue  # gone already
         except Exception as exc:
+            emptied = False
             logger.warning("Failed to delete a failed create's file: %s", type(exc).__name__)
+    return emptied

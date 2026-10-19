@@ -760,8 +760,9 @@ directory `artifacts/` is reserved: `confine_to_root` refuses a table location i
 **The sweep.** Run in a thread of its own by the worker that holds the scheduler role, every
 `LAKANA_RUN__SWEEP_INTERVAL` seconds (`housekeeping` in `lakana_worker.__main__`); see
 "The artifact store (M5c2b)" in `security.md` for what it deletes and what it never does. The same
-function then runs the code archive sweep (`sweep_code_archives`: a minute of its own, same
-`now` and rotation), and a failure of one does not stop the other.
+function then runs the table location sweep (`sweep_table_locations`, see "Table locations" in
+`security.md`) and the code archive sweep (`sweep_code_archives`: a minute of its own), with the
+same `now` and rotation, and a failure of one does not stop the others.
 
 **Settings.** `ArtifactsConfig` (`LAKANA_ARTIFACTS__MAX_FILE_BYTES`, `MAX_BYTES`, `MAX_FILES`,
 `UPLOAD_TTL_SECONDS`), read by the server and the worker; the info route sends the three size limits
@@ -782,5 +783,9 @@ and `LAKANA_APPEND__READ_TIMEOUT_SECONDS` with table appends; downloads have a l
 - **Artifact bytes: rows first, bytes second.** A deletion changes the database under the artifact's
   lock and removes objects afterwards; a file becomes visible and gets its row under that lock. A
   crash leaves orphan bytes for the sweep, never a live version without bytes.
+- **Table locations: record first.** A create commits its location's `CLAIMED` record before the
+  first file and publishes it to `LIVE` in the transaction that inserts the row (the fence); the
+  location sweep deletes only locations whose record is `ABANDONED` or `DROPPED`, never a directory
+  without a record.
 - **SQLite and Postgres both work** for `lakana-core` — no dialect-specific SQL, so the unit
   tier can run against in-memory SQLite while the integration tier uses real Postgres.

@@ -297,9 +297,10 @@ TABLE"`) or look at the query (`lakana query status ID`; a query whose write was
 `SUCCEEDED`), and only repeat the write if its rows are not there, since an `append` that did
 land would otherwise land twice. (The query shows `SUCCEEDED` in that case. The task of a table with [checks](check-your-data.md) is not ended `succeeded` before its checks ran.) Files that belong to a write into an existing table that did
 not commit stay as unreferenced files until `lakana table maintain` removes them. A table that
-was being created has no such command: if it did not appear, its files stay unreferenced in the
-environment's storage, and creating it again is safe. A pipeline task that fails this way is not
-retried by itself.
+was being created needs no command: if it did not appear, the worker's sweep removes its files once
+it has proven that the commit did not land (after the run has ended, or 24 hours for a create
+outside a run; see [The sweep](deploy-with-compose.md#the-sweep)), and creating it again is safe.
+A pipeline task that fails this way is not retried by itself.
 
 ## What cancel does not do
 

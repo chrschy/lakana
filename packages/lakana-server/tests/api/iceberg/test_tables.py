@@ -15,7 +15,7 @@ from lakana_core.catalog.json_schema import ColumnSpec
 from lakana_core.catalog.service import CatalogService
 from lakana_core.db import create_engine
 from lakana_core.identifiers import TableRef
-from lakana_core.models import Principal, Table, WriteMode
+from lakana_core.models import Principal, Table, TableLocation, TableLocationState, WriteMode
 from lakana_core.storage.resolver import StorageResolver
 from lakana_server.settings import Settings
 from tests.conftest import AUTH_HEADER
@@ -1103,3 +1103,31 @@ def test_an_unbound_task_token_is_refused_a_kept_table_over_the_iceberg_load(
     assert refused.status_code == 404, refused.text
     assert refused.json()["error"]["type"] == "KeptAfterCheckError"
     assert person.status_code == 200, person.text
+
+
+def test_an_iceberg_rest_create_claims_its_location_and_publishes_it(
+    client: TestClient, storage_root: str, settings: Settings
+) -> None:
+    """The create writes its metadata before the row exists, so the location is claimed first.
+
+    After the create the claim is LIVE and names the table, which is what keeps the location
+    sweep away from it.
+    """
+    _setup(client, storage_root)
+    created = client.post(
+        "/v1/dev/namespaces/gold/tables",
+        headers=AUTH_HEADER,
+        json={"name": "sales", "schema": _SCHEMA, "properties": {}},
+    )
+    assert created.status_code == 200, created.text
+    location = created.json()["metadata"]["location"]
+    engine = create_engine(settings.database)
+    with Session(engine) as session:
+        record = session.execute(select(TableLocation)).scalars().one()
+        table_id = session.execute(select(Table.id).where(Table.name == "sales")).scalar_one()
+    engine.dispose()
+    assert (record.location, record.state, record.table_id) == (
+        location,
+        TableLocationState.LIVE,
+        table_id,
+    )

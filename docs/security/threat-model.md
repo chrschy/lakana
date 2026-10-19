@@ -699,6 +699,20 @@ table's own id suffix could otherwise nest one table's directory inside another'
 rule catches that case specifically. A table failing the id-suffix check must be re-created;
 there is no in-place migration for an existing table's location.
 
+### Unattended deletion of table locations (#90)
+
+The worker's location sweep deletes table data with no person in the loop, so what it may delete
+is decided by catalog records, never by the absence of one: a create commits its location's record
+before its first file, the commit that publishes the table moves that record to `LIVE` behind a
+row-locked fence, and the sweep deletes only a location whose record is `ABANDONED` (or, from #94
+on, `DROPPED`). It deletes only inside an id-suffixed directory under `managed/` of the record's
+environment root, and before every delete it checks again, under the record's lock, that nothing in
+use in any environment is that location or lies inside it. A directory without a record is counted
+and never deleted, so a restored or replaced database cannot make the sweep delete what it forgot.
+Residuals (a writer that wakes up after its claim was abandoned, a namespace created inside an
+abandoned location between the check and a delete, a create in flight at a backup's moment after a
+restore) are listed in `docs/agent/security.md`, "Table locations".
+
 ## M3 exit criteria
 
 The M3 epic defines three exit criteria:

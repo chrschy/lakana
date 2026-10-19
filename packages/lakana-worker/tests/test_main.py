@@ -609,6 +609,7 @@ def _run_main(
         mock.patch("lakana_worker.__main__.SchedulerLoop") as scheduler_mock,
         mock.patch("lakana_worker.__main__.sweep_artifacts") as sweep_mock,
         mock.patch("lakana_worker.__main__.sweep_code_archives"),
+        mock.patch("lakana_worker.__main__.sweep_table_locations"),
         mock.patch("lakana_worker.__main__.backfill_table_columns"),
         mock.patch("lakana_worker.__main__.signal.signal"),
     ):
@@ -659,6 +660,7 @@ def _housekeeping(
     fires: mock.MagicMock | None = None,
     reads: mock.MagicMock | None = None,
     columns: mock.MagicMock | None = None,
+    locations: mock.MagicMock | None = None,
 ) -> None:
     """Run `main`, then the housekeeping callable it gave the scheduler, once.
 
@@ -678,6 +680,8 @@ def _housekeeping(
         Stands in for `sweep_table_reads`; a mock that succeeds when `None`.
     columns
         Stands in for `backfill_table_columns`; a mock that succeeds when `None`.
+    locations
+        Stands in for `sweep_table_locations`; a mock that succeeds when `None`.
     """
     monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{tmp_path}/lakana.db")
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
@@ -689,6 +693,7 @@ def _housekeeping(
         mock.patch("lakana_worker.__main__.sweep_job_fires", fires or mock.MagicMock()),
         mock.patch("lakana_worker.__main__.sweep_table_reads", reads or mock.MagicMock()),
         mock.patch("lakana_worker.__main__.backfill_table_columns", columns or mock.MagicMock()),
+        mock.patch("lakana_worker.__main__.sweep_table_locations", locations or mock.MagicMock()),
         mock.patch("lakana_worker.__main__.signal.signal"),
     ):
         scheduler_mock.return_value.start.return_value.is_alive.return_value = False
@@ -810,6 +815,40 @@ def test_a_failing_column_backfill_is_logged_and_does_not_raise(
     assert "The table column backfill failed (OSError)" in caplog.text
 
 
+def test_housekeeping_also_sweeps_table_locations_with_the_grace_period(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lakana_core.storage.resolver import StorageResolver
+
+    monkeypatch.setenv("LAKANA_TABLES__ABANDONED_GRACE_HOURS", "36")
+    artifacts, locations = mock.MagicMock(), mock.MagicMock()
+    _housekeeping(tmp_path, monkeypatch, artifacts, mock.MagicMock(), locations=locations)
+    assert locations.call_count == 1
+    call = locations.call_args
+    assert isinstance(call.args[1], StorageResolver)
+    assert call.kwargs["now"] == artifacts.call_args.kwargs["now"]
+    assert call.kwargs["rotation"] == artifacts.call_args.kwargs["rotation"] == 0
+    assert call.kwargs["grace_hours"] == 36
+    assert call.kwargs["should_stop"]() is False
+
+
+def test_a_failing_table_location_sweep_is_logged_and_the_others_still_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    columns = mock.MagicMock()
+    with caplog.at_level(logging.WARNING):
+        _housekeeping(
+            tmp_path,
+            monkeypatch,
+            mock.MagicMock(),
+            mock.MagicMock(),
+            columns=columns,
+            locations=mock.MagicMock(side_effect=OSError),
+        )
+    assert columns.call_count == 1
+    assert "The table location sweep failed (OSError)" in caplog.text
+
+
 def test_the_start_up_log_says_when_nothing_collects_leftovers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -821,6 +860,7 @@ def test_the_start_up_log_says_when_nothing_collects_leftovers(
     ]
     assert len(lines) == 1
     assert "artifact" in lines[0] and "not removed" in lines[0]
+    assert "tables whose create never finished" in lines[0]
 
 
 def test_the_worker_warns_at_start_up_only_when_old_format_secrets_are_accepted(

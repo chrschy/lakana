@@ -85,6 +85,15 @@ from lakana_core.catalog.health import (
 )
 from lakana_core.catalog.identity import artifact_refusal, resolve_table_id
 from lakana_core.catalog.json_schema import ColumnSpec, from_iceberg_schema
+from lakana_core.catalog.locations import (
+    CLAIM_RELEASED_MESSAGE,
+    claim_holder,
+    claim_location,
+    forget_location,
+    publish_location,
+    release_claim,
+    table_root_locations,
+)
 from lakana_core.catalog.maintenance import (
     DEFAULT_KEEP_DAYS,
     DEFAULT_KEEP_LAST,
@@ -203,7 +212,6 @@ from lakana_core.storage.resolver import (
     is_id_suffixed_location,
     is_within_location,
     nested_locations_within,
-    table_root_from_metadata_location,
 )
 
 logger = logging.getLogger(__name__)
@@ -1754,14 +1762,16 @@ class CatalogService:
     ) -> LoadedTable:
         """Create an Iceberg table.
 
-        The metadata file is written to object storage before the catalog row
-        is inserted (architecture Constraint 3). If the insert then loses a
-        race on the ``(namespace_id, name)`` unique constraint, the file is
-        an orphan, which is recoverable; the opposite order would leave a row
-        pointing at a file that does not exist, which is not. The
-        pre-existence check below exists only to produce a good error
-        message in the common case — the unique constraint is what actually
-        arbitrates a concurrent create.
+        The location's claim is committed first (`claim_location`), then the metadata file is
+        written to object storage, then the catalog row is inserted (architecture Constraint 3)
+        behind the publish fence (`publish_location`). If the insert then loses a race on the
+        ``(namespace_id, name)`` unique constraint, or fails before its commit was sent, the
+        file and the claim are deleted (`_release_location`); the opposite order would leave a
+        row pointing at a file that does not exist, which is not recoverable. A commit that
+        raised is settled as a write's is (`_settle_failed_write`): landed, the table is
+        returned; in doubt, the claim and the file stay for the sweep. The pre-existence check
+        exists only to produce a good error message in the common case — the unique constraint
+        is what actually arbitrates a concurrent create.
 
         Parameters
         ----------
@@ -1809,9 +1819,13 @@ class CatalogService:
         ConflictError
             If the insert fails for a reason other than a name collision —
             for instance, the namespace was dropped between the checks above
-            and the insert.
+            and the insert — or the sweep released the claim before the
+            insert (`CLAIM_RELEASED_MESSAGE`).
         PermissionDenied
             If the principal may not create tables here.
+        WriteOutcomeUnknownError
+            If the commit failed and the table could not be shown to exist; the
+            file and the claim are kept.
         """
         self._authz.authorize(
             p,
@@ -1826,8 +1840,24 @@ class CatalogService:
             sort_order=sort_order,
             properties=properties,
             location=location,
+            holder_run_id=claim_holder(p, None),
         )
-        return self._publish_table(prepared, prepared.metadata, owner_id=p.id)
+        self._commit_sent = False
+        try:
+            return self._publish_table(prepared, prepared.metadata, owner_id=p.id)
+        except Exception as exc:
+            if not self._settle_failed_write(
+                exc,
+                ref,
+                table_id=prepared.table_id,
+                snapshot_id=None,
+                new_table=True,
+                commit_sent=self._commit_sent,
+                clean_up=lambda: self._release_location(prepared),
+            ):
+                raise
+        _, row = self._find_table(ref)
+        return self._to_loaded_table(ref, row)
 
     def _prepare_table(
         self,
@@ -1838,13 +1868,17 @@ class CatalogService:
         sort_order: SortOrder | None,
         properties: Mapping[str, str] | None,
         location: str | None,
+        holder_run_id: uuid.UUID | None,
     ) -> _PreparedTable:
-        """Validate a new managed table and build its metadata, writing nothing.
+        """Validate a new managed table, build its metadata and claim its location.
 
         The first half of `create_table`: a create-mode write
         needs the table's id and location to write its data files before
         the row exists, so the two halves are separable. The caller must
-        already have authorized `Action.CREATE_TABLE` on `ref`.
+        already have authorized `Action.CREATE_TABLE` on `ref`. No file is
+        written here; the last step inserts and commits the location's
+        `CLAIMED` record (`claim_location`), so the claim exists before the
+        first file does. A create that is refused claims nothing.
 
         Parameters
         ----------
@@ -1860,6 +1894,8 @@ class CatalogService:
             Table properties.
         location
             Must be `None`; see `create_table`.
+        holder_run_id
+            The run that makes the create, recorded on the claim (`claim_holder`).
 
         Returns
         -------
@@ -1906,6 +1942,12 @@ class CatalogService:
             properties=dict(properties or {}),
             table_uuid=table_id,
         )
+        claim_location(
+            self._session,
+            environment_id=env.id,
+            location=table_location,
+            holder_run_id=holder_run_id,
+        )
         return _PreparedTable(
             ref=ref,
             table_id=table_id,
@@ -1925,7 +1967,9 @@ class CatalogService:
         metadata, or — for a create-mode write — that metadata with the
         first snapshot already applied, so the table appears with its data
         in one step. Anything already added to the session (an audit event,
-        lineage edges) commits with the row or not at all.
+        lineage edges) commits with the row or not at all, and so does the
+        move of the location's claim to `LIVE` (`publish_location`): when the
+        claim is no longer `CLAIMED` (the sweep abandoned it), nothing commits.
 
         Parameters
         ----------
@@ -1946,7 +1990,8 @@ class CatalogService:
         AlreadyExistsError
             If a concurrent create won the ``(namespace_id, name)`` race.
         ConflictError
-            If the insert failed for another reason.
+            If the insert failed for another reason, or the location's claim was
+            released before the insert (`CLAIM_RELEASED_MESSAGE`).
         ValidationError
             If the computed metadata location escapes the storage root.
         """
@@ -1977,6 +2022,12 @@ class CatalogService:
         sync_created_table(self._session, prepared.environment_id, row, ref.dotted())
         sync_table_columns(self._session, row.id, from_iceberg_schema(metadata.schema()))
         try:
+            # The fence's UPDATE flushes the row first, so a name collision raises here.
+            if not publish_location(
+                self._session, location=prepared.location, table_id=prepared.table_id
+            ):
+                self._session.rollback()
+                raise ConflictError(CLAIM_RELEASED_MESSAGE.format(table=ref.dotted()))
             self._guard.record_pending()
             self._commit_sent = True
             self._session.commit()
@@ -5435,23 +5486,10 @@ class CatalogService:
         -------
         list of str
             Derived from each metadata location, as the worker's own
-            confinement check does.
+            confinement check does (`table_root_locations`, which the location
+            sweep uses too).
         """
-        rows = self._session.execute(
-            select(Table.metadata_location)
-            .join(Namespace, Table.namespace_id == Namespace.id)
-            .where(
-                Namespace.environment_id == environment_id,
-                Table.id != table_id,
-                Table.metadata_location.is_not(None),
-            )
-        ).all()
-        return [
-            location
-            for (metadata_location,) in rows
-            if metadata_location is not None
-            and (location := table_root_from_metadata_location(metadata_location)) is not None
-        ]
+        return table_root_locations(self._session, environment_id=environment_id, exclude=table_id)
 
     @staticmethod
     def _delete_quietly(
@@ -5503,11 +5541,14 @@ class CatalogService:
     ) -> WriteResult:
         """Create a table from a result and publish it with its first snapshot, atomically.
 
-        The data files are written under the prepared, not yet
-        published, location; the fast append is applied to the prepared
-        metadata; `_publish_table` then inserts the row with the data
-        already current. On any failure the fresh location — which nothing
-        else can use — is emptied and the session rolled back.
+        The location's claim is committed first (`_prepare_table`); the data
+        files are written under the claimed, not yet published, location; the
+        fast append is applied to the prepared metadata; `_publish_table` then
+        inserts the row with the data already current, behind the publish
+        fence. On a failure known not to have committed, the fresh location —
+        which nothing else can use — is emptied, its claim removed and the
+        session rolled back (`_release_location`); a failure in doubt keeps
+        the files and the claim for the sweep.
 
         Parameters
         ----------
@@ -5552,6 +5593,7 @@ class CatalogService:
             sort_order=None,
             properties=None,
             location=None,
+            holder_run_id=claim_holder(p, query_run_id),
         )
         writer = DataFileWriter(prepared.metadata, prepared.resolved.file_io, max_rows=max_rows)
         try:
@@ -5596,7 +5638,7 @@ class CatalogService:
                 snapshot_id=None,
                 new_table=True,
                 commit_sent=self._commit_sent,
-                clean_up=lambda: cleanup_location(prepared.resolved, prepared.location),
+                clean_up=lambda: self._release_location(prepared),
             )
             if not landed:
                 raise
@@ -5818,7 +5860,9 @@ class CatalogService:
         - the check itself fails or times out (the database is unreachable): every file is kept
           and `WriteOutcomeUnknownError` says so. An orphan is harmless, a deleted live file is
           not. `lakana table maintain` removes the orphans of a write into an existing table;
-          nothing removes those of a create that did not land.
+          a create in doubt keeps its claim `CLAIMED`, and the location sweep
+          (`lakana_core.catalog.location_sweep`) removes its files once it has proven, under the
+          claim's lock, that the commit did not land.
 
         A `LakanaError` is raised before the commit by construction (a conflict, a refusal, a
         validation), and so is any exception when `commit_sent` is false: those need no check,
@@ -5892,6 +5936,45 @@ class CatalogService:
         clean_up()
         return False
 
+    def _release_location(self, prepared: _PreparedTable) -> None:
+        """Remove what a create known not to have committed wrote: claim first, files, record.
+
+        The claim is made `ABANDONED` (`release_claim`) before a file is deleted, and the record
+        is deleted only once every file is gone (`forget_location`), so a deletion that fails
+        leaves the record to the sweep, never a directory without one. A record that says the
+        location is in use keeps every file. Every failure is logged by its exception class
+        alone and swallowed, so it never replaces the caller's real error; the claim then stays
+        and the sweep decides.
+
+        Parameters
+        ----------
+        prepared
+            The failed create.
+        """
+        try:
+            deletable = release_claim(self._session, prepared.location)
+        except Exception as exc:
+            self._rollback_quietly()
+            logger.warning(
+                "The claim of a failed create could not be released (%s); its files were kept "
+                "for the clean-up.",
+                type(exc).__name__,
+            )
+            return
+        if not deletable:
+            logger.warning("A failed create's location is recorded as in use; its files were kept.")
+            return
+        if not cleanup_location(prepared.resolved, prepared.location):
+            return
+        try:
+            forget_location(self._session, prepared.location)
+        except Exception as exc:
+            self._rollback_quietly()
+            logger.warning(
+                "The record of a failed create could not be removed (%s); the clean-up removes it.",
+                type(exc).__name__,
+            )
+
     @staticmethod
     def _unknown_message(ref: TableRef, new_table: bool) -> str:
         """Build the text of `WriteOutcomeUnknownError`.
@@ -5911,8 +5994,9 @@ class CatalogService:
         return WRITE_OUTCOME_UNKNOWN_MESSAGE.format(
             table=ref.dotted(),
             leftovers=(
-                "They stay unreferenced in the environment's storage: the table does not exist, "
-                "so 'lakana table maintain' cannot remove them, and nothing else does yet."
+                "They stay in the environment's storage until the worker's clean-up has proven "
+                "that the commit did not land: it removes them then, and keeps them if the table "
+                "turns out to exist. Creating the table again is safe."
                 if new_table
                 else "Files of a write that was not committed are removed by "
                 "'lakana table maintain'."
