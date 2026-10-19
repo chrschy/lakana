@@ -78,6 +78,7 @@ nav:
       - explanation/support.md
       - explanation/upgrades.md
       - explanation/what-leaves-the-machine.md
+      - explanation/security.md
       - explanation/artifacts.md
       - explanation/python-assets.md
       - explanation/compose-known-gaps.md
