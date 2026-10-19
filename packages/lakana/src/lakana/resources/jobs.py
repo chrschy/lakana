@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any
 
 from lakana._http import HttpTransport
-from lakana._models import Delivery, Job, JobStart, WaitingStart
+from lakana._models import Delivery, Job, JobStart, Trigger, WaitingStart
 from lakana._routes import ROUTES
 from lakana.resources.queries import waiting_for_from_json
 from lakana.resources.runs import notification_from_json, run_from_json
@@ -28,6 +28,32 @@ def _when(value: str | None) -> datetime | None:
         The parsed value.
     """
     return datetime.fromisoformat(value) if value is not None else None
+
+
+_KINDS = ("schedule", "on_demand")
+"""The trigger kinds this SDK reads; any other is left out."""
+
+
+def trigger_from_json(data: dict[str, Any]) -> Trigger:
+    """Build a `Trigger` from a `TriggerOut` body.
+
+    Parameters
+    ----------
+    data
+        The decoded trigger.
+
+    Returns
+    -------
+    Trigger
+        The trigger.
+    """
+    return Trigger(
+        kind=data["kind"],
+        cron=data.get("cron"),
+        timezone=data.get("timezone"),
+        paused=data.get("paused"),
+        next_run_at=_when(data.get("next_run_at")),
+    )
 
 
 def job_from_json(data: dict[str, Any]) -> Job:
@@ -62,6 +88,11 @@ def job_from_json(data: dict[str, Any]) -> Job:
         last_run_status=data["last_run_status"],
         last_run_trigger=data["last_run_trigger"],
         last_run_at=_when(data["last_run_at"]),
+        triggers=tuple(
+            trigger_from_json(item)
+            for item in data.get("triggers", [])
+            if item.get("kind") in _KINDS
+        ),
     )
 
 
@@ -124,6 +155,37 @@ class Jobs:
             params={"repository": repository} if repository is not None else None,
         )
         return [job_from_json(item) for item in response.json()]
+
+    def get(self, environment: str, job: str, *, repository: str | None = None) -> Job:
+        """Show one job with its triggers (needs `READ_ENVIRONMENT`).
+
+        Parameters
+        ----------
+        environment
+            Environment name.
+        job
+            The job's name.
+        repository
+            Repository name; needed only when several repositories declare a job of this name.
+
+        Returns
+        -------
+        Job
+            The job, as `list` returns it.
+
+        Raises
+        ------
+        lakana.errors.NotFound
+            If the job does not exist; the message lists the jobs that do.
+        lakana.errors.Conflict
+            If several repositories declare it and none was named.
+        """
+        response = self._transport.request(
+            ROUTES["jobs.get"],
+            path_params={"env": environment, "job": job},
+            params={"repository": repository} if repository is not None else None,
+        )
+        return job_from_json(response.json())
 
     def start(self, environment: str, repository: str, job: str) -> JobStart:
         """Start a job, or let the start wait for the active run of its project (needs `RUN`).

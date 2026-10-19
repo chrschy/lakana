@@ -49,6 +49,7 @@ ROUTES: dict[str, Route] = {
     "runs.resume": Route("POST", "/api/v1/environments/{env}/runs/{run_id}/resume"),
     "runs.log": Route("GET", "/api/v1/environments/{env}/runs/{run_id}/tasks/{asset}/log"),
     "jobs.list": Route("GET", "/api/v1/environments/{env}/jobs"),
+    "jobs.get": Route("GET", "/api/v1/environments/{env}/jobs/{job}"),
     "jobs.start": Route("POST", "/api/v1/environments/{env}/jobs/{job}/runs"),
     "jobs.pause": Route("POST", "/api/v1/environments/{env}/jobs/{job}/pause"),
     "jobs.resume": Route("POST", "/api/v1/environments/{env}/jobs/{job}/resume"),

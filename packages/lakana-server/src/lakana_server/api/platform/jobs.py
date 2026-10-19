@@ -23,6 +23,8 @@ from lakana_server.api.platform.schemas import (
     JobRunRequest,
     JobStartOut,
     NotifyTestOut,
+    OnDemandTriggerOut,
+    ScheduleTriggerOut,
     WaitingStartOut,
 )
 from lakana_server.api.routing import AuthenticateFirstRoute
@@ -51,7 +53,18 @@ def _job_out(view: JobView) -> JobOut:
     fields = dataclasses.asdict(view)
     fields["select"] = list(view.select)
     fields["waiting_for"] = None if view.waiting_for is None else view.waiting_for.to_json()
-    return JobOut(**fields)
+    triggers: list[ScheduleTriggerOut | OnDemandTriggerOut] = []
+    if view.cron is not None and view.timezone is not None:
+        triggers.append(
+            ScheduleTriggerOut(
+                cron=view.cron,
+                timezone=view.timezone,
+                paused=view.paused,
+                next_run_at=None if view.paused else view.next_run_at,
+            )
+        )
+    triggers.append(OnDemandTriggerOut())
+    return JobOut(**fields, triggers=triggers)
 
 
 def _waiting_out(waiting: WaitingStart) -> WaitingStartOut:
@@ -115,6 +128,37 @@ def list_jobs(
         By repository, then job name.
     """
     return [_job_out(view) for view in service.list(principal, env, repository)]
+
+
+@router.get("/jobs/{job}", response_model=JobOut)
+def get_job(
+    env: str,
+    job: _JOB,
+    repository: str | None = Query(default=None, max_length=255),
+    principal: PrincipalRef = Depends(get_principal),
+    service: JobService = Depends(get_job_service),
+) -> JobOut:
+    """Show one job, with its triggers (needs `READ_ENVIRONMENT`).
+
+    Parameters
+    ----------
+    env
+        Environment name.
+    job
+        The job's name.
+    repository
+        The repository; needed only when several repositories declare the job.
+    principal
+        The authenticated caller.
+    service
+        The job service.
+
+    Returns
+    -------
+    JobOut
+        The job, as the list shows it.
+    """
+    return _job_out(service.get(principal, env, job, repository))
 
 
 @router.post(

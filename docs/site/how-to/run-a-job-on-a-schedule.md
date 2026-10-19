@@ -134,16 +134,17 @@ lakana job list --env dev
 
 <!-- output -->
 ```text
-┏━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━┓
-┃ name          ┃ state       ┃ schedule                ┃ next_run                                   ┃ last_run ┃
-┡━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━┩
-│ daily_silver  │ scheduled   │ 0 6 * * * Europe/Berlin │ 2026-10-15 06:00 Europe/Berlin (04:00 UTC) │          │
-│ hourly_bronze │ no schedule │                         │                                            │          │
-└───────────────┴─────────────┴─────────────────────────┴────────────────────────────────────────────┴──────────┘
-Not shown: repository. Use --output json to see it.
+┏━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ name          ┃ state       ┃ triggers                         ┃ next_run                                   ┃
+┡━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ daily_silver  │ scheduled   │ schedule 0 6 * * * Europe/Berlin │ 2026-10-15 06:00 Europe/Berlin (04:00 UTC) │
+│               │             │ on demand                        │                                            │
+│ hourly_bronze │ no schedule │ on demand                        │                                            │
+└───────────────┴─────────────┴──────────────────────────────────┴────────────────────────────────────────────┘
+Not shown: repository, last_run. Use --output json to see them.
 ```
 
-The next run is shown in the job's time zone and in UTC. `last_run` shows the status of the latest
+`triggers` lists how each job starts: its schedule (marked `(paused)` while paused) and `on demand`, which every job has. The next run is shown in the job's time zone and in UTC. `last_run`, hidden when the terminal is narrow (`--output json` has it), shows the status of the latest
 run and what started it (`schedule`, `api` or `manual`). The list shows every job of the
 environment to anyone who may read it; `--repo` limits it to one repository.
 
@@ -157,7 +158,7 @@ environment to anyone who may read it; `--repo` limits it to one repository.
 | `no run principal` | It has a schedule, but no principal is bound. | Ask an administrator to bind one. |
 | `run principal unusable` | The bound account is inactive or no longer a service account. | Ask an administrator to bind another. |
 
-Under the table, `lakana job list` prints the sentence of each job that waits or cannot start.
+`lakana job show NAME` lists each trigger of one job on its own line. The [Jobs reference](../reference/jobs.md) has the fields. Under the table, `lakana job list` prints the sentence of each job that waits or cannot start.
 ["Why is it waiting?"](why-is-it-waiting.md#a-waiting-job) explains each one.
 
 ## Pause and resume

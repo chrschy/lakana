@@ -105,6 +105,7 @@ COMMANDS: dict[str, tuple[str, ...]] = {
     "runs cancel": ("runs.cancel",),
     "runs resume": ("runs.resume",),
     "job list": ("jobs.list",),
+    "job show": ("jobs.get",),
     "job run": ("jobs.start", "runs.wait"),
     "job pause": ("jobs.pause",),
     "job resume": ("jobs.resume",),

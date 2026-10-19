@@ -213,3 +213,44 @@ def test_notify_test_returns_the_delivery_and_delivery_reads_it() -> None:
         "GET",
         f"/api/v1/environments/dev/notifications/{delivery_id}",
     )
+
+
+_TRIGGERS = [
+    {
+        "kind": "schedule",
+        "cron": "0 3 * * *",
+        "timezone": "Europe/Berlin",
+        "paused": False,
+        "next_run_at": "2026-10-15T01:00:00+00:00",
+    },
+    {"kind": "on_demand"},
+]
+
+
+def test_a_job_reads_its_triggers_and_ignores_a_kind_it_does_not_know() -> None:
+    body = {**_JOB, "triggers": [*_TRIGGERS, {"kind": "after_deploy", "repository": "x"}]}
+    job = _jobs(200, [body]).list("dev")[0]
+    schedule, on_demand = job.triggers
+    assert (schedule.kind, schedule.cron, schedule.timezone, schedule.paused) == (
+        "schedule",
+        "0 3 * * *",
+        "Europe/Berlin",
+        False,
+    )
+    assert schedule.next_run_at is not None and schedule.next_run_at.hour == 1
+    assert (on_demand.kind, on_demand.cron, on_demand.next_run_at) == ("on_demand", None, None)
+    assert len(job.triggers) == 2
+
+
+def test_a_job_from_an_older_server_has_no_triggers() -> None:
+    assert _jobs(200, [_JOB]).list("dev")[0].triggers == ()
+
+
+def test_get_reads_one_job() -> None:
+    seen: list[httpx.Request] = []
+    job = _jobs(200, {**_JOB, "triggers": _TRIGGERS}, seen).get("dev", "daily")
+    assert job.triggers[1].kind == "on_demand"
+    assert seen[0].url.path == "/api/v1/environments/dev/jobs/daily"
+    assert "repository" not in seen[0].url.params
+    _jobs(200, _JOB, seen).get("dev", "daily", repository="analytics")
+    assert seen[-1].url.params["repository"] == "analytics"

@@ -2384,6 +2384,46 @@ class JobStartOut(BaseModel):
     waiting: WaitingStartOut | None
 
 
+class ScheduleTriggerOut(BaseModel):
+    """A trigger that starts the job at the times a cron expression names.
+
+    Parameters
+    ----------
+    kind
+        Always ``schedule``.
+    cron
+        The cron expression.
+    timezone
+        The schedule's IANA zone.
+    paused
+        Whether the schedule is paused.
+    next_run_at
+        The next scheduled time (UTC), or null for a paused schedule.
+    """
+
+    kind: Literal["schedule"] = "schedule"
+    cron: str
+    timezone: str
+    paused: bool
+    next_run_at: datetime | None
+
+
+class OnDemandTriggerOut(BaseModel):
+    """The trigger every job has: a start through the API, the SDK or the CLI.
+
+    Parameters
+    ----------
+    kind
+        Always ``on_demand``.
+    """
+
+    kind: Literal["on_demand"] = "on_demand"
+
+
+TriggerOut = Annotated[ScheduleTriggerOut | OnDemandTriggerOut, Field(discriminator="kind")]
+"""One way a job starts. A client must ignore a ``kind`` it does not know: kinds may be added."""
+
+
 class JobOut(BaseModel):
     """One job and the platform's state for it.
 
@@ -2429,6 +2469,9 @@ class JobOut(BaseModel):
         What started it.
     last_run_at
         When it was created.
+    triggers
+        How the job starts, schedule first: a ``schedule`` trigger when the job has a schedule
+        in this environment, and the ``on_demand`` trigger every job has. Kinds may be added.
     """
 
     name: str
@@ -2449,6 +2492,7 @@ class JobOut(BaseModel):
     last_run_status: str | None
     last_run_trigger: str | None
     last_run_at: datetime | None
+    triggers: list[TriggerOut]
 
 
 class TaskAttemptOut(BaseModel):

@@ -1755,6 +1755,33 @@ class Run:
 
 
 @dataclass(frozen=True)
+class Trigger:
+    """One way a job starts.
+
+    Parameters
+    ----------
+    kind
+        ``schedule`` (the job starts at the times a cron expression names) or ``on_demand``
+        (a start through the API, the SDK or the CLI, which every job has). A newer server may
+        add kinds; the SDK leaves out one it does not know.
+    cron
+        For ``schedule``, the cron expression; `None` otherwise.
+    timezone
+        For ``schedule``, the IANA zone; `None` otherwise.
+    paused
+        For ``schedule``, whether it is paused; `None` otherwise.
+    next_run_at
+        For ``schedule``, the next scheduled time (UTC); `None` when paused or for another kind.
+    """
+
+    kind: str
+    cron: str | None = None
+    timezone: str | None = None
+    paused: bool | None = None
+    next_run_at: datetime | None = None
+
+
+@dataclass(frozen=True)
 class Job:
     """A job of a deployed project and the platform's state for it.
 
@@ -1800,6 +1827,8 @@ class Job:
         What started it.
     last_run_at
         When it was created.
+    triggers
+        How the job starts, schedule first; empty from a server that does not send them.
     """
 
     name: str
@@ -1820,6 +1849,7 @@ class Job:
     last_run_status: str | None
     last_run_trigger: str | None
     last_run_at: datetime | None
+    triggers: tuple[Trigger, ...] = ()
 
 
 @dataclass(frozen=True)
