@@ -2063,13 +2063,13 @@ def test_a_result_carries_what_the_rollback_did(
     [
         "!!not-base64",
         base64.urlsafe_b64encode(b'"a string"').decode(),
-        base64.urlsafe_b64encode(b'{"o": 1, "i": "x"}').decode(),
+        base64.urlsafe_b64encode(b'{"k": "checks", "o": 1, "i": "x"}').decode(),
         base64.urlsafe_b64encode(
-            b'{"o": "2026-10-11T12:00:00", "i": "' + b"0" * 32 + b'"}'
+            b'{"k": "checks", "o": "2026-10-11T12:00:00", "i": "' + b"0" * 32 + b'"}'
         ).decode(),
-        base64.urlsafe_b64encode(b'{"o": "not a time", "i": "x"}').decode(),
+        base64.urlsafe_b64encode(b'{"k": "checks", "o": "not a time", "i": "x"}').decode(),
         base64.urlsafe_b64encode(
-            b'{"o": "0001-01-01T00:00:00+23:00", "i": "' + b"0" * 32 + b'"}'
+            b'{"k": "checks", "o": "0001-01-01T00:00:00+23:00", "i": "' + b"0" * 32 + b'"}'
         ).decode(),
     ],
 )
