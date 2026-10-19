@@ -63,9 +63,9 @@ def _triggers(job: Job) -> str:
     Returns
     -------
     str
-        The triggers, comma-separated, schedule first.
+        One trigger per line, schedule first.
     """
-    return ", ".join(_trigger(trigger) for trigger in job.triggers)
+    return "\n".join(_trigger(trigger) for trigger in job.triggers)
 
 
 def _triggers_detail(job: Job) -> str:
@@ -175,7 +175,7 @@ def list_jobs(ctx: typer.Context, env: _ENV = None, repo: _REPO = None) -> None:
             "next_run": _next_run,
             "last_run": _last_run,
         },
-        flexible=["triggers"],
+        whole=["triggers"],
     )
     if state.output == "json":
         return

@@ -159,8 +159,8 @@ def test_list_shows_the_triggers_and_marks_a_paused_schedule(tmp_path: Path) -> 
     )
     out = _plain(result.stdout)
     assert "triggers" in out
-    assert "schedule 0 3 * * * Europe/Berlin, on demand" in out
-    assert "schedule 0 6 * * * Europe/Berlin (paused), on demand" in out
+    assert "schedule 0 3 * * * Europe/Berlin" in out and "on demand" in out
+    assert "schedule 0 6 * * * Europe/Berlin (paused)" in out
     assert "after_deploy" not in out
 
 
@@ -640,3 +640,20 @@ def test_notification_that_no_worker_has_tried_yet_reads_queued(tmp_path: Path) 
     api.on("GET", _NOTIFICATIONS, json=_delivery("pending"))
     result = invoke(make_state(tmp_path, api), "job", "notification", _DELIVERY, "--env", "dev")
     assert "queued" in _plain(result.stdout)
+
+
+@pytest.mark.parametrize("width", ["80", "120"])
+def test_a_trigger_never_splits_across_lines(tmp_path: Path, width: str) -> None:
+    api = FakeApi()
+    api.on("GET", _JOBS, json=[_job(), _job("nightly_export")])
+    result = invoke(
+        make_state(tmp_path, api), "job", "list", "--env", "dev", env={"COLUMNS": width}
+    )
+    lines = result.stdout.splitlines()
+    assert all(len(line) <= int(width) for line in lines)
+    cells = [part.strip() for line in lines for part in line.split("│")]
+    if width == "120":
+        assert "on demand" in cells
+        assert "schedule 0 3 * * * Europe/Berlin" in cells
+    else:
+        assert "Not shown: repository, last_run, triggers." in result.stdout

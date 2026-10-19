@@ -134,17 +134,17 @@ lakana job list --env dev
 
 <!-- output -->
 ```text
-┏━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━┓
-┃ name          ┃ state       ┃ triggers                             ┃ next_run                             ┃ last_run ┃
-┡━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━┩
-│ daily_silver  │ scheduled   │ schedule 0 6 * * * Europe/Berlin, on │ 2026-10-15 06:00 Europe/Berlin       │          │
-│               │             │ demand                               │ (04:00 UTC)                          │          │
-│ hourly_bronze │ no schedule │ on demand                            │                                      │          │
-└───────────────┴─────────────┴──────────────────────────────────────┴──────────────────────────────────────┴──────────┘
-Not shown: repository. Use --output json to see it.
+┏━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ name          ┃ state       ┃ triggers                         ┃ next_run                                   ┃
+┡━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ daily_silver  │ scheduled   │ schedule 0 6 * * * Europe/Berlin │ 2026-10-15 06:00 Europe/Berlin (04:00 UTC) │
+│               │             │ on demand                        │                                            │
+│ hourly_bronze │ no schedule │ on demand                        │                                            │
+└───────────────┴─────────────┴──────────────────────────────────┴────────────────────────────────────────────┘
+Not shown: repository, last_run. Use --output json to see them.
 ```
 
-`triggers` lists how each job starts: its schedule (marked `(paused)` while paused) and `on demand`, which every job has. The next run is shown in the job's time zone and in UTC. `last_run` shows the status of the latest
+`triggers` lists how each job starts: its schedule (marked `(paused)` while paused) and `on demand`, which every job has. The next run is shown in the job's time zone and in UTC. `last_run`, hidden when the terminal is narrow (`--output json` has it), shows the status of the latest
 run and what started it (`schedule`, `api` or `manual`). The list shows every job of the
 environment to anyone who may read it; `--repo` limits it to one repository.
 
