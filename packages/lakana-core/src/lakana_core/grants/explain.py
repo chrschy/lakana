@@ -195,6 +195,7 @@ def _permission(
     action: Action,
     scope: Securable,
     groups: dict[uuid.UUID, str],
+    active: bool,
 ) -> Permission:
     """Answer for one action as the route's check would.
 
@@ -212,20 +213,28 @@ def _permission(
         The object.
     groups
         The names of the principal's groups, by id.
+    active
+        Whether the principal may sign in.
 
     Returns
     -------
     Permission
         The decision. For an action that needs the `ADMIN` role, also refused without the
-        role on the instance (`admin_only_message`), and given only by that role's grants.
+        role on the instance (`admin_only_message`), and given only by that role's grants;
+        for a deactivated principal, the role is read from its grants alone, since
+        `holds_instance_admin` counts active principals only.
     """
     decision = authz.explain(principal, action, scope)
     grants, reason, allowed = decision.grants, decision.reason, decision.allowed
     if allowed and needs_admin_role(action):
-        if holds_instance_admin(session, principal.id):
-            grants = tuple(
-                g for g in grants if g.role is Role.ADMIN and g.kind is SecurableKind.INSTANCE
-            )
+        admin = tuple(
+            g for g in grants if g.role is Role.ADMIN and g.kind is SecurableKind.INSTANCE
+        )
+        # An active principal gets the route's own check. A deactivated one cannot sign in at
+        # all, and its report shows what its grants would allow: the ADMIN grant itself.
+        holds = holds_instance_admin(session, principal.id) if active else bool(admin)
+        if holds:
+            grants = admin
         else:
             allowed, grants, reason = False, (), admin_only_message(action)
     return Permission(action, allowed, tuple(_via(g, groups) for g in grants), reason)
@@ -262,7 +271,8 @@ def explain_permissions(
         )
     }
     permissions = tuple(
-        _permission(session, authz, ref, action, scope, groups) for action in ACTIONS_AT[scope.kind]
+        _permission(session, authz, ref, action, scope, groups, principal.is_active)
+        for action in ACTIONS_AT[scope.kind]
     )
     return PermissionReport(
         principal=principal.name,

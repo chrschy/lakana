@@ -180,6 +180,7 @@ def world(session: Session) -> _World:
     orders_id = resolve_table_id(session, "dev", _GOLD.joined(), "orders")
     people = {name: _principal(session, name) for name in ("ada", "alice", "bob", "carol", "erin")}
     people["dave"] = _principal(session, "dave", active=False)
+    people["frank"] = _principal(session, "frank", active=False)
     by = people["ada"].id
     analysts = Group(id=uuid.uuid4(), name="analysts")
     admins = Group(id=uuid.uuid4(), name="admins")
@@ -243,6 +244,9 @@ def world(session: Session) -> _World:
         "dave-admin": _grant(
             session, by, principal_id=people["dave"].id, role=Role.ADMIN, **instance
         ),
+        "frank-manage-grant": _grant(
+            session, by, principal_id=people["frank"].id, action=Action.MANAGE_GRANT, **instance
+        ),
         "erin-dev": _grant(
             session,
             by,
@@ -296,7 +300,7 @@ def _route_decides(session: Session, who: PrincipalRef, action: Action, scope: S
 
 
 @pytest.mark.parametrize("scope", sorted(_SCOPES))
-@pytest.mark.parametrize("name", ["ada", "alice", "bob", "carol", "dave", "erin"])
+@pytest.mark.parametrize("name", ["ada", "alice", "bob", "carol", "dave", "erin", "frank"])
 def test_explain_agrees_with_the_routes_for_every_action(
     session: Session, world: _World, name: str, scope: str
 ) -> None:
@@ -305,6 +309,8 @@ def test_explain_agrees_with_the_routes_for_every_action(
     report = explain_permissions(session, row, _SCOPES[scope])
     assert [p.action for p in report.permissions] == list(ACTIONS_AT[_SCOPES[scope].kind])
     for permission in report.permissions:
+        if not row.is_active and permission.action in ADMIN_ONLY_ACTIONS:
+            continue  # a deactivated principal's grants, not a route: see the test below
         decided = _route_decides(session, _ref(row), permission.action, _SCOPES[scope])
         assert permission.allowed is decided, (name, scope, permission.action)
         assert bool(permission.via) is permission.allowed
@@ -378,6 +384,30 @@ def test_a_deactivated_principal_is_flagged(session: Session, world: _World) -> 
     assert all(p.allowed for p in report.permissions)
     active = explain_permissions(session, world.principals["alice"], _SCOPES["dev"])
     assert (active.active, active.note) == (True, None)
+
+
+def test_a_deactivated_administrator_is_explained_from_its_grants(
+    session: Session, world: _World
+) -> None:
+    """The three ADMIN-only actions show the ADMIN grant, as every other action does."""
+    report = explain_permissions(session, world.principals["dave"], _SCOPES["instance"])
+    assert report.active is False
+    assert all(p.allowed for p in report.permissions)
+    for permission in report.permissions:
+        if permission.action in ADMIN_ONLY_ACTIONS:
+            assert [v.grant_id for v in permission.via] == [world.grants["dave-admin"].id]
+            assert permission.reason is None
+
+
+def test_a_deactivated_principal_without_the_admin_role_is_still_refused_them(
+    session: Session, world: _World
+) -> None:
+    """A single-action grant of MANAGE_GRANT gives nothing, deactivated or not."""
+    report = explain_permissions(session, world.principals["frank"], _SCOPES["instance"])
+    manage = next(p for p in report.permissions if p.action is Action.MANAGE_GRANT)
+    assert (manage.allowed, manage.via) == (False, ())
+    assert manage.reason is not None and "needs the ADMIN role on the instance" in manage.reason
+    assert report.active is False
 
 
 def test_the_actions_of_each_level_cover_every_action(session: Session) -> None:
