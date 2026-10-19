@@ -132,7 +132,7 @@ Each cell is a summary. The page named in the last column has the detail. The ch
 returned only the instance grants, 100 per page by default (`limit`, at most 200). The next page's
 cursor is in the response header `X-Next-Cursor`, which is absent on the last page; the body stays a
 JSON array. To list only the instance grants, keep the grants that have no environment. The principal
-and group lists are paged the same way and come newest first instead of by name; `?q=` finds a name.
+and group lists are paged the same way and come newest first (they had no set order before); `?q=` finds a name.
 A script that reads one of these lists in one request reads only its first page now: pass `limit` and
 follow `X-Next-Cursor`, or use the SDK's `iter()`. `lakana grant list`, `lakana principal list` and
 `lakana group list` print a `More results: … --cursor X` line when there is more. See
