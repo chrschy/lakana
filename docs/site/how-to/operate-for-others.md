@@ -66,11 +66,8 @@ bundle creates one, `dev`, in its own object storage. `lakana env create` makes 
 ([the command](../reference/cli.md#lakana-env-create)), and each environment can be protected
 so that only deployed projects change its tables: [Protected environments](projects.md#protected-environments-lockdown-and-break-glass).
 
-!!! note "A gap"
-    Creating a second environment needs a storage root and storage credentials. The steps that
-    give a new environment the bundle's own storage, with a secret, are not written down yet. Until
-    they are, use `dev`, or point a new environment at storage you already manage with
-    [Manage secrets](manage-secrets.md) and `lakana env set-storage`.
+A second environment, such as `prod`, needs the bundle's storage and its secret; the commands are in
+[Add an environment to a Compose instance](deploy-with-compose.md#add-an-environment-to-a-compose-instance).
 
 **The first grants.** A person who needs to read and query one environment gets the role
 `ANALYST` on it, and nothing more. Hide rows or values before you grant access to an environment

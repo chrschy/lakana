@@ -7,6 +7,10 @@
 # kind of work, the default worker stopped (the deploy, the canary and venv checks and the
 # run again, now on `worker-pipeline`) → down -v.
 #
+# One sequence is the documentation's own commands, sourced from docs/examples (the page shows
+# its regions): a second environment with the bundle's storage secret
+# (compose-add-environment.sh).
+#
 # The Python asset's packages come from an offline wheel directory: LAKANA_WHEELHOUSE, or one
 # built here by scripts/build_wheelhouse.sh (the only step that asks a package index). Its lakana
 # wheel must have the version of IMAGE; both are built from the same checkout.
@@ -80,6 +84,11 @@ check() {
   python3 -c 'import json,sys; assert json.loads(sys.argv[1]) == [{"id":1,"name":"alpha"},{"id":2,"name":"beta"}], sys.argv[1]' "$out"
 }
 check
+# The documentation's commands use the default profile, not `--profile team`.
+export LAKANA_PROFILE=team
+# Add an environment to the bundle (how-to "Add an environment to a Compose instance").
+# shellcheck source=../docs/examples/compose-add-environment.sh
+source "$here/../docs/examples/compose-add-environment.sh"
 # Init a project in the mounted repos/ directory, commit, register, deploy to dev.
 project="$bundle/repos/demo"
 lakana init "$project"
