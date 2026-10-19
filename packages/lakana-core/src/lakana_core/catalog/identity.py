@@ -28,7 +28,7 @@ from sqlalchemy.orm import Session
 from lakana_core.errors import ValidationError
 from lakana_core.identifiers import NamespacePath
 from lakana_core.kept_mark import KeptSeen
-from lakana_core.models import Environment, Namespace, Table, TableType
+from lakana_core.models import LIVE_ENVIRONMENT, Environment, Namespace, Table, TableType
 
 
 def resolve_environment_id(session: Session, environment: str) -> uuid.UUID | None:
@@ -47,7 +47,7 @@ def resolve_environment_id(session: Session, environment: str) -> uuid.UUID | No
         The environment's id, or `None` if no environment has that name.
     """
     return session.execute(
-        select(Environment.id).where(Environment.name == environment)
+        select(Environment.id).where(Environment.name == environment, LIVE_ENVIRONMENT)
     ).scalar_one_or_none()
 
 
@@ -80,6 +80,7 @@ def resolve_table_id(
         .join(Environment, Namespace.environment_id == Environment.id)
         .where(
             Environment.name == environment,
+            LIVE_ENVIRONMENT,
             Namespace.path == namespace_joined,
             Table.name == table,
         )
@@ -117,6 +118,7 @@ def resolve_table_with_note(
         .join(Environment, Namespace.environment_id == Environment.id)
         .where(
             Environment.name == environment,
+            LIVE_ENVIRONMENT,
             Namespace.path == namespace_joined,
             Table.name == table,
         )
@@ -146,7 +148,11 @@ def namespace_exists(session: Session, environment: str, namespace_joined: str) 
         session.execute(
             select(Namespace.id)
             .join(Environment, Namespace.environment_id == Environment.id)
-            .where(Environment.name == environment, Namespace.path == namespace_joined)
+            .where(
+                Environment.name == environment,
+                LIVE_ENVIRONMENT,
+                Namespace.path == namespace_joined,
+            )
         ).first()
         is not None
     )

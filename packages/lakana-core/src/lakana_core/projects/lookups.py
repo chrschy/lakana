@@ -10,7 +10,23 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from lakana_core.errors import NotFoundError
-from lakana_core.models import Environment, EnvironmentDeployment, Repository
+from lakana_core.models import LIVE_ENVIRONMENT, Environment, EnvironmentDeployment, Repository
+
+
+def live_environment_names(session: Session) -> list[str]:
+    """List the names of the environments that are not deleted.
+
+    Parameters
+    ----------
+    session
+        Database session.
+
+    Returns
+    -------
+    list of str
+        The names, in no particular order.
+    """
+    return list(session.execute(select(Environment.name).where(LIVE_ENVIRONMENT)).scalars())
 
 
 def environment_by_name(session: Session, name: str) -> Environment:
@@ -33,7 +49,9 @@ def environment_by_name(session: Session, name: str) -> Environment:
     NotFoundError
         If none has that name.
     """
-    env = session.execute(select(Environment).where(Environment.name == name)).scalar_one_or_none()
+    env = session.execute(
+        select(Environment).where(Environment.name == name, LIVE_ENVIRONMENT)
+    ).scalar_one_or_none()
     if env is None:
         raise NotFoundError(f"No environment named {name!r}.")
     return env

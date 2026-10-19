@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from lakana._http import HttpTransport
@@ -29,7 +30,25 @@ def _environment_from_json(data: dict[str, Any]) -> Environment:
         is_protected=data["is_protected"],
         properties=data["properties"],
         retention_days=data.get("retention_days"),
+        deleted_at=_moment(data.get("deleted_at")),
+        purge_after=_moment(data.get("purge_after")),
     )
+
+
+def _moment(value: str | None) -> datetime | None:
+    """Read an optional ISO 8601 time.
+
+    Parameters
+    ----------
+    value
+        The JSON value; absent from a server older than environment deletion.
+
+    Returns
+    -------
+    datetime or None
+        The time.
+    """
+    return None if value is None else datetime.fromisoformat(value)
 
 
 _EnvironmentList = list[Environment]
@@ -99,33 +118,92 @@ class Environments:
         response = self._transport.request(ROUTES["environments.get"], path_params={"name": name})
         return _environment_from_json(response.json())
 
-    def list(self) -> _EnvironmentList:
+    def list(self, *, deleted: bool = False) -> _EnvironmentList:
         """List every environment the caller may read.
+
+        Parameters
+        ----------
+        deleted
+            List the deleted environments whose files are not deleted yet instead, each with
+            its `purge_after`.
 
         Returns
         -------
         list of Environment
             Every readable environment.
         """
-        response = self._transport.request(ROUTES["environments.list"])
+        params = {"deleted": "true"} if deleted else None
+        response = self._transport.request(ROUTES["environments.list"], params=params)
         return [_environment_from_json(item) for item in response.json()]
 
-    def delete(self, name: str) -> None:
-        """Delete an environment.
+    def delete(self, name: str, *, purge: bool = False) -> Environment | None:
+        """Delete an environment: its tables can be restored with `restore` until `purge_after`.
+
+        Every managed table becomes a dropped table whose files the server's clean-up deletes
+        after the undo period (`LAKANA_TABLES__UNDO_DAYS`, 7 days by default); views and
+        external tables are removed, and an external table's files are never deleted.
+
+        Parameters
+        ----------
+        name
+            The environment's name.
+        purge
+            Make everything due at once: the next clean-up deletes the files, and the
+            environment cannot be restored. Also accepted for an environment already deleted.
+
+        Returns
+        -------
+        Environment or None
+            The deleted environment, with `deleted_at` and `purge_after`; `None` from a server
+            older than environment restore, which kept the files for ever.
+
+        Raises
+        ------
+        lakana.errors.NotFound
+            If no environment of this name exists, or it is already deleted and `purge` is
+            false.
+        lakana.errors.Conflict
+            If a repository is still deployed to it; undeploy first.
+        lakana.errors.ValidationError
+            If it is protected.
+        """
+        response = self._transport.request(
+            ROUTES["environments.delete"],
+            path_params={"name": name},
+            params={"purge": "true"} if purge else None,
+        )
+        if response.status_code == 204 or not response.content:
+            return None
+        return _environment_from_json(response.json())
+
+    def restore(self, name: str) -> Environment:
+        """Restore a deleted environment within its undo period, with the tables it dropped.
+
+        The tables come back with the same ids, data and grants; a table dropped before the
+        environment was deleted stays dropped (`Tables.undrop` restores it).
 
         Parameters
         ----------
         name
             The environment's name.
 
+        Returns
+        -------
+        Environment
+            The restored environment.
+
         Raises
         ------
         lakana.errors.NotFound
             If no environment of this name exists.
         lakana.errors.Conflict
-            If a repository is still deployed to it; undeploy first.
+            If it is not deleted, its undo period has ended, or the clean-up has started
+            deleting its files.
         """
-        self._transport.request(ROUTES["environments.delete"], path_params={"name": name})
+        response = self._transport.request(
+            ROUTES["environments.restore"], path_params={"name": name}
+        )
+        return _environment_from_json(response.json())
 
     def update_storage(
         self, name: str, options: dict[str, str] | None = None, secret_ref: str | None = None

@@ -847,6 +847,11 @@ _NOTHING_OF_A_KEPT_TABLE = {
     "get_environment": _NO_TABLE,
     "list_environments": _NO_TABLE,
     "delete_environment": _NO_TABLE,
+    "restore_environment": (
+        "brings the deleted environment's tables back as they were, notes included, and returns "
+        "only the environment; reading one goes through `load_table`"
+    ),
+    "list_deleted_environments": _NO_TABLE,
     "update_environment_storage": _NO_TABLE,
     "set_environment_protection": _NO_TABLE,
     "create_namespace": _NO_TABLE,

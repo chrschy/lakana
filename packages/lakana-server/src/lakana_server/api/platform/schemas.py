@@ -123,6 +123,12 @@ class EnvironmentOut(BaseModel):
         Free-form metadata.
     retention_days
         The retention of its tables that set none of their own, in days; `null` when off.
+    deleted_at
+        When it was deleted; `null` unless it is (`GET /api/v1/environments?deleted=true`).
+    purge_after
+        For a deleted environment, until when `POST /api/v1/environments/{name}/restore` can
+        restore it; from then on the worker's clean-up deletes its tables' files. `null`
+        unless deleted.
     """
 
     name: str
@@ -131,6 +137,8 @@ class EnvironmentOut(BaseModel):
     is_protected: bool
     properties: dict[str, str]
     retention_days: int | None = None
+    deleted_at: datetime | None = None
+    purge_after: datetime | None = None
 
     model_config = {"from_attributes": True}
 

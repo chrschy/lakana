@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Iterator, Mapping
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -163,20 +163,67 @@ def test_environments_list_parses_every_item() -> None:
     ]
 
 
-def test_environments_delete_sends_a_delete() -> None:
-    """`environments.delete` DELETEs `/api/v1/environments/{name}`."""
-    seen: dict[str, Any] = {}
+_DELETED_ENV = {
+    "name": "dev",
+    "storage_root": "file:///tmp/dev",
+    "storage_secret_ref": None,
+    "is_protected": False,
+    "properties": {},
+    "retention_days": None,
+    "deleted_at": "2026-10-20T10:00:00+00:00",
+    "purge_after": "2026-10-27T10:00:00+00:00",
+}
+
+
+def test_environments_delete_sends_a_delete_and_returns_the_undo_period() -> None:
+    """`environments.delete` DELETEs `/api/v1/environments/{name}`, `purge` as a parameter."""
+    seen: list[tuple[str, str, str]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        seen["method"] = request.method
-        seen["path"] = request.url.path
-        return httpx.Response(204)
+        seen.append((request.method, request.url.path, str(request.url.params)))
+        return httpx.Response(200, json=_DELETED_ENV)
 
     environments = Environments(_transport(handler))
-    environments.delete("dev")
+    deleted = environments.delete("dev")
+    environments.delete("dev", purge=True)
 
-    assert seen["method"] == "DELETE"
-    assert seen["path"] == "/api/v1/environments/dev"
+    assert seen == [
+        ("DELETE", "/api/v1/environments/dev", ""),
+        ("DELETE", "/api/v1/environments/dev", "purge=true"),
+    ]
+    assert deleted is not None
+    assert deleted.purge_after == datetime(2026, 10, 27, 10, tzinfo=UTC)
+    assert deleted.deleted_at == datetime(2026, 10, 20, 10, tzinfo=UTC)
+
+
+def test_environments_delete_accepts_an_older_servers_empty_answer() -> None:
+    """A server from before the undo period answers 204 without a body: `None`."""
+    environments = Environments(_transport(lambda request: httpx.Response(204)))
+    assert environments.delete("dev") is None
+
+
+def test_environments_restore_posts_and_list_deleted_asks_for_them() -> None:
+    """`restore` POSTs `/restore`; `list(deleted=True)` sends `deleted=true`."""
+    seen: list[tuple[str, str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path, str(request.url.params)))
+        if request.method == "POST":
+            return httpx.Response(
+                200, json={**_DELETED_ENV, "deleted_at": None, "purge_after": None}
+            )
+        return httpx.Response(200, json=[_DELETED_ENV])
+
+    environments = Environments(_transport(handler))
+    restored = environments.restore("dev")
+    (listed,) = environments.list(deleted=True)
+
+    assert seen == [
+        ("POST", "/api/v1/environments/dev/restore", ""),
+        ("GET", "/api/v1/environments", "deleted=true"),
+    ]
+    assert (restored.deleted_at, restored.purge_after) == (None, None)
+    assert listed.purge_after == datetime(2026, 10, 27, 10, tzinfo=UTC)
 
 
 def test_environments_update_storage_sends_a_patch_with_the_given_fields() -> None:

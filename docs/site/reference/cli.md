@@ -225,7 +225,13 @@ Create environment NAME (with bronze/silver/gold namespaces).
 
 Usage: `lakana env list [OPTIONS]`
 
-List environments you can see.
+List environments you can see, or with --deleted the deleted ones.
+
+A deleted environment keeps its tables' files until `purge_after` (the server's undo period, 7 days by default); until then `lakana env restore NAME` brings it back.
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `--deleted` | flag | off | List the deleted environments that can still be restored, and until when. |
 
 ### `lakana env get`
 
@@ -241,14 +247,29 @@ Show environment NAME.
 
 Usage: `lakana env delete [OPTIONS] {name}`
 
-Delete environment NAME.
+Delete environment NAME. Its tables' files are kept for the undo period, then deleted.
 
-Refused (409) while any repository is deployed to it: run `lakana undeploy REPO --env NAME` for each first. Refused while protected. Data in object storage is left alone.
+Within the server's undo period (`LAKANA_TABLES__UNDO_DAYS`, 7 days by default), `lakana env restore NAME` brings the environment back with its tables, their data and their grants. Until then the name stays taken, and `lakana env list --deleted` shows until when. Views and external tables are removed; an external table's files are never deleted. `--purge` skips the period.
+
+Refused (409) while any repository is deployed to it: run `lakana undeploy REPO --env NAME` for each first. Refused while protected.
 
 | Name | Type | Default | Description |
 |---|---|---|---|
 | `NAME` | text | required |  |
+| `--purge` | flag | off | Delete the tables' files at the worker's next clean-up instead of after the undo period; the environment cannot be restored then. Also for an environment already deleted. |
 | `--yes` | flag | off | Don't ask for confirmation. |
+
+### `lakana env restore`
+
+Usage: `lakana env restore [OPTIONS] {name}`
+
+Restore the deleted environment NAME, with the tables, data and grants it had.
+
+Works until the end of the undo period that `lakana env list --deleted` shows, and not after `lakana env delete NAME --purge`. A table dropped before the environment was deleted stays dropped; restore it afterwards with `lakana table undrop`. Needs MANAGE_ENVIRONMENT (deleting the environment revoked the grants given on it, so usually an administrator's).
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `NAME` | text | required |  |
 
 ### `lakana env set-storage`
 

@@ -1175,7 +1175,9 @@ accident or believes it closed:
 - `keep_versions` deletes without `DROP_TABLE`, and a run that stored a version and then failed
   leaves it live with the previous one already pruned when `keep_versions=1`.
 - The harness's residuals, below under "Residuals of the harness".
-- Deleting an environment leaves artifact bytes in storage, as it leaves table data.
+- Deleting an environment keeps its artifact rows, hidden, until the location sweep removes the
+  environment's row after the undo period (#213); the rows then cascade and the bytes stay in
+  storage, without a marker, so no sweep deletes them.
 - Never point two deployments at one storage root: each would see the other's artifacts as leftovers
   (the marker rule keeps the sweep from deleting them, but nothing else protects them).
 - `list_artifacts` and the version list are not paged; the download route answers `GET` only and
@@ -1202,8 +1204,8 @@ before the first file, and a directory without a record is never deleted.**
 **The record.** `table_locations` (`lakana_core.models.table_location`): one row per managed
 location, unique by absolute `location`, `CLAIMED | LIVE | DROPPED | ABANDONED`, the holder run,
 `claimed_at`, `purge_after`. `table_id` has no foreign key on purpose (the record outlives a dropped
-row); `environment_id` cascades, so deleting an environment leaves its directories without records,
-which nothing deletes. Migration `0042` backfills `LIVE` for every `ICEBERG` row with a metadata
+row); `environment_id` cascades, but a deleted environment's row stays until its last record is
+gone (#213, below), so its tombstones are purged like any other. Migration `0042` backfills `LIVE` for every `ICEBERG` row with a metadata
 file. A drop makes the record its tombstone (`DROPPED`, below); `0043` adds `dropped_table` and
 `purge_started_at`.
 
@@ -1407,6 +1409,88 @@ a missing table (the drop is undoable). A long REST append (no query run) that c
 is refused the same way. A deploy that adds the table as an asset concurrently can lose the race; the
 table is a tombstone that undrop restores. The expiring listing and `table list` compute the clock per
 request; the sweep decides again under the locks, so a listing can be stale but never makes a drop.
+
+### Deleting an environment: tombstones, the restore, and the last purge (#213)
+
+User documentation: "Delete and restore an environment" in
+`docs/site/how-to/drop-and-restore-a-table.md`. Code: `lakana_core.catalog.environment_deletion`,
+`CatalogService.delete_environment`/`restore_environment`/`list_deleted_environments`, and the end
+of each environment's pass in the location sweep. Before this, a deletion cascaded every row and
+left every file for ever (no record, so no sweep touched them).
+
+**The deletion** keeps its refusals (`MANAGE_ENVIRONMENT` on the environment scope, protected 422,
+deployed repositories 409) and runs in one transaction under the environment's row lock (`SELECT
+... FOR UPDATE`, re-read). In this order: every `CLAIMED` record of the environment under its own
+lock (`LIVE` when a row names it, an in-doubt create that landed, whose table is then dropped with
+the others; else `ABANDONED` with the deletion's `purge_after`, so the create's publish fails);
+every non-artifact row under its row lock through `tombstones.drop_row` (`reason:
+environment_deleted`, the deleter as actor, one `now` for every stamp): a managed table becomes a
+tombstone with its own policies, a view or external table leaves none (external files are never
+deleted); then `revoke_attached(environment_id)` for what is left (environment and namespace grants,
+artifact policies), listed in `environments.revoked_policy_ids`; task tokens of the name are
+revoked; the row gets `deleted_at`, `deleted_by`, `purge_after` (`now + LAKANA_TABLES__UNDO_DAYS`,
+`now` with `purge`) and `dropped_location_ids` (exactly the tombstones it made). Artifacts and
+namespaces stay: the restore needs the namespaces, and an artifact has no tombstone of its own.
+`ENVIRONMENT_DELETED` carries `tables`, `tables_without_tombstone` (a managed table whose root had
+no record of its own: only uncatalogued, files kept, as a drop does), `purge_after` and `purge`.
+`--purge` on a deleted environment moves its `purge_after` and every purgeable record's of it that
+has not started to now, audited as a second `ENVIRONMENT_DELETED` with `already_deleted`.
+
+**Hidden everywhere, by name.** `LIVE_ENVIRONMENT` (`deleted_at IS NULL`) is in every lookup of an
+environment by name: `CatalogService._find_environment` (with the restore hint only for a caller
+who `permits` `MANAGE_ENVIRONMENT`; anyone else gets the missing environment's message), the
+`list_environments` filter, `_lock_unprotected_environment`, `identity` (so authorization resolves
+no environment id and only an instance grant can apply), `QueryService`, search, secrets, project
+lookups, artifact creation, the package-index and repository read checks, the worker's venv build,
+and `StorageResolver.for_environment` (refuses one unless `include_deleted`, which only the
+location sweep and the restore pass). The artifact and code sweeps skip deleted environments. The
+name stays taken (`environments.name` is unique): a create of it is a 409 naming `lakana env
+restore` and `lakana env delete --purge`.
+
+**The fence against a create or undrop racing the deletion.** A create claims before its first
+file and publishes with `_publish_table`: it flushes the row (SQLite's write lock), takes the
+environment's row **share** lock (`lock_live_environment`), refuses with `ENVIRONMENT_GONE_MESSAGE`
+when `deleted_at` is set, and only then runs the claim fence. The deletion holds the exclusive lock
+while it resolves claims and drops tables, so a publish either committed first (the deletion, whose
+listing runs after the claims step, drops its table too) or sees the deletion. A claim inserted
+after the deletion (a create that found the environment earlier) is never published; the sweep
+abandons it once its holder ended or its grace period passed. `undrop_table` takes the same share
+lock before the tombstone's lock; `create_external_table` checks `deleted_at` on the row it locks.
+The lock order is always environment row, then table row, then location record. Pins:
+`test_environment_deletion.py` (`test_a_create_whose_claim_came_before_the_deletion_is_not_published`,
+`test_a_claim_made_after_the_deletion_is_never_published`,
+`test_an_undrop_while_the_environment_is_deleted_is_refused`).
+
+**The restore** authorizes `MANAGE_ENVIRONMENT` on the environment scope, locks the row, and
+refuses (rolling back, nothing restored): no row (404), not deleted (409), `db_now >=
+purge_after` (409), any listed record missing, not `DROPPED`, marked `purge_started_at`, or not
+stamped with the deletion's `deleted_at` (409), any metadata file missing (409), a name taken
+(409). Each listed record is locked before anything is written, so the sweep's `_start` either
+marked one first (refused) or finds the record `LIVE` afterwards. Then each table through the undrop
+helpers (`restore_table`, `refresh_restored`, `restore_policies`, `revive`, one `TABLE_UNDROPPED`
+with `reason: environment_restored`), `unrevoke` of the row's own list at `revoked_at ==
+deleted_at`, the row unmarked, `ENVIRONMENT_RESTORED`. A table dropped before the deletion is not in
+the list and stays a tombstone; task tokens stay revoked.
+
+**The last purge.** The sweep lists deleted environments with the others, resolves their storage
+with `include_deleted`, expires nothing in them, and never makes a claim in one `LIVE`. After the
+environment's purges, `purge_environment` takes the row's lock (`lock_row`), decides again (still
+deleted, `purge_after <= now`, no `table_locations` row of the environment in any state), revokes
+anything still active, records `ENVIRONMENT_PURGED` and deletes the row; the database cascades
+namespaces, artifact rows, secrets, runs and the rest. A record is created only with a claim, whose
+insert takes the row's key-share lock, so a claim cannot slip in between the check and the delete.
+A nested or shared-root location still blocks a purge as before (`location_in_use`,
+`dropped_inside`, in every environment); the row then waits. Pins:
+`test_the_row_stays_until_the_last_record_is_gone`,
+`test_a_live_table_in_another_environment_on_the_root_is_never_purged`.
+
+**Residuals, accepted.** An environment-scoped admin who deleted an environment cannot restore it
+(the deletion revoked that grant; an administrator can). Views and external tables are not
+restored. A view created through a lookup made before the deletion can land in the deleted
+environment (no files; restored with it or cascaded with the row). Queued runs of a deleted
+environment fail at the worker (the environment is not found). The artifacts' bytes are left in
+storage after the row goes. Environments deleted before this release left no row and no record;
+their directories are only counted (`unrecorded_directories`).
 
 ## Checks and the rollback (M5d-a)
 
@@ -2763,7 +2847,9 @@ work.
   for a name that does not exist yet — must never be enough to create an environment or
   repoint an existing one's storage root. `delete_environment` still accepts
   environment-scoped `MANAGE_ENVIRONMENT`, since deleting an environment you already
-  administer is not the same privilege as creating or re-rooting one.
+  administer is not the same privilege as creating or re-rooting one. `restore_environment`
+  authorizes the same right, but the deletion revoked the environment's own grants, so in
+  practice only an instance-level holder (an administrator) restores one (#213).
 - **`delete_environment` refuses while a repository is deployed** (`ConflictError`, 409; M5c1):
   a run start locks the deployment pointer, then the environment row; the delete's cascade locked
   them the other way round and the two deadlocked on Postgres (40P01). The delete now locks the
@@ -2777,6 +2863,9 @@ exists. The 409 names the deployed repositories; undeploy each first.
   exists is `CatalogService.set_environment_protection`, exposed as `PATCH
   /api/v1/environments/{name}` with body `{"is_protected": bool}` and gated by the same
   instance-scoped `MANAGE_ENVIRONMENT`.
+- **A deleted environment is a row with `deleted_at` (#213).** See "Deleting an environment"
+  above: its tables are tombstones, it is hidden from every lookup by name, and its name stays
+  taken until the sweep removes the row.
 - **All four environment operations are audited.** `create_environment`,
   `delete_environment`, `update_environment_storage`, and `set_environment_protection` each
   record an `AuditEvent` (`ENVIRONMENT_CREATED`/`ENVIRONMENT_DELETED`/

@@ -23,7 +23,13 @@ from lakana_core.audit.service import AuditService
 from lakana_core.auth import Action, AuthorizationService, PrincipalRef, Securable
 from lakana_core.errors import AlreadyExistsError, NotFoundError, ValidationError
 from lakana_core.identifiers import shown
-from lakana_core.models import AuditEventType, Environment, Secret, SecretUseKind
+from lakana_core.models import (
+    LIVE_ENVIRONMENT,
+    AuditEventType,
+    Environment,
+    Secret,
+    SecretUseKind,
+)
 from lakana_core.secrets.crypto import SecretBinding, encrypt_secret_values
 from lakana_core.secrets.keys import KeyProvider
 from lakana_core.secrets.uses import (
@@ -78,7 +84,7 @@ class SecretService:
             If no environment has that name.
         """
         env = self._session.execute(
-            select(Environment).where(Environment.name == name)
+            select(Environment).where(Environment.name == name, LIVE_ENVIRONMENT)
         ).scalar_one_or_none()
         if env is None:
             raise NotFoundError(f"No environment named {name!r}.")

@@ -684,13 +684,19 @@ def test_a_view_reference_to_an_artifact_needs_read_on_it(session: Session, tmp_
     assert reads == [Securable.table_scope("dev", _REF.namespace, "churn")]
 
 
-def test_deleting_an_environment_removes_its_artifact_rows(
+def test_deleting_an_environment_keeps_its_artifact_rows_hidden_until_a_restore(
     session: Session, tmp_path: Path
 ) -> None:
+    """An artifact is no tombstone: its row stays with the deleted environment and comes back."""
     catalog, p = _catalog(session, tmp_path)
-    assert session.query(Table).filter(Table.table_type == TableType.ARTIFACT).count() == 1
+    artifacts = session.query(Table).filter(Table.table_type == TableType.ARTIFACT)
+    assert artifacts.count() == 1
     catalog.delete_environment(p, "dev")
-    assert session.query(Table).count() == 0
+    assert artifacts.count() == 1
+    with pytest.raises(NotFoundError):
+        catalog.list_tables(p, "dev", _REF.namespace)
+    catalog.restore_environment(p, "dev")
+    assert artifacts.count() == 1
 
 
 # What each public operation that takes, lists or removes tables does when the row is an artifact:
@@ -744,7 +750,8 @@ _ARTIFACT_HANDLING = {
         "find_view": "hides",
         "resolve_lineage_sources": "lineage-source",
         "drop_namespace": "refuses-while-present",
-        "delete_environment": "cascades",
+        "delete_environment": "keeps-with-environment",
+        "restore_environment": "keeps-with-environment",
     },
     "QueryService": {
         "submit_write": "refuses",
@@ -783,10 +790,10 @@ _KINDS_OF_HANDLING = {
     "name-taken",
     "lineage-source",
     "refuses-while-present",
-    "cascades",
+    "keeps-with-environment",
     "artifact-surface",
 }
-_BY_NAME = {"drop_namespace", "delete_environment"}
+_BY_NAME = {"drop_namespace", "delete_environment", "restore_environment"}
 
 
 def _table_methods(cls: type) -> set[str]:
@@ -804,7 +811,8 @@ def _table_methods(cls: type) -> set[str]:
         `WriteTarget` (which carries a table name), or whose name contains "table" or
         "dotted", or whose own name contains "table" (`list_tables` takes a namespace) or
         "artifact" (`list_artifacts` takes an environment); and
-        `drop_namespace` and `delete_environment`, which remove tables with their container.
+        `drop_namespace`, `delete_environment` and `restore_environment`, which remove or bring
+        back tables with their container.
     """
     found = set()
     for name, method in inspect.getmembers(cls, inspect.isfunction):

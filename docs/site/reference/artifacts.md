@@ -696,5 +696,6 @@ Files are stored under the environment's storage root, in `artifacts/<artifact i
 a manifest is stored in `artifacts/<artifact id>/manifests/<version>.json`. The id is the
 artifact's id as 32 hexadecimal digits. The directory `artifacts/` of a storage root is reserved:
 a table location inside it is refused. A file is stored once per artifact. Nothing is shared between
-artifacts. Deleting an environment removes the artifact rows from the catalog and leaves the
-files in storage, as it leaves the data of tables.
+artifacts. A deleted environment keeps its artifacts, hidden, and `lakana env restore` brings them
+back with it. Once the worker removes the deleted environment after its undo period, the artifact
+rows go from the catalog and their files stay in storage.

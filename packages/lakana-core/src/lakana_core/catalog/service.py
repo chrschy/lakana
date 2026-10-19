@@ -74,6 +74,17 @@ from lakana_core.catalog.descriptions import (
     sync_created_table,
     table_description,
 )
+from lakana_core.catalog.environment_deletion import (
+    DELETED_HINT_MESSAGE,
+    ENVIRONMENT_GONE_MESSAGE,
+    NAME_HELD_MESSAGE,
+    NO_DELETED_MESSAGE,
+    NOT_DELETED_MESSAGE,
+    delete_rows,
+    lock_live_environment,
+    purge_early,
+    restore_rows,
+)
 from lakana_core.catalog.external_location import check_claim_free, parse_external_location
 from lakana_core.catalog.field_ids import check_added_files_have_field_ids
 from lakana_core.catalog.health import (
@@ -149,6 +160,7 @@ from lakana_core.catalog.tombstones import (
     find_tombstone,
     list_tombstones,
     name_holder,
+    refresh_restored,
     restore_policies,
     restore_table,
     revive,
@@ -192,8 +204,8 @@ from lakana_core.identifiers import (
     shown,
     validate_path_component,
 )
-from lakana_core.identity.task_tokens import revoke_task_tokens_for_environment
 from lakana_core.models import (
+    LIVE_ENVIRONMENT,
     AuditEvent,
     AuditEventType,
     CheckOutcome,
@@ -1085,7 +1097,8 @@ class CatalogService:
         Raises
         ------
         AlreadyExistsError
-            If an environment with that name already exists.
+            If an environment with that name already exists, also a deleted one whose files
+            are kept (`NAME_HELD_MESSAGE` names the restore and the early purge).
         PermissionDenied
             If the principal may not manage environments.
 
@@ -1101,6 +1114,13 @@ class CatalogService:
         existing = self._session.execute(
             select(Environment).where(Environment.name == name)
         ).scalar_one_or_none()
+        if existing is not None and existing.deleted_at is not None:
+            assert existing.purge_after is not None  # nosec B101 -- set with deleted_at
+            raise AlreadyExistsError(
+                NAME_HELD_MESSAGE.format(
+                    name=name, purge_after=existing.purge_after.isoformat(timespec="seconds")
+                )
+            )
         if existing is not None:
             raise AlreadyExistsError(f"Environment {name!r} already exists.")
         env = Environment(
@@ -1152,12 +1172,13 @@ class CatalogService:
         Raises
         ------
         NotFoundError
-            If no environment has that name.
+            If no environment has that name, also when it is deleted; the message names the
+            restore when `p` may make it (`DELETED_HINT_MESSAGE`).
         PermissionDenied
             If the principal may not read environments.
         """
         self._authz.authorize(p, Action.READ_ENVIRONMENT, Securable.environment_scope(name))
-        return self._find_environment(name)
+        return self._find_environment(name, p)
 
     def list_environments(self, p: PrincipalRef) -> list[Environment]:
         """List every environment `p` may read.
@@ -1179,7 +1200,9 @@ class CatalogService:
         Filtered through `permits`, not `authorize`. A hidden
         environment is not a denied action and writes no audit event.
         """
-        rows = self._session.execute(select(Environment).order_by(Environment.created_at))
+        rows = self._session.execute(
+            select(Environment).where(LIVE_ENVIRONMENT).order_by(Environment.created_at)
+        )
         return [
             env
             for env in rows.scalars()
@@ -1188,39 +1211,32 @@ class CatalogService:
             )
         ]
 
-    def delete_environment(self, p: PrincipalRef, name: str) -> None:
-        """Delete an environment and its catalog entries.
+    def delete_environment(self, p: PrincipalRef, name: str, *, purge: bool = False) -> Environment:
+        """Delete an environment: its tables become tombstones for the undo period.
 
-        This removes catalog rows only. Data in object storage is left alone,
-        because deleting an environment must never silently destroy data.
+        In one transaction under the environment's row lock
+        (`lakana_core.catalog.environment_deletion.delete_rows`): every managed table is dropped
+        through the drop path (``reason: environment_deleted``), so its files stay until
+        ``purge_after`` (now plus `undo_days`) and the grants, row filters and column masks
+        bound to it are revoked onto its tombstone; views and external tables are dropped
+        likewise and leave no tombstone (external files are never deleted); what is still bound
+        to the environment is revoked and listed on the row, and task tokens scoped to it are
+        revoked. The row is then marked deleted: hidden from every lookup by name, its name
+        still taken, and kept with the storage settings the location sweep needs to delete the
+        files once ``purge_after`` has passed. `restore_environment` undoes it until then; the
+        sweep deletes the row after the last file.
 
-        Deletion is authorized on its own behalf, against
-        ``MANAGE_ENVIRONMENT``: it must not be satisfiable merely by
-        borrowing the weaker ``READ_ENVIRONMENT`` check that
-        :meth:`get_environment` performs, which would let any principal who
-        can read an environment also delete it.
+        Deletion is authorized on its own behalf, against ``MANAGE_ENVIRONMENT``: it must not be
+        satisfiable merely by borrowing the weaker ``READ_ENVIRONMENT`` check that
+        :meth:`get_environment` performs.
 
-        Every active grant, row filter, and column mask attached to this
-        environment (or a namespace or table within it) is soft-revoked
-        first, in the same transaction — otherwise a later
-        environment re-created under the same name would silently inherit
-        the old one's grants and policies. Every unrevoked task token
-        scoped to this environment by name is revoked the same way: `TaskToken.environment` is a
-        plain
-        name column, not a foreign key, so a token minted for this
-        environment would otherwise stay usable by name after it is gone.
+        A protected environment (`Environment.is_protected`) refuses deletion outright.
 
-        A protected environment (`Environment.is_protected`) refuses
-        deletion outright: this is the enforcement the
-        flag previously lacked entirely.
-
-        An environment that still has a deployed repository refuses deletion
-        : a run start locks the deployment pointer and then the
-        environment row, and the cascade of this delete would lock them in the
-        opposite order, so the two could deadlock. The environment row is
-        locked first (and re-read, so protection is checked on the locked row,
-        never a stale copy), then the pointers are looked at without locking,
-        which removes the cycle; undeploy first.
+        An environment that still has a deployed repository refuses deletion: a run start locks
+        the deployment pointer and then the environment row, and a deletion locks the row
+        first, so the two could deadlock. The environment row is locked first (and re-read, so
+        protection is checked on the locked row, never a stale copy), then the pointers are
+        looked at without locking, which removes the cycle; undeploy first.
 
         Parameters
         ----------
@@ -1228,41 +1244,217 @@ class CatalogService:
             The acting principal.
         name
             Environment name.
+        purge
+            Make everything due now: the next sweep deletes the files and then the row, and the
+            environment cannot be restored. On an environment that is already deleted, this is
+            all the call does, to it and to every tombstone it has.
+
+        Returns
+        -------
+        Environment
+            The deleted environment, with its ``purge_after``.
 
         Raises
         ------
         NotFoundError
-            If no environment has that name (also when a concurrent delete
-            wins the row lock).
+            If no environment has that name (also when a concurrent delete wins the row lock),
+            or it is already deleted and `purge` is false.
         ValidationError
             If the environment is protected.
         ConflictError
-            If a repository is still deployed to the environment; the
-            message names them.
+            If a repository is still deployed to the environment; the message names them.
         PermissionDenied
             If the principal may not manage environments.
         """
         self._authz.authorize(p, Action.MANAGE_ENVIRONMENT, Securable.environment_scope(name))
-        env = self._lock_unprotected_environment(name)
-        deployed = self._session.scalars(
-            select(Repository.name)
-            .join(EnvironmentDeployment, EnvironmentDeployment.repository_id == Repository.id)
-            .where(EnvironmentDeployment.environment_id == env.id)
-            .order_by(Repository.name)
-        ).all()
-        if deployed:
+        env = self._lock_environment_row(name)
+        if env is None:
             self._session.rollback()
-            raise ConflictError(
-                f"Environment {name!r} still has deployed repositories: {', '.join(deployed)}. "
-                f"Undeploy each first (`lakana undeploy REPO --env {name}`)."
+            raise NotFoundError(f"No environment named {name!r}.")
+        now = db_now(self._session)
+        if env.deleted_at is not None:
+            if not purge:
+                message = self._missing_environment_message(p, env)
+                self._session.rollback()
+                raise NotFoundError(message)
+            detail = purge_early(self._session, env, now=now)
+        else:
+            if env.is_protected:
+                self._session.rollback()
+                raise ValidationError(f"Environment {name!r} is protected.")
+            deployed = self._session.scalars(
+                select(Repository.name)
+                .join(EnvironmentDeployment, EnvironmentDeployment.repository_id == Repository.id)
+                .where(EnvironmentDeployment.environment_id == env.id)
+                .order_by(Repository.name)
+            ).all()
+            if deployed:
+                self._session.rollback()
+                raise ConflictError(
+                    f"Environment {name!r} still has deployed repositories: "
+                    f"{', '.join(deployed)}. Undeploy each first (`lakana undeploy REPO --env "
+                    f"{name}`)."
+                )
+            purge_after = now if purge else now + timedelta(days=self._undo_days)
+            detail = delete_rows(
+                self._session, p, env, now=now, purge_after=purge_after, purge=purge
             )
-        revoke_attached(self._session, p, environment_id=env.id)
-        revoke_task_tokens_for_environment(self._session, p, name)
         AuditService(self._session).record(
-            p.id, AuditEventType.ENVIRONMENT_DELETED, securable=Securable.environment_scope(name)
+            p.id,
+            AuditEventType.ENVIRONMENT_DELETED,
+            securable=Securable.environment_scope(name),
+            detail=detail,
         )
-        self._session.delete(env)
         self._session.commit()
+        return env
+
+    def restore_environment(self, p: PrincipalRef, name: str) -> Environment:
+        """Undo the deletion of an environment within its undo period.
+
+        Under the environment's row lock and the lock of every tombstone the deletion made
+        (`lakana_core.catalog.environment_deletion.restore_rows`): the tables it dropped come
+        back with the same ids and metadata, with exactly the grants, row filters and column
+        masks it revoked, and the row is no longer deleted. A table dropped before the deletion
+        stays a tombstone, which `undrop_table` restores afterwards. One `TABLE_UNDROPPED` per
+        table and one `ENVIRONMENT_RESTORED` record it.
+
+        Parameters
+        ----------
+        p
+            The acting principal; needs ``MANAGE_ENVIRONMENT``, the right of the deletion.
+        name
+            Environment name.
+
+        Returns
+        -------
+        Environment
+            The restored environment.
+
+        Raises
+        ------
+        NotFoundError
+            If no environment of that name exists, deleted or not (`NO_DELETED_MESSAGE`).
+        ConflictError
+            If it is not deleted (`NOT_DELETED_MESSAGE`), its undo period has ended, the sweep
+            has started deleting one of its tables' files, or a table's metadata file is gone.
+        PermissionDenied
+            If the principal may not manage environments.
+        """
+        self._authz.authorize(p, Action.MANAGE_ENVIRONMENT, Securable.environment_scope(name))
+        env = self._lock_environment_row(name)
+        if env is None:
+            self._session.rollback()
+            raise NotFoundError(NO_DELETED_MESSAGE.format(name=name))
+        if env.deleted_at is None:
+            self._session.rollback()
+            raise ConflictError(NOT_DELETED_MESSAGE.format(name=name))
+        resolved = self._storage.for_environment(name, include_deleted=True)
+
+        def file_exists(location: str) -> bool:
+            """Say whether a metadata file is still in the environment's storage.
+
+            Parameters
+            ----------
+            location
+                The metadata location.
+
+            Returns
+            -------
+            bool
+                Whether it exists.
+            """
+            return bool(resolved.file_io.new_input(location).exists())
+
+        try:
+            detail = restore_rows(
+                self._session, p, env, now=db_now(self._session), file_exists=file_exists
+            )
+        except ConflictError:
+            self._session.rollback()
+            raise
+        AuditService(self._session).record(
+            p.id,
+            AuditEventType.ENVIRONMENT_RESTORED,
+            securable=Securable.environment_scope(name),
+            detail=detail,
+        )
+        self._session.commit()
+        return env
+
+    def list_deleted_environments(self, p: PrincipalRef) -> list[Environment]:
+        """List the deleted environments `p` may read, whose files are not deleted yet.
+
+        Parameters
+        ----------
+        p
+            The acting principal.
+
+        Returns
+        -------
+        list of Environment
+            Oldest deletion first, each with its ``deleted_at`` and ``purge_after``. Filtered
+            through `permits` as `list_environments` is.
+        """
+        rows = self._session.execute(
+            select(Environment)
+            .where(Environment.deleted_at.is_not(None))
+            .order_by(Environment.deleted_at, Environment.name)
+        )
+        return [
+            env
+            for env in rows.scalars()
+            if self._authz.permits(
+                p, Action.READ_ENVIRONMENT, Securable.environment_scope(env.name)
+            )
+        ]
+
+    def _lock_environment_row(self, name: str) -> Environment | None:
+        """Lock an environment's row by name, deleted or not, and read it again.
+
+        Parameters
+        ----------
+        name
+            The environment's name.
+
+        Returns
+        -------
+        Environment or None
+            The locked row; `None` when no row has the name.
+        """
+        return self._session.execute(
+            select(Environment)
+            .where(Environment.name == name)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).scalar_one_or_none()
+
+    def _missing_environment_message(self, p: PrincipalRef | None, env: Environment) -> str:
+        """Word the `NotFoundError` of a deleted environment.
+
+        Parameters
+        ----------
+        p
+            The caller, when known.
+        env
+            The deleted environment.
+
+        Returns
+        -------
+        str
+            `DELETED_HINT_MESSAGE` for a deleted environment the caller may restore; otherwise
+            the message of a missing one, so the deletion is not disclosed.
+        """
+        if (
+            env.purge_after is None
+            or p is None
+            or not self._authz.permits(
+                p, Action.MANAGE_ENVIRONMENT, Securable.environment_scope(env.name)
+            )
+        ):
+            return f"No environment named {env.name!r}."
+        return DELETED_HINT_MESSAGE.format(
+            name=env.name, purge_after=env.purge_after.isoformat(timespec="seconds")
+        )
 
     def update_environment_storage(
         self,
@@ -1399,13 +1591,15 @@ class CatalogService:
         self._session.commit()
         return env
 
-    def _find_environment(self, name: str) -> Environment:
-        """Fetch an environment row by name, without authorizing.
+    def _find_environment(self, name: str, p: PrincipalRef | None = None) -> Environment:
+        """Fetch an environment row by name, without authorizing; a deleted one is not found.
 
         Parameters
         ----------
         name
             Environment name.
+        p
+            The caller, when the error may name the restore of a deleted environment.
 
         Returns
         -------
@@ -1415,13 +1609,16 @@ class CatalogService:
         Raises
         ------
         NotFoundError
-            If no environment has that name.
+            If no environment has that name, or it is deleted
+            (`_missing_environment_message`).
         """
         env = self._session.execute(
             select(Environment).where(Environment.name == name)
         ).scalar_one_or_none()
-        if env is None:
-            raise NotFoundError(f"No environment named {name!r}.")
+        if env is None or env.deleted_at is not None:
+            if env is None:
+                raise NotFoundError(f"No environment named {name!r}.")
+            raise NotFoundError(self._missing_environment_message(p, env))
         return env
 
     def create_namespace(
@@ -1637,7 +1834,7 @@ class CatalogService:
             If the principal may not read namespaces in this environment.
         """
         self._authz.authorize(p, Action.READ_NAMESPACE, Securable.environment_scope(environment))
-        env = self._find_environment(environment)
+        env = self._find_environment(environment, p)
         query = select(Namespace).where(Namespace.environment_id == env.id)
         if parent is not None:
             prefix = escape_like(parent.joined() + NAMESPACE_SEPARATOR)
@@ -2046,6 +2243,9 @@ class CatalogService:
         ConflictError
             If the insert failed for another reason, or the location's claim was
             released before the insert (`CLAIM_RELEASED_MESSAGE`).
+        NotFoundError
+            If the environment was deleted before the commit (`ENVIRONMENT_GONE_MESSAGE`); the
+            commit takes the environment's row lock first (`lock_live_environment`).
         ValidationError
             If the computed metadata location escapes the storage root.
         """
@@ -2076,6 +2276,12 @@ class CatalogService:
         sync_created_table(self._session, prepared.environment_id, row, ref.dotted())
         sync_table_columns(self._session, row.id, from_iceberg_schema(metadata.schema()))
         try:
+            self._session.flush()  # a name collision raises here, and SQLite's write lock is held
+            if not lock_live_environment(self._session, prepared.environment_id):
+                self._session.rollback()
+                raise NotFoundError(
+                    ENVIRONMENT_GONE_MESSAGE.format(table=ref.dotted(), environment=ref.environment)
+                )
             # The fence's UPDATE flushes the row first, so a name collision raises here.
             # The location as the sweep and the backfill derive it from the metadata file, so
             # the record that goes LIVE is the one they would find for this table.
@@ -2234,9 +2440,15 @@ class CatalogService:
         # concurrent creates in the same environment can still both pass
         # this check and race on the insert — a real gap on SQLite, not one
         # this comment used to claim SQLite closed on its own.
-        self._session.execute(
-            select(Environment).where(Environment.id == env.id).with_for_update()
+        locked = self._session.execute(
+            select(Environment)
+            .where(Environment.id == env.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
         ).scalar_one()
+        if locked.deleted_at is not None:
+            self._session.rollback()
+            raise NotFoundError(f"No environment named {ref.environment!r}.")
         check_claim_free(self._session, env.id, loc.claim)
         row = Table(
             id=uuid.uuid4(),
@@ -2335,7 +2547,7 @@ class CatalogService:
             .with_for_update()
             .execution_options(populate_existing=True)
         ).scalar_one_or_none()
-        if env is None:
+        if env is None or env.deleted_at is not None:
             self._session.rollback()
             raise NotFoundError(f"No environment named {name!r}.")
         if env.is_protected:
@@ -6471,6 +6683,9 @@ class CatalogService:
         )
         self._guard.check(p, ref.environment, WriteOperation.CREATE_TABLE, table_target(target))
         env = self._find_environment(ref.environment)
+        if not lock_live_environment(self._session, env.id):
+            self._session.rollback()
+            raise NotFoundError(f"No environment named {ref.environment!r}.")
         record_id = find_tombstone(self._session, env.id, ref.namespace, ref.name)
         record = None if record_id is None else lock_location(self._session, record_id)
         snapshot = None if record is None else record.dropped_table
@@ -6513,12 +6728,7 @@ class CatalogService:
             row = restore_table(
                 self._session, snapshot, namespace_id=namespace_id, name=target.name
             )
-            retention_cleared = row.retention_on is not None and row.retention_on <= now.date()
-            if retention_cleared:
-                row.retention_on = None
-                row.retention_set_by = p.id
-                row.retention_set_at = now
-            row.updated_at = datetime.now(UTC)
+            retention_cleared = refresh_restored(row, p.id, now)
             restored = restore_policies(
                 self._session,
                 record,
@@ -6840,7 +7050,7 @@ class CatalogService:
         self._authz.authorize(
             p, Action.READ_TABLE, Securable.namespace_scope(environment, namespace)
         )
-        env = self._find_environment(environment)
+        env = self._find_environment(environment, p)
         ns = self._find_namespace(env, namespace)
         query = select(Table).where(Table.namespace_id == ns.id)
         if not include_views:

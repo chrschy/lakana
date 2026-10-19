@@ -791,6 +791,8 @@ and `LAKANA_APPEND__READ_TIMEOUT_SECONDS` with table appends; downloads have a l
   and the ids of the policies it revoked, which `undrop_table` restores under the record's lock.
   An expiry (`lakana_core.catalog.retention`, step 1 of the location sweep) is the same drop
   (`tombstones.drop_row`) by the system, decided again under the environment's and the table's row
-  locks.
+  locks. Deleting an environment (`lakana_core.catalog.environment_deletion`) is the same drop for
+  every table in it; the row stays, marked `deleted_at` and hidden from every lookup by name
+  (`LIVE_ENVIRONMENT`), until the sweep has purged its last record and deletes it.
 - **SQLite and Postgres both work** for `lakana-core` — no dialect-specific SQL, so the unit
   tier can run against in-memory SQLite while the integration tier uses real Postgres.

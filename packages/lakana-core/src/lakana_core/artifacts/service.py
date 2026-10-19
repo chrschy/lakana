@@ -149,6 +149,7 @@ from lakana_core.errors import (
 from lakana_core.grants.revocation import revoke_attached
 from lakana_core.identifiers import NamespacePath, TableRef, shown, validate_path_component
 from lakana_core.models import (
+    LIVE_ENVIRONMENT,
     ArtifactBlob,
     ArtifactUpload,
     ArtifactVersion,
@@ -1302,7 +1303,11 @@ class ArtifactService:
         namespace_id = self._session.execute(
             select(Namespace.id)
             .join(Environment, Namespace.environment_id == Environment.id)
-            .where(Environment.name == ref.environment, Namespace.path == ref.namespace.joined())
+            .where(
+                Environment.name == ref.environment,
+                LIVE_ENVIRONMENT,
+                Namespace.path == ref.namespace.joined(),
+            )
             .with_for_update(read=True, of=Namespace)
         ).scalar_one_or_none()
         if namespace_id is None:

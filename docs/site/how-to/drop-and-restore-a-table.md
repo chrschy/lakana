@@ -1,7 +1,8 @@
 # Drop and restore a table
 
 After this guide you can drop a table, see which dropped tables can still be restored, bring one
-back with its data and its access rules, and delete a table's files for good. You need a managed
+back with its data and its access rules, delete a table's files for good, and do the same for a
+whole environment. You need a managed
 table (see [Getting started](../tutorials/getting-started.md)) and the right to drop tables, which
 the data engineer and admin roles include.
 
@@ -105,6 +106,57 @@ and no later than one sweep after it**. The sweep runs every `LAKANA_RUN__SWEEP_
   counts their directories as directories without a record. A later release adds a command to remove
   them.
 
+## Delete and restore an environment
+
+Deleting an environment drops every table in it the way `lakana table delete` drops one: the
+tables' files stay for the undo period, and until it ends the whole environment can be restored.
+You need the right to manage the environment, which the admin role includes.
+
+<!-- source: docs/examples/drop-and-restore-a-table/run.sh#env-delete -->
+```bash
+lakana env delete sandbox --yes
+```
+
+From then on the environment is gone from `lakana env list`, from every query and from every engine
+that reads it through the Iceberg REST catalog. Its views and external tables are removed (an
+external table's files are never deleted); its artifacts stay with it. Its name stays taken until
+the files are deleted, so an environment of the same name cannot be created meanwhile.
+
+`--deleted` lists the deleted environments that can still be restored, and until when
+(`purge_after`, UTC):
+
+<!-- source: docs/examples/drop-and-restore-a-table/run.sh#env-list-deleted -->
+```bash
+lakana env list --deleted
+```
+
+Restore it before `purge_after`:
+
+<!-- source: docs/examples/drop-and-restore-a-table/run.sh#env-restore -->
+```bash
+lakana env restore sandbox
+```
+
+Every table the deletion dropped comes back as `lakana table undrop` brings one back: the same
+table with its data, and exactly the grants, row filters and column masks the deletion took away,
+including the grants given on the environment itself. A table that was dropped before the
+environment was deleted stays dropped; restore it afterwards with `lakana table undrop`. Views and
+external tables do not come back. Deleting an environment revokes the grants given on it, so an
+environment admin who deleted one cannot restore it: an administrator of the instance can.
+
+`--purge` skips the undo period, for an environment you delete or one already deleted: the worker
+deletes the files at its next clean-up, the environment cannot be restored, and its name is free
+again after that clean-up.
+
+<!-- source: docs/examples/drop-and-restore-a-table/run.sh#env-purge -->
+```bash
+lakana env delete sandbox --purge --yes
+```
+
+The environment itself is removed by the first sweep after its undo period that finds none of its
+tables' files left. An environment deleted before this release kept every file and left no trace in
+the catalog; nothing changes for it, and a later release adds a command to remove such leftovers.
+
 ## Through the APIs
 
 - **REST.** `DELETE /api/v1/environments/{env}/namespaces/{path}/tables/{name}` drops, with
@@ -113,9 +165,14 @@ and no later than one sweep after it**. The sweep runs every `LAKANA_RUN__SWEEP_
   `namespace`, `uuid`, `kind`, `dropped_at`, `purge_after`, `restorable`).
   `POST /api/v1/environments/{env}/namespaces/{path}/tables/{name}/undrop` restores, with an optional
   body `{"new_name": "..."}`, and answers with the table.
+  For an environment: `DELETE /api/v1/environments/{name}` (with `?purge=true`) answers with the
+  environment and its `deleted_at` and `purge_after`; `GET /api/v1/environments?deleted=true` lists
+  the deleted ones; `POST /api/v1/environments/{name}/restore` restores one.
 - **SDK.** `client.tables.delete(env, "silver.orders", purge=False)`,
   `client.tables.list_dropped(env, "silver")` and
-  `client.tables.undrop(env, "silver.orders", new_name=None)`.
+  `client.tables.undrop(env, "silver.orders", new_name=None)`; for an environment
+  `client.environments.delete(name, purge=False)`, `client.environments.list(deleted=True)` and
+  `client.environments.restore(name)`.
 - **Iceberg REST catalog.** A drop from an engine keeps the files for the undo period like any other;
   `purgeRequested=true` makes them due at the next sweep.
 
@@ -129,12 +186,16 @@ and no later than one sweep after it**. The sweep runs every `LAKANA_RUN__SWEEP_
 | `silver.orders cannot be restored: the worker's sweep has started deleting its files, ...` | The sweep began deleting before the restore. | Restore from a backup if you have one. |
 | `silver.orders cannot be restored: its files are gone ...` | Its metadata file was deleted from storage by something other than Lakana. | Restore from a backup of the storage if you have one. |
 | `silver.orders cannot be restored: its namespace silver was dropped after it. ...` | The namespace is gone. | Create the namespace again (`lakana ns create`), then restore the table. |
+| `No environment named 'sandbox'. It was deleted, and it can be restored with ...` | The environment was deleted. | Restore it with `lakana env restore sandbox` if you need it. |
+| `Environment 'sandbox' cannot be created: an environment of that name was deleted, ...` | A deleted environment holds the name until its files are deleted. | Restore it, or delete its files now with `lakana env delete sandbox --purge`. |
+| `Environment 'sandbox' cannot be restored: its undo period ended at ... (UTC), ...` | The period is over, or the environment was deleted with `--purge`. | The files are deleted or about to be; restore from a backup if you have one. |
+| `Environment 'sandbox' cannot be restored: the worker's clean-up has started deleting ...` | The sweep began deleting one of its tables' files. | Restore from a backup if you have one. |
 
 ## What the audit log records
 
 - `TABLE_DROPPED` for every drop, by the person who dropped it: `reason` (`user`, or `purge` for a
-  drop with `--purge`, or `retention` with no person for a table that expired: see
-  [Let tables expire](let-tables-expire.md)), `table_id`, `kind`, `purge_after` (empty for a table whose files are not
+  drop with `--purge`, `environment_deleted` for a table of a deleted environment, or `retention`
+  with no person for a table that expired: see [Let tables expire](let-tables-expire.md)), `table_id`, `kind`, `purge_after` (empty for a table whose files are not
   deleted, such as an external table) and `revoked_policies`, the number of grants, row filters and
   column masks the drop took away.
 - `TABLE_UNDROPPED` for a restore: `table_id`, `name`, `dropped_name`, `dropped_at`,
@@ -142,3 +203,10 @@ and no later than one sweep after it**. The sweep runs every `LAKANA_RUN__SWEEP_
   and `retention_cleared`, whether the restore removed an expiry day that had passed.
 - `TABLE_PURGED` when the sweep deletes the files, with no person: see
   [The sweep](deploy-with-compose.md#the-sweep).
+- `ENVIRONMENT_DELETED` for a deletion: `tables` (how many can be restored), `purge_after` and
+  `purge`; each of its tables has its own `TABLE_DROPPED` with `reason` `environment_deleted`.
+  `--purge` on a deleted environment records a second one with `already_deleted`.
+- `ENVIRONMENT_RESTORED` for a restore: `tables`, `restored_policies` (how many came back) and
+  `deleted_at`; each table has its own `TABLE_UNDROPPED` with `reason` `environment_restored`.
+- `ENVIRONMENT_PURGED` when the sweep removes a deleted environment after its last files, with no
+  person.

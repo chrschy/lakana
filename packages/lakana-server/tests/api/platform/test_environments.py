@@ -81,12 +81,86 @@ def test_list_returns_every_environment(client: TestClient, tmp_path: Path) -> N
     assert names == {"dev", "prd"}
 
 
-def test_delete_removes_the_environment(client: TestClient, tmp_path: Path) -> None:
-    """A deleted environment is gone from a subsequent get."""
+def test_delete_hides_the_environment_and_names_the_restore(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """The deleted environment comes back with its `purge_after`; a get is 404 with the restore."""
     _create(client, tmp_path)
     response = client.delete("/api/v1/environments/dev", headers=AUTH_HEADER)
-    assert response.status_code == 204
-    assert client.get("/api/v1/environments/dev", headers=AUTH_HEADER).status_code == 404
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["name"] == "dev"
+    assert body["deleted_at"] is not None and body["purge_after"] is not None
+    missing = client.get("/api/v1/environments/dev", headers=AUTH_HEADER)
+    assert missing.status_code == 404
+    assert "lakana env restore dev" in missing.json()["detail"]
+    assert client.get("/api/v1/environments", headers=AUTH_HEADER).json() == []
+    assert client.get("/v1/dev/namespaces", headers=AUTH_HEADER).status_code == 404
+    assert client.get("/v1/dev/namespaces/gold", headers=AUTH_HEADER).status_code == 404
+
+
+def test_deleted_environments_are_listed_and_restored(client: TestClient, tmp_path: Path) -> None:
+    """`?deleted=true` lists them; `POST .../restore` brings one back as it was."""
+    created = _create(client, tmp_path)
+    client.delete("/api/v1/environments/dev", headers=AUTH_HEADER)
+    listed = client.get("/api/v1/environments?deleted=true", headers=AUTH_HEADER)
+    assert listed.status_code == 200
+    assert [(e["name"], e["purge_after"] is not None) for e in listed.json()] == [("dev", True)]
+
+    restored = client.post("/api/v1/environments/dev/restore", headers=AUTH_HEADER)
+
+    assert restored.status_code == 200, restored.text
+    assert restored.json() == created
+    assert client.get("/api/v1/environments/dev", headers=AUTH_HEADER).json() == created
+    again = client.post("/api/v1/environments/dev/restore", headers=AUTH_HEADER)
+    assert again.status_code == 409
+    assert "not deleted" in again.json()["detail"]
+    assert client.post("/api/v1/environments/nope/restore", headers=AUTH_HEADER).status_code == 404
+
+
+def test_the_name_of_a_deleted_environment_is_refused_with_both_ways_out(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """409, naming the restore and the early purge."""
+    _create(client, tmp_path)
+    client.delete("/api/v1/environments/dev", headers=AUTH_HEADER)
+    response = client.post(
+        "/api/v1/environments",
+        headers=AUTH_HEADER,
+        json={
+            "name": "dev",
+            "storage": {"scheme": "file", "root": f"file://{tmp_path}/dev", "options": {}},
+        },
+    )
+    assert response.status_code == 409
+    assert "lakana env restore dev" in response.json()["detail"]
+    assert "lakana env delete dev --purge" in response.json()["detail"]
+
+
+def test_purge_makes_a_deletion_due_at_once(client: TestClient, tmp_path: Path) -> None:
+    """`?purge=true`: `purge_after` is the deletion's time; a restore is refused."""
+    _create(client, tmp_path)
+    response = client.delete("/api/v1/environments/dev?purge=true", headers=AUTH_HEADER)
+    assert response.status_code == 200, response.text
+    assert response.json()["purge_after"] == response.json()["deleted_at"]
+    again = client.delete("/api/v1/environments/dev?purge=true", headers=AUTH_HEADER)
+    assert again.status_code == 200, again.text
+    refused = client.post("/api/v1/environments/dev/restore", headers=AUTH_HEADER)
+    assert refused.status_code == 409
+    assert "undo period ended" in refused.json()["detail"]
+
+
+def test_an_environment_admin_deletes_but_an_instance_admin_restores(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """The deletion revokes the environment's own grants, the deleter's among them."""
+    _create(client, tmp_path, "sandbox")
+    bob = _grant_environment_admin(client, "sandbox")
+    assert client.delete("/api/v1/environments/sandbox", headers=bob).status_code == 200
+    assert client.post("/api/v1/environments/sandbox/restore", headers=bob).status_code == 403
+    restored = client.post("/api/v1/environments/sandbox/restore", headers=AUTH_HEADER)
+    assert restored.status_code == 200, restored.text
+    assert client.get("/api/v1/environments/sandbox", headers=bob).status_code == 200
 
 
 def test_delete_unknown_is_404(client: TestClient) -> None:

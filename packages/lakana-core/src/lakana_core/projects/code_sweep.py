@@ -59,7 +59,14 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from lakana_core.artifacts.sweep import MAX_CONSECUTIVE_FAILURES, ORPHAN_BLOB_GRACE
 from lakana_core.identifiers import shown
-from lakana_core.models import DeployKind, DeployRun, DeployStatus, Environment, JobVersion
+from lakana_core.models import (
+    LIVE_ENVIRONMENT,
+    DeployKind,
+    DeployRun,
+    DeployStatus,
+    Environment,
+    JobVersion,
+)
 from lakana_core.storage.base import Storage
 from lakana_core.storage.resolver import StorageResolver
 
@@ -401,9 +408,9 @@ def sweep_code_archives(
     stop = should_stop or (lambda: False)
     final = clock() + max_seconds
     rows = session.execute(
-        select(Environment.id, Environment.name, Environment.storage_root).order_by(
-            Environment.name
-        )
+        select(Environment.id, Environment.name, Environment.storage_root)
+        .where(LIVE_ENVIRONMENT)
+        .order_by(Environment.name)
     ).all()
     session.rollback()
     groups: dict[str, list[tuple[uuid.UUID, str]]] = defaultdict(list)

@@ -315,6 +315,13 @@ table inside it, …` at each sweep. An external table's files are never deleted
 bucket's own rules decide when a deleted file is gone. See
 [Drop and restore a table](drop-and-restore-a-table.md).
 
+**Deleted environments.** A deleted environment's tables are dropped tables like any other, and the
+sweep deletes their files after the undo period in the same way. Once none of its tables' files are
+left and its own undo period has passed, the sweep removes the environment from the catalog too
+(audit event `ENVIRONMENT_PURGED`, with no principal), and its name is free again. Nothing in a
+deleted environment expires. See
+[Delete and restore an environment](drop-and-restore-a-table.md#delete-and-restore-an-environment).
+
 **Tables whose retention has passed.** Before anything else, the same sweep drops the managed
 tables that their retention (`lakana table retention`, `lakana env retention`) lets expire, at most
 `LAKANA_TABLES__MAX_EXPIRIES_PER_SWEEP` (100) per sweep, the most overdue first. Each is dropped like

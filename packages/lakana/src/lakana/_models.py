@@ -33,6 +33,11 @@ class Environment:
     retention_days
         The retention of its tables that set none of their own, in days; `None` when off, and
         from a server older than retention.
+    deleted_at
+        When it was deleted; `None` unless it is (`Environments.list(deleted=True)`).
+    purge_after
+        For a deleted environment, until when `Environments.restore` can restore it; from then
+        on the server's clean-up deletes its tables' files. `None` unless deleted.
     """
 
     name: str
@@ -41,6 +46,8 @@ class Environment:
     is_protected: bool
     properties: dict[str, str]
     retention_days: int | None = None
+    deleted_at: datetime | None = None
+    purge_after: datetime | None = None
 
 
 @dataclass(frozen=True)

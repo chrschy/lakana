@@ -17,10 +17,10 @@ than ``LAKANA_TABLE_READS__KEEP_DAYS`` are swept away, so neither keeps a table.
 - ``on``: the table expires from midnight UTC of that day on, whatever its activity.
 
 **Never expired:** a table in a protected environment (even one whose retention was set before
-the protection), a table the current project version of a deployment in its environment declares
-as an asset, a table a queued or running query writes (by id or by name) or whose pipeline task
-has not ended, a table whose location record is not its own `LIVE` one (an expiry must leave a
-tombstone), and anything but a managed table.
+the protection) or in a deleted one, a table the current project version of a deployment in its
+environment declares as an asset, a table a queued or running query writes (by id or by name) or
+whose pipeline task has not ended, a table whose location record is not its own `LIVE` one (an
+expiry must leave a tombstone), and anything but a managed table.
 
 **The expiry.** `expire_due` is step 1 of `lakana_core.catalog.location_sweep`. For each due
 table, under the environment's and the table's row locks, it decides again with what is stored
@@ -716,7 +716,13 @@ def expire_table(
     """
     env = lock_row(session, Environment, environment_id)
     row = None if env is None else lock_row(session, Table, table_id)
-    if env is None or row is None or env.is_protected or row.table_type is not TableType.ICEBERG:
+    if (
+        env is None
+        or row is None
+        or env.is_protected
+        or env.deleted_at is not None
+        or row.table_type is not TableType.ICEBERG
+    ):
         session.rollback()
         return None
     path = session.scalars(select(Namespace.path).where(Namespace.id == row.namespace_id)).one()
@@ -802,7 +808,7 @@ def expire_due(
         What was done.
     """
     env = session.get(Environment, environment_id, populate_existing=True)
-    if env is None or env.is_protected or limit <= 0:
+    if env is None or env.is_protected or env.deleted_at is not None or limit <= 0:
         session.rollback()
         return ExpiryCounts()
     found = describe_retentions(session, env, retention_candidates(session, env))

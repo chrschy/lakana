@@ -41,6 +41,7 @@ from lakana_core.models import (
     RepositoryKind,
 )
 from lakana_core.projects.git_input import resolve_local_path, validate_ref, validate_repo_url
+from lakana_core.projects.lookups import live_environment_names
 from lakana_core.secrets.uses import (
     SecretBindingRefused,
     SecretUse,
@@ -162,7 +163,7 @@ class RepositoryService:
         """
         if self._authz.permits(p, Action.MANAGE_REPOSITORY, Securable.instance_scope()):
             return
-        for name in self._session.execute(select(Environment.name)).scalars():
+        for name in live_environment_names(self._session):
             if self._authz.permits(p, Action.READ_ENVIRONMENT, Securable.environment_scope(name)):
                 return
         self._authz.authorize(p, Action.READ_ENVIRONMENT, Securable.instance_scope())

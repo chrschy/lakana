@@ -3803,3 +3803,70 @@ def test_0044_adds_retention_columns_and_sets_no_retention_on_any_row(
             )
     finally:
         engine.dispose()
+
+
+_REVISION_0045 = "ca4f68b6e89a"
+
+
+def test_0045_adds_the_deletion_columns_and_deletes_no_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revision `0045`: what a deleted environment keeps, empty on every existing row.
+
+    No environment comes out of the upgrade deleted, so nothing is hidden and nothing is purged
+    because of it; the downgrade removes the columns again without touching a row.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    """
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, _REVISION_0042)
+    ids = _seed_tables_for_0042(db_path)
+    command.upgrade(config, _REVISION_0044)
+    command.upgrade(config, _REVISION_0045)
+    columns = (
+        "deleted_at",
+        "deleted_by",
+        "purge_after",
+        "dropped_location_ids",
+        "revoked_policy_ids",
+    )
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        environments = {c["name"]: c for c in inspect(engine).get_columns("environments")}
+        for name in columns:
+            assert environments[name]["nullable"] is True
+        with engine.connect() as connection:
+            assert (
+                connection.execute(
+                    sa.text(
+                        "SELECT count(*) FROM environments WHERE deleted_at IS NULL"
+                        " AND deleted_by IS NULL AND purge_after IS NULL"
+                        " AND dropped_location_ids IS NULL AND revoked_policy_ids IS NULL"
+                    )
+                ).scalar_one()
+                == 1
+            )
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, _REVISION_0044)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        names = {c["name"] for c in inspect(engine).get_columns("environments")}
+        assert not names & set(columns)
+        with engine.connect() as connection:
+            assert (
+                connection.execute(sa.text("SELECT count(*) FROM environments")).scalar_one() == 1
+            )
+            assert connection.execute(sa.text("SELECT count(*) FROM tables")).scalar_one() == (
+                len(ids) - 1
+            )
+    finally:
+        engine.dispose()
