@@ -120,6 +120,30 @@ python3 -c 'import json,sys; q=json.loads(sys.argv[1]); assert isinstance(q, lis
 out=$(lakana --output json query list --env dev)
 python3 -c 'import json,sys; assert json.loads(sys.argv[1]) == [], sys.argv[1]' "$out"
 
+# The how-to "Find a run, a query or a deploy" shows one filter per list. The run above succeeded
+# and nothing failed or was cancelled, so a filter on `failed` finds nothing.
+# docs:start find-failed-run
+lakana runs list --env dev --status failed --since 2026-10-18
+# docs:end find-failed-run
+out=$(lakana --output json runs list --env dev --status failed --since 2026-10-18)
+python3 -c 'import json,sys; assert json.loads(sys.argv[1]) == [], sys.argv[1]' "$out"
+out=$(lakana --output json runs list --env dev --status succeeded,failed,cancelled --since 2020-01-01 --trigger manual)
+python3 -c 'import json,sys; assert json.loads(sys.argv[1]) == [], sys.argv[1]' "$out"
+out=$(lakana --output json runs list --env dev --status succeeded --since 2020-01-01 --limit 5)
+python3 -c 'import json,sys; r=json.loads(sys.argv[1]); assert len(r) == 1 and r[0]["status"] == "succeeded", r' "$out"
+# docs:start find-person-query
+lakana query list --env dev --status failed --submitter admin
+# docs:end find-person-query
+out=$(lakana --output json query list --env dev --status failed --submitter admin)
+python3 -c 'import json,sys; assert json.loads(sys.argv[1]) == [], sys.argv[1]' "$out"
+out=$(lakana --output json query list --env dev --status succeeded --submitter admin)
+python3 -c 'import json,sys; q=json.loads(sys.argv[1]); assert q and all(x["submitter"] == "admin" for x in q), q' "$out"
+# docs:start find-repo-deploys
+lakana deploys list --env dev --repo analytics --limit 20
+# docs:end find-repo-deploys
+out=$(lakana --output json deploys list --env dev --repo analytics --limit 20)
+python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert len(d) == 1 and d[0]["repository"] == "analytics", d' "$out"
+
 # docs:start worker-list
 lakana worker list
 # docs:end worker-list

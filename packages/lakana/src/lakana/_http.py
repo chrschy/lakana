@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import time
-from collections.abc import Generator, Iterator, Mapping
+from collections.abc import Generator, Iterator, Mapping, Sequence
 from typing import Any, cast
 from urllib.parse import quote
 
@@ -102,6 +102,29 @@ def query_params(**params: object) -> dict[str, object]:
         than omitting the parameter.
     """
     return {key: value for key, value in params.items() if value is not None}
+
+
+NEXT_CURSOR_HEADER = "X-Next-Cursor"
+"""The response header of a paged list that carries the cursor of the next page."""
+
+
+def csv_param(values: str | Sequence[str] | None) -> str | None:
+    """Join the values of a filter that takes several into the comma-separated form.
+
+    Parameters
+    ----------
+    values
+        One value, several, or `None` for no filter.
+
+    Returns
+    -------
+    str or None
+        ``"failed,cancelled"``; `None` when no value is given, so the filter is left out.
+    """
+    if values is None:
+        return None
+    joined = values if isinstance(values, str) else ",".join(values)
+    return joined or None
 
 
 class HttpTransport:

@@ -10,15 +10,12 @@ because the worker writes them and the server shows them. Each text is a module 
 
 from __future__ import annotations
 
-import base64
-import binascii
-import json
 import re
 import shlex
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from sqlalchemy import delete, select, update
@@ -27,7 +24,6 @@ from sqlalchemy.orm import Session
 from lakana_core.audit.service import AuditService
 from lakana_core.auth import Securable
 from lakana_core.db import db_now
-from lakana_core.errors import ValidationError
 from lakana_core.identifiers import TableRef, shown
 from lakana_core.models import (
     AuditEventType,
@@ -371,11 +367,6 @@ RETRY_MESSAGE = (
 )
 """The message of an attempt whose count failed for a transient reason (text M6)."""
 
-_BAD_CURSOR = (
-    "The cursor is not valid. Start the listing again without `cursor`; pass the `next_cursor` of "
-    "a page only to continue that listing."
-)
-
 
 @dataclass(frozen=True)
 class CheckResultView:
@@ -498,59 +489,6 @@ def view_of(row: CheckResult, task: str, run_as: str | None) -> CheckResultView:
         started_at=row.started_at,
         finished_at=row.finished_at,
     )
-
-
-def encode_cursor(row: CheckResult) -> str:
-    """Encode a result's position in the newest-first order as an opaque cursor.
-
-    Parameters
-    ----------
-    row
-        The last result of the page being returned.
-
-    Returns
-    -------
-    str
-        Unpadded base64url of ``{"o": finished_at, "i": id}``.
-    """
-    raw = json.dumps({"o": row.finished_at.isoformat(), "i": str(row.id)}).encode()
-    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
-
-
-def decode_cursor(cursor: str) -> tuple[datetime, uuid.UUID]:
-    """Decode a cursor produced by `encode_cursor`.
-
-    Parameters
-    ----------
-    cursor
-        The value a client sent back.
-
-    Returns
-    -------
-    tuple of (datetime, uuid.UUID)
-        The ``finished_at`` (UTC) and id to resume after.
-
-    Raises
-    ------
-    ValidationError
-        If `cursor` is not one this server could have issued.
-    """
-    try:
-        data = json.loads(base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)))
-        if not (
-            isinstance(data, dict)
-            and isinstance(data.get("o"), str)
-            and isinstance(data.get("i"), str)
-        ):
-            raise ValidationError(_BAD_CURSOR)
-        finished_at = datetime.fromisoformat(data["o"])
-        if finished_at.tzinfo is None:
-            raise ValidationError(_BAD_CURSOR)
-        finished_at = finished_at.astimezone(UTC)
-        result_id = uuid.UUID(data["i"])
-    except (binascii.Error, ValueError, OverflowError) as exc:
-        raise ValidationError(_BAD_CURSOR) from exc
-    return finished_at, result_id
 
 
 @dataclass(frozen=True)

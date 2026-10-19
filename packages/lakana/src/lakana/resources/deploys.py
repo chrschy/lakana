@@ -6,8 +6,16 @@ import time
 from datetime import datetime
 from typing import Any
 
-from lakana._http import HttpTransport
-from lakana._models import Deploy, DeployAccepted, Deployment, Orphan, Orphans, ProjectVersion
+from lakana._http import NEXT_CURSOR_HEADER, HttpTransport, query_params
+from lakana._models import (
+    Deploy,
+    DeployAccepted,
+    Deployment,
+    DeployPage,
+    Orphan,
+    Orphans,
+    ProjectVersion,
+)
 from lakana._routes import ROUTES
 from lakana.errors import DeployFailed
 
@@ -174,21 +182,83 @@ class Deploys:
         )
         return deploy_from_json(response.json())
 
-    def list(self, environment: str) -> _DeployList:
+    def list(
+        self,
+        environment: str,
+        *,
+        repository: str | None = None,
+        limit: int | None = None,
+        cursor: str | None = None,
+    ) -> _DeployList:
         """List an environment's deploy history, newest first.
+
+        The deploys of one page; `list_page` also returns the cursor of the next one.
 
         Parameters
         ----------
         environment
             Environment name.
+        repository
+            Only this repository's deploys.
+        limit
+            Most deploys returned (1 to 200); `None` leaves it to the server (100).
+        cursor
+            A previous page's `next_cursor`. Send the same `repository` with every page.
 
         Returns
         -------
         list of Deploy
             Newest first.
+
+        Raises
+        ------
+        lakana.errors.ValidationError
+            If `limit` is outside 1 to 200 or `cursor` is not one the server issued for the
+            deploys list.
         """
-        response = self._transport.request(ROUTES["deploys.list"], path_params={"env": environment})
-        return [deploy_from_json(item) for item in response.json()]
+        return self.list_page(environment, repository=repository, limit=limit, cursor=cursor).items
+
+    def list_page(
+        self,
+        environment: str,
+        *,
+        repository: str | None = None,
+        limit: int | None = None,
+        cursor: str | None = None,
+    ) -> DeployPage:
+        """List one page of an environment's deploy history, with the cursor of the next page.
+
+        Parameters
+        ----------
+        environment
+            Environment name.
+        repository
+            Only this repository's deploys.
+        limit
+            Most deploys returned (1 to 200); `None` leaves it to the server (100).
+        cursor
+            A previous page's `next_cursor`. Send the same `repository` with every page.
+
+        Returns
+        -------
+        DeployPage
+            The deploys, newest first, and the cursor for the next page (`None` on the last).
+
+        Raises
+        ------
+        lakana.errors.ValidationError
+            If `limit` is outside 1 to 200 or `cursor` is not one the server issued for the
+            deploys list.
+        """
+        response = self._transport.request(
+            ROUTES["deploys.list"],
+            path_params={"env": environment},
+            params=query_params(repository=repository, limit=limit, cursor=cursor),
+        )
+        return DeployPage(
+            items=[deploy_from_json(item) for item in response.json()],
+            next_cursor=response.headers.get(NEXT_CURSOR_HEADER),
+        )
 
     def wait(
         self,

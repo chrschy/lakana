@@ -861,7 +861,7 @@ environment has a current deployment from it: undeploy it there first.
 ```bash
 lakana deploy --env dev [--ref main] [--dry-run]
 lakana rollback --env dev --to-previous      # or --to <full sha>
-lakana deploys list --env dev
+lakana deploys list --env dev [--repo analytics] [--limit N]
 lakana deployments --env dev
 lakana project-version show <id> --env dev
 lakana orphans --env dev                     # produced earlier, by no current deploy
@@ -931,7 +931,7 @@ lakana run --env dev                                   # the whole DAG, waits, e
 lakana run --env dev --select 'gold.*' --upstream      # gold and everything it reads
 lakana run --env dev --select silver.clean --downstream
 lakana run --env dev --no-wait                         # print the run id and return
-lakana runs list --env dev [--repo analytics] [--limit N]
+lakana runs list --env dev [--repo analytics] [--status failed] [--since 2026-10-18] [--limit N]
 lakana runs show RUN_ID --env dev
 lakana runs logs RUN_ID --env dev [--task gold.daily] [--follow]
 lakana runs cancel RUN_ID --env dev
@@ -945,7 +945,9 @@ checks of that table run, and the task ends `failed` when a blocking check fails
 
 `lakana run` prints the run id first (stderr), then one plain line per task status change, then a
 summary (every task; at most 50 error texts, then `+N more failed tasks` — `--output json` has
-them all). `lakana runs list` returns the newest 100 runs, or `--limit N` (1–200). Exit 0 on
+them all). `lakana runs list` returns the newest 100 runs, or `--limit N` (1–200); `--status`, `--trigger`,
+`--job`, `--since` and `--repo` narrow it and a long list names the command for the next page (see
+[Find a run, a query or a deploy](find-a-run.md)). Exit 0 on
 success; 1 when the run fails, is cancelled or `--timeout` elapses (the run keeps going; the message names `lakana runs show RUN_ID --env ENV`); 7 when a run of the repository
 is already active. `--no-wait` prints only the id.
 

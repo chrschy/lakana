@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from typing import Any
 
 import pyarrow as pa
 import pyarrow.ipc
 
-from lakana._http import HttpTransport
-from lakana._models import QueryListEntry, QueryStatus, WaitingFor
+from lakana._http import NEXT_CURSOR_HEADER, HttpTransport, csv_param, query_params
+from lakana._models import QueryListEntry, QueryListPage, QueryStatus, WaitingFor
 from lakana._routes import ROUTES
 from lakana.errors import QueryFailed, ValidationError
 
@@ -349,8 +349,18 @@ class Queries:
     def __init__(self, transport: HttpTransport) -> None:
         self._transport = transport
 
+    # `list` and `list_page` take the same filters and each documents them: a public method
+    # states its own parameters.
+    # jscpd:ignore-start
     def list(
-        self, environment: str, *, include_ended: bool = False, limit: int = 100
+        self,
+        environment: str,
+        *,
+        include_ended: bool = False,
+        status: str | Sequence[str] | None = None,
+        submitter: str | None = None,
+        limit: int = 100,
+        cursor: str | None = None,
     ) -> _EntryList:
         """List the queries of an environment: running, then queued, then (optionally) ended.
 
@@ -360,6 +370,8 @@ class Queries:
         Running queries come first, longest running first, then queued ones in the order they
         will be taken, with the reason each waits in `waiting_for`; with `include_ended`, then
         the queries that ended in the last 24 hours, newest first. `limit` cuts that order.
+        `status` and `submitter` only narrow what you may see; `list_page` also returns the
+        cursor of the next page.
 
         Parameters
         ----------
@@ -367,8 +379,16 @@ class Queries:
             The environment.
         include_ended
             Also list the queries that ended in the last 24 hours.
+        status
+            Only queries in this status or one of these (``queued``, ``running``,
+            ``succeeded``, ``failed``, ``cancelled``). An ended status lists the ended queries
+            of the last 24 hours, with or without `include_ended`.
+        submitter
+            Only the queries submitted by the principal with this name.
         limit
             Most entries returned (1 to 200).
+        cursor
+            A previous page's `next_cursor`. Send the same filters with every page.
 
         Returns
         -------
@@ -382,14 +402,79 @@ class Queries:
         lakana.errors.NotFound
             If the environment does not exist.
         lakana.errors.ValidationError
-            If `limit` is outside 1 to 200.
+            If `limit` is outside 1 to 200, a status is unknown, or `cursor` is not one the
+            server issued for the queries list.
+        """
+        return self.list_page(
+            environment,
+            include_ended=include_ended,
+            status=status,
+            submitter=submitter,
+            limit=limit,
+            cursor=cursor,
+        ).items
+
+    def list_page(
+        self,
+        environment: str,
+        *,
+        include_ended: bool = False,
+        status: str | Sequence[str] | None = None,
+        submitter: str | None = None,
+        limit: int = 100,
+        cursor: str | None = None,
+    ) -> QueryListPage:
+        """List one page of the queries of an environment, with the cursor of the next page.
+
+        Parameters
+        ----------
+        environment
+            The environment.
+        include_ended
+            Also list the queries that ended in the last 24 hours.
+        status
+            Only queries in this status or one of these (``queued``, ``running``,
+            ``succeeded``, ``failed``, ``cancelled``).
+        submitter
+            Only the queries submitted by the principal with this name.
+        limit
+            Most entries returned (1 to 200).
+        cursor
+            A previous page's `next_cursor`. Send the same filters with every page.
+
+        Returns
+        -------
+        QueryListPage
+            The entries in the order of `list`, and the cursor for the next page (`None` on
+            the last).
+
+        Raises
+        ------
+        lakana.errors.PermissionDenied
+            If you may not submit queries in this environment.
+        lakana.errors.NotFound
+            If the environment does not exist.
+        lakana.errors.ValidationError
+            If `limit` is outside 1 to 200, a status is unknown, or `cursor` is not one the
+            server issued for the queries list.
         """
         response = self._transport.request(
             ROUTES["queries.list"],
             path_params={"env": environment},
-            params={"include_ended": "true" if include_ended else "false", "limit": limit},
+            params=query_params(
+                include_ended="true" if include_ended else "false",
+                status=csv_param(status),
+                submitter=submitter,
+                limit=limit,
+                cursor=cursor,
+            ),
         )
-        return [_entry_from_json(item) for item in response.json()]
+        return QueryListPage(
+            items=[_entry_from_json(item) for item in response.json()],
+            next_cursor=response.headers.get(NEXT_CURSOR_HEADER),
+        )
+
+    # jscpd:ignore-end
 
     def submit(
         self,

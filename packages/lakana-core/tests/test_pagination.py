@@ -1,0 +1,113 @@
+"""The cursor of the newest-first lists: one codec for checks, runs, queries and deploys."""
+
+from __future__ import annotations
+
+import base64
+import enum
+import uuid
+from datetime import UTC, datetime, timedelta, timezone
+
+import pytest
+
+from lakana_core.errors import ValidationError
+from lakana_core.pagination import Position, decode_cursor, encode_cursor, parse_choices
+
+_AT = datetime(2026, 10, 11, 12, 0, tzinfo=UTC)
+
+
+def _raw(payload: bytes) -> str:
+    """Encode a hand-made cursor body the way the codec does.
+
+    Parameters
+    ----------
+    payload
+        The JSON bytes.
+
+    Returns
+    -------
+    str
+        Unpadded base64url.
+    """
+    return base64.urlsafe_b64encode(payload).rstrip(b"=").decode()
+
+
+def test_a_cursor_round_trips_its_position() -> None:
+    row_id = uuid.uuid4()
+    cursor = encode_cursor("runs", _AT, row_id)
+    assert decode_cursor("runs", cursor) == Position(at=_AT, id=row_id, part=0)
+
+
+def test_a_cursor_keeps_its_part_and_normalises_the_zone_to_utc() -> None:
+    row_id = uuid.uuid4()
+    local = _AT.astimezone(timezone(timedelta(hours=2)))
+    position = decode_cursor("queries", encode_cursor("queries", local, row_id, part=2))
+    assert position == Position(at=_AT, id=row_id, part=2)
+    assert position.at.utcoffset() == timedelta(0)
+
+
+def test_a_cursor_of_another_list_is_refused_and_names_both_lists() -> None:
+    cursor = encode_cursor("checks", _AT, uuid.uuid4())
+    with pytest.raises(ValidationError) as caught:
+        decode_cursor("runs", cursor)
+    message = str(caught.value)
+    assert "cursor is not valid" in message
+    assert "`checks` list" in message
+    assert "`runs` list" in message
+    assert "Start the listing again" in message
+
+
+@pytest.mark.parametrize(
+    "cursor",
+    [
+        "!!not-base64",
+        _raw(b'"a string"'),
+        _raw(b'{"k": "runs", "o": 1, "i": "x"}'),
+        _raw(b'{"k": "runs", "o": "2026-10-11T12:00:00", "i": "' + b"0" * 32 + b'"}'),
+        _raw(b'{"k": "runs", "o": "not a time", "i": "x"}'),
+        _raw(b'{"k": "runs", "o": "0001-01-01T00:00:00+23:00", "i": "' + b"0" * 32 + b'"}'),
+        _raw(b'{"o": "2026-10-11T12:00:00+00:00", "i": "' + b"0" * 32 + b'"}'),
+        _raw(
+            b'{"k": "runs", "o": "2026-10-11T12:00:00+00:00", "i": "' + b"0" * 32 + b'", "p": "x"}'
+        ),
+    ],
+)
+def test_a_cursor_that_was_not_issued_is_refused(cursor: str) -> None:
+    with pytest.raises(ValidationError, match="Start the listing again"):
+        decode_cursor("runs", cursor)
+
+
+class _Colour(enum.StrEnum):
+    """Two members to choose from."""
+
+    RED = "red"
+    BLUE = "blue"
+
+
+def test_parse_choices_returns_the_members_in_the_order_given() -> None:
+    assert parse_choices("colour", ["blue", "red"], _Colour) == (_Colour.BLUE, _Colour.RED)
+    assert parse_choices("colour", [], _Colour) == ()
+
+
+def test_parse_choices_names_the_parameter_the_value_and_the_allowed_values() -> None:
+    with pytest.raises(ValidationError) as caught:
+        parse_choices("colour", ["red", "green"], _Colour)
+    message = str(caught.value)
+    assert "`colour`" in message
+    assert "'green'" in message
+    assert "red, blue" in message
+
+
+def test_parse_choices_may_ignore_the_letter_case() -> None:
+    class Upper(enum.StrEnum):
+        """Members whose value is upper case."""
+
+        QUEUED = "QUEUED"
+
+    assert parse_choices("status", ["queued", "QUEUED"], Upper, any_case=True) == (
+        Upper.QUEUED,
+        Upper.QUEUED,
+    )
+    with pytest.raises(ValidationError, match="must be one of QUEUED"):
+        parse_choices("status", ["nope"], Upper, any_case=True)
+    with pytest.raises(ValidationError, match="must be one of QUEUED"):
+        parse_choices("status", ["queued"], Upper)

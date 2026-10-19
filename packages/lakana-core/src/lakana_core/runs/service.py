@@ -54,6 +54,7 @@ from lakana_core.models.run import (
     TERMINAL_TASK_STATUSES,
 )
 from lakana_core.notifications.views import NotificationView, notification_view
+from lakana_core.pagination import decode_cursor, encode_cursor, parse_choices
 from lakana_core.projects.checks import (
     kept_check_tables,
     read_manifest_checks,
@@ -68,8 +69,6 @@ from lakana_core.runs.checks import (
     ASSET,
     SOURCE_CHECK,
     CheckResultView,
-    decode_cursor,
-    encode_cursor,
     view_of,
 )
 from lakana_core.runs.kept import kept_tables
@@ -1632,13 +1631,104 @@ class RunService:
         NotFoundError
             If the environment or the repository does not exist.
         """
+        return self.list_runs_page(p, environment, repository=repository, limit=limit)[0]
+
+    def list_runs_page(
+        self,
+        p: PrincipalRef,
+        environment: str,
+        *,
+        repository: str | None = None,
+        status: Sequence[str] = (),
+        trigger: Sequence[str] = (),
+        job: str | None = None,
+        since: datetime | None = None,
+        limit: int = 100,
+        cursor: str | None = None,
+    ) -> tuple[list[RunView], str | None]:
+        """List an environment's runs, newest first, one page at a time, without tasks.
+
+        Every filter narrows the list; they combine with AND. Runs are ordered by creation time,
+        then id, newest first; a page continues strictly after the last run of the previous one.
+
+        Parameters
+        ----------
+        p
+            The caller.
+        environment
+            Environment name.
+        repository
+            Only this repository's runs.
+        status
+            Only runs in one of these statuses (``queued``, ``running``, ``succeeded``,
+            ``failed``, ``cancelled``); none means any.
+        trigger
+            Only runs started by one of these (``schedule``, ``api``, ``manual``); none means
+            any. An ad-hoc run has no trigger and matches none of them.
+        job
+            Only runs of this job.
+        since
+            Only runs created at or after this time (timezone-aware).
+        limit
+            Most runs returned.
+        cursor
+            The `next_cursor` of the previous page. Send the same filters with every page.
+
+        Returns
+        -------
+        tuple of (list of RunView, str or None)
+            The page, and the cursor of the next one, or `None` on the last.
+
+        Raises
+        ------
+        PermissionDenied
+            Without READ_ENVIRONMENT.
+        NotFoundError
+            If the environment or the repository does not exist.
+        ValidationError
+            If `limit` is below 1, a status or trigger is unknown, `since` has no time zone, or
+            `cursor` is not one this server issued for the runs list.
+        """
         self._authz.authorize(p, Action.READ_ENVIRONMENT, Securable.environment_scope(environment))
+        if limit < 1:
+            raise ValidationError(f"limit must be at least 1, got {limit}.")
+        statuses = parse_choices("status", status, RunStatus)
+        triggers = parse_choices("trigger", trigger, RunTrigger)
+        if since is not None and since.tzinfo is None:
+            raise ValidationError(
+                "`since` has no time zone. Write it with one, for example 2026-10-18T00:00:00Z "
+                "or 2026-10-18T00:00:00+02:00."
+            )
+        position = None if cursor is None else decode_cursor("runs", cursor)
         env = self._environment(environment)
         query = select(Run).where(Run.environment_id == env.id)
         if repository is not None:
             query = query.where(Run.repository_id == self._repository(repository).id)
-        runs = self._session.scalars(query.order_by(Run.created_at.desc(), Run.id).limit(limit))
-        return [self._view(run, env, with_tasks=False) for run in runs]
+        if statuses:
+            query = query.where(Run.status.in_(statuses))
+        if triggers:
+            query = query.where(Run.trigger.in_(triggers))
+        if job is not None:
+            query = query.where(Run.job == job)
+        if since is not None:
+            query = query.where(Run.created_at >= since)
+        if position is not None:
+            query = query.where(
+                or_(
+                    Run.created_at < position.at,
+                    and_(Run.created_at == position.at, Run.id < position.id),
+                )
+            )
+        runs = list(
+            self._session.scalars(
+                query.order_by(Run.created_at.desc(), Run.id.desc()).limit(limit + 1)
+            )
+        )
+        page = runs[:limit]
+        next_cursor = None
+        if len(runs) > limit:
+            next_cursor = encode_cursor("runs", page[-1].created_at, page[-1].id)
+        return [self._view(run, env, with_tasks=False) for run in page], next_cursor
 
     # -- check results -------------------------------------------------------
 
@@ -1731,11 +1821,11 @@ class RunService:
         if table is not None:
             query = query.where(CheckResult.table_name == table)
         if cursor is not None:
-            finished_at, result_id = decode_cursor(cursor)
+            position = decode_cursor("checks", cursor)
             query = query.where(
                 or_(
-                    CheckResult.finished_at < finished_at,
-                    and_(CheckResult.finished_at == finished_at, CheckResult.id < result_id),
+                    CheckResult.finished_at < position.at,
+                    and_(CheckResult.finished_at == position.at, CheckResult.id < position.id),
                 )
             )
         rows = self._session.execute(
@@ -1744,7 +1834,10 @@ class RunService:
             .execution_options(populate_existing=True)
         ).all()
         page = rows[:limit]
-        next_cursor = encode_cursor(page[-1][0]) if len(rows) > limit else None
+        next_cursor = None
+        if len(rows) > limit:
+            last = page[-1][0]
+            next_cursor = encode_cursor("checks", last.finished_at, last.id)
         return [view_of(result, asset, run_as) for result, asset, run_as in page], next_cursor
 
     # -- cancel and resume -------------------------------------------------

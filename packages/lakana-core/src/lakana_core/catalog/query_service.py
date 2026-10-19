@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
-from sqlalchemy import func, select, text, update
+from sqlalchemy import and_, func, or_, select, text, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
@@ -42,6 +42,7 @@ from lakana_core.models import (
     TaskRun,
     WriteMode,
 )
+from lakana_core.pagination import decode_cursor, encode_cursor, parse_choices
 from lakana_core.runs import pools
 from lakana_core.runs.lockdown import (
     ProtectedWriteGuard,
@@ -72,6 +73,12 @@ QUERY_LIST_ENDED_SECONDS = 86_400
 
 QUERY_LIST_MAX = 200
 """The most rows `list_queries` returns."""
+
+_RUNNING, _QUEUED, _ENDED = 0, 1, 2
+"""The parts a listing is read in, in order; a cursor names the part of its last row."""
+
+_LIVE_STATUSES = (QueryRunStatus.RUNNING, QueryRunStatus.QUEUED)
+"""The statuses of a query that has not ended."""
 
 MAX_AHEAD_COUNTED = 10_000
 """The most queued runs a listing counts ahead of a row; beyond it the reason says "more than"."""
@@ -386,6 +393,48 @@ class QueryService:
     ) -> list[QueryListItem]:
         """List the queries of an environment: running, then queued, then (optionally) ended.
 
+        The first page of `list_queries_page` without a filter.
+
+        Parameters
+        ----------
+        p
+            The acting principal.
+        environment
+            Environment name.
+        include_ended
+            Also list the runs that ended in the last 24 hours.
+        limit
+            Most rows returned (1 to 200).
+
+        Returns
+        -------
+        list of QueryListItem
+            The rows, in the order of `list_queries_page`.
+
+        Raises
+        ------
+        PermissionDenied
+            If the caller may not read queries in this environment (as `get_query_run`).
+        NotFoundError
+            If the environment does not exist.
+        ValidationError
+            If `limit` is outside 1 to 200.
+        """
+        return self.list_queries_page(p, environment, include_ended=include_ended, limit=limit)[0]
+
+    def list_queries_page(
+        self,
+        p: PrincipalRef,
+        environment: str,
+        *,
+        include_ended: bool = False,
+        status: Sequence[str] = (),
+        submitter: str | None = None,
+        limit: int = 100,
+        cursor: str | None = None,
+    ) -> tuple[list[QueryListItem], str | None]:
+        """List the queries of an environment, one page at a time: running, queued, then ended.
+
         Who sees which row follows `cancel_query`. A caller with `MANAGE_ENVIRONMENT` on the
         environment who authenticated with a personal token (`permits` only chooses the path;
         `authorize` is the gate, and what is audited) sees every row of this environment.
@@ -398,7 +447,17 @@ class QueryService:
         The rows never hold the SQL, the error message, the lineage, the result location or
         the worker. Order: `RUNNING` runs longest-running first, then `QUEUED` runs in the
         order they will be taken (oldest first), then, with `include_ended`, the runs that ended
-        in the last `QUERY_LIST_ENDED_SECONDS`, newest first; `limit` cuts that order. Every
+        in the last `QUERY_LIST_ENDED_SECONDS`, newest first; `limit` cuts that order, and ties on
+        the time are broken by id. A page continues strictly after the last row of the previous
+        one (`cursor`), in that order. A query that changes status between two pages moves to
+        another part of the order, so a long listing of live queries can miss or repeat it;
+        the ended part never changes.
+
+        `status` and `submitter` only narrow the rows the caller may already see: the rights
+        above are applied first and a filter is one more condition, so `submitter` never shows
+        another principal's query to a caller who does not see it. A status that is no longer
+        running or queued asks for the ended runs of the last 24 hours, with or without
+        `include_ended`. Every
         statement selects columns, never the SQL text. The ended read filters and orders by
         `finished_at` alone, by the index on `(environment_id, finished_at)`: every writer of
         a final status sets it, so a final run without one (none is known) would not appear.
@@ -423,13 +482,20 @@ class QueryService:
             Environment name.
         include_ended
             Also list the runs that ended in the last 24 hours.
+        status
+            Only runs in one of these statuses (``queued``, ``running``, ``succeeded``,
+            ``failed``, ``cancelled``; any letter case); none means any.
+        submitter
+            Only runs submitted by the principal with this name.
         limit
             Most rows returned (1 to 200).
+        cursor
+            The `next_cursor` of the previous page. Send the same filters with every page.
 
         Returns
         -------
-        list of QueryListItem
-            The rows, in the order above.
+        tuple of (list of QueryListItem, str or None)
+            The rows, in the order above, and the cursor of the next page or `None` on the last.
 
         Raises
         ------
@@ -438,7 +504,8 @@ class QueryService:
         NotFoundError
             If the environment does not exist.
         ValidationError
-            If `limit` is outside 1 to 200.
+            If `limit` is outside 1 to 200, a status is unknown, or `cursor` is not one this
+            server issued for the queries list.
         """
         scope = Securable.environment_scope(environment)
         manager = p.task_scope is None and self._authz.permits(p, Action.MANAGE_ENVIRONMENT, scope)
@@ -449,49 +516,78 @@ class QueryService:
         env = self._find_environment(environment)
         if not 1 <= limit <= QUERY_LIST_MAX:
             raise ValidationError(f"limit must be between 1 and {QUERY_LIST_MAX}, not {limit}.")
+        statuses = parse_choices("status", status, QueryRunStatus, any_case=True)
+        position = None if cursor is None else decode_cursor("queries", cursor)
         visible = [QueryRun.environment_id == env.id]
         if not manager:
             visible.append(QueryRun.principal_id == p.id)
             if p.task_scope is not None:
                 visible.append(QueryRun.task_token_id == p.task_scope.token_id)
+        if submitter is not None:
+            visible.append(Principal.name == submitter)
         now = db_now(self._session)
         started = func.coalesce(QueryRun.started_at, QueryRun.created_at)
         cutoff = now - timedelta(seconds=QUERY_LIST_ENDED_SECONDS)
-        reads = [
-            (QueryRun.status == QueryRunStatus.RUNNING, (started, QueryRun.id)),
-            (QueryRun.status == QueryRunStatus.QUEUED, (QueryRun.created_at, QueryRun.id)),
-        ]
-        if include_ended:
-            ended = QueryRun.status.not_in([QueryRunStatus.RUNNING, QueryRunStatus.QUEUED])
-            reads.append(
-                (
-                    ended & (QueryRun.finished_at >= cutoff),
-                    (QueryRun.finished_at.desc(), QueryRun.id),
-                )
+        final = [m for m in QueryRunStatus if m not in _LIVE_STATUSES]
+        wanted_final = [m for m in statuses if m in final]
+        # (part, condition, sort time, oldest first); a cursor names the part of its last row
+        parts: list[tuple[int, Any, Any, bool]] = []
+        if not statuses or QueryRunStatus.RUNNING in statuses:
+            parts.append((_RUNNING, QueryRun.status == QueryRunStatus.RUNNING, started, True))
+        if not statuses or QueryRunStatus.QUEUED in statuses:
+            parts.append(
+                (_QUEUED, QueryRun.status == QueryRunStatus.QUEUED, QueryRun.created_at, True)
             )
-        rows = []
-        for condition, order in reads:
-            if len(rows) >= limit:
+        if wanted_final or (include_ended and not statuses):
+            ended = QueryRun.status.in_(wanted_final or final) & (QueryRun.finished_at >= cutoff)
+            parts.append((_ENDED, ended, QueryRun.finished_at, False))
+        found: list[tuple[int, Any]] = []
+        for part, condition, when, oldest_first in parts:
+            if len(found) > limit:
                 break
-            rows += self._session.execute(
-                select(
-                    QueryRun.id,
-                    Principal.name,
-                    QueryRun.write_mode,
-                    QueryRun.target_name,
-                    QueryRun.status,
-                    QueryRun.created_at,
-                    QueryRun.started_at,
-                    QueryRun.finished_at,
-                    QueryRun.error_cause,
-                    QueryRun.principal_id,
-                    QueryRun.task_run_id,
-                )
-                .outerjoin(Principal, Principal.id == QueryRun.principal_id)
-                .where(*visible, condition)
-                .order_by(*order)
-                .limit(limit - len(rows))
-            ).all()
+            if position is not None and part < position.part:
+                continue
+            after = []
+            if position is not None and part == position.part:
+                after = [
+                    or_(
+                        (when > position.at) if oldest_first else (when < position.at),
+                        and_(when == position.at, QueryRun.id > position.id),
+                    )
+                ]
+            found += [
+                (part, row)
+                for row in self._session.execute(
+                    select(
+                        QueryRun.id,
+                        Principal.name,
+                        QueryRun.write_mode,
+                        QueryRun.target_name,
+                        QueryRun.status,
+                        QueryRun.created_at,
+                        QueryRun.started_at,
+                        QueryRun.finished_at,
+                        QueryRun.error_cause,
+                        QueryRun.principal_id,
+                        QueryRun.task_run_id,
+                    )
+                    .outerjoin(Principal, Principal.id == QueryRun.principal_id)
+                    .where(*visible, condition, *after)
+                    .order_by(when if oldest_first else when.desc(), QueryRun.id)
+                    .limit(limit + 1 - len(found))
+                ).all()
+            ]
+        page = found[:limit]
+        rows = [row for _, row in page]
+        next_cursor = None
+        if len(found) > limit:
+            part, last = page[-1]
+            moment = {
+                _RUNNING: last.started_at or last.created_at,
+                _QUEUED: last.created_at,
+                _ENDED: last.finished_at,
+            }[part]
+            next_cursor = encode_cursor("queries", moment, last.id, part)
         reasons = self._reasons_for_listing(rows, now, p.id)
         return [
             QueryListItem(
@@ -507,7 +603,7 @@ class QueryService:
                 waiting_for=reasons.get(row.id),
             )
             for row in rows
-        ]
+        ], next_cursor
 
     def _reasons_for_listing(
         self, rows: Sequence[Any], now: datetime, caller_id: uuid.UUID

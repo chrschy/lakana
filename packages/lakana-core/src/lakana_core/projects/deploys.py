@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from typing import Any, cast
 
 import sqlglot
-from sqlalchemy import delete, func, insert, select, update
+from sqlalchemy import and_, delete, func, insert, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -52,6 +52,7 @@ from lakana_core.models import (
     TableType,
 )
 from lakana_core.models.run import ACTIVE_RUN_STATUSES
+from lakana_core.pagination import decode_cursor, encode_cursor
 from lakana_core.projects.checks import ParsedCheck, check_sql_references, may_read_every
 from lakana_core.projects.dag import ProjectGraph
 from lakana_core.projects.diff import DeployDiff, diff_manifests
@@ -1083,15 +1084,74 @@ class DeployService:
         NotFoundError
             If the environment does not exist.
         """
+        return self.history_page(p, environment, limit=limit)[0]
+
+    def history_page(
+        self,
+        p: PrincipalRef,
+        environment: str,
+        *,
+        repository: str | None = None,
+        limit: int = 100,
+        cursor: str | None = None,
+    ) -> tuple[list[DeployRunView], str | None]:
+        """List an environment's deploy history, newest first, one page at a time.
+
+        Runs are ordered by creation time, then id, newest first; a page continues strictly
+        after the last run of the previous one.
+
+        Parameters
+        ----------
+        p
+            The acting principal.
+        environment
+            Environment name.
+        repository
+            Only this repository's runs.
+        limit
+            Most runs returned.
+        cursor
+            The `next_cursor` of the previous page. Send the same `repository` with every page.
+
+        Returns
+        -------
+        tuple of (list of DeployRunView, str or None)
+            The page, and the cursor of the next one, or `None` on the last.
+
+        Raises
+        ------
+        PermissionDenied
+            Without READ_ENVIRONMENT.
+        NotFoundError
+            If the environment or the repository does not exist.
+        ValidationError
+            If `limit` is below 1 or `cursor` is not one this server issued for the deploys list.
+        """
         env = self._authorize_read(p, environment)
-        runs = self._session.execute(
-            select(DeployRun)
-            .where(DeployRun.environment_id == env.id)
-            .order_by(DeployRun.created_at.desc())
-            .limit(limit)
-        ).scalars()
+        if limit < 1:
+            raise ValidationError(f"limit must be at least 1, got {limit}.")
+        position = None if cursor is None else decode_cursor("deploys", cursor)
+        query = select(DeployRun).where(DeployRun.environment_id == env.id)
+        if repository is not None:
+            query = query.where(DeployRun.repository_id == self._repository(repository).id)
+        if position is not None:
+            query = query.where(
+                or_(
+                    DeployRun.created_at < position.at,
+                    and_(DeployRun.created_at == position.at, DeployRun.id < position.id),
+                )
+            )
+        runs = list(
+            self._session.execute(
+                query.order_by(DeployRun.created_at.desc(), DeployRun.id.desc()).limit(limit + 1)
+            ).scalars()
+        )
+        page = runs[:limit]
+        next_cursor = None
+        if len(runs) > limit:
+            next_cursor = encode_cursor("deploys", page[-1].created_at, page[-1].id)
         reads = _WarningReads()
-        return [self._view(run, p, reads) for run in runs]
+        return [self._view(run, p, reads) for run in page], next_cursor
 
     def deployments(self, p: PrincipalRef, environment: str) -> list[DeploymentView]:
         """List the current project version per repository.
