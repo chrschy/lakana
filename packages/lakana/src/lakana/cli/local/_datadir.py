@@ -112,6 +112,17 @@ class DataDir:
         return self.root / "master.key"
 
     @property
+    def bootstrap_token_path(self) -> Path:
+        """Where the server writes a first-administrator token it had to mint.
+
+        Returns
+        -------
+        Path
+            `<root>/bootstrap-token`.
+        """
+        return self.root / "bootstrap-token"
+
+    @property
     def server_pid(self) -> Path:
         """The server pidfile.
 

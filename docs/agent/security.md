@@ -1995,6 +1995,19 @@ carries any of the three, and a grant below instance scope never satisfied these
 - **The bootstrap is the one exemption.** `AllowAllAuthorization` asks for no role: it creates
   the first administrator before one exists. Nothing else in `packages/*/src` constructs one,
   which a test pins.
+- **A minted bootstrap token never reaches a log (#208).** When `bootstrap_if_needed` has to
+  create the first administrator and no key id was supplied, it writes the token to
+  `LAKANA_BOOTSTRAP_TOKEN_FILE` (`write_token_file`: `O_CREAT | O_EXCL | O_NOFOLLOW`, mode 0600
+  whatever the umask, `fsync`ed, the file removed again if the commit fails) and the server
+  logs, at WARNING, only the administrator's name, the key id and the path. The setting has no
+  default (the server has no data directory of its own); unset in that case, start-up fails
+  naming it, before any state changes. An existing file or symlink at the path is refused, not
+  overwritten. A supplied key id already used by some PAT (a revoked one keeps its key id)
+  fails start-up with `ConflictError`; no random token is invented. The supplied-credential
+  path is unchanged: DEBUG, no token, no file. Audit of other token sources: PAT issue/mint
+  returns the token once in the HTTP response only, task tokens go to the child's stdin, and
+  `PatService`, `TaskTokenService` and the auth paths log no token; a test pins that the
+  bootstrap emits no `lakana_pat_` string at any level.
 - **A principal's own tokens** stay administrator-only: issuing, listing and revoking a personal
   access token needs `MANAGE_TOKEN` whoever it is for. This element adds no self-service; that
   belongs to the sign-in design (#32).
@@ -3530,10 +3543,8 @@ checklist true; `packages/lakana-worker/tests/test_git.py` pins each line.
   environment as well as the server's, though the worker has no use for it, is accepted
   because in local mode the same local user already administers both processes — there is
   no separate worker operator to keep it from. When the server honours a caller-supplied
-  bootstrap credential, it logs only the key id at `WARNING`, never the token — the caller
-  (the CLI) already holds the full value, so re-logging it would put a working secret in
-  server output for no reason; a credential the server had to mint itself (a key id
-  collision) is still logged in full, since that log line is the only way to learn it.
+  bootstrap credential, it logs only the key id at `DEBUG`, never the token — the caller
+  (the CLI) already holds the full value. The server never logs a token at all (#208, below).
   **Later runs never repeat this.** `_child_env` builds the child environment from
   `os.environ` plus explicit overrides; on any run after the first (`key_id`/`secret` both
   `None`), it explicitly pops `LAKANA_BOOTSTRAP_PAT_KEY_ID`/`_SECRET` from that environment, so
@@ -3546,13 +3557,11 @@ checklist true; `packages/lakana-worker/tests/test_git.py` pins each line.
   passes no bootstrap credential — but the database has no admin either, since migration
   never completed — so the server's own lockout recovery (`bootstrap_if_needed`, above) acts
   exactly as it would for any instance found with no active admin: it mints a fresh
-  credential and, because nothing else on this path already holds that value, logs it in
-  full to the server's own output (`server | Minted a bootstrap PAT … lakana_pat_…`), the same
-  as a key id collision does. This is a second, real path to a logged admin token, distinct
-  from the key id collision case above; the CLI itself never sees or prints it, and its own
-  message on this path still only tells the user to delete the data directory and start over
-  — a correct instruction (the database is otherwise unmigrated and unusable), if a shorter
-  path than reading the logged token line would already give.
+  credential and writes it to `<data dir>/bootstrap-token` (`_child_env` sets
+  `LAKANA_BOOTSTRAP_TOKEN_FILE` there, inside the 0700 data directory; an inherited value
+  wins), never to the log. The CLI itself never sees or prints it, and its own message on this
+  path still only tells the user to delete the data directory and start over — a correct
+  instruction (the database is otherwise unmigrated and unusable).
 - **The `local` profile is saved before `dev` is created.** If `environments.create` then
   fails or is interrupted (e.g. Ctrl-C), the admin token is already on disk. The next run's
   `_later_run_profile_check` notices `dev` is missing and creates it itself, over the REST

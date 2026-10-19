@@ -18,8 +18,11 @@ restores the bootstrap principal to admin from scratch.
 
 from __future__ import annotations
 
+import contextlib
+import os
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -33,7 +36,7 @@ from lakana_core.auth import (
     Securable,
     SecurableKind,
 )
-from lakana_core.errors import ConflictError
+from lakana_core.errors import ConflictError, ValidationError
 from lakana_core.grants.roles import Role
 from lakana_core.grants.service import GrantService, active_instance_admin_ids
 from lakana_core.identity.pats import PatService
@@ -206,6 +209,67 @@ def _pat_key_id_exists(session: Session, key_id: str) -> bool:
     )
 
 
+def write_token_file(path: Path, token: str) -> None:
+    """Write a freshly minted token to a file only its owner can read.
+
+    The file is created exclusively (`O_CREAT | O_EXCL`), so an existing file is never overwritten
+    and a symlink at the path is never followed (`O_NOFOLLOW` as well); its mode is 0600
+    whatever the umask; the content is flushed to disk before this returns. Missing parent
+    directories are created with mode 0700.
+
+    Parameters
+    ----------
+    path
+        Where to write the token.
+    token
+        The full token; written with a trailing newline, and nothing else.
+
+    Raises
+    ------
+    ConflictError
+        If something already exists at `path` (a file, a directory or a symlink), or the file
+        cannot be written for another reason. The message names the path and the next step.
+    """
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ConflictError(
+            f"Could not write the first administrator's token to {path}: {exc.strerror}. Point "
+            "LAKANA_BOOTSTRAP_TOKEN_FILE at a path in a directory the server's user can write."
+        ) from exc
+    try:
+        fd = os.open(
+            path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+            0o600,
+        )
+    except FileExistsError as exc:
+        raise ConflictError(
+            f"The first administrator's token cannot be written: {path} already exists (a file "
+            "or a symlink). It may hold an earlier token; remove it after use, or point "
+            "LAKANA_BOOTSTRAP_TOKEN_FILE at a path that does not exist, then start the "
+            "server again."
+        ) from exc
+    except OSError as exc:
+        raise ConflictError(
+            f"Could not write the first administrator's token to {path}: {exc.strerror}. Point "
+            "LAKANA_BOOTSTRAP_TOKEN_FILE at a path in a directory the server's user can write."
+        ) from exc
+    try:
+        with os.fdopen(fd, "w") as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            handle.write(token + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+    except OSError as exc:
+        with contextlib.suppress(OSError):
+            path.unlink()
+        raise ConflictError(
+            f"Could not write the first administrator's token to {path}: {exc.strerror}. Point "
+            "LAKANA_BOOTSTRAP_TOKEN_FILE at a path on a disk that has room and accepts writes."
+        ) from exc
+
+
 def admin_exists(session: Session) -> bool:
     """Check whether an active instance admin already exists.
 
@@ -231,6 +295,7 @@ def bootstrap_if_needed(
     *,
     key_id: str | None = None,
     secret: str | None = None,
+    token_file: Path | None = None,
 ) -> str | None:
     """Restore the instance's admin, but only when none currently exists.
 
@@ -260,11 +325,9 @@ def bootstrap_if_needed(
     3. Grants it instance ADMIN (re-granting even if a prior grant was
        revoked).
     4. Mints one fresh PAT, via `PatService.issue(..., commit=False)`
-       — which itself records `PAT_ISSUED`. If `key_id`
-       is given but some PAT row (of any principal, revoked or not —
-       revoking a row never frees its `key_id`) already uses it, a fresh
-       random credential is minted instead; it is still logged the same
-       way.
+       — which itself records `PAT_ISSUED`. A random token is written to `token_file`
+       (`write_token_file`) before the commit and never returned to be logged; the file is
+       removed again if the commit fails. A supplied `key_id`/`secret` writes no file.
     5. Records `AuditEventType.BOOTSTRAP_ADMIN_RESTORED`.
 
     Steps 1's reactivation and 2 through 5 share one commit — nothing above
@@ -284,23 +347,47 @@ def bootstrap_if_needed(
     secret
         A specific secret to issue the recovery PAT with. Same
         restriction as `key_id`.
+    token_file
+        Where to write a randomly minted token. Required when `key_id` is `None`; unused when a
+        credential is supplied. From `Settings.bootstrap_token_file`.
 
     Returns
     -------
     str or None
-        The freshly minted PAT's full token value, to log once at
-        `WARNING`; it is never retrievable again. `None` if an active
-        instance admin already exists, in which case nothing else in
+        The freshly minted PAT's full token value. It must never be logged: a
+        random token is in `token_file`, a supplied one is already known to the caller.
+        `None` if an active instance admin already exists, in which case nothing else in
         this function runs.
 
     Raises
     ------
+    ValidationError
+        If a random token would be minted and no `token_file` is given. Raised before anything
+        changes.
     ConflictError
-        If `ensure_bootstrap_principal` cannot create or find the
-        principal named `name`.
+        If `key_id` is supplied and some PAT already uses it (a collision never mints a
+        different token); if `ensure_bootstrap_principal` cannot create or find the
+        principal named `name`; or if the token file already exists or cannot be written.
     """
     if admin_exists(session):
         return None
+    if key_id is None and token_file is None:
+        raise ValidationError(
+            "The server has to create the first administrator and no token was supplied, so "
+            "it would write a new token to a file, but LAKANA_BOOTSTRAP_TOKEN_FILE is not "
+            "set. Set it to a path only the server's user can reach (for example "
+            "/var/lib/lakana/bootstrap-token), or supply LAKANA_BOOTSTRAP_PAT_KEY_ID and "
+            "LAKANA_BOOTSTRAP_PAT_SECRET."
+        )
+    if key_id is not None and _pat_key_id_exists(session, key_id):
+        raise ConflictError(
+            f"The first administrator cannot be restored: the key id {key_id!r} in "
+            "LAKANA_BOOTSTRAP_PAT_KEY_ID is already used by an earlier token (a revoked token "
+            "keeps its key id). Set LAKANA_BOOTSTRAP_PAT_KEY_ID and LAKANA_BOOTSTRAP_PAT_SECRET "
+            "to a new pair (a key id never used before, for example 16 random hex digits), or "
+            "remove both and set LAKANA_BOOTSTRAP_TOKEN_FILE to have a new token written to a "
+            "file; then start the server again."
+        )
     authz = AllowAllAuthorization()
     principal = ensure_bootstrap_principal(session, name)
     principal_row = session.get(Principal, principal.id)
@@ -326,17 +413,22 @@ def bootstrap_if_needed(
 
     ensure_bootstrap_admin_grant(session, principal, authz, commit=False)
 
-    resolved_key_id, resolved_secret = key_id, secret
-    if resolved_key_id is not None and _pat_key_id_exists(session, resolved_key_id):
-        resolved_key_id, resolved_secret = None, None
     issued = PatService(session, authz).issue(
         principal,
         principal.name,
         name="bootstrap",
-        key_id=resolved_key_id,
-        secret=resolved_secret,
+        key_id=key_id,
+        secret=secret,
         commit=False,
     )
+    written: Path | None = None
+    if key_id is None and token_file is not None:
+        try:
+            write_token_file(token_file, issued.token)
+        except ConflictError:
+            session.rollback()
+            raise
+        written = token_file
 
     AuditService(session).record(
         principal.id,
@@ -344,5 +436,11 @@ def bootstrap_if_needed(
         securable=Securable.instance_scope(),
         detail={"key_id": issued.key_id},
     )
-    session.commit()
+    try:
+        session.commit()
+    except BaseException:
+        if written is not None:
+            with contextlib.suppress(OSError):
+                written.unlink()
+        raise
     return issued.token

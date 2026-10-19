@@ -114,7 +114,7 @@ Each cell is a summary. The page named in the last column has the detail. The ch
 
 | Release | What it asks | Where |
 |---|---|---|
-| 0.16.0 | Migrations `0036` to `0041`. `GET /api/v1/grants` without a filter now returns every grant, in pages of 100 (follow `X-Next-Cursor`), and the principal and group lists come newest first, paged the same way. Filters and masks that exist are not checked again; a new one is type-checked when it is created. Descriptions appear after the next deploy; table readers count from the upgrade on; search finds the columns of existing tables once the sweep has filled them in (1,000 tables take about 20 hours). Upgrade the workers together with the server, so that every task failure gets its code. | [Notes for 0.16.0](#notes-for-0160) |
+| 0.16.0 | Migrations `0036` to `0041`. `GET /api/v1/grants` without a filter now returns every grant, in pages of 100 (follow `X-Next-Cursor`), and the principal and group lists come newest first, paged the same way. Filters and masks that exist are not checked again; a new one is type-checked when it is created. Descriptions appear after the next deploy; table readers count from the upgrade on; search finds the columns of existing tables once the sweep has filled them in (1,000 tables take about 20 hours). Upgrade the workers together with the server, so that every task failure gets its code. | [Notes for 0.16.0](#what-every-upgrade-asks) |
 | 0.15.0 | Migration `0035` (a database check on a secret's use; it stops and names any inconsistent secret). While an environment has a storage secret, changing its storage options needs `MANAGE_SECRET` there as well as `MANAGE_ENVIRONMENT`; the Compose set-up attaches its storage secret to `dev` only together with the bundle's own options. A commit through the Iceberg REST catalog is refused when one of its manifest files is over 64 MiB. | [Notes for 0.15.0](#notes-for-0150) |
 | 0.14.0 | Migration `0034` (binds each secret to one use). New images are `ghcr.io/lakana-labs/lakana`: change `LAKANA_IMAGE` in a bundle's `.env` before you pull. Replace the bundle's `compose.yaml`: SeaweedFS runs as two containers behind an S3 gateway, and `docker compose down` must come before `up`. A secret has one use (a package index, a repository, or its own environment) and is refused for any other; a secret the migration could not bind is bound by an administrator with `lakana secret bind`. | [Notes for 0.14.0](#notes-for-0140) |
 | 0.13.0 | Migration `0033` (adds `schema_id` to row filters and column masks). Iceberg tables are read by field id: a renamed column keeps its data; a column dropped and added again, also by a type change with `evolve_schema`, is a new column whose older rows read as NULL; reads of a table whose nested fields were renamed or re-added, that has a column type Lakana cannot read, or whose column names differ only in letter case are refused. A commit through the Iceberg REST catalog that adds a data file without field ids is refused, as is one of more than 2,000 data files or one whose check takes over 60 seconds; files committed earlier without field ids read as NULL. A read under a row filter or column mask is refused when a column the policy uses was renamed or replaced since the policy was created: create the policy again for its column, then revoke the old one. A query that changes data is refused wherever the statement sits. Errors on reads under a row filter or column mask show a fixed message. | [Notes for 0.13.0](#notes-for-0130) |
@@ -125,6 +125,32 @@ Each cell is a summary. The page named in the last column has the detail. The ch
 | 0.9.0 | Upgrade every worker before you deploy Python assets; rewrite `asset(deps=...)` as `asset(inputs=...)`; move helper modules out of `assets/`; an older bundle needs three additions. | [Upgrading](../how-to/deploy-with-compose.md#upgrading), [Projects and deploys](../how-to/projects.md) |
 
 ## Notes for the next release
+
+### The first administrator's token is written to a file, never to the log
+
+When the server has to create its first administrator and no token was supplied
+(`LAKANA_BOOTSTRAP_PAT_KEY_ID` unset), it used to print the new token in a WARNING line of its
+log, where anyone who could read the log (`docker compose logs`, a log shipper) found a working
+administrator's token. It now writes the token to a new file and logs only the administrator's
+name, the token's key id and the file's path.
+
+- **New setting `LAKANA_BOOTSTRAP_TOKEN_FILE`**, with no default: the server has no data directory
+  of its own to put the file in. The file is created with mode 0600, readable by the server's user
+  only, and never overwritten: if it exists (or is a symlink), the server refuses to start; read
+  it, sign in, and **delete it after use**.
+- **Who is affected.** An instance that starts the server itself, outside the Compose bundle and
+  `lakana server start --local`, without `LAKANA_BOOTSTRAP_PAT_KEY_ID`, and has no administrator
+  yet (a new instance, or the recovery in [step 5 of "Delegation needs the ADMIN
+  role"](#delegation-needs-the-admin-role)). It stops at start-up with a message that names the setting: set
+  `LAKANA_BOOTSTRAP_TOKEN_FILE` to a path in a directory only the server's user can enter, or
+  supply `LAKANA_BOOTSTRAP_PAT_KEY_ID` and `LAKANA_BOOTSTRAP_PAT_SECRET`. A running instance
+  that already has an administrator is not affected. The Compose bundle and a local instance are
+  not affected either: both supply the token themselves, and a local instance's later run that has
+  to mint one writes `bootstrap-token` in its data directory.
+- **A key id that is already taken now stops the start-up.** Before, the server made up a
+  different token and logged it. Now it refuses and says so: use a key id never used before (a
+  revoked token keeps its key id), or unset the key id and set `LAKANA_BOOTSTRAP_TOKEN_FILE`.
+  Only the recovery with every administrator revoked reaches this; see the recovery steps below.
 
 ### Table locations are recorded, and a create that never finished is cleaned up
 
@@ -832,31 +858,32 @@ docker compose logs server
 ```
 
    The server creates the restored principal, or reactivates it, gives it the `ADMIN` role,
-   revokes its earlier tokens and issues one new token. What you see depends on where the token
-   comes from (the name is the one you configured):
+   revokes its earlier tokens and issues one new token. **It never prints the token.** What
+   happens depends on where the token comes from (the name is the one you configured):
 
-   - A token the server made up: its log has `Minted a bootstrap PAT for 'admin'` at the level
-     WARNING, followed by the new token. The server prints it this once. This is the line of an
-     instance that was set up with the bundle.
-   - The token made of the values in `.env`, when the database never held a token with the key id
-     in `LAKANA_BOOTSTRAP_PAT_KEY_ID`: the server prints no token, and only a DEBUG line (set
-     `LAKANA_LOG__LEVEL` to `DEBUG` to see it) says it was restored. The token that works is
-     the one made of the two values in `.env`:
-     `lakana_pat_<LAKANA_BOOTSTRAP_PAT_KEY_ID>_<LAKANA_BOOTSTRAP_PAT_SECRET>`.
-
-   Before the restart, make sure the server's `LAKANA_LOG__LEVEL` is not `ERROR`: at that level
-   the line with the token is not printed, and a token the server made up is lost.
+   - The Compose bundle, and any server started with `LAKANA_BOOTSTRAP_PAT_KEY_ID`: the key id in
+     `.env` was used by the token of the first start, and a revoked token keeps its key id, so the
+     server **stops with an error** that names `LAKANA_BOOTSTRAP_PAT_KEY_ID` and no administrator
+     is restored. Give it a pair never used before: in `.env`, replace
+     `LAKANA_BOOTSTRAP_PAT_KEY_ID` with 16 new hex digits and `LAKANA_BOOTSTRAP_PAT_SECRET` with a
+     new random string (for example the output of `openssl rand -hex 8` and of `openssl rand -hex 32`),
+     then `docker compose up -d server`. The token that works is
+     `lakana_pat_<LAKANA_BOOTSTRAP_PAT_KEY_ID>_<LAKANA_BOOTSTRAP_PAT_SECRET>`, made of the new
+     values; the server logs only a DEBUG line (set `LAKANA_LOG__LEVEL` to `DEBUG` to see it).
+     Sign in with it.
+   - A server started with `LAKANA_BOOTSTRAP_TOKEN_FILE` and no key id: its log has a WARNING line
+     that names the administrator, the key id and the file, and the token is in that file
+     (mode 0600; read it as the server's user). **Delete the file** once you have signed in; the
+     server refuses to start while a file is in the way.
 
    Sign in with the token, as in
    [Revoking the bootstrap credential](../how-to/deploy-with-compose.md#revoking-the-bootstrap-credential),
    and give the `ADMIN` role back to the others.
 
-   If you missed the line, read the server's log again with the last command above: the line is
-   still there as long as the server's container was not created anew. A second restart does
-   **not** issue another token, because an administrator exists again. If the line is gone, or
-   was never printed, run the `UPDATE` once more and restart the server: it restores the
-   principal again, with another new token. Deactivating the principals instead of revoking
-   their grants is not described here.
+   A second restart does **not** issue another token, because an administrator exists again. If
+   you lost the token, run the `UPDATE` once more and restart the server: it restores the
+   principal again, with another new token (a new key id pair, or a new file, as above).
+   Deactivating the principals instead of revoking their grants is not described here.
 
 ### Package sources are checked
 
