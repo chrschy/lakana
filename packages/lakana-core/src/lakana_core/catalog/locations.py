@@ -374,25 +374,18 @@ def other_table_locations(
     return found
 
 
-def table_root_locations(
-    session: Session,
-    *,
-    environment_id: uuid.UUID | None = None,
-    exclude: uuid.UUID | None = None,
-) -> list[str]:
-    """List the root locations of managed tables, derived from their metadata files.
+def table_root_locations(session: Session) -> list[str]:
+    """List the root locations of managed tables in every environment, from their metadata files.
 
-    The check `CatalogService.maintain` makes for tables nested in the one it maintains, and the
-    sweep for tables nested in a location it is about to purge.
+    The check the location sweep makes for tables nested in a location it is about to purge, and
+    the set of known locations its count of directories without a record leaves alone.
+    Maintenance uses `other_table_locations`, which also reads the records in the same
+    statement.
 
     Parameters
     ----------
     session
         Database session.
-    environment_id
-        Only this environment's tables; every environment when `None`.
-    exclude
-        A table to leave out.
 
     Returns
     -------
@@ -401,12 +394,6 @@ def table_root_locations(
         does not derive contributes nothing.
     """
     query = select(Table.metadata_location).where(Table.metadata_location.is_not(None))
-    if environment_id is not None:
-        query = query.join(Namespace, Table.namespace_id == Namespace.id).where(
-            Namespace.environment_id == environment_id
-        )
-    if exclude is not None:
-        query = query.where(Table.id != exclude)
     return [
         location
         for (metadata_location,) in session.execute(query).all()

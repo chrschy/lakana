@@ -33,6 +33,7 @@ from lakana_core.catalog.locations import (
     CLAIM_RELEASED_MESSAGE,
     claim_holder,
     lock_location,
+    other_table_locations,
     publish_location,
 )
 from lakana_core.catalog.service import CatalogService
@@ -46,6 +47,7 @@ from lakana_core.models import (
     Table,
     TableLocation,
     TableLocationState,
+    TableType,
     WriteMode,
 )
 from lakana_core.storage.resolver import ResolvedStorage, StorageResolver
@@ -736,3 +738,32 @@ def test_a_drop_makes_the_record_a_tombstone_in_its_own_transaction(
     assert record.state is TableLocationState.DROPPED
     assert record.table_id == created.uuid
     assert other.scalar(select(Table.id)) is None
+
+
+def test_other_table_locations_reads_records_and_rows_and_skips_what_does_not_derive(
+    session: Session, principal: PrincipalRef, store: Path
+) -> None:
+    """Records and row roots, itself left out; a row with no metadata directory adds nothing."""
+    catalog = _catalog(session, principal, store)
+    own = catalog.create_table(principal, _ref("gold.orders"), schema=_schema())
+    other = catalog.create_table(principal, _ref("gold.daily"), schema=_schema())
+    own_location = own.metadata_location.rsplit("/metadata/", 1)[0]
+    other_location = other.metadata_location.rsplit("/metadata/", 1)[0]
+    namespace_id = session.scalars(select(Table.namespace_id).where(Table.id == own.uuid)).one()
+    session.add(
+        Table(
+            id=uuid.uuid4(),
+            namespace_id=namespace_id,
+            name="odd",
+            table_type=TableType.ICEBERG,
+            metadata_location=f"file://{store}/managed/gold/odd.metadata.json",
+        )
+    )
+    session.commit()
+    environment_id = session.scalars(select(Environment.id)).one()
+
+    found = other_table_locations(
+        session, environment_id=environment_id, table_id=own.uuid, location=own_location
+    )
+
+    assert sorted(set(found)) == [other_location]
