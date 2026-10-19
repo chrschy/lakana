@@ -419,6 +419,28 @@ def test_runs_logs_follow_stops_when_the_task_is_complete(tmp_path: Path) -> Non
     assert [r.url.path.endswith("/log") for r in api.requests].count(True) == 1
 
 
+def test_a_followed_log_that_is_complete_is_not_fetched_again(tmp_path: Path) -> None:
+    """Two tasks: the one whose log is complete is skipped on the later polls."""
+    api = FakeApi()
+    runs = iter(["running", "running", "succeeded"])
+    last = ["running"]
+
+    def run_response(request: httpx.Request) -> httpx.Response:
+        last[0] = next(runs, last[0])
+        return httpx.Response(
+            200, json=_run(last[0], _task("a.b", "succeeded"), _task("c.d", "running"))
+        )
+
+    api.routes["GET", _RUN_PATH] = run_response
+    api.on("GET", f"{_RUN_PATH}/tasks/a.b/log", json=_log_body("done\n", 5, complete=True))
+    api.on("GET", f"{_RUN_PATH}/tasks/c.d/log", json=_log_body("", 0))
+    followed = invoke(make_state(tmp_path, api), "runs", "logs", _ID, "--env", "dev", "--follow")
+    assert followed.exit_code == 0, followed.output
+    paths = [r.url.path for r in api.requests if r.url.path.endswith("/log")]
+    assert paths.count(f"{_RUN_PATH}/tasks/a.b/log") == 1
+    assert paths.count(f"{_RUN_PATH}/tasks/c.d/log") == 3
+
+
 def test_runs_logs_follow_starts_over_when_the_log_shrank(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
