@@ -427,8 +427,11 @@ class Runs:
         )
         return run_from_json(response.json())
 
-    def log(self, environment: str, run_id: str, asset: str) -> TaskLog:
-        """Return a task's free-text log and attempts.
+    def log(self, environment: str, run_id: str, asset: str, offset: int | None = None) -> TaskLog:
+        """Return a task's free-text log and attempts, all of it or from a byte offset.
+
+        To follow a log, pass the previous answer's `next_offset` as `offset`: each byte then
+        travels once. One answer carries at most 1 MiB; `more` says whether to ask again at once.
 
         Parameters
         ----------
@@ -438,21 +441,29 @@ class Runs:
             The run.
         asset
             The task's dotted table name.
+        offset
+            The byte to read from; `None` returns the whole log.
 
         Returns
         -------
         TaskLog
-            Text and attempts.
+            Text, where it ends in the stored log (`next_offset`), whether more is stored,
+            whether the task is finished and its log read to the end, and attempts.
         """
         response = self._transport.request(
             ROUTES["runs.log"],
             path_params={"env": environment, "run_id": run_id, "asset": asset},
+            params=query_params(offset=offset),
         )
         data = response.json()
         return TaskLog(
             run_id=data["run_id"],
             asset=data["asset"],
             text=data["text"],
+            next_offset=data["next_offset"],
+            more=data["more"],
+            complete=data["complete"],
+            reset=data["reset"],
             attempts=[
                 TaskAttempt(
                     attempt=a["attempt"],

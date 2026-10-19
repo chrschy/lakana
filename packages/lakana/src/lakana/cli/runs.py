@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from datetime import UTC, datetime
 from typing import Annotated
 
@@ -784,15 +784,34 @@ def show(ctx: typer.Context, run_id: str, env: _ENV = None) -> None:
     _emit_notifications(state, found)
 
 
+@dataclass
+class _Followed:
+    """What `lakana runs logs --follow` has printed so far.
+
+    Parameters
+    ----------
+    offsets
+        The byte to ask for next, per task.
+    headed
+        Tasks whose ``== asset ==`` header was printed.
+    complete
+        Tasks whose log is finished and read to the end.
+    """
+
+    offsets: dict[str, int] = field(default_factory=dict)
+    headed: set[str] = field(default_factory=set)
+    complete: set[str] = field(default_factory=set)
+
+
 def _print_log(
     state: CliState,
     environment: str,
     run_id: str,
     asset: str,
-    printed: dict[str, int],
+    followed: _Followed | None,
     header: bool,
 ) -> None:
-    """Print the not-yet-printed part of one task's log.
+    """Print one task's log: all of it, or only what a follow has not printed yet.
 
     Parameters
     ----------
@@ -804,19 +823,27 @@ def _print_log(
         The run.
     asset
         The task.
-    printed
-        Characters already printed per task; updated.
+    followed
+        The follow's progress, updated; `None` prints the whole log with one request.
     header
         Print an ``== asset ==`` header before the first output.
     """
-    text = state.client().runs.log(environment, run_id, asset).text
-    done = printed.get(asset, 0)
-    if len(text) <= done:
-        return
-    if header and done == 0:
-        typer.echo(f"== {asset} ==")
-    typer.echo(text[done:], nl=False)
-    printed[asset] = len(text)
+    while True:
+        offset = None if followed is None else followed.offsets.get(asset, 0)
+        log = state.client().runs.log(environment, run_id, asset, offset=offset)
+        if log.text:
+            if header and (followed is None or asset not in followed.headed):
+                typer.echo(f"== {asset} ==")
+            typer.echo(log.text, nl=False)
+            if followed is not None:
+                followed.headed.add(asset)
+        if followed is None:
+            return
+        followed.offsets[asset] = log.next_offset
+        if log.complete:
+            followed.complete.add(asset)
+        if not log.more:
+            return
 
 
 @runs_app.command("logs")
@@ -826,7 +853,11 @@ def logs(
     env: _ENV = None,
     task: Annotated[str | None, typer.Option("--task", help="Only this task's log.")] = None,
     follow: Annotated[
-        bool, typer.Option("--follow", help="Keep printing until the run finishes.")
+        bool,
+        typer.Option(
+            "--follow",
+            help="Keep printing new text until the run finishes; each byte is fetched once.",
+        ),
     ] = False,
 ) -> None:
     """Print a run's task logs.
@@ -842,7 +873,7 @@ def logs(
     task
         One task.
     follow
-        Poll until the run finishes.
+        Poll until the run, or the one task, finishes.
 
     Raises
     ------
@@ -851,14 +882,17 @@ def logs(
     """
     state = state_of(ctx)
     environment = resolve_environment(state, env)
-    printed: dict[str, int] = {}
+    followed = _Followed() if follow else None
     try:
         while True:
             current = state.client().runs.get(environment, run_id)
             assets = [task] if task is not None else [t.asset for t in current.tasks]
             for asset in assets:
-                _print_log(state, environment, run_id, asset, printed, header=task is None)
-            if not follow or current.status in _FINISHED:
+                if followed is None or asset not in followed.complete:
+                    _print_log(state, environment, run_id, asset, followed, header=task is None)
+            if followed is None or current.status in _FINISHED:
+                return
+            if assets and followed.complete.issuperset(assets):
                 return
             time.sleep(_FOLLOW_SECONDS)
     except KeyboardInterrupt as exc:

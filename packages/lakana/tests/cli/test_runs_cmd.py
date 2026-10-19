@@ -271,46 +271,193 @@ def test_runs_list_show_cancel_resume(tmp_path: Path) -> None:
     assert _ID in invoke(state, "runs", "resume", _ID, "--env", "dev").stdout
 
 
+def _log_body(
+    text: str, next_offset: int, *, more: bool = False, complete: bool = False, reset: bool = False
+) -> dict[str, object]:
+    """Build a `TaskLogOut` body.
+
+    Parameters
+    ----------
+    text
+        The text.
+    next_offset
+        Where it ends.
+    more
+        Whether stored bytes remain.
+    complete
+        Whether the task is finished and nothing more comes.
+    reset
+        Whether the log shrank.
+
+    Returns
+    -------
+    dict
+        The body.
+    """
+    return {
+        "run_id": _ID,
+        "asset": "a.b",
+        "text": text,
+        "attempts": [],
+        "next_offset": next_offset,
+        "more": more,
+        "complete": complete,
+        "reset": reset,
+    }
+
+
+def _serve_log(api: FakeApi, stored: list[bytes], *, chunk: int = 1 << 20) -> list[int]:
+    """Serve ``a.b``'s log from `stored` like the server: from `offset`, at most `chunk` bytes.
+
+    Parameters
+    ----------
+    api
+        The fake.
+    stored
+        The log's bytes; the test appends to it between polls (its only element).
+    chunk
+        The most bytes one response carries.
+
+    Returns
+    -------
+    list of int
+        The byte count of each response's text, in order.
+    """
+    sent: list[int] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        data = stored[0]
+        start = int(request.url.params.get("offset", 0))
+        end = min(len(data), start + chunk)
+        text = data[start:end]
+        sent.append(len(text))
+        return httpx.Response(
+            200, json=_log_body(text.decode(), end, more=end < len(data), reset=start > len(data))
+        )
+
+    api.routes["GET", f"{_RUN_PATH}/tasks/a.b/log"] = respond
+    return sent
+
+
 def test_runs_logs_for_one_task(tmp_path: Path) -> None:
-    """`--task` prints exactly that task's log, without a header."""
+    """`--task` prints exactly that task's log, without a header, and sends no offset."""
     api = FakeApi()
     api.on("GET", _RUN_PATH, json=_run("succeeded", _task("a.b", "succeeded")))
-    api.on(
-        "GET",
-        f"{_RUN_PATH}/tasks/a.b/log",
-        json={"run_id": _ID, "asset": "a.b", "text": "line 1\n", "attempts": []},
-    )
+    api.on("GET", f"{_RUN_PATH}/tasks/a.b/log", json=_log_body("line 1\n", 7))
     single = invoke(make_state(tmp_path, api), "runs", "logs", _ID, "--env", "dev", "--task", "a.b")
     assert single.stdout == "line 1\n"
+    assert "offset" not in api.requests[-1].url.params
 
 
-def test_runs_logs_follow_prints_only_new_text_until_the_run_finishes(tmp_path: Path) -> None:
-    """`--follow` without `--task`: every task under a header, new text only, then exit."""
+def test_runs_logs_follow_fetches_each_byte_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--follow` asks from the offset it reached: each line travels once, then it exits."""
     api = FakeApi()
-    _sequence(
-        api,
-        "GET",
-        _RUN_PATH,
-        [
-            _run("running", _task("a.b", "running")),
-            _run("running", _task("a.b", "running")),
-            _run("succeeded", _task("a.b", "succeeded")),
-        ],
-    )
-    log = {"run_id": _ID, "asset": "a.b", "attempts": []}
-    _sequence(
-        api,
-        "GET",
-        f"{_RUN_PATH}/tasks/a.b/log",
-        [
-            {**log, "text": "line 1\n"},
-            {**log, "text": "line 1\n"},
-            {**log, "text": "line 1\nline 2\n"},
-        ],
-    )
+    stored = [b"line 1\n"]
+    sent = _serve_log(api, stored)
+    appended = [b"line 1\nline 2 \xc3\xa4\n", b"line 1\nline 2 \xc3\xa4\nline 3\n"]
+    _sequence_run(api, iter(["running", "running", "succeeded"]))
+
+    def sleep(_seconds: float) -> None:
+        stored[0] = appended.pop(0) if appended else stored[0]
+
+    monkeypatch.setattr(runs_module.time, "sleep", sleep)
     followed = invoke(make_state(tmp_path, api), "runs", "logs", _ID, "--env", "dev", "--follow")
     assert followed.exit_code == 0, followed.output
-    assert followed.stdout == "== a.b ==\nline 1\nline 2\n"
+    assert followed.stdout == "== a.b ==\nline 1\nline 2 \u00e4\nline 3\n"
+    offsets = [r.url.params["offset"] for r in api.requests if r.url.path.endswith("/log")]
+    assert offsets == ["0", "7", "17"]
+    assert sum(sent) == len(stored[0])
+
+
+def _sequence_run(api: FakeApi, states: Iterator[str]) -> None:
+    """Answer the run request with one of `states` per request (the last repeats).
+
+    Parameters
+    ----------
+    api
+        The fake.
+    states
+        Run statuses in order.
+    """
+    last = ["running"]
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        last[0] = next(states, last[0])
+        done = last[0] == "succeeded"
+        return httpx.Response(
+            200, json=_run(last[0], _task("a.b", "succeeded" if done else "running"))
+        )
+
+    api.routes["GET", _RUN_PATH] = respond
+
+
+def test_runs_logs_follow_continues_while_the_server_cut_the_chunk(tmp_path: Path) -> None:
+    """A capped response is followed at once by the next chunk, not after a poll."""
+    api = FakeApi()
+    stored = [b"abcdefghij"]
+    sent = _serve_log(api, stored, chunk=4)
+    _sequence_run(api, iter(["succeeded"]))
+    followed = invoke(make_state(tmp_path, api), "runs", "logs", _ID, "--env", "dev", "--follow")
+    assert followed.stdout == "== a.b ==\nabcdefghij"
+    assert sent == [4, 4, 2]
+
+
+def test_runs_logs_follow_stops_when_the_task_is_complete(tmp_path: Path) -> None:
+    """The log reports `complete`: no more requests, even though the run is still going."""
+    api = FakeApi()
+    api.routes["GET", _RUN_PATH] = lambda request: httpx.Response(
+        200, json=_run("running", _task("a.b", "succeeded"))
+    )
+    api.on("GET", f"{_RUN_PATH}/tasks/a.b/log", json=_log_body("done\n", 5, complete=True))
+    followed = invoke(
+        make_state(tmp_path, api), "runs", "logs", _ID, "--env", "dev", "--task", "a.b", "--follow"
+    )
+    assert followed.exit_code == 0, followed.output
+    assert followed.stdout == "done\n"
+    assert [r.url.path.endswith("/log") for r in api.requests].count(True) == 1
+
+
+def test_a_followed_log_that_is_complete_is_not_fetched_again(tmp_path: Path) -> None:
+    """Two tasks: the one whose log is complete is skipped on the later polls."""
+    api = FakeApi()
+    runs = iter(["running", "running", "succeeded"])
+    last = ["running"]
+
+    def run_response(request: httpx.Request) -> httpx.Response:
+        last[0] = next(runs, last[0])
+        return httpx.Response(
+            200, json=_run(last[0], _task("a.b", "succeeded"), _task("c.d", "running"))
+        )
+
+    api.routes["GET", _RUN_PATH] = run_response
+    api.on("GET", f"{_RUN_PATH}/tasks/a.b/log", json=_log_body("done\n", 5, complete=True))
+    api.on("GET", f"{_RUN_PATH}/tasks/c.d/log", json=_log_body("", 0))
+    followed = invoke(make_state(tmp_path, api), "runs", "logs", _ID, "--env", "dev", "--follow")
+    assert followed.exit_code == 0, followed.output
+    paths = [r.url.path for r in api.requests if r.url.path.endswith("/log")]
+    assert paths.count(f"{_RUN_PATH}/tasks/a.b/log") == 1
+    assert paths.count(f"{_RUN_PATH}/tasks/c.d/log") == 3
+
+
+def test_runs_logs_follow_starts_over_when_the_log_shrank(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`reset`: the client continues from the offset the server names, not its own."""
+    api = FakeApi()
+    stored = [b"0123456789"]
+    _serve_log(api, stored)
+    _sequence_run(api, iter(["running", "running", "succeeded"]))
+
+    def sleep(_seconds: float) -> None:
+        stored[0] = b"ab"
+
+    monkeypatch.setattr(runs_module.time, "sleep", sleep)
+    followed = invoke(make_state(tmp_path, api), "runs", "logs", _ID, "--env", "dev", "--follow")
+    assert followed.stdout == "== a.b ==\n0123456789"
+    offsets = [r.url.params["offset"] for r in api.requests if r.url.path.endswith("/log")]
+    assert offsets == ["0", "10", "2"]
 
 
 def test_json_output_of_run_show_and_resume(tmp_path: Path) -> None:

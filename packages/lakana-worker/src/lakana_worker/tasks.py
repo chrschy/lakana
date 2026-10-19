@@ -618,7 +618,10 @@ def _prepare(session: Session, engine: RunEngine, claimed: ClaimedTask) -> _Prep
 def _finish(
     session: Session, engine: RunEngine, claimed: ClaimedTask, outcome: TaskOutcome
 ) -> None:
-    """Record the attempt and append its log block.
+    """Append the attempt's log block and record the attempt, in that order.
+
+    The block is written inside the recording, before its commit (see `record_attempt`), so a
+    finished task never has a log that is still to come. A claim that was lost writes none.
 
     Parameters
     ----------
@@ -632,7 +635,33 @@ def _finish(
         How the attempt ended.
     """
     session.rollback()
-    recorded = record_attempt(
+    in_transaction = outcome.in_transaction
+
+    def store_log_then(recording: Session) -> None:
+        """Append the attempt's log block, then do the outcome's own work.
+
+        Called by `record_attempt` once the claim is known to be held and before it commits,
+        so a reader that sees the task finished finds the block in its log. Writing the log
+        never fails the recording (`write_task_log` only logs a warning).
+
+        Parameters
+        ----------
+        recording
+            The session of `record_attempt`.
+        """
+        if outcome.environment is not None:
+            write_task_log(
+                recording,
+                engine.key_provider,
+                outcome.environment,
+                claimed.run_id,
+                claimed.asset,
+                _log_block(recording, engine, claimed, outcome),
+            )
+        if in_transaction is not None:
+            in_transaction(recording)
+
+    record_attempt(
         session,
         claimed.task_run_id,
         engine.settings.worker_id,
@@ -642,10 +671,31 @@ def _finish(
         error_message=outcome.message,
         rows_written=outcome.rows,
         on_committed=COMMITTED_BEFORE_RECORDED_MESSAGE,
-        in_transaction=outcome.in_transaction,
+        in_transaction=store_log_then,
     )
-    if not recorded or outcome.environment is None:
-        return
+
+
+def _log_block(
+    session: Session, engine: RunEngine, claimed: ClaimedTask, outcome: TaskOutcome
+) -> str:
+    """Build the text one attempt appends to its task's log.
+
+    Parameters
+    ----------
+    session
+        Database session (for the database's time).
+    engine
+        The run engine.
+    claimed
+        The claim.
+    outcome
+        How the attempt ended.
+
+    Returns
+    -------
+    str
+        The block, ending in a line break.
+    """
     mode = outcome.mode
     lines = [
         f"attempt {claimed.attempt} on {engine.settings.worker_id} at "
@@ -665,14 +715,7 @@ def _finish(
     if outcome.output:
         lines.append("  output:")
         lines.extend(f"    {line}" for line in outcome.output.splitlines())
-    write_task_log(
-        session,
-        engine.key_provider,
-        outcome.environment,
-        claimed.run_id,
-        claimed.asset,
-        "\n".join(lines) + "\n",
-    )
+    return "\n".join(lines) + "\n"
 
 
 def _execute(

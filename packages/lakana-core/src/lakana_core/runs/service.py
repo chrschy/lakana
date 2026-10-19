@@ -144,6 +144,54 @@ class _RunAs(NamedTuple):
     protected: bool
 
 
+LOG_CHUNK_BYTES = 1024 * 1024
+"""The most bytes of a task's log one request with an offset returns."""
+
+
+def _char_start(data: bytes, index: int) -> int:
+    """Move `index` back to the first byte of the UTF-8 character it falls in.
+
+    Parameters
+    ----------
+    data
+        The log's bytes.
+    index
+        A byte position.
+
+    Returns
+    -------
+    int
+        `index`, or the position of the lead byte when `index` is inside a character.
+    """
+    while 0 < index < len(data) and data[index] & 0xC0 == 0x80:
+        index -= 1
+    return index
+
+
+def log_window(data: bytes, offset: int | None) -> tuple[str, int, int]:
+    """Cut the part of a stored log a request reads, never inside a character.
+
+    Parameters
+    ----------
+    data
+        The whole stored log.
+    offset
+        The byte to start from, or `None` for the whole log.
+
+    Returns
+    -------
+    tuple of str, int and int
+        The text, the byte it starts at (before `offset` only when `offset` fell inside a
+        character) and the byte after it. Stored logs are valid UTF-8; if one is not, the bad
+        bytes become U+FFFD.
+    """
+    start = 0 if offset is None else _char_start(data, min(offset, len(data)))
+    end = (
+        len(data) if offset is None else _char_start(data, min(start + LOG_CHUNK_BYTES, len(data)))
+    )
+    return data[start:end].decode("utf-8", errors="replace"), start, end
+
+
 def task_log_path(run_id: uuid.UUID, asset: str) -> str:
     """Return the environment-relative path of a task's free-text log.
 
@@ -384,12 +432,26 @@ class TaskLogView:
         The free-text log, empty when none was written (or storage failed).
     attempts
         The structured log, oldest first.
+    next_offset
+        The byte to continue from: where the text ends in the stored log.
+    more
+        Whether stored bytes remain after `next_offset` (the chunk limit cut the text).
+    complete
+        Whether the task has finished and the text reaches the end of its log.
+    reset
+        Whether the request's offset lay beyond the end of the log, which only happens when
+        the log is shorter than before (it was removed); the client starts again from
+        `next_offset`.
     """
 
     run_id: uuid.UUID
     asset: str
     text: str
     attempts: tuple[TaskAttemptView, ...]
+    next_offset: int = 0
+    more: bool = False
+    complete: bool = False
+    reset: bool = False
 
 
 @dataclass(frozen=True)
@@ -1970,9 +2032,18 @@ class RunService:
     # -- logs and status -----------------------------------------------------
 
     def task_log(
-        self, p: PrincipalRef, environment: str, run_id: uuid.UUID, asset: str
+        self,
+        p: PrincipalRef,
+        environment: str,
+        run_id: uuid.UUID,
+        asset: str,
+        offset: int | None = None,
     ) -> TaskLogView:
         """Return a task's free-text log and its attempts.
+
+        The stored log is already redacted (the worker redacts before it appends), so cutting
+        it at a byte never splits a secret into two readable halves; an offset counts the
+        bytes of what the caller receives.
 
         Parameters
         ----------
@@ -1984,11 +2055,15 @@ class RunService:
             The run.
         asset
             The task's dotted table name.
+        offset
+            The byte to read from; `None` returns the whole log. With an offset at most
+            `LOG_CHUNK_BYTES` come back, ending before a half character.
 
         Returns
         -------
         TaskLogView
-            Text (empty when none was written or storage failed) and attempts.
+            Text (empty when none was written or storage failed), where to continue, and
+            attempts.
 
         Raises
         ------
@@ -2024,15 +2099,29 @@ class RunService:
         )
         path = task_log_path(run.id, asset)
         text = ""
+        next_offset = offset or 0
+        more = reset = read = False
         try:
             storage = (
                 StorageResolver(self._session, self._key_provider).for_environment(env.name).storage
             )
-            if storage.exists(path):
-                text = storage.read(path).decode("utf-8", errors="replace")
+            data = storage.read(path) if storage.exists(path) else b""
+            text, _, next_offset = log_window(data, offset)
+            more = next_offset < len(data)
+            reset = offset is not None and offset > len(data)
+            read = True
         except (OSError, LakanaError):
-            text = ""
-        return TaskLogView(run_id=run.id, asset=asset, text=text, attempts=attempts)
+            pass
+        return TaskLogView(
+            run_id=run.id,
+            asset=asset,
+            text=text,
+            attempts=attempts,
+            next_offset=next_offset,
+            more=more,
+            complete=read and not more and task.status in TERMINAL_TASK_STATUSES,
+            reset=reset,
+        )
 
     def scheduler_status(self, p: PrincipalRef) -> SchedulerView:
         """Report the scheduler holder and queue lengths (admin).
