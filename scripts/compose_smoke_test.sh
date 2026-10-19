@@ -24,7 +24,9 @@ here=$(cd "$(dirname "$0")" && pwd)
 # key. Without this, this script's own `down -v` at cleanup would tear down
 # and delete the volumes of any real `lakana` bundle already running on the
 # same Docker host.
-export COMPOSE_PROJECT_NAME="lakana-smoke-$$"
+# (Written into the bundle's .env below; a variable already in the shell would override it.)
+unset COMPOSE_PROJECT_NAME
+project_name="lakana-smoke-$$"
 work=$(mktemp -d)
 export XDG_CONFIG_HOME="$work/config" NO_COLOR=1
 port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')
@@ -63,6 +65,9 @@ if [ "$image_version" != "$wheel_version" ]; then
   exit 1
 fi
 lakana bundle init "$bundle" --image "$IMAGE" --port "$port"
+# The name goes in the bundle's .env, as the guide tells an operator to do, not in the shell:
+# the documented backup and restore commands must find the volumes through Compose alone.
+echo "COMPOSE_PROJECT_NAME=$project_name" >> "$bundle/.env"
 cd "$bundle"
 # `worker.depends_on.setup: {condition: service_completed_successfully}` in
 # the compose template is what

@@ -4,7 +4,7 @@
 #
 # Not an example the runner starts (it needs Docker and the Compose bundle): the
 # `compose-smoke` job (scripts/compose_smoke_test.sh) sources this file from the directory of
-# a running bundle that has run a project, with the bundle's profile in effect and the table
+# a running bundle (its Compose project name set in .env, as the guide recommends) that has run a project, with the bundle's profile in effect and the table
 # bronze.demo holding ids 1 and 2. $RESTORED is a directory that does not exist yet; it plays
 # the part of the new directory the page describes.
 
@@ -15,9 +15,11 @@ rows='[{"id":1,"name":"alpha"},{"id":2,"name":"beta"}]'
 docker compose stop server worker worker-interactive worker-pipeline
 docker compose exec -T postgres pg_dump -U lakana lakana > lakana.sql
 docker compose stop seaweedfs seaweedfs-core
-docker run --rm -v "${COMPOSE_PROJECT_NAME:-lakana}_seaweed:/data" -v "$PWD":/backup busybox tar czf /backup/seaweed.tgz /data
+docker compose run --rm --no-deps -T -v "$PWD":/backup --entrypoint tar seaweedfs-core czf /backup/seaweed.tgz -C /data .
 docker compose up -d --wait
 # docs:end backup
+# The archive holds the storage's data: SeaweedFS volume files, not an empty or another bundle's volume.
+tar tzf seaweed.tgz | grep -q '\.dat$'
 
 # A change after the backup, which the restore has to take back.
 printf 'id,name\n3,gamma\n' > change.csv
@@ -42,8 +44,7 @@ docker compose up -d --wait postgres
 docker compose exec -T postgres psql -U lakana -d lakana -v ON_ERROR_STOP=1 --single-transaction < lakana.sql
 # docs:end restore-catalog
 # docs:start restore-storage
-docker compose create seaweedfs-core
-docker run --rm -v "${COMPOSE_PROJECT_NAME:-lakana}_seaweed:/data" -v "$PWD":/backup busybox tar xzf /backup/seaweed.tgz -C /
+docker compose run --rm --no-deps -T -v "$PWD":/backup --entrypoint tar seaweedfs-core xzf /backup/seaweed.tgz -C /data
 # docs:end restore-storage
 # docs:start restore-start
 docker compose up -d --wait

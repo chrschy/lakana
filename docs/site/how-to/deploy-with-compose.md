@@ -700,10 +700,11 @@ storage root and endpoint, a secret with the keys, and the secret attached to th
 secret belongs to one environment, so `prod` gets its own secret with the same keys under the
 same name, `seaweedfs-s3`.
 
-You need these rights: `MANAGE_ENVIRONMENT` on the instance, to create the environment, and
-`MANAGE_SECRET` and `MANAGE_ENVIRONMENT` on `prod` (since 0.15.0, attaching a secret and changing
-the options of an environment that has one both need `MANAGE_SECRET`). The bootstrap credential
-and anyone with the `ADMIN` role have them. Run the commands in the bundle's directory, with the
+You need these rights, each at the scope shown: step 1 needs `MANAGE_ENVIRONMENT` on the instance;
+step 2 needs `MANAGE_SECRET` on `prod`; step 3 needs `MANAGE_ENVIRONMENT` on the instance (not
+only on `prod`) and, since 0.15.0, `MANAGE_SECRET` on `prod`. The bootstrap credential and
+anyone with the `ADMIN` role on the instance have them all; the `ADMIN` role on `prod` alone does
+not cover steps 1 and 3. Run the commands in the bundle's directory, with the
 profile `bundle init` saved (see [Quickstart](#quickstart)).
 
 1. Create the environment in the bundle's bucket, `lakana`, under its own prefix, with the
@@ -901,9 +902,10 @@ unavailable for the time this takes.
 
 1. Stop the server and every worker service, so nothing writes any more.
 2. Dump the catalog; this needs `postgres` to be running.
-3. Stop the two storage services and archive the `seaweed` volume. Its name starts with the
-   Compose project name (`lakana_seaweed` unless you set `COMPOSE_PROJECT_NAME`, which the command
-   reads; see
+3. Stop the two storage services and archive the `seaweed` volume. Compose mounts the volume
+   into a one-off container of the `seaweedfs-core` service that runs `tar`, so it finds the right
+   volume whatever the project name is, whether you set `COMPOSE_PROJECT_NAME` in `.env`, in the
+   shell, or not at all (see
    [Running more than one bundle on a host](#running-more-than-one-bundle-on-a-host)).
 4. Start everything again, and keep a copy of `.env` and `compose.yaml` with the two backups: `.env`
    holds the master key.
@@ -913,7 +915,7 @@ unavailable for the time this takes.
 docker compose stop server worker worker-interactive worker-pipeline
 docker compose exec -T postgres pg_dump -U lakana lakana > lakana.sql
 docker compose stop seaweedfs seaweedfs-core
-docker run --rm -v "${COMPOSE_PROJECT_NAME:-lakana}_seaweed:/data" -v "$PWD":/backup busybox tar czf /backup/seaweed.tgz /data
+docker compose run --rm --no-deps -T -v "$PWD":/backup --entrypoint tar seaweedfs-core czf /backup/seaweed.tgz -C /data .
 docker compose up -d --wait
 ```
 
@@ -963,13 +965,12 @@ docker compose up -d --wait postgres
 docker compose exec -T postgres psql -U lakana -d lakana -v ON_ERROR_STOP=1 --single-transaction < lakana.sql
 ```
 
-4. Create the storage volume through Compose, so it carries Compose's labels, and unpack the
-   archive into it.
+4. Unpack the archive into the storage volume. Compose creates the volume, with its own labels
+   and the project name from `.env`, and mounts it into a one-off container that runs `tar`.
 
 <!-- source: docs/examples/compose-restore.sh#restore-storage -->
 ```bash
-docker compose create seaweedfs-core
-docker run --rm -v "${COMPOSE_PROJECT_NAME:-lakana}_seaweed:/data" -v "$PWD":/backup busybox tar xzf /backup/seaweed.tgz -C /
+docker compose run --rm --no-deps -T -v "$PWD":/backup --entrypoint tar seaweedfs-core xzf /backup/seaweed.tgz -C /data
 ```
 
 5. Before you start everything, decide about the sweep (below), then start it.
