@@ -1,4 +1,4 @@
-"""`lakana job list|run|pause|resume|notify-test|notification`: the jobs of a project."""
+"""`lakana job list|show|run|pause|resume|notify-test|notification`: the jobs of a project."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Annotated
 
 import typer
 
-from lakana._models import Job
+from lakana._models import Job, Trigger
 from lakana.cli import _output
 from lakana.cli._state import resolve_environment, state_of
 from lakana.cli.deploys import resolve_repository
@@ -19,8 +19,8 @@ _REPO = Annotated[
     str | None, typer.Option("--repo", help="Repository name (default: lakana.yaml's repo:).")
 ]
 _NAME = Annotated[str, typer.Argument(help="The job's name, as in lakana.yaml.")]
-_COLUMNS = ["name", "repository", "state", "schedule", "next_run", "last_run"]
-_DROPPABLE = ["repository", "last_run", "schedule"]
+_COLUMNS = ["name", "repository", "state", "triggers", "next_run", "last_run"]
+_DROPPABLE = ["repository", "last_run", "triggers"]
 """What `job list` leaves out first on a narrow terminal: the name, state and next run stay."""
 
 _NOTIFY_POLLS = 30
@@ -33,8 +33,27 @@ job_app = typer.Typer(
 )
 
 
-def _schedule(job: Job) -> str:
-    """Write a job's schedule for the list.
+def _trigger(trigger: Trigger) -> str:
+    """Write one trigger.
+
+    Parameters
+    ----------
+    trigger
+        The trigger.
+
+    Returns
+    -------
+    str
+        ``schedule 0 6 * * * Europe/Berlin`` with `` (paused)`` when paused, or ``on demand``.
+    """
+    if trigger.kind == "on_demand":
+        return "on demand"
+    paused = " (paused)" if trigger.paused else ""
+    return f"schedule {trigger.cron} {trigger.timezone}{paused}"
+
+
+def _triggers(job: Job) -> str:
+    """Write a job's triggers for the list.
 
     Parameters
     ----------
@@ -44,9 +63,35 @@ def _schedule(job: Job) -> str:
     Returns
     -------
     str
-        ``cron zone``, or empty for a job without a schedule here.
+        The triggers, comma-separated, schedule first.
     """
-    return f"{job.cron} {job.timezone}" if job.cron else ""
+    return ", ".join(_trigger(trigger) for trigger in job.triggers)
+
+
+def _triggers_detail(job: Job) -> str:
+    """Write a job's triggers for `job show`, one per line, with the next run.
+
+    Parameters
+    ----------
+    job
+        The job.
+
+    Returns
+    -------
+    str
+        A line per trigger: a schedule with its next run (or how to resume it), and how to start by
+        hand.
+    """
+    lines = []
+    for trigger in job.triggers:
+        if trigger.kind == "on_demand":
+            lines.append(f"on demand: lakana job run {_output.inline(job.name)}")
+        elif trigger.paused:
+            resume = f"lakana job resume {_output.inline(job.name)}"
+            lines.append(f"{_trigger(trigger)}; resume it with '{resume}'")
+        else:
+            lines.append(f"{_trigger(trigger)}; next run {_next_run(job)}".rstrip())
+    return "\n".join(lines)
 
 
 def _next_run(job: Job) -> str:
@@ -107,7 +152,7 @@ def register(app: typer.Typer) -> None:
 
 @job_app.command("list")
 def list_jobs(ctx: typer.Context, env: _ENV = None, repo: _REPO = None) -> None:
-    """List the jobs of the deployed projects: state, schedule, next run and last run.
+    """List the jobs of the deployed projects: state, triggers, next run and last run.
 
     Parameters
     ----------
@@ -125,8 +170,12 @@ def list_jobs(ctx: typer.Context, env: _ENV = None, repo: _REPO = None) -> None:
         jobs,
         columns=_COLUMNS,
         droppable=_DROPPABLE,
-        derived={"schedule": _schedule, "next_run": _next_run, "last_run": _last_run},
-        flexible=["schedule"],
+        derived={
+            "triggers": _triggers,
+            "next_run": _next_run,
+            "last_run": _last_run,
+        },
+        flexible=["triggers"],
     )
     if state.output == "json":
         return
@@ -135,6 +184,34 @@ def list_jobs(ctx: typer.Context, env: _ENV = None, repo: _REPO = None) -> None:
             typer.echo(
                 f"{_output.inline(job.name)}: {_output.inline(job.waiting_for.message, 300)}"
             )
+
+
+@job_app.command("show")
+def show_job(ctx: typer.Context, name: _NAME, env: _ENV = None, repo: _REPO = None) -> None:
+    """Show job NAME: its state, its triggers with the next run, and its last run.
+
+    Parameters
+    ----------
+    ctx
+        The Typer context.
+    name
+        The job.
+    env
+        Environment.
+    repo
+        Repository name; needed only when several repositories declare a job of this name.
+    """
+    state = state_of(ctx)
+    job = state.client().jobs.get(resolve_environment(state, env), name, repository=repo)
+    _output.emit(
+        state,
+        job,
+        columns=["name", "repository", "state", "triggers", "select", "last_run"],
+        derived={"triggers": _triggers_detail, "last_run": _last_run},
+        flexible=["triggers"],
+    )
+    if state.output != "json" and job.waiting_for is not None:
+        typer.echo(_output.inline(job.waiting_for.message, 300))
 
 
 @job_app.command("run")

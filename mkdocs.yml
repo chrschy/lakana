@@ -59,6 +59,7 @@ nav:
       - reference/table-health.md
       - reference/search.md
       - reference/lists.md
+      - reference/jobs.md
   - Explanation:
       - explanation/index.md
       - explanation/scope.md

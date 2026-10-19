@@ -13,4 +13,6 @@ Pages:
 
 - [Runs, queries and deploys lists](lists.md): the filters, the order and the cursor of the three lists, the refusals, commands, SDK and routes.
 
+- [Jobs](jobs.md): the triggers of a job, the fields of the job listing, routes, commands and SDK.
+
 Pages are added here as they are written.

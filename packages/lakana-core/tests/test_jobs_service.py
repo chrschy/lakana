@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1433,3 +1434,28 @@ def test_notify_test_of_a_damaged_notify_entry_is_refused_like_a_missing_one(
     with pytest.raises(ConflictError, match="no usable `notify:`"):
         _service(session).notify_test(principal, "dev", "analytics", "alerting")
     assert session.scalar(select(func.count()).select_from(NotificationDelivery)) == 0
+
+
+def test_get_shows_one_job_and_says_what_is_wrong_otherwise(
+    session: Session,
+    deployed: Repository,
+    principal: PrincipalRef,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One job comes back as the list shows it; a miss or a clash names the next step."""
+    service = _service(session)
+    listed = {v.name: v for v in service.list(principal, "dev")}
+    assert service.get(principal, "dev", "daily") == listed["daily"]
+    assert service.get(principal, "dev", "daily", "analytics") == listed["daily"]
+    with pytest.raises(NotFoundError, match=r"in 'dev'\. Its jobs: daily, manual"):
+        service.get(principal, "dev", "nope")
+    with pytest.raises(NotFoundError, match="in 'analytics' in 'dev'"):
+        service.get(principal, "dev", "nope", "analytics")
+    views = list(service.list(principal, "dev"))
+    twin = dataclasses.replace(views[0], repository="other")
+    monkeypatch.setattr(JobService, "list", lambda *_args: [*views, twin])
+    with pytest.raises(ConflictError, match=r"analytics, other.*--repo"):
+        service.get(principal, "dev", views[0].name)
+    monkeypatch.setattr(JobService, "list", lambda *_args: [])
+    with pytest.raises(NotFoundError, match="No job is deployed there"):
+        service.get(principal, "dev", "daily")

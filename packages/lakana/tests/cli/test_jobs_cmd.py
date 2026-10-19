@@ -71,6 +71,16 @@ def _job(name: str = "daily", **changes: Any) -> dict[str, Any]:  # ruff: ignore
         "last_run_status": "succeeded",
         "last_run_trigger": "schedule",
         "last_run_at": "2026-06-30T01:00:00+00:00",
+        "triggers": [
+            {
+                "kind": "schedule",
+                "cron": "0 3 * * *",
+                "timezone": "Europe/Berlin",
+                "paused": False,
+                "next_run_at": "2026-07-01T01:00:00+00:00",
+            },
+            {"kind": "on_demand"},
+        ],
     }
     return {**body, **changes}
 
@@ -124,6 +134,87 @@ def test_list_shows_state_schedule_next_run_in_both_zones_and_the_last_run(
     assert "2026-07-01 03:00 Europe/Berlin (01:00 UTC)" in out
     assert "succeeded (schedule)" in out
     assert "busy: A start waits for run X." in out
+
+
+def test_list_shows_the_triggers_and_marks_a_paused_schedule(tmp_path: Path) -> None:
+    api = FakeApi()
+    paused = {
+        "kind": "schedule",
+        "cron": "0 6 * * *",
+        "timezone": "Europe/Berlin",
+        "paused": True,
+        "next_run_at": None,
+    }
+    api.on(
+        "GET",
+        _JOBS,
+        json=[
+            _job(),
+            _job("sleepy", triggers=[paused, {"kind": "on_demand"}]),
+            _job("manual", triggers=[{"kind": "on_demand"}, {"kind": "after_deploy"}]),
+        ],
+    )
+    result = invoke(
+        make_state(tmp_path, api), "job", "list", "--env", "dev", env={"COLUMNS": "200"}
+    )
+    out = _plain(result.stdout)
+    assert "triggers" in out
+    assert "schedule 0 3 * * * Europe/Berlin, on demand" in out
+    assert "schedule 0 6 * * * Europe/Berlin (paused), on demand" in out
+    assert "after_deploy" not in out
+
+
+def test_show_lists_each_trigger_with_its_next_run(tmp_path: Path) -> None:
+    api = FakeApi()
+    api.on("GET", f"{_JOBS}/daily", json=_job())
+    result = invoke(
+        make_state(tmp_path, api), "job", "show", "daily", "--env", "dev", "--repo", "analytics"
+    )
+    assert result.exit_code == 0, result.output
+    assert api.requests[0].url.params["repository"] == "analytics"
+    out = _plain(result.stdout)
+    assert "schedule 0 3 * * * Europe/Berlin" in out
+    assert "next run 2026-07-01 03:00 Europe/Berlin (01:00 UTC)" in out
+    assert "on demand" in out and "lakana job run daily" in out
+
+
+def test_show_of_a_paused_schedule_and_of_a_job_without_one(tmp_path: Path) -> None:
+    api = FakeApi()
+    paused = {
+        "kind": "schedule",
+        "cron": "0 6 * * *",
+        "timezone": "UTC",
+        "paused": True,
+        "next_run_at": None,
+    }
+    api.on("GET", f"{_JOBS}/sleepy", json=_job("sleepy", triggers=[paused, {"kind": "on_demand"}]))
+    api.on("GET", f"{_JOBS}/manual", json=_job("manual", triggers=[{"kind": "on_demand"}]))
+    sleepy = _plain(
+        invoke(make_state(tmp_path, api), "job", "show", "sleepy", "--env", "dev").stdout
+    )
+    assert "paused" in sleepy and "next run" not in sleepy
+    manual = _plain(
+        invoke(make_state(tmp_path, api), "job", "show", "manual", "--env", "dev").stdout
+    )
+    assert "schedule 0" not in manual and "on demand" in manual
+
+
+def test_show_as_json_is_the_whole_object(tmp_path: Path) -> None:
+    api = FakeApi()
+    api.on("GET", f"{_JOBS}/daily", json=_job())
+    result = invoke(
+        make_state(tmp_path, api), "--output", "json", "job", "show", "daily", "--env", "dev"
+    )
+    body = json.loads(result.stdout)
+    assert [t["kind"] for t in body["triggers"]] == ["schedule", "on_demand"]
+
+
+def test_show_of_an_unknown_job_exits_6_with_the_names(tmp_path: Path) -> None:
+    api = FakeApi()
+    api.on("GET", f"{_JOBS}/nope", status=404, json={"detail": "No job 'nope'. Its jobs: daily."})
+    result = invoke(make_state(tmp_path, api), "job", "show", "nope", "--env", "dev")
+    assert result.exit_code == 6
+    assert "daily" in _plain(result.stderr)
 
 
 def test_a_job_in_utc_shows_the_time_in_utc_only(tmp_path: Path) -> None:
