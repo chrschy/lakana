@@ -16,6 +16,13 @@ query path sit relative to `lakana-core`/`lakana-server`, see `docs/agent/archit
   `write.data.path`/`write.object-storage.path`/`write.metadata.path` are refused as table
   properties for the same reason. Do not add a path that lets any of these through, even
   confined to the storage root.
+- **A new managed table's location is claimed before its first file, and published behind a
+  fence.** Any new path that writes a new managed location goes through
+  `CatalogService._prepare_table` (which commits the `CLAIMED` record) and `_publish_table` (which
+  runs `publish_location` in the transaction that inserts the row and rolls back when it moves
+  nothing). Never write a file under a location without a record, never insert an `ICEBERG` row
+  without the fence, and never delete table files outside `lakana_core.catalog.location_sweep` or
+  `_release_location`. See "Table locations" below.
 - **An `EXTERNAL` table claims an exclusive `raw/<dir>` directory**
   (`lakana_core.catalog.external_location`), not an arbitrary glob. Any new code that lists
   or resolves an external table's files must go through `parse_external_location`/
@@ -1184,6 +1191,74 @@ already running). It adds nothing to what in-process code can do with the task's
 it needs the scan, the upload and the download to work by directory descriptor (`dir_fd`): #67. Words
 in code, messages and docs stay "by name" and "a check, not a guarantee"; never write that a link "is
 never followed" without that qualification.
+
+## Table locations: the claim, the fence and the sweep (#90)
+
+User documentation: "The sweep" and "After a restore" in `docs/site/how-to/deploy-with-compose.md`.
+This is the first part of the data-deletion design (drops as tombstones #94 and retention #87 build
+on it). The code deletes table data unattended; the rule is the artifact store's: **a record exists
+before the first file, and a directory without a record is never deleted.**
+
+**The record.** `table_locations` (`lakana_core.models.table_location`): one row per managed
+location, unique by absolute `location`, `CLAIMED | LIVE | DROPPED | ABANDONED`, the holder run,
+`claimed_at`, `purge_after`. `table_id` has no foreign key on purpose (the record outlives a dropped
+row); `environment_id` cascades, so deleting an environment leaves its directories without records,
+which nothing deletes. Migration `0042` backfills `LIVE` for every `ICEBERG` row with a metadata
+file. A drop does not change the record yet: a dropped table's record stays `LIVE` and protects its
+directory until #94 makes drops write `DROPPED`.
+
+**The claim.** `_prepare_table` ends with `claim_location`, which inserts and **commits** the
+`CLAIMED` record; validation and refusal come before it, so a refused create claims nothing. Both
+creates use it: `create_table` (the platform route and the Iceberg REST create, which writes metadata
+before the row exists) and a create-mode write (`_write_new_table`, data files first). The holder is
+`claim_holder`: the query run, else the worker's fenced run, else the run context's query run or task
+run; `None` for a person.
+
+**The fence.** `_publish_table` runs `UPDATE table_locations SET state='LIVE', table_id=… WHERE
+location=… AND state='CLAIMED'` in the transaction that inserts the row and raises `ConflictError`
+(`CLAIM_RELEASED_MESSAGE`) after a rollback when no row moved. The sweep moves a claim to
+`ABANDONED` only under the same row's lock (`lock_location`, a no-op `UPDATE`: a row lock on
+Postgres, the write lock on SQLite) and reads the row again under it. Whichever commits first wins;
+the other sees it. Pins: `test_table_locations_postgres_integration.py` (both orders, two sessions,
+two threads), `test_table_locations.py` (`test_the_fence_refuses_a_create_whose_claim_was_abandoned_meanwhile`,
+`test_publish_location_moves_only_a_claim`), `test_table_location_sweep.py`
+(`test_a_claim_published_between_the_listing_and_the_lock_is_left_live`,
+`test_a_claim_abandoned_by_the_sweep_refuses_a_later_publish`).
+
+**A failed create.** `_settle_failed_write` decides, for `create_table` too now. Known not to have
+committed (a `LakanaError`, or anything before the commit was sent): `_release_location` makes the
+claim `ABANDONED` (only from `CLAIMED`), deletes the files (`cleanup_location`, only objects strictly
+below the location), and deletes the record only when every file is gone; a record that says `LIVE`
+keeps every file. In doubt: the claim stays `CLAIMED`, the files stay, `WriteOutcomeUnknownError`
+says the clean-up removes them once it has proven the commit did not land. A commit that landed
+although it raised returns the table.
+
+**The sweep** (`lakana_core.catalog.location_sweep`, in the worker's housekeeping, single-flight,
+the artifact sweep's deadline, rotation and failure cap; `LAKANA_RUN__SWEEP_INTERVAL=0` turns it off
+and the start-up line names it). Step 1 (expiries) is #87's. Step 2: a claim is resolved only when
+its holder (a `QueryRun` or `TaskRun`) is in a final state, or, with no holder or one the catalog
+does not know, after `LAKANA_TABLES__ABANDONED_GRACE_HOURS`; under the lock, `LIVE` if a `tables`
+row's metadata lies under the location, else `ABANDONED` with `purge_after = now` and
+`TABLE_LOCATION_ABANDONED` (no principal). Step 3: an `ABANDONED` or `DROPPED` record past
+`purge_after` is purged only if its location is canonical, strictly inside `managed/` of its
+environment's root and ends in `-<32 hex>`, and nothing in use is the location or lies inside it in
+**any** environment (`location_in_use`: `LIVE`/`CLAIMED` records and `tables` rows; plus
+`table_root_locations` with `nested_locations_within`, maintain's check). Before **each** delete,
+under the record's lock, the record must still be purgeable and `location_in_use` false again; only
+objects strictly inside the location with sane segments are deleted; the record goes last, with
+`TABLE_PURGED` (`files`, `bytes`, `complete`); a pass that stops part-way records `complete: false`
+and keeps the record. Directories under `managed/` that end in a table id, hold files and have no
+record are counted (`unrecorded_directories`) and logged once per root and run, never deleted.
+
+**Residuals, accepted.** A create whose claim was abandoned (its run ended, or the grace passed)
+while its process still writes, for example a frozen worker that wakes up, can add files after the
+purge: its commit is refused by the fence, and the files become a directory without a record. A
+namespace created inside an abandoned location between the last check and a delete is not seen. A
+delete in flight can outlive the lock when the database ends the session. After a restore, a create
+that was in flight at the backup has a `CLAIMED` record: once the scheduler ends its run, the sweep
+removes its files even if the table was finished after the backup (the docs tell the operator to
+keep the sweep off and copy such directories first). A dropped table's directory is never deleted
+until #94.
 
 ## Checks and the rollback (M5d-a)
 

@@ -454,10 +454,10 @@ def test_a_directory_that_vanishes_before_it_is_opened_is_skipped(
     gone = _attempt(work, "attempt-abcd1234", _MAX_AGE * 5)
     real = os.open
 
-    def opening(path: str | os.PathLike[str], flags: int, *args: int) -> int:
+    def opening(path: str | os.PathLike[str], flags: int, *args: int, **kwargs: int) -> int:
         if Path(path) == gone:
             raise FileNotFoundError(path)
-        return real(path, flags, *args)
+        return real(path, flags, *args, **kwargs)
 
     monkeypatch.setattr(os, "open", opening)
     assert _sweeper(work).sweep() == 0
@@ -585,14 +585,14 @@ def test_a_directory_swapped_for_a_young_one_before_it_is_opened_is_kept(
     real = os.open
     swapped: list[bool] = []
 
-    def swap_then_open(path: str | os.PathLike[str], flags: int, *args: int) -> int:
+    def swap_then_open(path: str | os.PathLike[str], flags: int, *args: int, **kwargs: int) -> int:
         if Path(path) == old and not swapped:
             swapped.append(True)
             old.rename(work / "moved-away")
             old.mkdir(mode=0o700)
             (old / "result.json").write_text("live")
             os.utime(old, (_NOW - 1, _NOW - 1))
-        return real(path, flags, *args)
+        return real(path, flags, *args, **kwargs)
 
     monkeypatch.setattr(os, "open", swap_then_open)
     assert _sweeper(work).sweep() == 0

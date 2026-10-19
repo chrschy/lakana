@@ -3459,3 +3459,195 @@ def test_0041_adds_the_time_a_principal_is_passed_by_until(
         assert "query_passed_by_until" not in names
     finally:
         engine.dispose()
+
+
+_REVISION_0042 = "b1e8f4c7a3d9"
+
+
+def _seed_tables_for_0042(db_path: Path) -> dict[str, str]:
+    """Insert, before revision `0042`, one table of every kind the backfill must tell apart.
+
+    Parameters
+    ----------
+    db_path
+        The SQLite file.
+
+    Returns
+    -------
+    dict of str to str
+        The id (hex) of each table, by name.
+    """
+    env_id, ns_id = uuid.uuid4().hex, uuid.uuid4().hex
+    root = "file:///lake/dev"
+    ids = {name: uuid.uuid4().hex for name in ("orders", "legacy", "twin", "raw", "v", "m", "new")}
+    metadata = {
+        "orders": f"{root}/managed/gold/orders-{ids['orders']}/metadata/00001-a.metadata.json",
+        "legacy": f"{root}/managed/gold/metadata/00000-b.metadata.json",
+        "twin": f"{root}/managed/gold/metadata/00003-c.metadata.json",
+        "raw": None,
+        "v": None,
+        "m": None,
+        "new": None,
+    }
+    kinds = {
+        "orders": "ICEBERG",
+        "legacy": "ICEBERG",
+        "twin": "ICEBERG",
+        "raw": "EXTERNAL",
+        "v": "VIEW",
+        "m": "ARTIFACT",
+        "new": "ICEBERG",
+    }
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                sa.text(
+                    "INSERT INTO environments (id, name, storage_root, storage_options,"
+                    " is_protected, properties, created_at, updated_at)"
+                    " VALUES (:id, 'dev', :root, '{}', 0, '{}', :t, :t)"
+                ),
+                {"id": env_id, "root": root, "t": "2026-10-01 09:00:00"},
+            )
+            connection.execute(
+                sa.text(
+                    "INSERT INTO namespaces (id, environment_id, path, properties)"
+                    " VALUES (:id, :env, 'gold', '{}')"
+                ),
+                {"id": ns_id, "env": env_id},
+            )
+            for name, table_id in ids.items():
+                connection.execute(
+                    sa.text(
+                        "INSERT INTO tables (id, namespace_id, name, table_type,"
+                        " metadata_location, created_at, updated_at)"
+                        " VALUES (:id, :ns, :name, :kind, :meta, :t, :t)"
+                    ),
+                    {
+                        "id": table_id,
+                        "ns": ns_id,
+                        "name": name,
+                        "kind": kinds[name],
+                        "meta": metadata[name],
+                        "t": "2026-10-02 09:00:00",
+                    },
+                )
+    finally:
+        engine.dispose()
+    return {"env": env_id, **ids}
+
+
+def test_0042_adds_table_locations_with_a_live_record_for_every_managed_table(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revision `0042`: `table_locations`, backfilled LIVE for managed tables only, undone down.
+
+    An external table, a view, an artifact and a managed table without a metadata file get no
+    record; two legacy tables that share a location get one; nothing is deleted.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    """
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, _REVISION_0041)
+    ids = _seed_tables_for_0042(db_path)
+
+    command.upgrade(config, _REVISION_0042)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        inspector = inspect(engine)
+        columns = {c["name"]: c for c in inspector.get_columns("table_locations")}
+        assert set(columns) == {
+            "id",
+            "table_id",
+            "environment_id",
+            "location",
+            "state",
+            "holder_run_id",
+            "claimed_at",
+            "dropped_at",
+            "purge_after",
+            "revoked_policy_ids",
+        }
+        assert [c for c, info in columns.items() if info["nullable"]] == [
+            "table_id",
+            "holder_run_id",
+            "dropped_at",
+            "purge_after",
+        ]
+        assert [
+            (fk["referred_table"], fk["options"].get("ondelete"))
+            for fk in inspector.get_foreign_keys("table_locations")
+        ] == [("environments", "CASCADE")]
+        assert [u["column_names"] for u in inspector.get_unique_constraints("table_locations")] == [
+            ["location"]
+        ]
+        with engine.connect() as connection:
+            rows = connection.execute(
+                sa.text(
+                    "SELECT table_id, environment_id, location, state, holder_run_id,"
+                    " revoked_policy_ids, purge_after FROM table_locations ORDER BY location"
+                )
+            ).all()
+        root = "file:///lake/dev/managed/gold"
+        assert [(r[2], r[3]) for r in rows] == [
+            (root, "LIVE"),
+            (f"{root}/orders-{ids['orders']}", "LIVE"),
+        ]
+        assert uuid.UUID(rows[0][0]).hex in {ids["legacy"], ids["twin"]}  # one record, one owner
+        assert uuid.UUID(rows[1][0]).hex == ids["orders"]
+        assert {uuid.UUID(r[1]).hex for r in rows} == {ids["env"]}
+        assert all(r[4] is None and json.loads(r[5]) == [] and r[6] is None for r in rows)
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, _REVISION_0041)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        inspector = inspect(engine)
+        assert "table_locations" not in inspector.get_table_names()
+        with engine.connect() as connection:
+            assert connection.execute(sa.text("SELECT count(*) FROM tables")).scalar_one() == 7
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "metadata_location",
+    [
+        "s3://bucket/dev/managed/gold/orders-0a1b/metadata/00001-a.metadata.json",
+        "s3://bucket/dev/managed/gold/x-0a1b/inner-2c3d/metadata/00000-b.metadata.json",
+        "file:///lake/dev/managed/metadata/t-0a1b/metadata/00002-c.metadata.json",
+        "file:///lake/dev/managed/gold/t-0a1b/metadata/",
+        "file:///lake/dev/managed/gold/t-0a1b/metadata",
+        "file:///lake/dev/managed/gold/t-0a1b/",
+        "file:///lake/dev/managed/gold/t-0a1b/00000-d.metadata.json",
+    ],
+)
+def test_0042_derives_a_table_root_as_the_application_does(metadata_location: str) -> None:
+    """The frozen copy in migration `0042` agrees with the function it mirrors.
+
+    Parameters
+    ----------
+    metadata_location
+        A sample: plain, nested, a directory named `metadata`, with and without a trailing
+        slash, and without a metadata directory at all.
+    """
+    import importlib.util
+
+    from lakana_core.storage.resolver import table_root_from_metadata_location
+
+    path = ALEMBIC_INI.parent / "src/lakana_core/migrations/versions/0042_table_locations.py"
+    spec = importlib.util.spec_from_file_location("migration_0042", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.table_root_from_metadata_location(
+        metadata_location
+    ) == table_root_from_metadata_location(metadata_location)

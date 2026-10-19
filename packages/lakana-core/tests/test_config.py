@@ -997,3 +997,25 @@ def test_the_default_window_cannot_exceed_the_kept_period() -> None:
     with pytest.raises(PydanticValidationError, match="LAKANA_TABLE_READS__DEFAULT_DAYS"):
         TableReadsConfig(keep_days=10, default_days=11)
     assert TableReadsConfig(keep_days=10, default_days=10).default_days == 10
+
+
+def test_abandoned_claims_wait_24_hours_by_default() -> None:
+    from lakana_core.config import TablesConfig
+
+    assert TablesConfig().abandoned_grace_hours == 24
+
+
+def test_the_grace_period_reads_its_environment_variable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LAKANA_DATABASE__URL", "sqlite://")
+    monkeypatch.setenv("LAKANA_TABLES__ABANDONED_GRACE_HOURS", "72")
+    assert Settings().tables.abandoned_grace_hours == 72
+
+
+@pytest.mark.parametrize("hours", [0, -1, 8761])
+def test_the_grace_period_is_between_one_hour_and_one_year(hours: int) -> None:
+    from lakana_core.config import TablesConfig
+
+    with pytest.raises(PydanticValidationError, match="abandoned_grace_hours"):
+        TablesConfig(abandoned_grace_hours=hours)
