@@ -407,8 +407,9 @@ name. In a script, pass `--yes` to skip the question.
 
 - [Check your data](../how-to/check-your-data.md) writes more checks, shows a failing one and what
   it does to a table.
-- [Projects and deploys](../how-to/projects.md) covers asset front-matter, `lakana.yaml`, Python
-  assets, dry-run deploys, rollback, and selecting what to run.
+- [Projects and deploys](../how-to/projects.md) covers Python assets, dry-run deploys, rollback, and
+  selecting what to run. The keys you can write are in the reference:
+  [asset front-matter](../reference/asset-front-matter.md) and [`lakana.yaml`](../reference/lakana-yaml.md).
 - [Give a second person access](../how-to/give-a-second-person-access.md) issues a token to a
   colleague who may query one environment.
 - [Deploying with Compose (team mode)](../how-to/deploy-with-compose.md) moves from your machine to an

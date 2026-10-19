@@ -57,7 +57,8 @@ A pull request that changes only documentation skips CI's heavy jobs and runs th
 documentation tests (`uv run pytest scripts/tests`); the same file explains the rule.
 
 Documentation pages live in `docs/site/`. Check, build and preview them with
-`uv run python scripts/docs_blocks.py`, `uv run --group docs zensical build --strict`
+`uv run python scripts/docs_blocks.py`, `uv run python scripts/generate_reference.py --check`
+(rewrites the generated CLI and settings references without `--check`), `uv run --group docs zensical build --strict`
 (then `uv run python scripts/check_built_site.py site-build`) and
 `uv run --group docs zensical serve`
 (`docs/agent/testing.md`, "The documentation site", explains the code-block markers).

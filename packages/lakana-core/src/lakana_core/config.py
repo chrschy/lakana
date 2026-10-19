@@ -104,10 +104,12 @@ class DatabaseConfig(BaseModel):
     Parameters
     ----------
     url
-        SQLAlchemy database URL. Its `repr`/`str` show the URL with any
-        password redacted — see `__repr_args__`.
+        Address of the metadata database, for example
+        `postgresql+psycopg://lakana:PASSWORD@postgres/lakana`. A password in it is hidden in logs
+        and error messages. Required.
     echo
-        Whether SQLAlchemy should log the SQL it emits.
+        Whether every SQL statement sent to the metadata database is written to the log. Off by
+        default; turn it on only while you look for a problem, because it is very verbose.
     """
 
     model_config = ConfigDict(hide_input_in_errors=True)
@@ -137,22 +139,16 @@ class SecretsConfig(BaseModel):
     Parameters
     ----------
     master_key
-        Base64-encoded 32-byte master key that wraps every secret's own
-        data key (`lakana_core.secrets.keys.EnvKeyProvider`). `None` (the
-        default) means no secrets can be created or decrypted yet — this
-        does not fail startup, only the first actual secret operation,
-        so a deployment that never uses secret-backed storage needs no
-        configuration here at all. Its `repr`/`str` show ``"***"`` when
-        set and `None` when unset — see `__repr_args__`.
+        The key that protects every stored secret: 32 random bytes, base64-encoded. Unset (the
+        default), the instance starts but no secret can be created or read. The Compose bundle
+        generates one. Keep it safe: a lost key makes every stored secret unrecoverable. Set the
+        same value on the server and on every worker.
     accept_format_1
-        Whether to read secrets stored in the old format (1), written before
-        the stored format bound a secret to its row. `False` (the default)
-        refuses such a secret with a message that says how to set it again.
-        `True` reads them, which accepts any old-format ciphertext written
-        under the master key on any row; the server and the worker log a
-        WARNING at start-up while it is on. Set it
-        (`LAKANA_SECRETS__ACCEPT_FORMAT_1=true`) on the server and on every
-        worker, and remove it once every secret is stored again.
+        Whether to read secrets stored in the old format, written by a release before a secret was
+        bound to its row. `false` (the default) refuses such a secret with a message that says how
+        to set it again. `true` reads them, and the server and the worker log a warning at start
+        while it is on. Turn it on, on the server and on every worker, only while you set old
+        secrets again, and remove it afterwards.
     """
 
     model_config = ConfigDict(hide_input_in_errors=True)
@@ -428,26 +424,31 @@ class RunConfig(BaseModel):
         Most retries a project may configure for one asset; deploy
         validation refuses more.
     scheduler_interval_seconds
-        How often the scheduler holder ticks.
+        How often, in seconds, the worker that holds the scheduler role checks for work that is
+        ready, retries that are due, lost workers and cancellations.
     lease_seconds
-        How long a claimed task's lease lasts without renewal.
+        How long, in seconds, a claimed task stays with its worker without the worker renewing the
+        claim; after that another worker may take it.
     renew_seconds
-        How often a worker renews its lease; must be below `lease_seconds`.
+        How often, in seconds, a worker renews its claim on a task. It must be below
+        `LAKANA_RUN__LEASE_SECONDS`.
     drain_grace_seconds
-        On SIGTERM, how long a running task may finish before it is released.
+        When a worker is asked to stop, how many seconds a running task may take to finish before
+        the task is handed to another worker.
     server_url
         Base URL of the Lakana server as a Python task's subprocess reaches it.
         Unset, this worker cannot run Python assets.
     venv_cache
-        Absolute directory of the venv cache; `None` uses the worker's cache directory.
+        Absolute path of the directory that keeps the Python environments of projects. Unset, the
+        worker uses its own cache directory.
     venv_keep
         How many venvs to keep, most recently used first.
     venv_build_timeout
-        Seconds one `uv sync` may run.
+        Longest, in seconds, that building the Python environment of a project may take.
     venv_max_bytes
         Largest on-disk size of one venv while it is built.
     kill_grace
-        Seconds between SIGTERM and SIGKILL when a Python task is stopped.
+        Seconds between asking a Python task to stop and ending its process by force.
     sweep_interval
         Seconds between the worker's sweeps of attempt directories a dead worker left
         behind (also at worker start), and between the sweeps of the artifact store that the
@@ -458,13 +459,16 @@ class RunConfig(BaseModel):
         steps and between files, stops at the first safe point, and fails the run with the
         timeout cause; running maintenance again continues where it stopped.
     index_url
-        An extra package index for the venv build (a `SecretStr`: it may carry a password).
+        An extra package index for building the environment of a Python project, as a URL. It may
+        carry a password, which is hidden in logs and error messages.
     https_proxy
-        Proxy of the venv build (a `SecretStr`).
+        Proxy that the environment build uses, as a URL. It may carry a password, which is hidden
+        in logs and error messages.
     no_proxy
         Comma-separated hosts that bypass the proxy.
     ca_bundle
-        Absolute path of a PEM file the venv build trusts; only its format is checked here.
+        Absolute path of a PEM file of certificate authorities that the environment build trusts,
+        for an internal package index. The file must exist and be readable on the worker.
     """
 
     model_config = ConfigDict(hide_input_in_errors=True)
@@ -601,15 +605,14 @@ class GitConfig(BaseModel):
     Parameters
     ----------
     https_proxy
-        ``http://`` or ``https://`` URL of the proxy git tunnels through
-        (``http://user:password@host:3128``; the password is required with a
-        username, and both are percent-encoded). A `SecretStr`: `repr`, `str` and
-        `model_dump` hide it.
+        URL of the proxy that git uses for HTTPS repositories, for example
+        `http://user:password@host:3128`; a username needs a password, and both are percent-
+        encoded. A password is hidden in logs and error messages.
     no_proxy
         Comma-separated hosts, domains or CIDRs that bypass the proxy.
     ca_bundle
-        Absolute path of a PEM file of the CAs git trusts for HTTPS (replaces the
-        system store). Only its format is checked here.
+        Absolute path of a PEM file of certificate authorities that git trusts for HTTPS; it
+        replaces the system store. The file must exist and be readable on the worker.
     """
 
     model_config = ConfigDict(hide_input_in_errors=True)
@@ -707,13 +710,13 @@ class WebhookConfig(BaseModel):
         domain itself), that skip the address check and may use ``http`` and any port. Matching
         ignores case and a trailing dot. For an internal chat server.
     proxy
-        ``http://`` or ``https://`` URL of the proxy webhooks tunnel through with ``CONNECT``
-        (``http://user:password@host:3128``). The worker still resolves and checks the
-        destination name, but the proxy resolves it again to connect, so the proxy is trusted
-        to refuse internal addresses. A `SecretStr`: `repr`, `str` and `model_dump` hide it.
+        URL of the proxy that webhooks go through, for example `http://user:password@host:3128`.
+        The worker checks the destination name, but the proxy looks it up again, so the proxy must
+        refuse internal addresses itself. A password is hidden in logs and error messages.
     ca_bundle
-        Absolute path of a PEM file of the CAs webhooks trust (replaces the built-in store, never
-        disables verification). Only its format is checked here.
+        Absolute path of a PEM file of certificate authorities that webhooks trust; it replaces
+        the built-in store and never turns verification off. The file must exist and be readable
+        on the worker.
     """
 
     model_config = ConfigDict(hide_input_in_errors=True)
@@ -813,11 +816,11 @@ class DenialAuditConfig(BaseModel):
     Parameters
     ----------
     per_principal_per_minute
-        Denials recorded per principal per minute, by each server process and each worker
-        (`lakana_core.audit.denial_limiter.DenialAuditLimiter`). A denial past it is still
-        refused, but not recorded; the next row recorded for that principal carries the number
-        not recorded as `detail.suppressed`, and each one is written to the process log at INFO.
-        The first denial of each action by a principal is always recorded.
+        Most refusals the audit log records for one principal per minute, in each server and each
+        worker. A refusal past the limit is still refused, but not recorded; the next row recorded
+        for that principal says how many were left out, and each one is written to the process
+        log. The first refusal of each action by a principal is always recorded. Raise it if you
+        need every refusal in the table.
     """
 
     per_principal_per_minute: int = Field(default=30, gt=0)
@@ -831,11 +834,11 @@ class TableReadsConfig(BaseModel):
     Parameters
     ----------
     keep_days
-        Days a day's count of reads of a table is kept (default 90). The worker's sweep deletes
-        older rows, and `GET .../tables/{name}/health` accepts `days` up to this.
+        Days of read counts kept for each table (default 90). A worker deletes older counts, and
+        the health of a table can look back at most this many days.
     default_days
-        The window the health of a table shows when the request names none (default 30); at most
-        `keep_days`.
+        Days of reads that the health of a table shows when the request names none (default 30);
+        at most `LAKANA_TABLE_READS__KEEP_DAYS`.
     """
 
     keep_days: int = Field(default=90, ge=1)
@@ -880,25 +883,20 @@ class QueryLimitsConfig(BaseModel):
         Most rows a query may return. Exceeding it fails the query; the
         result is never truncated.
     max_result_bytes
-        Most bytes a result may occupy as in-memory Arrow buffers — a
-        memory-exhaustion guard, not an on-disk or wire size. Checked
-        between fetched batches (`lakana_worker.executor._FETCH_BATCH_ROWS`),
-        so a result can overshoot this by up to one batch's worth of the
-        query's largest value, not by an unbounded amount.
+        Most bytes a query result may take in memory. A result over the limit fails the query. It
+        protects the worker from running out of memory; the check happens between batches of rows,
+        so a result can pass the limit by a little before it is stopped.
     memory_limit
-        DuckDB `memory_limit` for the query's connection, in DuckDB's own
-        syntax (``"1GB"``, ``"512MiB"``). Bounds execution, not just the
-        result.
+        Memory one query may use, written as DuckDB writes sizes, for example `1GB` or `512MiB`.
+        Some operations go beyond it. Keep it well below the memory limit of the worker.
     max_write_rows
-        Most rows a write run may write. Exceeding it fails the run
-        and deletes every file it wrote. Writes are deliberately not bound
-        by `max_result_bytes`: they stream to storage, never into a result.
+        Most rows one write run may write. A run that passes it fails and removes every file it
+        wrote.
     timeout_seconds
-        Wall-clock limit for one query, in seconds. For a write run it covers the whole
-        streaming phase, not just the start of the query, so time spent encoding and
-        uploading to storage counts: a slow store can fail a write with the time-limit
-        message while DuckDB is idle. Hard limit: the query runs in a process of its
-        own; at the limit the worker asks it to stop and, `kill_grace_seconds` later, kills it.
+        Longest one query may run, in seconds. For a write it includes the time to store the
+        result, so a slow object store can fail a write with the time-limit message. At the limit
+        the worker asks the query to stop and, after the grace period of
+        `LAKANA_QUERY_LIMITS__KILL_GRACE_SECONDS`, ends it.
     kill_grace_seconds
         Seconds between asking a query to stop (its time limit, a cancel, the worker's
         drain) and killing its process. 0 kills at once; it must be a finite number. A query that
@@ -906,20 +904,16 @@ class QueryLimitsConfig(BaseModel):
         time limit or a cancel request says so in its message (a task's cancel and the worker's
         drain only log it).
     threads
-        DuckDB `threads` for the query's connection, so one query cannot
-        take every CPU core.
+        Processor threads one query may use, so that one query cannot take every core of the
+        worker.
     max_temp_directory_size
-        DuckDB `max_temp_directory_size` for the per-run spill directory, in
-        DuckDB's own syntax (``"10GB"``). Spilling only happens where the
-        local filesystem is enabled (local `file://` mode): every other mode
-        disables it for user SQL, which also blocks DuckDB's spill files, so a
-        query over `memory_limit` fails there instead of spilling.
+        Disk a query may use for temporary files when it needs more than its memory limit, written
+        as DuckDB writes sizes, for example `10GB`. Only local file storage allows it; with every
+        other storage a query over its memory limit fails instead of using disk.
     max_statement_chars
-        Longest SQL text, in characters, accepted at submit: a query, a write, a row-filter or
-        column-mask expression, and a SQL asset at deploy. The SQL parser's time and
-        memory grow with the text and are outside the query timeout (30 MB of nested
-        subqueries took 19 s and 2.9 GB); the default is far above any statement written by
-        hand.
+        Longest SQL text, in characters, that is accepted: a submitted query or write, a row
+        filter or column mask expression, and a SQL asset at deploy. A longer text is refused with
+        a message that names this setting. The default is far above any statement written by hand.
     running_per_principal
         The most ad-hoc queries one user or service account runs at once, over every
         environment: `auto` or a whole number of 1 or more. A further query waits
@@ -1090,14 +1084,12 @@ class WorkerConfig(BaseModel):
     Parameters
     ----------
     memory_limit
-        The limit on the worker's resident memory, counting the Python tasks and `uv` it
-        started (``"4GB"``, at least ``512MB``; ``"off"`` or ``"0"`` for none; see
-        `parse_memory_limit`). Units are binary: ``GB`` and ``g`` mean 1024 MB, unlike
-        DuckDB's `LAKANA_QUERY_LIMITS__MEMORY_LIMIT`, where ``GB`` is decimal and ``GiB``
-        binary. A worker over the limit records why against what it was running, kills its
-        tasks and exits; Docker or the local-mode supervisor restarts it. When unset, the
-        worker uses 90 percent of its container's memory limit, or 4GB without one. Linux
-        measures the worker and its descendants; macOS only the worker process; Windows
+        The most memory the worker may use in all, with the Python tasks and `uv` it started, for
+        example `4GB` (at least `512MB`; `off` or `0` for none). Units are binary: `GB` and `g`
+        mean 1024 MB, unlike `LAKANA_QUERY_LIMITS__MEMORY_LIMIT`, where `GB` is decimal. A worker
+        over the limit ends its tasks, records why and stops; Docker or the local-mode supervisor
+        restarts it. Unset, the worker uses 90 percent of its container's memory limit, or 4GB
+        without one. Linux measures the worker and what it started; macOS only the worker; Windows
         nothing.
     notifications
         Whether this worker delivers job notifications (`LAKANA_WORKER__NOTIFICATIONS`, on by
@@ -1167,15 +1159,13 @@ class LogConfig(BaseModel):
     Parameters
     ----------
     level
-        ``DEBUG``, ``INFO``, ``WARNING`` or ``ERROR``, in any letter case (kept in upper case).
-        Lakana's own log lines, and uvicorn's, are printed from this level up; a library's only
-        from WARNING. Above INFO the denials over the audit rate leave no line in the log (only
-        the summary row in the audit table); uvicorn's access log, one line per request, is
-        printed at INFO and DEBUG only.
+        `DEBUG`, `INFO`, `WARNING` or `ERROR`, in any letter case. Lakana's own log lines and the
+        server's are printed from this level up; other libraries only from `WARNING`. Above
+        `INFO`, refusals past the audit rate leave no line in the log, only the summary row in the
+        audit log. The request log, one line per request, is printed at `INFO` and `DEBUG` only.
     access
-        Whether the server prints uvicorn's access log, one line per request (`LAKANA_LOG__ACCESS`).
-        On by default; ``lakana server start --local`` turns it off unless asked with
-        ``--log-requests``. Nothing else in the log changes.
+        Whether the server logs every request, one line each. On by default; `lakana server start
+        --local` turns it off unless you pass `--log-requests`. Nothing else in the log changes.
     """
 
     level: str = "INFO"
@@ -1216,10 +1206,10 @@ class TaskTokensConfig(BaseModel):
     Parameters
     ----------
     max_ttl_seconds
-        Longest `ttl_seconds` a minted task token may request. Enforced by
-        `lakana_core.identity.task_tokens.TaskTokenService.mint`, so an
-        unattended task's credential cannot outlive human review
-        indefinitely by requesting an arbitrarily long lifetime.
+        Longest lifetime, in seconds, that can be requested for a task token. A task token is the
+        temporary credential a Python task uses to call Lakana. The default is one day. Lower it
+        to shorten the time a leaked token would work. The server and the worker both read it; set
+        the same value on both.
     """
 
     max_ttl_seconds: int = Field(default=86_400, gt=0)
@@ -1258,8 +1248,9 @@ class Settings(BaseSettings):
     database
         Metadata database configuration.
     bootstrap_admin
-        Name of the principal created on first start and used until M3
-        introduces real authentication.
+        Name of the administrator created the first time the server starts, if no principal of
+        that name exists. Its credential is shown once at the first start. Change it only before
+        the first start.
     secrets
         Secrets subsystem configuration.
     query_limits
@@ -1288,9 +1279,8 @@ class Settings(BaseSettings):
         How long the reads of a table are kept and how far back its health shows them
         (`LAKANA_TABLE_READS__*`).
     repo_roots
-        Absolute directories local repositories must lie under
-        (`LAKANA_REPO_ROOTS`, a JSON list). Empty refuses every local
-        repository.
+        Absolute directories that local repositories must lie under, as a JSON list, for example
+        `["/repos"]`. Empty (the default) refuses every local repository.
     """
 
     model_config = SettingsConfigDict(

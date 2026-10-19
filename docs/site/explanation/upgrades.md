@@ -562,7 +562,7 @@ the job works again. Nothing is required of a project that declares none. See
 - **New settings, on the worker:** `LAKANA_WEBHOOK__ALLOW_HOSTS`, `LAKANA_WEBHOOK__PROXY` and
   `LAKANA_WEBHOOK__CA_BUNDLE`, and `LAKANA_WORKER__NOTIFICATIONS` (on by default). A worker without
   a usable `LAKANA_SECRETS__MASTER_KEY` sends no notifications. See
-  [Webhook network settings](../how-to/projects.md#webhook-network-settings).
+  [Webhook network settings](../reference/network-settings.md#webhook-network-settings).
 - **Without a setting, the worker sends only to a public `https` address on port 443.** If your
   chat server is inside your network, an operator has to allow its name.
 - **New audit events:** `NOTIFICATION_FAILED` (a delivery gave up; its `detail` has the run, the

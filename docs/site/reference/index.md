@@ -17,4 +17,14 @@ Pages:
 
 - [Jobs](jobs.md): the triggers of a job, the fields of the job listing, routes, commands and SDK.
 
+- [Command line](cli.md): every `lakana` command and sub-command with its arguments and options. Generated from the code.
+- [Settings](settings.md): every `LAKANA_*` environment variable with its type, default, reader and description. Generated from the code.
+
+- [Project layout](project-layout.md): the files a deploy reads and the table names they give.
+- [Asset front-matter](asset-front-matter.md): every key of the `/* lakana */` block of an asset.
+- [`lakana.yaml`](lakana-yaml.md): defaults, requirements, jobs, notifications, check defaults, retries and per-environment overrides.
+- [Python assets](python-assets.md): the rules, what a deploy checks, what a task may do, failures and the operator's settings.
+- [Network settings of the worker](network-settings.md): git and webhook proxies and CA files.
+- [The Compose bundle](compose-bundle.md): the keys of `.env`, the services and the settings an operator changes most.
+
 Pages are added here as they are written.

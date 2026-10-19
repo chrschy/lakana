@@ -11,4 +11,8 @@ Pages:
 - [What leaves the machine](what-leaves-the-machine.md): the outbound connections Lakana makes.
 - [Artifacts: what they are and what they are not](artifacts.md): what a stored model is, who can read and write it, and what deleting removes.
 
+- [Python assets: what they are for and how far they are trusted](python-assets.md): why SQL first, and why one instance is one trust domain.
+- [Known gaps of the Compose bundle](compose-known-gaps.md): what the bundle does not do or protect, and why.
+- [Security overview](security.md): who may do what, where secrets live, what the audit log records and how a query is kept inside its limits.
+
 Pages are added here as they are written.

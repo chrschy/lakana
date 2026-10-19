@@ -291,6 +291,13 @@ One directory per kind, each with an `index.md` that introduces it:
 | `docs/site/reference/` | Reference | exact facts: every option, default and limit |
 | `docs/site/explanation/` | Explanation | why it works this way |
 
+Two reference pages are generated, never edited by hand: `reference/cli.md` from the Typer app
+and `reference/settings.md` from the settings models of `lakana-core` and `lakana-server` (the
+description of a variable is its entry in the model's `Parameters` docstring section, so document
+a new setting there). After a command, an option or a setting changes, run
+`uv run python scripts/generate_reference.py` and commit the pages; `--check` fails, naming the
+stale page, and runs in CI's `docs` job and in `scripts/tests/test_generate_reference.py`.
+
 A new page must be listed under `nav` in `mkdocs.yml`, and every entry must be a page;
 `scripts/tests/test_docs_site.py` fails otherwise. Link to other pages with relative `.md` links;
 the strict build fails on a broken link or anchor.
@@ -417,6 +424,7 @@ A change under `docs/examples/` is not a documentation-only change, so CI runs t
 ```bash
 uv sync --locked --all-packages --group docs
 uv run python scripts/docs_blocks.py            # check every block; add --fix to rewrite synced ones
+uv run python scripts/generate_reference.py     # rewrite the CLI and settings references (--check: fail when stale)
 uv run --group docs zensical build --strict     # build into site-build/ (a traceback after the message is normal on failure)
 uv run python scripts/check_built_site.py site-build   # external resources, missing files and URLs outside /lakana/
 uv run --group docs zensical serve              # preview on http://localhost:8000
@@ -432,7 +440,7 @@ that did not succeed (`lakana --output json runs list`, then `lakana runs logs R
 environment `dev`, which every example uses). That is where `uv`'s build output is: it is a task's
 output, not part of the instance's log. It is best effort: at most 30 s, one line for a
 command that fails, and the example's exit status is unchanged. In CI the `docs` job runs the
-block check (without `--fix`), the
+block check (without `--fix`), the generated-reference check, the
 strict build and the built-site check, and uploads `site-build` as the `docs-site` artifact
 (kept 7 days); `docs-examples` builds the `lakana` wheel of the commit (`uv build --package lakana
 --wheel --out-dir DIR`) and runs the runner with `LAKANA_TEST_WHEELHOUSE=DIR`. The example

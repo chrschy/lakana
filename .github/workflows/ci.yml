@@ -282,6 +282,9 @@ jobs:
         # Without --fix: a page that differs from its source fails, and the tool's own
         # messages (page, line, what to do) are the job log.
         run: uv run python scripts/docs_blocks.py
+      - name: Generated references (CLI and settings) are current
+        # Fails naming the stale page and the command that regenerates it.
+        run: uv run python scripts/generate_reference.py --check
       - name: Build the site
         # Zensical prints a Python traceback after its own message when strict mode fails.
         run: uv run --group docs zensical build --strict
