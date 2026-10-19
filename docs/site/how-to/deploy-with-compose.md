@@ -902,17 +902,18 @@ unavailable for the time this takes.
 1. Stop the server and every worker service, so nothing writes any more.
 2. Dump the catalog; this needs `postgres` to be running.
 3. Stop the two storage services and archive the `seaweed` volume. Its name starts with the
-   Compose project name (`lakana_seaweed` unless you set `COMPOSE_PROJECT_NAME`, see
+   Compose project name (`lakana_seaweed` unless you set `COMPOSE_PROJECT_NAME`, which the command
+   reads; see
    [Running more than one bundle on a host](#running-more-than-one-bundle-on-a-host)).
 4. Start everything again, and keep a copy of `.env` and `compose.yaml` with the two backups: `.env`
    holds the master key.
 
-<!-- not tested: stops and dumps a running Docker Compose stack and archives its volume, and the example runner has no Docker -->
+<!-- source: docs/examples/compose-restore.sh#backup -->
 ```bash
 docker compose stop server worker worker-interactive worker-pipeline
 docker compose exec -T postgres pg_dump -U lakana lakana > lakana.sql
 docker compose stop seaweedfs seaweedfs-core
-docker run --rm -v lakana_seaweed:/data -v "$PWD":/backup busybox tar czf /backup/seaweed.tgz /data
+docker run --rm -v "${COMPOSE_PROJECT_NAME:-lakana}_seaweed:/data" -v "$PWD":/backup busybox tar czf /backup/seaweed.tgz /data
 docker compose up -d --wait
 ```
 
@@ -920,6 +921,94 @@ A backup taken while the stack runs is not consistent, whatever the order: a fil
 between the two (a dropped artifact, or a deleted version after the sweep) is still listed by the
 restored catalog, and a version stored between them is missing from it. Take backups with the steps
 above.
+
+## Restore
+
+A restore puts the catalog and the object storage back from one backup, taken as under
+"Backups". The project's `compose-smoke` job runs the backup and these steps: it backs up, changes
+a table, loses the instance, restores into a new directory, and compares the table, the runs and
+an artifact.
+
+**Where to restore.** Into the directory of the bundle you lost, if it is still there, or into a
+new, empty directory (on a new machine, say). The directory needs the `compose.yaml` and the
+`.env` of the same bundle: `.env` holds the master key, which decrypts the stored secrets, and the
+storage keys, which the restored storage was set up with. A bundle made by a new `bundle init` has
+other keys and cannot read the restored instance. So keep copies of `.env`, `compose.yaml`, the
+`repos/` directory (local repositories live there) and the two backup files together, and
+restore from them. Use the image version of the backup, or a newer one: `migrate` brings the catalog up to date when
+you start it. Never restore a catalog into an older image than the one that wrote it.
+
+1. In the directory, put the four files, and make sure `repos/` exists.
+
+<!-- source: docs/examples/compose-restore.sh#restore-directory -->
+```bash
+mkdir -p repos
+```
+
+2. Remove the volumes of the instance you are replacing. This **deletes** its catalog and its
+   data, so be sure the backups are good first. In a new directory on a new machine there is
+   nothing to remove, and it does nothing.
+
+<!-- source: docs/examples/compose-restore.sh#restore-clear -->
+```bash
+docker compose down -v
+```
+
+3. Start Postgres alone and load the dump. `ON_ERROR_STOP` and `--single-transaction` make a
+   failed load leave the database empty rather than half full.
+
+<!-- source: docs/examples/compose-restore.sh#restore-catalog -->
+```bash
+docker compose up -d --wait postgres
+docker compose exec -T postgres psql -U lakana -d lakana -v ON_ERROR_STOP=1 --single-transaction < lakana.sql
+```
+
+4. Create the storage volume through Compose, so it carries Compose's labels, and unpack the
+   archive into it.
+
+<!-- source: docs/examples/compose-restore.sh#restore-storage -->
+```bash
+docker compose create seaweedfs-core
+docker run --rm -v "${COMPOSE_PROJECT_NAME:-lakana}_seaweed:/data" -v "$PWD":/backup busybox tar xzf /backup/seaweed.tgz -C /
+```
+
+5. Before you start everything, decide about the sweep (below), then start it.
+
+<!-- source: docs/examples/compose-restore.sh#restore-start -->
+```bash
+docker compose up -d --wait
+```
+
+6. Check the result. A table you know reads the rows it had at the backup (not the ones
+   written after it), and the runs of the backup are listed. `bronze.demo` and `dev` are examples;
+   use your own.
+
+<!-- source: docs/examples/compose-restore.sh#check -->
+```bash
+lakana sql "SELECT id, name FROM bronze.demo ORDER BY id"
+lakana runs list --env dev
+```
+
+Everything written after the backup is gone: rows, runs, grants and tokens. People whose token
+was issued after it must get a new one. Secrets are back as they were, because they are in the
+catalog, encrypted with the master key in `.env`.
+
+**The sweep.** Once an hour the sweep removes what a crash or an abandoned upload left behind. After a restore the catalog and the storage can
+disagree if they were not taken at the same moment, and the sweep is built to remove little then:
+it keeps an artifact directory the catalog does not know and the files a manifest it does not know
+names, and logs that it did. To keep it from removing anything at all while you check, set
+`LAKANA_RUN__SWEEP_INTERVAL: "0"` in the shared `x-lakana-env` block of `compose.yaml` before step
+5 (the workers read it there, not from `.env`), and remove the line once you have checked:
+
+```yaml
+x-lakana-env: &lakana-env
+  # ... the lines that are already here stay ...
+  LAKANA_RUN__SWEEP_INTERVAL: "0"
+```
+
+What each log line means is in [After a restore](#after-a-restore). There is no command yet to
+bring an artifact back into the catalog or to make it forget one on purpose; issue
+[#68](https://github.com/lakana-labs/lakana/issues/68) tracks it.
 
 ## After a restore
 

@@ -7,9 +7,10 @@
 # kind of work, the default worker stopped (the deploy, the canary and venv checks and the
 # run again, now on `worker-pipeline`) → down -v.
 #
-# One sequence is the documentation's own commands, sourced from docs/examples (the page shows
-# its regions): a second environment with the bundle's storage secret
-# (compose-add-environment.sh).
+# Two sequences are the documentation's own commands, sourced from docs/examples (the page shows
+# their regions): a second environment with the bundle's storage secret
+# (compose-add-environment.sh) and a backup, a change and a restore into a new directory
+# (compose-restore.sh).
 #
 # The Python asset's packages come from an offline wheel directory: LAKANA_WHEELHOUSE, or one
 # built here by scripts/build_wheelhouse.sh (the only step that asks a package index). Its lakana
@@ -178,6 +179,15 @@ check
 # same version downloaded again is the same files.
 lakana --profile team artifact download models.doubler "$copy/second" --env dev
 diff -r "$copy/first" "$copy/second"
+# Back up, change, lose the instance and restore it into a new directory (how-to "Deploying with
+# Compose", Backups and Restore). From here on the bundle runs in $RESTORED.
+RESTORED="$work/restored"
+# shellcheck source=../docs/examples/compose-restore.sh
+source "$here/../docs/examples/compose-restore.sh"
+# The restored storage holds the artifact's bytes: the same version downloaded again is the same files.
+lakana --profile team artifact download models.doubler "$copy/third" --env dev
+diff -r "$copy/first" "$copy/third"
+check
 # Workers for one kind of work. The bundle starts none by default; two numbers in .env
 # start one of each next to the two `all` workers. Then the default workers go to zero, so that
 # what follows can only run on the specialised ones: ad-hoc queries on `worker-interactive`, the
