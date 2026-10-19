@@ -3616,3 +3616,38 @@ def test_0042_adds_table_locations_with_a_live_record_for_every_managed_table(
             assert connection.execute(sa.text("SELECT count(*) FROM tables")).scalar_one() == 7
     finally:
         engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "metadata_location",
+    [
+        "s3://bucket/dev/managed/gold/orders-0a1b/metadata/00001-a.metadata.json",
+        "s3://bucket/dev/managed/gold/x-0a1b/inner-2c3d/metadata/00000-b.metadata.json",
+        "file:///lake/dev/managed/metadata/t-0a1b/metadata/00002-c.metadata.json",
+        "file:///lake/dev/managed/gold/t-0a1b/metadata/",
+        "file:///lake/dev/managed/gold/t-0a1b/metadata",
+        "file:///lake/dev/managed/gold/t-0a1b/",
+        "file:///lake/dev/managed/gold/t-0a1b/00000-d.metadata.json",
+    ],
+)
+def test_0042_derives_a_table_root_as_the_application_does(metadata_location: str) -> None:
+    """The frozen copy in migration `0042` agrees with the function it mirrors.
+
+    Parameters
+    ----------
+    metadata_location
+        A sample: plain, nested, a directory named `metadata`, with and without a trailing
+        slash, and without a metadata directory at all.
+    """
+    import importlib.util
+
+    from lakana_core.storage.resolver import table_root_from_metadata_location
+
+    path = ALEMBIC_INI.parent / "src/lakana_core/migrations/versions/0042_table_locations.py"
+    spec = importlib.util.spec_from_file_location("migration_0042", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.table_root_from_metadata_location(
+        metadata_location
+    ) == table_root_from_metadata_location(metadata_location)

@@ -12,13 +12,33 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-from lakana_core.storage.resolver import table_root_from_metadata_location
-
 # revision identifiers, used by Alembic.
 revision: str = "b1e8f4c7a3d9"
 down_revision: str | Sequence[str] | None = "a0d7e3b6f2c8"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
+
+
+def table_root_from_metadata_location(metadata_location: str) -> str | None:
+    """Derive a table's root location from its metadata file's location.
+
+    A frozen copy: it mirrors `lakana_core.storage.resolver.table_root_from_metadata_location`
+    as of this migration, so that a later change there cannot change what this migration does.
+    `test_migrations.py` checks that the two still agree on sample locations.
+
+    Parameters
+    ----------
+    metadata_location
+        A table's `metadata_location`.
+
+    Returns
+    -------
+    str or None
+        Everything before the last ``/metadata/``, or `None` when there is none.
+    """
+    marker = "/metadata/"
+    index = metadata_location.rfind(marker)
+    return None if index == -1 else metadata_location[:index]
 
 
 def upgrade() -> None:
