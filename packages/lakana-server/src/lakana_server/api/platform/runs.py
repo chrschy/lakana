@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import dataclasses
 import uuid
+from datetime import datetime
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response
 from sqlalchemy.orm import Session
 
 from lakana_core.auth import AuthorizationService, PrincipalRef
@@ -16,6 +17,7 @@ from lakana_core.runs.check_rows import submit_check_rows
 from lakana_core.runs.checks import CheckResultView
 from lakana_core.runs.selection import Selection
 from lakana_core.runs.service import RunService, RunView, TaskLogView, TaskRunView
+from lakana_server.api.platform.listing import set_next_cursor, split_values
 from lakana_server.api.platform.schemas import (
     CheckResultOut,
     CheckResultPage,
@@ -149,21 +151,44 @@ def start_run(
 @router.get("/runs", response_model=list[RunOut])
 def list_runs(
     env: str,
+    response: Response,
     repository: str | None = Query(default=None, max_length=255),
+    status: list[str] = Query(default=[], max_length=16),
+    trigger: list[str] = Query(default=[], max_length=16),
+    job: str | None = Query(default=None, max_length=255),
+    since: datetime | None = None,
     limit: int = Query(default=100, ge=1, le=200),
+    cursor: str | None = Query(default=None, max_length=512),
     principal: PrincipalRef = Depends(get_principal),
     service: RunService = Depends(get_run_service),
 ) -> list[RunOut]:
-    """List runs, newest first (needs `READ_ENVIRONMENT`).
+    """List runs, newest first, one page at a time (needs `READ_ENVIRONMENT`).
+
+    The cursor of the next page is in the `X-Next-Cursor` response header; it is absent on the
+    last page. Send the same filters with every page.
 
     Parameters
     ----------
     env
         Environment name.
+    response
+        The response, to set the cursor header on.
     repository
         Only this repository's runs.
+    status
+        Only runs in these statuses (`queued`, `running`, `succeeded`, `failed`,
+        `cancelled`); repeat the parameter or separate the values with commas.
+    trigger
+        Only runs started this way (`schedule`, `api`, `manual`); repeat or separate with commas.
+    job
+        Only runs of this job.
+    since
+        Only runs created at or after this ISO 8601 time, with a time zone
+        (`2026-10-18T00:00:00Z`).
     limit
         Most runs returned (1 to 200).
+    cursor
+        The `X-Next-Cursor` of the previous page.
     principal
         The authenticated caller.
     service
@@ -174,9 +199,19 @@ def list_runs(
     list of RunOut
         Without tasks.
     """
-    return [
-        run_out(v) for v in service.list_runs(principal, env, repository=repository, limit=limit)
-    ]
+    views, next_cursor = service.list_runs_page(
+        principal,
+        env,
+        repository=repository,
+        status=split_values(status),
+        trigger=split_values(trigger),
+        job=job,
+        since=since,
+        limit=limit,
+        cursor=cursor,
+    )
+    set_next_cursor(response, next_cursor)
+    return [run_out(v) for v in views]
 
 
 @router.get("/runs/{run_id}", response_model=RunOut)

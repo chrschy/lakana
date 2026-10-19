@@ -1,0 +1,45 @@
+"""What the list routes of runs, queries and deploys share: filter values and the cursor header.
+
+These lists answer with a JSON array, as they did before they could be paged, so the cursor of the
+next page travels in a response header instead of a body field.
+"""
+
+from __future__ import annotations
+
+from fastapi import Response
+
+NEXT_CURSOR_HEADER = "X-Next-Cursor"
+"""The response header that carries the cursor of the next page; absent on the last page."""
+
+
+def split_values(values: list[str]) -> list[str]:
+    """Flatten a repeatable, comma-separated filter into its values.
+
+    ``?status=failed&status=cancelled`` and ``?status=failed,cancelled`` both give
+    ``["failed", "cancelled"]``.
+
+    Parameters
+    ----------
+    values
+        The values of the query parameter, as sent.
+
+    Returns
+    -------
+    list of str
+        Each non-empty, stripped value.
+    """
+    return [part.strip() for value in values for part in value.split(",") if part.strip()]
+
+
+def set_next_cursor(response: Response, next_cursor: str | None) -> None:
+    """Put the cursor of the next page on the response, if there is one.
+
+    Parameters
+    ----------
+    response
+        The response being built.
+    next_cursor
+        The cursor, or `None` on the last page.
+    """
+    if next_cursor is not None:
+        response.headers[NEXT_CURSOR_HEADER] = next_cursor

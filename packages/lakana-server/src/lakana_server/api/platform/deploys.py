@@ -7,11 +7,12 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Query, Response
 
 from lakana_core.auth import PrincipalRef
 from lakana_core.models import DeployKind
 from lakana_core.projects.deploys import DeploymentView, DeployRunView, DeployService
+from lakana_server.api.platform.listing import set_next_cursor
 from lakana_server.api.platform.schemas import (
     DeployAccepted,
     DeployCreate,
@@ -105,15 +106,30 @@ def create_deploy(
 @router.get("/deploys", response_model=list[DeployOut])
 def list_deploys(
     env: str,
+    response: Response,
+    repository: str | None = Query(default=None, max_length=255),
+    limit: int = Query(default=100, ge=1, le=200),
+    cursor: str | None = Query(default=None, max_length=512),
     principal: PrincipalRef = Depends(get_principal),
     service: DeployService = Depends(get_deploy_service),
 ) -> list[DeployOut]:
-    """List an environment's deploy history, newest first.
+    """List an environment's deploy history, newest first, one page at a time.
+
+    The cursor of the next page is in the `X-Next-Cursor` response header; it is absent on the
+    last page. Send the same `repository` with every page.
 
     Parameters
     ----------
     env
         Environment name.
+    response
+        The response, to set the cursor header on.
+    repository
+        Only this repository's deploys.
+    limit
+        Most deploys returned (1 to 200).
+    cursor
+        The `X-Next-Cursor` of the previous page.
     principal
         The authenticated caller.
     service
@@ -124,7 +140,11 @@ def list_deploys(
     list of DeployOut
         Newest first.
     """
-    return [_to_out(view) for view in service.history(principal, env)]
+    views, next_cursor = service.history_page(
+        principal, env, repository=repository, limit=limit, cursor=cursor
+    )
+    set_next_cursor(response, next_cursor)
+    return [_to_out(view) for view in views]
 
 
 @router.get("/deploys/{deploy_id}", response_model=DeployOut)

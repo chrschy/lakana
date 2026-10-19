@@ -14,6 +14,7 @@ from lakana_core.models import QueryRun, QueryRunStatus, WriteMode
 from lakana_core.runs.waiting import WaitReason
 from lakana_core.secrets.keys import KeyProvider
 from lakana_core.storage.resolver import StorageResolver
+from lakana_server.api.platform.listing import set_next_cursor, split_values
 from lakana_server.api.platform.schemas import (
     QueryListOut,
     QueryStatusOut,
@@ -72,8 +73,12 @@ def _status_out(run: QueryRun, waiting: WaitReason | None) -> QueryStatusOut:
 @router.get("", response_model=list[QueryListOut])
 def list_queries(
     env: str,
+    response: Response,
     include_ended: bool = Query(default=False),
+    status: list[str] = Query(default=[], max_length=16),
+    submitter: str | None = Query(default=None, max_length=255),
     limit: int = Query(default=100, ge=1, le=QUERY_LIST_MAX),
+    cursor: str | None = Query(default=None, max_length=512),
     principal: PrincipalRef = Depends(get_principal),
     queries: QueryService = Depends(get_query_service),
 ) -> list[QueryListOut]:
@@ -83,14 +88,30 @@ def list_queries(
     everyone else sees the queries their principal submitted (a task token: its own). Never
     the SQL text, an error message or a result.
 
+    The cursor of the next page is in the `X-Next-Cursor` response header; it is absent on the
+    last page. Send the same filters with every page. The filters only narrow what the caller
+    may see: `submitter` never shows another principal's query to a caller who is not a
+    manager.
+
     Parameters
     ----------
     env
         Environment name.
+    response
+        The response, to set the cursor header on.
     include_ended
         Also list the queries that ended in the last 24 hours.
+    status
+        Only queries in these statuses (`queued`, `running`, `succeeded`, `failed`,
+        `cancelled`; any letter case); repeat the parameter or separate the values with commas.
+        An ended status lists the ended queries of the last 24 hours, with or without
+        `include_ended`.
+    submitter
+        Only queries submitted by the principal with this name.
     limit
         Most rows returned (1 to 200).
+    cursor
+        The `X-Next-Cursor` of the previous page.
     principal
         The authenticated caller.
     queries
@@ -110,6 +131,16 @@ def list_queries(
     lakana_core.errors.NotFoundError
         Mapped to 404, if the environment does not exist.
     """
+    items, next_cursor = queries.list_queries_page(
+        principal,
+        env,
+        include_ended=include_ended,
+        status=split_values(status),
+        submitter=submitter,
+        limit=limit,
+        cursor=cursor,
+    )
+    set_next_cursor(response, next_cursor)
     return [
         QueryListOut(
             id=str(item.id),
@@ -123,7 +154,7 @@ def list_queries(
             error_cause=item.error_cause,
             waiting_for=None if item.waiting_for is None else item.waiting_for.to_json(),
         )
-        for item in queries.list_queries(principal, env, include_ended=include_ended, limit=limit)
+        for item in items
     ]
 
 
