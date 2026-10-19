@@ -704,7 +704,7 @@ logger = logging.getLogger(__name__)
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
 
-_PARSER_FAULTS = (ValueError,)
+_PARSER_FAULTS = (ValueError, AttributeError)
 """What sqlglot's parser raises, besides its own syntax errors, on text it half-reads."""
 
 
@@ -728,7 +728,8 @@ def _parse_sql(sql: str, dialect: str) -> exp.Expr:
     ValidationError
         With the guard's syntax message, if sqlglot's parser itself fails on the text with
         an error that is not a `ParseError` (it assumes a name is a string where the text put
-        a placeholder, for one).
+        a placeholder (`ValueError`), or reads a struct key from a node it left empty
+        (`AttributeError`)).
     """
     try:
         return sqlglot.parse_one(sql, dialect=dialect)

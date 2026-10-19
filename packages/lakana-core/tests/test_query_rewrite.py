@@ -1881,3 +1881,26 @@ def test_expected_errors_pass_through_the_safety_net() -> None:
     """A syntax error keeps its own type; the net does not rewrite it."""
     with pytest.raises(sqlglot.errors.ParseError):
         query_rewrite.check_blacklist("SELECT FROM WHERE (")
+
+
+@pytest.mark.parametrize(
+    "check",
+    [query_rewrite.check_blacklist, query_rewrite.extract_table_refs, query_rewrite.rewrite_query],
+)
+def test_a_parser_attribute_error_is_refused_with_the_syntax_message(
+    check: Callable[..., object],
+) -> None:
+    """A half-parsed struct literal is refused, not raised as `AttributeError` (#216).
+
+    Parameters
+    ----------
+    check
+        A public entry point of the guard.
+    """
+    args = (
+        (_WITNESS_EMPTY_NODE, {})
+        if check is query_rewrite.rewrite_query
+        else (_WITNESS_EMPTY_NODE,)
+    )
+    with pytest.raises(ValidationError, match=_SYNTAX_MESSAGE):
+        check(*args)
