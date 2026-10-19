@@ -19,7 +19,8 @@ docker compose run --rm --no-deps -T -v "$PWD":/backup --entrypoint tar seaweedf
 docker compose up -d --wait
 # docs:end backup
 # The archive holds the storage's data: SeaweedFS volume files, not an empty or another bundle's volume.
-tar tzf seaweed.tgz | grep -q '\.dat$'
+listing=$(tar tzf seaweed.tgz)
+grep -q '\.dat$' <<<"$listing"
 
 # A change after the backup, which the restore has to take back.
 printf 'id,name\n3,gamma\n' > change.csv
