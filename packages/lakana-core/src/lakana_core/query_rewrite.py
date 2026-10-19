@@ -414,6 +414,28 @@ _VALUES_CLAUSE_MESSAGE = (
 """Why a bare `VALUES` list carrying a clause other than `ORDER BY`, `LIMIT` or `OFFSET` is
 refused, naming the clause and the form that takes it."""
 
+_NO_SUCH_CLAUSE_MESSAGE = "DuckDB has no {clause}; {hint}."
+"""Why a bare `VALUES` list carrying a clause DuckDB takes nowhere, not even in a `SELECT`, is
+refused, with what to do instead."""
+
+_CLAUSES_DUCKDB_LACKS = {
+    "SORT BY": "use ORDER BY",
+    "CLUSTER BY": "use ORDER BY",
+    "DISTRIBUTE BY": "remove it",
+    "FOR UPDATE": "remove it, a query takes no lock",
+    "CONNECT BY": "remove it",
+    "MATCH_RECOGNIZE": "remove it",
+    "PREWHERE": "use WHERE in a SELECT of the list",
+    "SETTINGS": "remove it",
+    "FORMAT": "remove it",
+    "OPTION": "remove it",
+    "FOR": "remove it",
+}
+"""The clauses of `_VALUES_CLAUSES` that DuckDB refuses in a `SELECT` too, each with the hint
+its refusal gives. Checked against DuckDB 1.5: each is a parser error after
+`SELECT * FROM (VALUES (1)) AS t(a)`, where `WHERE`, `GROUP BY`, `WINDOW`, `TABLESAMPLE`,
+`JOIN`, `PIVOT` and `LATERAL` run."""
+
 _VALUES_MODIFIERS = ("order", "limit", "offset")
 """The `exp.Values` arguments that apply to the whole result and move to the `SELECT` around it.
 
@@ -941,7 +963,8 @@ def _reject_values_clauses(values: exp.Values) -> None:
     ------
     ValidationError
         If it carries an argument outside `_VALUES_ARGS` — an alias (`_ALIASED_VALUES_MESSAGE`)
-        or a clause such as `WHERE` or `JOIN` (`_VALUES_CLAUSE_MESSAGE`, naming the clause).
+        or a clause such as `WHERE` or `JOIN` (`_VALUES_CLAUSE_MESSAGE`, naming the clause), or
+        one DuckDB never takes, such as `SORT BY` (`_NO_SUCH_CLAUSE_MESSAGE`).
     """
     for key, value in values.args.items():
         if key in _VALUES_ARGS or value is None or value == []:
@@ -949,6 +972,9 @@ def _reject_values_clauses(values: exp.Values) -> None:
         if key == "alias":
             raise ValidationError(_ALIASED_VALUES_MESSAGE)
         clause = _VALUES_CLAUSES.get(key, key.upper())
+        hint = _CLAUSES_DUCKDB_LACKS.get(clause)
+        if hint is not None:
+            raise ValidationError(_NO_SUCH_CLAUSE_MESSAGE.format(clause=clause, hint=hint))
         raise ValidationError(_VALUES_CLAUSE_MESSAGE.format(clause=clause))
 
 

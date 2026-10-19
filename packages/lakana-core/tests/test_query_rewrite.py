@@ -1736,26 +1736,37 @@ def test_a_bare_values_list_with_an_alias_is_refused_as_duckdb_refuses_it(sql: s
         rewrite_query(sql, {})
 
 
+_SELECT_FORM = (
+    "A VALUES list on its own takes no {c}; write SELECT * FROM (VALUES ...) AS t(a, b) {c} ... "
+    "instead."
+)
+"""The refusal for a clause DuckDB takes in a `SELECT` but not on a bare `VALUES`."""
+
 _VALUES_CLAUSES_DUCKDB_REFUSES = [
-    pytest.param("SORT BY 1", "SORT BY", id="sort-by"),
-    pytest.param("CLUSTER BY 1", "CLUSTER BY", id="cluster-by"),
-    pytest.param("DISTRIBUTE BY 1", "DISTRIBUTE BY", id="distribute-by"),
-    pytest.param("FOR UPDATE", "FOR UPDATE", id="for-update"),
-    pytest.param("WHERE TRUE", "WHERE", id="where"),
-    pytest.param("QUALIFY TRUE", "QUALIFY", id="qualify"),
-    pytest.param("HAVING TRUE", "HAVING", id="having"),
-    pytest.param("WINDOW w AS (ORDER BY 1)", "WINDOW", id="window"),
-    pytest.param("TABLESAMPLE (10 ROWS)", "TABLESAMPLE", id="tablesample"),
-    pytest.param("USING SAMPLE 10", "TABLESAMPLE", id="using-sample"),
-    pytest.param("GROUP BY 1", "GROUP BY", id="group-by"),
-    pytest.param("JOIN bronze.x ON TRUE", "JOIN", id="join"),
+    pytest.param("SORT BY 1", "DuckDB has no SORT BY; use ORDER BY.", id="sort-by"),
+    pytest.param("CLUSTER BY 1", "DuckDB has no CLUSTER BY; use ORDER BY.", id="cluster-by"),
+    pytest.param("DISTRIBUTE BY 1", "DuckDB has no DISTRIBUTE BY; remove it.", id="distribute-by"),
+    pytest.param(
+        "FOR UPDATE", "DuckDB has no FOR UPDATE; remove it, a query takes no lock.", id="for-update"
+    ),
+    pytest.param("WHERE TRUE", _SELECT_FORM.format(c="WHERE"), id="where"),
+    pytest.param("QUALIFY TRUE", _SELECT_FORM.format(c="QUALIFY"), id="qualify"),
+    pytest.param("HAVING TRUE", _SELECT_FORM.format(c="HAVING"), id="having"),
+    pytest.param("WINDOW w AS (ORDER BY 1)", _SELECT_FORM.format(c="WINDOW"), id="window"),
+    pytest.param("TABLESAMPLE (10 ROWS)", _SELECT_FORM.format(c="TABLESAMPLE"), id="tablesample"),
+    pytest.param("USING SAMPLE 10", _SELECT_FORM.format(c="TABLESAMPLE"), id="using-sample"),
+    pytest.param("GROUP BY 1", _SELECT_FORM.format(c="GROUP BY"), id="group-by"),
+    pytest.param("JOIN bronze.x ON TRUE", _SELECT_FORM.format(c="JOIN"), id="join"),
 ]
-"""Clauses sqlglot attaches to a bare `VALUES` and DuckDB refuses there, with the name refused."""
+"""Clauses sqlglot attaches to a bare `VALUES` and DuckDB refuses there, with the refusal.
+
+For a clause DuckDB never takes, the refusal says so; for the others it shows the `SELECT` form
+DuckDB runs."""
 
 
-@pytest.mark.parametrize(("clause", "name"), _VALUES_CLAUSES_DUCKDB_REFUSES)
+@pytest.mark.parametrize(("clause", "message"), _VALUES_CLAUSES_DUCKDB_REFUSES)
 def test_a_clause_duckdb_does_not_take_on_a_bare_values_list_is_refused(
-    clause: str, name: str
+    clause: str, message: str
 ) -> None:
     """The rewrite would drop the clause or render it in the wrong place; it is refused instead.
 
@@ -1763,14 +1774,10 @@ def test_a_clause_duckdb_does_not_take_on_a_bare_values_list_is_refused(
     ----------
     clause
         The clause after the `VALUES` list.
-    name
-        The clause's name, as the refusal states it.
+    message
+        The refusal, word for word.
     """
     sql = f"VALUES (1) {clause}"
-    message = (
-        f"A VALUES list on its own takes no {name}; write "
-        f"SELECT * FROM (VALUES ...) AS t(a, b) {name} ... instead."
-    )
     for check in (check_blacklist, extract_table_refs, lambda text: rewrite_query(text, {})):
         with pytest.raises(ValidationError) as caught:
             check(sql)
@@ -1787,6 +1794,7 @@ def test_every_argument_sqlglot_can_set_on_values_is_allowed_or_refused_by_name(
 
     assert known <= query_rewrite._VALUES_ARGS | set(query_rewrite._VALUES_CLAUSES)
     assert not query_rewrite._VALUES_ARGS & set(query_rewrite._VALUES_CLAUSES)
+    assert set(query_rewrite._CLAUSES_DUCKDB_LACKS) <= set(query_rewrite._VALUES_CLAUSES.values())
 
 
 def test_an_argument_on_values_with_no_name_yet_is_refused_all_the_same() -> None:
