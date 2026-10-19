@@ -992,3 +992,49 @@ def test_a_mask_on_a_nanosecond_parquet_timestamp_is_read_as_written(tmp_path: P
         )
         assert "CAST" not in rewritten.sql.split(" FROM READ_PARQUET")[0]
         assert _fetch(rewritten) == [expected]
+
+
+@pytest.mark.parametrize(
+    ("sql", "rows"),
+    [
+        ("VALUES (1, 'a'), (2, 'b')", [{"col0": 1, "col1": "a"}, {"col0": 2, "col1": "b"}]),
+        ("VALUES (2), (1), (3) ORDER BY 1 DESC LIMIT 2", [{"col0": 3}, {"col0": 2}]),
+    ],
+)
+def test_a_query_that_is_only_a_values_list_returns_its_rows(
+    sql: str, rows: list[dict[str, object]]
+) -> None:
+    """`lakana sql "VALUES ..."` takes the query path and returns what DuckDB itself returns.
+
+    Parameters
+    ----------
+    sql
+        A bare `VALUES` list.
+    rows
+        The rows, with the column names DuckDB gives a bare `VALUES`.
+    """
+    check_blacklist(sql)
+    rewritten = rewrite_query(sql, {})
+
+    result = execute_query(rewritten.sql, rewritten.parameters, restrict_local_filesystem=False)
+
+    assert result.to_pylist() == rows
+    assert duckdb.connect().execute(sql).to_arrow_table().to_pylist() == rows
+
+
+def test_a_column_mask_holds_for_a_read_inside_a_bare_values_list(tmp_path: Path) -> None:
+    """A masked column read through a subquery in `VALUES` shows the mask, never the value."""
+    probe = tmp_path / "customers.parquet"
+    pq.write_table(pa.table({"id": [1, 2], "ssn": ["111-22-3333", "444-55-6666"]}), probe)
+    source = TableSource(
+        urls=[str(probe)],
+        file_format="parquet",
+        columns={"id": "BIGINT", "ssn": "VARCHAR"},
+        column_masks={"ssn": "'***'"},
+    )
+    sql = "VALUES ((SELECT max(ssn) FROM gold.customers), (SELECT count(*) FROM gold.customers))"
+    check_blacklist(sql)
+
+    rows = _fetch(rewrite_query(sql, {"gold.customers": source}))
+
+    assert rows == [("***", 2)]

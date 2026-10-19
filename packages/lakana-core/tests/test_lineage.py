@@ -57,3 +57,8 @@ def test_a_traceable_column_survives_an_untraceable_sibling() -> None:
         "category": [{"table": "bronze.weather", "column": "category"}],
         "*": [],
     }
+
+
+def test_a_bare_values_list_has_no_traceable_column() -> None:
+    """A `VALUES` list reads no table, so its columns trace to nothing."""
+    assert extract_lineage("VALUES (1, 'a')") == {}
