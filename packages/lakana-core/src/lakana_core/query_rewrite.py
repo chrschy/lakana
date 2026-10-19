@@ -51,7 +51,7 @@ from sqlglot.optimizer.qualify import qualify
 from sqlglot.optimizer.scope import Scope, build_scope, traverse_scope
 
 from lakana_core.errors import LakanaError, ValidationError
-from lakana_core.sql_syntax import SQL_SYNTAX_ERRORS, describe_syntax_error
+from lakana_core.sql_syntax import SQL_SYNTAX_ERRORS
 
 _BLACKLISTED_FUNCTIONS = frozenset(
     {
@@ -725,18 +725,17 @@ def _parse_sql(sql: str, dialect: str) -> exp.Expr:
 
     Raises
     ------
-    ValidationError
-        With the guard's syntax message, if sqlglot's parser itself fails on the text with
-        an error that is not a `ParseError` (it assumes a name is a string where the text put
-        a placeholder (`ValueError`), or reads a struct key from a node it left empty
-        (`AttributeError`)).
+    sqlglot.errors.ParseError
+        If sqlglot's parser itself fails on the text with an error that is not a
+        `ParseError`: a `ValueError` (it assumes a name is a string where the text put a
+        placeholder) or an `AttributeError` (it reads a struct key from a node it left empty).
+        It is a `ParseError` so that every handler of `SQL_SYNTAX_ERRORS`, such as the one
+        that names a broken stored view, treats it as the syntax error it is.
     """
     try:
         return sqlglot.parse_one(sql, dialect=dialect)
     except _PARSER_FAULTS as exc:
-        raise ValidationError(
-            describe_syntax_error(sqlglot.errors.ParseError("the text could not be read"), sql)
-        ) from exc
+        raise sqlglot.errors.ParseError("the text could not be read") from exc
 
 
 def _fail_closed(func: Callable[_P, _R]) -> Callable[_P, _R]:

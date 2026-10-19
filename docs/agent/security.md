@@ -2199,7 +2199,8 @@ request while its database session is open; releasing it before the reads is not
 **A query the guard cannot read is refused, never allowed.** sqlglot's parser sometimes fails
 on malformed text with an error that is not a `ParseError`: a `ValueError` (a placeholder where
 it expects a name) or an `AttributeError` (a node it left empty). `_parse_sql` turns these two
-into a `ValidationError` with the usual syntax message. Beyond them, `_fail_closed` wraps the
+into a `ParseError`, so every `except SQL_SYNTAX_ERRORS` handler gives the usual syntax message
+and a stored view that trips one is named, not the reader's query. Beyond them, `_fail_closed` wraps the
 three entry points (`check_blacklist`, `extract_table_refs`, `rewrite_query`): any other
 unexpected exception becomes a `ValidationError` ("We could not parse your SQL..."), logged at
 WARNING with the exception's type and the entry point, never the SQL. No path returns normally

@@ -21,6 +21,7 @@ from lakana_core.query_rewrite import (
     extract_table_refs,
     rewrite_query,
 )
+from lakana_core.sql_syntax import describe_syntax_error
 
 _READER_CALL = re.compile(r"READ_PARQUET\(GETVARIABLE\('v_\d+_files'\)\)")
 """A generated reader call, reading one of the variables the query process sets."""
@@ -1841,8 +1842,9 @@ def test_a_parser_value_error_is_refused_with_the_syntax_message(
         if check is query_rewrite.rewrite_query
         else (_WITNESS_PLACEHOLDER_NAME,)
     )
-    with pytest.raises(ValidationError, match=_SYNTAX_MESSAGE):
+    with pytest.raises(sqlglot.errors.ParseError) as caught:
         check(*args)
+    assert describe_syntax_error(caught.value, args[0]).startswith(_SYNTAX_MESSAGE)
 
 
 @pytest.mark.parametrize("entry", ["check_blacklist", "extract_table_refs", "rewrite_query"])
@@ -1902,5 +1904,22 @@ def test_a_parser_attribute_error_is_refused_with_the_syntax_message(
         if check is query_rewrite.rewrite_query
         else (_WITNESS_EMPTY_NODE,)
     )
-    with pytest.raises(ValidationError, match=_SYNTAX_MESSAGE):
+    with pytest.raises(sqlglot.errors.ParseError) as caught:
         check(*args)
+    assert describe_syntax_error(caught.value, args[0]).startswith(_SYNTAX_MESSAGE)
+
+
+@pytest.mark.parametrize("witness", [_WITNESS_PLACEHOLDER_NAME, _WITNESS_EMPTY_NODE])
+def test_a_stored_view_that_trips_a_parser_fault_is_named(witness: str) -> None:
+    """The reader's valid query is not blamed for a stored view the parser faults on.
+
+    Parameters
+    ----------
+    witness
+        The stored view's SQL.
+    """
+    with pytest.raises(ValidationError, match=r"View 'gold\.v' could not be read"):
+        expand_views(
+            "SELECT * FROM gold.v",
+            lambda dotted: ViewDefinition(name=dotted, sql=witness) if dotted == "gold.v" else None,
+        )

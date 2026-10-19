@@ -8,7 +8,7 @@ from hypothesis import strategies as st
 
 from lakana_core.errors import ValidationError
 from lakana_core.query_rewrite import check_blacklist, extract_table_refs
-from lakana_core.sql_syntax import SQL_SYNTAX_ERRORS
+from lakana_core.sql_syntax import SQL_SYNTAX_ERRORS, describe_syntax_error
 
 _STATEMENTS = (
     "DELETE FROM bronze.t RETURNING *",
@@ -110,5 +110,6 @@ def test_found_by_mutation_a_half_parsed_statement_is_refused_by_both_checks(sql
         A malformed statement the parser raises a non-syntax error on.
     """
     for check in (check_blacklist, extract_table_refs):
-        with pytest.raises(ValidationError, match="SQL syntax error"):
+        with pytest.raises(SQL_SYNTAX_ERRORS) as caught:
             check(sql)
+        assert describe_syntax_error(caught.value, sql).startswith("SQL syntax error")
