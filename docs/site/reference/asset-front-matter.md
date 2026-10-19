@@ -32,7 +32,8 @@ which read no data and are not inputs; every other table function (`read_parquet
 `glob`, anything unknown) fails the deploy with an issue at `path:line` (the line where the SQL body starts) — register the
 data as a table and reference it.
 
-An asset is one `SELECT`. A statement that changes data or the session (`INSERT`, `UPDATE`,
+An asset is one `SELECT` (also with `WITH`, or a set operation such as `UNION`), or a `VALUES`
+list such as `VALUES (1, 'a'), (2, 'b')`. A statement that changes data or the session (`INSERT`, `UPDATE`,
 `DELETE`, `MERGE`, `COPY`, `CREATE`, `DROP`, `ATTACH`, `SET` and the like) fails the deploy
 wherever it sits, also inside a CTE or a subquery, with ``A query reads data and cannot change
 it: `DELETE` is not allowed, also not inside a CTE or subquery.`` A query may not call

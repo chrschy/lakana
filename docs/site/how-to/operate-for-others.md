@@ -174,7 +174,7 @@ server starts, and read the changelog.
 Look at three things regularly: whether the instance answers, what the logs say, and what people
 did.
 
-**Is it healthy?** Today, `docker compose ps` shows whether each service runs and is healthy. Two
+**Is it healthy?** `docker compose ps` shows whether each service runs and is healthy. Two
 commands show whether workers are registered and which one holds the scheduler role; they need the
 right to manage environments on the instance, which an administrator has:
 
@@ -188,9 +188,9 @@ lakana worker list
 lakana scheduler status
 ```
 
-A full "Is my instance healthy?" page, with what to check and what to do about each answer, is
-issue [#45](https://github.com/lakana-labs/lakana/issues/45). It is not written yet. What the two
-commands show, and what to do when a query waits:
+[Is my instance healthy?](instance-health.md) goes through everything to look at, one question at a
+time: the services, the health route, the workers, the queue, the database, the storage and the disk,
+with what a bad answer looks like. What the two commands show, and what to do when a query waits:
 [Why is my query or task waiting?](why-is-it-waiting.md#what-an-operator-can-look-at).
 
 **Logs worth alerting on.** The server and the workers print to standard error:
