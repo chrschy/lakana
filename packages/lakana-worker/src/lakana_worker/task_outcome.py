@@ -9,7 +9,7 @@ check phase all end an attempt this way, so none of them has to import the other
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import NamedTuple
 
@@ -17,11 +17,13 @@ from sqlalchemy.orm import Session
 
 from lakana_core.errors import ConflictError, LakanaError, PermissionDenied
 from lakana_core.kept_mark import KeptSeen
-from lakana_core.models import WriteMode
+from lakana_core.models import QueryErrorCause, WriteMode
+from lakana_core.runs.failures import FailureCode
 from lakana_core.runs.lockdown import WriteFenceRefused
 from lakana_core.runs.tasks import FailureKind, Written
 from lakana_core.sql_syntax import SQL_SYNTAX_ERRORS
 from lakana_worker.executor import QueryCancelled, QueryTimeout, TransientQueryError
+from lakana_worker.pipeline import failure_cause
 
 INTERNAL_ERROR_MESSAGE = "internal error while preparing the task; see the worker log"
 
@@ -71,8 +73,68 @@ def classify(exc: BaseException | None) -> FailureKind:
     return FailureKind.TRANSIENT
 
 
+_CAUSE_CODES: Mapping[QueryErrorCause, FailureCode] = {
+    QueryErrorCause.NOT_FOUND: FailureCode.NOT_FOUND,
+    QueryErrorCause.PERMISSION_DENIED: FailureCode.PERMISSION_DENIED,
+    QueryErrorCause.RESULT_TOO_LARGE: FailureCode.QUERY_INVALID,
+    QueryErrorCause.OUT_OF_MEMORY: FailureCode.MEMORY,
+    QueryErrorCause.INVALID_QUERY: FailureCode.QUERY_INVALID,
+    QueryErrorCause.TIMEOUT: FailureCode.TIMEOUT,
+    QueryErrorCause.CANCELLED: FailureCode.CANCELLED,
+    QueryErrorCause.INTERNAL: FailureCode.INTERNAL,
+    QueryErrorCause.WORKER_LOST: FailureCode.WORKER_LOST,
+}
+"""The task failure code of each cause a query run can store."""
+
+
+def failure_code_of(exc: BaseException | None, cause: str | None = None) -> FailureCode:
+    """Map what failed a query to the task failure code.
+
+    The exception is classified as the query run's own cause is (`pipeline.failure_cause`), with a
+    write conflict as the one addition: a query has no code for it, a task does.
+
+    Parameters
+    ----------
+    exc
+        The exception `run_one` returned or a preparation raised; `None` when a query run failed
+        without one.
+    cause
+        The `QueryRun.error_cause` stored on the failed run, used only without `exc`.
+
+    Returns
+    -------
+    FailureCode
+        The code; `INTERNAL` for an exception nobody classifies, and for a missing or unknown
+        `cause`.
+    """
+    if isinstance(exc, ConflictError):
+        return FailureCode.CONFLICT
+    if exc is not None:
+        return _CAUSE_CODES[failure_cause(exc)]
+    try:
+        return _CAUSE_CODES[QueryErrorCause(cause)]
+    except ValueError:
+        return FailureCode.INTERNAL
+
+
+def stop_code(kind: FailureKind) -> FailureCode | None:
+    """Give the code of a stop that `cancel_kind` reported.
+
+    Parameters
+    ----------
+    kind
+        ``CANCELLED`` or ``RELEASED``, as `cancel_kind` returns.
+
+    Returns
+    -------
+    FailureCode or None
+        ``cancelled`` for a cancel; `None` for a release, which is no failure.
+    """
+    return FailureCode.CANCELLED if kind is FailureKind.CANCELLED else None
+
+
 class TaskFailure(Exception):
-    """A failure while preparing a task, with its kind and a safe message.
+    """A failure while preparing a task, with its kind, a safe message and its code.
 
     Parameters
     ----------
@@ -80,6 +142,8 @@ class TaskFailure(Exception):
         What happens next.
     message
         The text for `error_message` and the log.
+    code
+        Why it failed; `None` only for a release (`stop_code`).
     in_transaction
         Work to land in the same transaction as the attempt's record (see
         `TaskOutcome.in_transaction`).
@@ -89,11 +153,13 @@ class TaskFailure(Exception):
         self,
         kind: FailureKind,
         message: str,
+        code: FailureCode | None,
         in_transaction: Callable[[Session], None] | None = None,
     ) -> None:
         super().__init__(message)
         self.kind = kind
         self.message = message
+        self.code = code
         self.in_transaction = in_transaction
 
 
@@ -185,6 +251,9 @@ class TaskOutcome:
         Work that must land in the same transaction as the attempt's record, or not at all
         (`record_attempt`): a failed code integrity check fails the run with it, so a reclaim
         never finds the run failed and the attempt open, or the reverse.
+    failure_code
+        Why the attempt failed, for a failure; `None` for a success and a release. A failure
+        without one is recorded as ``internal``.
     """
 
     kind: FailureKind | None
@@ -201,3 +270,4 @@ class TaskOutcome:
     kept_table: KeptTable | None = None
     built_snapshot_id: int | None = None
     in_transaction: Callable[[Session], None] | None = None
+    failure_code: FailureCode | None = None

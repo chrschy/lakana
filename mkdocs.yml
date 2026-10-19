@@ -60,6 +60,7 @@ nav:
       - reference/search.md
       - reference/lists.md
       - reference/jobs.md
+      - reference/why-did-it-fail.md
   - Explanation:
       - explanation/index.md
       - explanation/scope.md

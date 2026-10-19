@@ -267,6 +267,48 @@ def _emit_tasks(state: CliState, run: Run) -> None:
         )
 
 
+def _next_step(task: RunTask) -> str:
+    """Word the code and the next step of a failed task as one line.
+
+    Parameters
+    ----------
+    task
+        A task with a failure.
+
+    Returns
+    -------
+    str
+        ``failed: timeout. Next: <the next step>``, the server's words escaped and on one line.
+    """
+    failure = task.failure
+    assert failure is not None  # nosec B101 -- callers test it
+    return (
+        f"failed: {_output.inline(failure.code, 40)}. "
+        f"Next: {_output.inline(failure.next_step, _PROGRESS_REASON_LIMIT)}"
+    )
+
+
+def _emit_failures(run: Run) -> None:
+    """Print, for each failed task, its code, what happened and what to do; nothing without any.
+
+    A task that never started because an upstream task failed, and one that was cancelled, are
+    not listed: the task that failed says it all. At most `MAX_SUMMARY_ERRORS` tasks are listed
+    (the task table says how many more failed; ``--output json`` has every failure).
+
+    Parameters
+    ----------
+    run
+        The run.
+    """
+    failed = [t for t in run.tasks if t.status == "failed" and t.failure is not None]
+    for task in failed[:MAX_SUMMARY_ERRORS]:
+        assert task.failure is not None  # nosec B101 -- filtered above
+        typer.echo("")
+        typer.echo(f"{task.asset} failed: {_output.inline(task.failure.code, 40)}")
+        typer.echo(f"  {_output.inline(task.failure.cause, _PROGRESS_REASON_LIMIT)}")
+        typer.echo(f"  Next: {_output.inline(task.failure.next_step, _PROGRESS_REASON_LIMIT)}")
+
+
 _NAME_PAD = 2
 """The name column of a check group is its longest name plus this many spaces."""
 _STATE_WIDTH = 7
@@ -519,7 +561,10 @@ class _Progress:
             if changed:
                 duration = _duration(task)
                 line = _progress_line(task)
-                typer.echo(f"{line}  {duration}" if duration else line)
+                line = f"{line}  {duration}" if duration else line
+                if task.status == "failed" and task.failure is not None:
+                    line = f"{line}  {_next_step(task)}"
+                typer.echo(line)
             elif code_changed and code in _OWN_LINE_CODES and reason is not None:
                 message = _output.inline(reason.message, _PROGRESS_REASON_LIMIT)
                 if message.strip():
@@ -541,6 +586,7 @@ def _summary(state: CliState, run: Run) -> None:
         return
     typer.echo(f"Run {run.id} {run.status}")
     _emit_tasks(state, run)
+    _emit_failures(run)
     _emit_checks(state, run)
 
 
@@ -780,6 +826,7 @@ def show(ctx: typer.Context, run_id: str, env: _ENV = None) -> None:
         return
     _output.emit(state, found, columns=_SHOW_COLUMNS)
     _emit_tasks(state, found)
+    _emit_failures(found)
     _emit_checks(state, found)
     _emit_notifications(state, found)
 

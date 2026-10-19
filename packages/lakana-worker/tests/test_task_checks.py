@@ -123,6 +123,10 @@ def test_a_failed_blocking_check_is_permanent_and_the_build_runs_once(world: Wor
         world.admin.id,
     )
     assert [a.outcome for a in _attempts(world, task.id)] == [AttemptOutcome.FAILED]
+    assert (task.failure_code, _attempts(world, task.id)[0].failure_code) == (
+        "check_blocked",
+        "check_blocked",
+    )
     assert _marker(world, "silver.orders") == run_id
     assert task.written_table_id is None  # the rollback cleared the stamp
     assert _task(world, "gold.report").status is TaskStatus.UPSTREAM_FAILED
@@ -219,6 +223,7 @@ def test_a_check_that_cannot_run_blocks_and_rolls_back(world: World) -> None:
     task = _task(world, "silver.orders")
     error = f"Binder Error: the check's query failed. {_SEE_YOURSELF}"
     assert (task.status, task.attempt) == (TaskStatus.FAILED, 1)
+    assert task.failure_code == "check_error"
     assert task.error_message == (
         f"Check `silver.orders/broken` could not run (checks/silver/orders/broken.sql): {error} "
         f"Data that could not be checked is not published. {_UNPUBLISHED} {_after(run_id)}"
@@ -428,6 +433,7 @@ def test_a_source_check_of_a_deactivated_principal_fails_permanently(world: Worl
         1,
         "the run principal is deactivated or deleted",
     )
+    assert task.failure_code == "permission_denied"
     assert _results(world, task.id) == []
     assert _counts(world, task.id) == []
 
@@ -633,6 +639,7 @@ def test_a_deactivated_principal_after_the_write_makes_every_check_errored(
         (CheckOutcome.ERRORED, error),
     ]
     assert task.status is TaskStatus.FAILED
+    assert task.failure_code == "check_error"
     assert task.error_message == (
         f"Check `silver.orders/a_unique` could not run (checks/silver/orders/a_unique.sql): "
         f"{error} Data that could not be checked is not published. The table was set back to "

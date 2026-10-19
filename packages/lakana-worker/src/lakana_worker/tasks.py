@@ -69,6 +69,7 @@ from lakana_core.runs.checks import (
     ASSET,
     SOURCE_CHECK,
 )
+from lakana_core.runs.failures import FailureCode
 from lakana_core.runs.kept import clear_kept
 from lakana_core.runs.scheduler import COMMITTED_BEFORE_RECORDED_MESSAGE
 from lakana_core.runs.selection import ManifestGraph, unselected_upstreams
@@ -99,7 +100,9 @@ from lakana_worker.task_outcome import (
     TaskFailure,
     TaskOutcome,
     classify,
+    failure_code_of,
     failure_message,
+    stop_code,
 )
 
 logger = logging.getLogger(__name__)
@@ -291,7 +294,9 @@ def check_integrity(
         problem = verify_code(session, engine.key_provider, env, version)
     except OSError as exc:
         raise TaskFailure(
-            FailureKind.TRANSIENT, "the code tarball could not be read (storage error)"
+            FailureKind.TRANSIENT,
+            "the code tarball could not be read (storage error)",
+            FailureCode.INTERNAL,
         ) from exc
     if problem is not None:
         message = f"code integrity check failed: {problem}"
@@ -318,7 +323,9 @@ def check_integrity(
             fail_run(inner, run_id, message, commit=False)
 
         session.rollback()
-        raise TaskFailure(FailureKind.PERMANENT, message, fail_with_attempt)
+        raise TaskFailure(
+            FailureKind.PERMANENT, message, FailureCode.CODE_CHANGED, fail_with_attempt
+        )
     if len(engine.verified) >= _MAX_VERIFIED:
         engine.verified.clear()
     engine.verified.add(run.id)
@@ -481,7 +488,9 @@ def require_upstreams(
         up = TableRef.from_dotted(environment, upstream)
         if resolve_table_id(session, environment, up.namespace.joined(), up.name) is None:
             raise TaskFailure(
-                FailureKind.PERMANENT, f"upstream table '{upstream}' has not been built"
+                FailureKind.PERMANENT,
+                f"upstream table '{upstream}' has not been built",
+                FailureCode.UPSTREAM_MISSING,
             )
 
 
@@ -520,17 +529,21 @@ def _prepare(session: Session, engine: RunEngine, claimed: ClaimedTask) -> _Prep
     env = session.get(Environment, run.environment_id) if run is not None else None
     version = session.get(JobVersion, run.job_version_id) if run is not None else None
     if run is None or env is None or version is None:
-        raise TaskFailure(FailureKind.PERMANENT, NO_RUN_MESSAGE)
+        raise TaskFailure(FailureKind.PERMANENT, NO_RUN_MESSAGE, FailureCode.NOT_FOUND)
     check_integrity(session, engine, run, env, version)
     check_manifest_version(version.manifest_json)
     row = session.get(Principal, run.run_as_principal_id) if run.run_as_principal_id else None
     if row is None or not row.is_active:
-        raise TaskFailure(FailureKind.PERMANENT, NO_PRINCIPAL_MESSAGE)
+        raise TaskFailure(
+            FailureKind.PERMANENT, NO_PRINCIPAL_MESSAGE, FailureCode.PERMISSION_DENIED
+        )
     entry = manifest_entry(version.manifest_json, claimed.asset)
     sql = entry.get("sql") if entry is not None else None
     if entry is None or not isinstance(sql, str) or not sql.strip():
         raise TaskFailure(
-            FailureKind.PERMANENT, f"the project version has no SQL for {claimed.asset}"
+            FailureKind.PERMANENT,
+            f"the project version has no SQL for {claimed.asset}",
+            FailureCode.CODE_CHANGED,
         )
     authz = engine.authz_factory(session)
     reader = PrincipalRef(id=row.id, name=row.name, type=row.type)
@@ -557,6 +570,7 @@ def _prepare(session: Session, engine: RunEngine, claimed: ClaimedTask) -> _Prep
         raise TaskFailure(
             FailureKind.PERMANENT,
             f"the project version's write mode {mode_name!r} for {claimed.asset} is not valid",
+            FailureCode.CODE_CHANGED,
         ) from None
     key = entry.get("incremental_key")
     write = QueryRun(
@@ -669,6 +683,7 @@ def _finish(
         kind=outcome.kind,
         rand=engine.rand,
         error_message=outcome.message,
+        failure_code=outcome.failure_code,
         rows_written=outcome.rows,
         on_committed=COMMITTED_BEFORE_RECORDED_MESSAGE,
         in_transaction=store_log_then,
@@ -784,14 +799,16 @@ def _execute(
     stored, watermark, rows = write.error_message, write.watermark, write.rows_written
     kind: FailureKind | None
     message: str | None
+    code: FailureCode | None = None
     if succeeded:
         kind, message = None, None
     elif (stop := cancel_kind(session, keeper, claimed.run_id)) is not None:
-        kind, message = stop[0], stop[1] or stored
+        kind, message, code = stop[0], stop[1] or stored, stop_code(stop[0])
     elif crashed:
-        kind, message = FailureKind.TRANSIENT, INTERNAL_ERROR_MESSAGE
+        kind, message, code = FailureKind.TRANSIENT, INTERNAL_ERROR_MESSAGE, FailureCode.INTERNAL
     else:
         kind, message = classify(failure), failure_message(failure, stored)
+        code = failure_code_of(failure, write.error_cause)
     return TaskOutcome(
         kind,
         message,
@@ -801,6 +818,7 @@ def _execute(
         rows,
         kept_table=prepared.kept_table if succeeded else None,
         built_snapshot_id=write.snapshot_id if succeeded and prepared.kept_table else None,
+        failure_code=code,
     )
 
 
@@ -837,16 +855,30 @@ def _attempt(
         return None
     except TaskFailure as failure:
         return TaskOutcome(
-            failure.kind, failure.message, environment, in_transaction=failure.in_transaction
+            failure.kind,
+            failure.message,
+            environment,
+            in_transaction=failure.in_transaction,
+            failure_code=failure.code,
         )
     except LakanaError as exc:
         stop = cancel_kind(session, keeper, claimed.run_id)
         if stop is not None:
-            return TaskOutcome(stop[0], stop[1], environment)
-        return TaskOutcome(classify(exc), failure_message(exc, str(exc)), environment)
+            return TaskOutcome(stop[0], stop[1], environment, failure_code=stop_code(stop[0]))
+        return TaskOutcome(
+            classify(exc),
+            failure_message(exc, str(exc)),
+            environment,
+            failure_code=failure_code_of(exc),
+        )
     except Exception:
         logger.exception("Preparing task run %s failed unexpectedly.", claimed.task_run_id)
-        return TaskOutcome(FailureKind.TRANSIENT, INTERNAL_ERROR_MESSAGE, environment)
+        return TaskOutcome(
+            FailureKind.TRANSIENT,
+            INTERNAL_ERROR_MESSAGE,
+            environment,
+            failure_code=FailureCode.INTERNAL,
+        )
     return _execute(session, engine, claimed, prepared, keeper)
 
 
@@ -950,7 +982,10 @@ def _older_server_refusal(
     if not tables:
         return None
     return TaskOutcome(
-        FailureKind.PERMANENT, _OLDER_SERVER.format(tables=" and ".join(tables)), environment
+        FailureKind.PERMANENT,
+        _OLDER_SERVER.format(tables=" and ".join(tables)),
+        environment,
+        failure_code=FailureCode.NO_RUNTIME,
     )
 
 
@@ -998,11 +1033,18 @@ def _dispatch(
             return _attempt(session, engine, claimed, keeper, environment)
         session.rollback()
         if engine.python is None:
-            return TaskOutcome(FailureKind.PERMANENT, _NO_RUNTIME, environment)
+            return TaskOutcome(
+                FailureKind.PERMANENT, _NO_RUNTIME, environment, failure_code=FailureCode.NO_RUNTIME
+            )
         return engine.python.attempt(engine, claimed, keeper, environment, serve_queries)
     except Exception:
         logger.exception("Running task run %s failed unexpectedly.", claimed.task_run_id)
-        return TaskOutcome(FailureKind.TRANSIENT, RUN_ERROR_MESSAGE, environment)
+        return TaskOutcome(
+            FailureKind.TRANSIENT,
+            RUN_ERROR_MESSAGE,
+            environment,
+            failure_code=FailureCode.INTERNAL,
+        )
 
 
 def run_claimed(

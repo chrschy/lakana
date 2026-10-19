@@ -57,6 +57,7 @@ from lakana_core.models import (
 )
 from lakana_core.projects.run_policy import MAX_RETRY_DELAY_SECONDS, RunCaps
 from lakana_core.runs.checks import ASSET, SOURCE_CHECK
+from lakana_core.runs.failures import UNKNOWN_FAILURE, FailureCode, failure_of
 from lakana_core.runs.selection import Selection
 from lakana_core.runs.service import RunService, task_log_path
 from lakana_core.storage.resolver import StorageResolver
@@ -2507,3 +2508,152 @@ def test_a_direct_reader_of_a_rebuilt_kept_table_lists_it_once(
     view = _service(session).start(principal, "dev", "analytics", Selection())
 
     assert _tasks_of(session, view.id)["gold.report"].upstream_json == ["silver.orders"]
+
+
+# -- failure codes ------------------------------------------------------------
+
+
+def _fail_task(
+    session: Session,
+    run_id: uuid.UUID,
+    asset: str,
+    status: TaskStatus,
+    *,
+    code: str | None = None,
+    message: str | None = None,
+) -> None:
+    """Put a task of a run into a status, with the text and code of its failure.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    run_id
+        The run.
+    asset
+        The task's asset.
+    status
+        Its new status.
+    code
+        The stored failure code, if any.
+    message
+        The stored error text, if any.
+    """
+    task = session.scalars(
+        select(TaskRun).where(TaskRun.run_id == run_id, TaskRun.asset == asset)
+    ).one()
+    task.status = status
+    task.failure_code = code
+    task.error_message = message
+    session.commit()
+
+
+def test_a_failed_task_shows_its_code_with_the_cause_and_the_next_step(
+    session: Session, version: JobVersion, principal: PrincipalRef
+) -> None:
+    """The view carries the failure; the free text stays as the error message."""
+    started = _service(session).start(principal, "dev", "analytics", Selection())
+    _fail_task(
+        session, started.id, "gold.daily", TaskStatus.FAILED, code="timeout", message="too slow"
+    )
+
+    view = _service(session).get(principal, "dev", started.id)
+    tasks = {t.asset: t for t in view.tasks}
+
+    failed = tasks["gold.daily"]
+    assert failed.error_message == "too slow"
+    assert failed.failure == failure_of(FailureCode.TIMEOUT)
+    assert tasks["silver.clean"].failure is None
+
+
+def test_an_old_failed_task_without_a_code_is_unknown(
+    session: Session, version: JobVersion, principal: PrincipalRef
+) -> None:
+    """A row from before the codes shows `unknown`, with a generic cause and next step."""
+    started = _service(session).start(principal, "dev", "analytics", Selection())
+    _fail_task(session, started.id, "gold.daily", TaskStatus.FAILED, message="old text")
+
+    view = _service(session).get(principal, "dev", started.id)
+
+    assert {t.asset: t.failure for t in view.tasks}["gold.daily"] == UNKNOWN_FAILURE
+
+
+def test_a_succeeded_task_with_a_note_has_no_failure(
+    session: Session, version: JobVersion, principal: PrincipalRef
+) -> None:
+    """A warning note on a success is not an error."""
+    started = _service(session).start(principal, "dev", "analytics", Selection())
+    _fail_task(session, started.id, "gold.daily", TaskStatus.SUCCEEDED, message="a check warned")
+
+    view = _service(session).get(principal, "dev", started.id)
+
+    assert {t.asset: t.failure for t in view.tasks}["gold.daily"] is None
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        (TaskStatus.UPSTREAM_FAILED, FailureCode.UPSTREAM_FAILED),
+        (TaskStatus.CANCELLED, FailureCode.CANCELLED),
+    ],
+)
+def test_an_old_task_that_never_ran_is_named_by_its_status(
+    session: Session,
+    version: JobVersion,
+    principal: PrincipalRef,
+    status: TaskStatus,
+    expected: FailureCode,
+) -> None:
+    """The status says it exactly, so no guess is needed for a row without a code."""
+    started = _service(session).start(principal, "dev", "analytics", Selection())
+    _fail_task(session, started.id, "gold.daily", status)
+
+    view = _service(session).get(principal, "dev", started.id)
+
+    assert {t.asset: t.failure for t in view.tasks}["gold.daily"] == failure_of(expected)
+
+
+def test_a_run_counts_its_failed_tasks_in_the_view_and_in_the_list(
+    session: Session, version: JobVersion, principal: PrincipalRef
+) -> None:
+    """`failed_tasks` counts tasks that failed themselves, not those that never ran."""
+    started = _service(session).start(principal, "dev", "analytics", Selection())
+    _fail_task(session, started.id, "silver.clean", TaskStatus.FAILED, code="memory")
+    _fail_task(session, started.id, "gold.daily", TaskStatus.UPSTREAM_FAILED)
+
+    assert _service(session).get(principal, "dev", started.id).failed_tasks == 1
+    listed = _service(session).list_runs(principal, "dev")
+    assert [run.failed_tasks for run in listed] == [1]
+
+
+def test_task_log_attempts_carry_their_failure(
+    session: Session, version: JobVersion, principal: PrincipalRef
+) -> None:
+    """A failed attempt shows its code, an old one `unknown`, a good one nothing."""
+    started = _service(session).start(principal, "dev", "analytics", Selection())
+    task = session.scalars(select(TaskRun).where(TaskRun.asset == "gold.daily")).one()
+    for number, outcome, code in (
+        (1, AttemptOutcome.TIMED_OUT, "timeout"),
+        (2, AttemptOutcome.FAILED, None),
+        (3, AttemptOutcome.SUCCEEDED, None),
+    ):
+        session.add(
+            TaskAttempt(
+                id=uuid.uuid4(),
+                task_run_id=task.id,
+                attempt=number,
+                worker="w1",
+                started_at=datetime.now(UTC),
+                outcome=outcome,
+                failure_code=code,
+            )
+        )
+    session.commit()
+
+    log = _service(session).task_log(principal, "dev", started.id, "gold.daily")
+
+    assert [a.failure for a in log.attempts] == [
+        failure_of(FailureCode.TIMEOUT),
+        UNKNOWN_FAILURE,
+        None,
+    ]

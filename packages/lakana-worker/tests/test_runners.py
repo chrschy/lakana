@@ -25,6 +25,7 @@ import pytest
 
 import lakana_worker.runners as runners_module
 from lakana.runner import TaskDescription, parse_description
+from lakana_core.runs.failures import FailureCode
 from lakana_worker.processes import remove_private_tree
 from lakana_worker.runners import (
     MAX_ERROR_MESSAGE_CHARS,
@@ -967,7 +968,9 @@ def test_a_succeeded_artifact_record_with_a_bad_exit_status_of_an_unstopped_proc
         " 'manifest_sha256': 'a' * 64})\nsys.exit(1)\n"
     )
     assert outcome == RunOutcome(
-        succeeded=False, error_message="the task process exited with status 1 without a result"
+        succeeded=False,
+        error_message="the task process exited with status 1 without a result",
+        failure_code=FailureCode.BUILD_FAILED,
     )
 
 
@@ -1030,7 +1033,11 @@ def test_a_timeout_kills_the_whole_process_group(harness: Harness) -> None:
     )
     assert time.monotonic() - started < 15
     assert outcome == RunOutcome(
-        succeeded=False, error_message="timed out after 0.4s", killed=True, timed_out=True
+        succeeded=False,
+        error_message="timed out after 0.4s",
+        killed=True,
+        timed_out=True,
+        failure_code=FailureCode.TIMEOUT,
     )
     grandchild = int(harness.output().split()[0])
     deadline = time.monotonic() + 5
@@ -1106,7 +1113,15 @@ def test_the_stop_signal_terminates_the_process(harness: Harness, reason: StopRe
     _stop_when_seen(harness, b"working", reason)
     outcome = harness.run("print('working', flush=True)\ntime.sleep(60)\n")
     assert outcome == RunOutcome(
-        succeeded=False, error_message=f"stopped: {reason.value}", killed=True
+        succeeded=False,
+        error_message=f"stopped: {reason.value}",
+        killed=True,
+        failure_code={
+            StopReason.CANCELLED: FailureCode.CANCELLED,
+            StopReason.LEASE_LOST: FailureCode.WORKER_LOST,
+            StopReason.DRAIN: FailureCode.WORKER_LOST,
+            StopReason.MEMORY: FailureCode.MEMORY,
+        }[reason],
     )
     harness.stop.set(StopReason.CANCELLED)
     assert harness.stop.reason is reason
@@ -1161,7 +1176,12 @@ def test_the_memory_watchdog_ends_a_running_task_at_once_without_the_grace(
         "print('working', flush=True)\ntime.sleep(60)\n",
         kill_grace=30.0,
     )
-    assert outcome == RunOutcome(succeeded=False, error_message="ended for memory", killed=True)
+    assert outcome == RunOutcome(
+        succeeded=False,
+        error_message="ended for memory",
+        killed=True,
+        failure_code=FailureCode.MEMORY,
+    )
     assert time.monotonic() - started < 20  # no ask, no 30 s grace
     handle, pid, answered = result
     assert answered is True
@@ -1371,6 +1391,7 @@ def test_a_venv_without_the_harness_module_fails_permanently_and_says_what_to_do
         "and deploy again"
     )
     assert harness.log == []
+    assert outcome.failure_code is FailureCode.BUILD_FAILED
 
 
 def test_an_unusable_attempt_directory_is_a_failure_not_an_exception(
@@ -1381,6 +1402,7 @@ def test_an_unusable_attempt_directory_is_a_failure_not_an_exception(
     outcome = _run_in(harness, blocker)
     assert outcome.succeeded is False
     assert (outcome.error_message or "").startswith("could not prepare the task directory")
+    assert outcome.failure_code is FailureCode.INTERNAL
 
 
 def test_a_missing_attempt_directory_is_not_created(harness: Harness, tmp_path: Path) -> None:
@@ -1398,6 +1420,7 @@ def test_an_attempt_directory_others_can_reach_is_refused(
     shared.chmod(mode)
     outcome = _run_in(harness, shared)
     assert "not private" in (outcome.error_message or "")
+    assert outcome.failure_code is FailureCode.INTERNAL
     assert list(shared.iterdir()) == []
 
 
@@ -1413,6 +1436,7 @@ def test_a_missing_working_directory_is_a_failure_not_an_exception(harness: Harn
     outcome = harness.run("")
     assert outcome.succeeded is False
     assert (outcome.error_message or "").startswith("could not start the task process")
+    assert outcome.failure_code is FailureCode.INTERNAL
 
 
 def test_the_attempt_directories_are_private(harness: Harness) -> None:
@@ -1510,7 +1534,11 @@ def test_a_raising_log_sink_stops_the_child_and_fails_the_attempt(harness: Harne
     started = time.monotonic()
     outcome = harness.run("print('x', flush=True)\ntime.sleep(60)\n")
     assert outcome == RunOutcome(
-        succeeded=False, error_message="the log sink failed", killed=True, retryable=False
+        succeeded=False,
+        error_message="the log sink failed",
+        killed=True,
+        retryable=False,
+        failure_code=FailureCode.INTERNAL,
     )
     assert time.monotonic() - started < 20
 
@@ -1524,7 +1552,10 @@ def test_a_sink_that_fails_on_the_final_flush_fails_an_attempt_without_a_record(
     harness.sink = broken
     outcome = harness.run("sys.stdout.write('no newline')\nsys.stdout.flush()\nsys.exit(0)\n")
     assert outcome == RunOutcome(
-        succeeded=False, error_message="the log sink failed", retryable=False
+        succeeded=False,
+        error_message="the log sink failed",
+        retryable=False,
+        failure_code=FailureCode.INTERNAL,
     )
 
 
@@ -1809,6 +1840,34 @@ def test_exit_status_two_is_a_permanent_disagreement_about_the_description() -> 
     assert "same lakana version" in outcome.error_message
     other = _outcome(None, code=3)
     assert other.retryable is True
+    assert (outcome.failure_code, other.failure_code) == (FailureCode.BUILD_FAILED,) * 2
+
+
+def test_a_failed_record_is_a_build_failure_unless_it_says_conflict() -> None:
+    """The process reported its own failure; only an explicit conflict flag is another code."""
+    failed = _outcome({"status": "failed", "message": "boom"})
+    conflicted = _outcome({"status": "failed", "message": "lost the race", "conflict": True})
+
+    assert failed.failure_code is FailureCode.BUILD_FAILED
+    assert conflicted.failure_code is FailureCode.CONFLICT
+
+
+def test_a_process_ended_by_a_signal_or_without_a_result_is_a_build_failure() -> None:
+    """Nothing says more than that the process did not finish."""
+    assert _outcome(None, code=-9).failure_code is FailureCode.BUILD_FAILED
+    assert _outcome(None, code=1).failure_code is FailureCode.BUILD_FAILED
+
+
+def test_a_stop_for_no_reason_is_internal() -> None:
+    """The supervisor stopped the process and cannot say why."""
+    outcome = _outcome(None, stopped=True)
+
+    assert outcome.failure_code is FailureCode.INTERNAL
+
+
+def test_a_success_has_no_failure_code() -> None:
+    """Only a failure carries one."""
+    assert _outcome({"status": "succeeded", "snapshot_id": 1, "rows": 1}).failure_code is None
 
 
 def test_a_harness_that_exits_with_status_two_fails_for_good(harness: Harness) -> None:
@@ -1827,6 +1886,7 @@ def test_a_timeout_that_is_not_finite_is_refused_before_a_process_starts(
     assert outcome.succeeded is False
     assert outcome.retryable is False
     assert outcome.error_message is not None and "finite" in outcome.error_message
+    assert outcome.failure_code is FailureCode.INTERNAL
     assert not (harness.attempt / (RESULT_FILE + ".started")).exists()
 
 

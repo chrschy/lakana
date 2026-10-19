@@ -557,6 +557,32 @@ class WaitingFor:
 
 
 @dataclass(frozen=True)
+class Failure:
+    """Why a task or an attempt failed: a stable code, the cause and the next step.
+
+    The code is a stable string; the sentences may be reworded. A newer server may send a code
+    this SDK does not know, so treat it as opaque and show `cause` and `next_step`. The codes are
+    listed in the reference page "Why did it fail?".
+
+    Parameters
+    ----------
+    code
+        `build_failed`, `code_changed`, `secret_refused`, `no_runtime`, `upstream_failed`,
+        `upstream_missing`, `check_blocked`, `check_error`, `query_invalid`, `permission_denied`,
+        `not_found`, `memory`, `timeout`, `cancelled`, `worker_lost`, `conflict` or `internal`;
+        `unknown` for a failure recorded before the codes existed.
+    cause
+        One sentence: what happened.
+    next_step
+        One sentence: what to do about it.
+    """
+
+    code: str
+    cause: str
+    next_step: str
+
+
+@dataclass(frozen=True)
 class QueryListEntry:
     """One query in the list of an environment's queries: never its SQL or its error message.
 
@@ -1422,6 +1448,9 @@ class RunTask:
         was lost after it may have written the table, or its run was cancelled while it waited
         with rows no check had passed. ``False`` once the task has ended, and for a server that
         predates the field.
+    failure
+        Why the task failed, was cancelled or never ran (`Failure`); `None` for a task with no
+        error, and for a server that predates the field. `error_message` is its detail.
     """
 
     asset: str
@@ -1440,6 +1469,7 @@ class RunTask:
     checks: tuple[CheckResult, ...] = ()
     kept_check: bool | None = False
     setting_back: bool = False
+    failure: Failure | None = None
 
 
 @dataclass(frozen=True)
@@ -1546,6 +1576,9 @@ class Run:
     notifications
         The notifications the run queued, oldest first (empty in listings, and from a server
         that predates them).
+    failed_tasks
+        How many tasks ended ``failed`` (not ``upstream_failed`` or ``cancelled``), also in
+        listings; 0 from a server that predates the field.
     """
 
     id: str
@@ -1570,6 +1603,7 @@ class Run:
     scheduled_for: datetime | None = None
     missed: int = 0
     notifications: list[Notification] = field(default_factory=list)
+    failed_tasks: int = 0
 
 
 @dataclass(frozen=True)
@@ -1743,6 +1777,9 @@ class TaskAttempt:
         Rows written.
     error_message
         Why it failed.
+    failure
+        The code, cause and next step of an attempt that did not succeed (`Failure`); `None`
+        for one that succeeded or is running, and for a server that predates the field.
     """
 
     attempt: int
@@ -1752,6 +1789,7 @@ class TaskAttempt:
     outcome: str | None
     rows_written: int | None
     error_message: str | None
+    failure: Failure | None = None
 
 
 @dataclass(frozen=True)

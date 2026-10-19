@@ -23,6 +23,7 @@ from lakana_core.models import (
     TaskRun,
     TaskStatus,
 )
+from lakana_core.runs.failures import FailureCode
 from lakana_core.runs.tasks import (
     ClaimedTask,
     FailureKind,
@@ -499,6 +500,7 @@ def test_a_task_the_watchdog_ended_and_recorded_itself_is_not_recorded_again_by_
         kind: FailureKind | None,
         rand: Callable[[], float],
         error_message: str | None = None,
+        failure_code: FailureCode | None = None,
         on_committed: str | None = None,
         stopped: bool = False,
     ) -> bool:
@@ -520,6 +522,8 @@ def test_a_task_the_watchdog_ended_and_recorded_itself_is_not_recorded_again_by_
             Passed on.
         error_message
             Passed on.
+        failure_code
+            Passed on.
         on_committed
             Passed on.
         stopped
@@ -538,6 +542,7 @@ def test_a_task_the_watchdog_ended_and_recorded_itself_is_not_recorded_again_by_
             kind=kind,
             rand=rand,
             error_message=error_message,
+            failure_code=failure_code,
             on_committed=on_committed,
             stopped=stopped,
         )
@@ -603,6 +608,7 @@ def test_a_task_the_watchdog_ended_that_is_still_in_flight_is_recorded_once_as_t
     task = _task(world, claimed.asset)
     assert task.status is TaskStatus.PENDING
     assert task.error_message == memory_module.task_ended_message(limit)
+    assert task.failure_code == "memory"
     with world.session() as session:
         assert len(session.scalars(select(TaskAttempt)).all()) == 1
 
@@ -635,6 +641,7 @@ def test_a_task_ended_by_an_earlier_check_does_not_count_against_a_later_lone_ta
         kind: FailureKind | None,
         rand: Callable[[], float],
         error_message: str | None = None,
+        failure_code: FailureCode | None = None,
         on_committed: str | None = None,
         stopped: bool = False,
     ) -> bool:
@@ -656,6 +663,8 @@ def test_a_task_ended_by_an_earlier_check_does_not_count_against_a_later_lone_ta
             Passed on.
         error_message
             Passed on.
+        failure_code
+            Passed on.
         on_committed
             Passed on.
         stopped
@@ -675,6 +684,7 @@ def test_a_task_ended_by_an_earlier_check_does_not_count_against_a_later_lone_ta
             kind=kind,
             rand=rand,
             error_message=error_message,
+            failure_code=failure_code,
             on_committed=on_committed,
             stopped=stopped,
         )

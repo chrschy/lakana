@@ -108,6 +108,7 @@ from lakana_core.runs.checks import (
     warning_note,
 )
 from lakana_core.runs.checks import failure_message as check_failure_message
+from lakana_core.runs.failures import FailureCode, check_failure_code
 from lakana_core.runs.kept import (
     KeptNote,
     clear_kept_in_attempt,
@@ -143,6 +144,7 @@ from lakana_worker.task_outcome import (
     TaskOutcome,
     classify,
     failure_message,
+    stop_code,
 )
 
 if TYPE_CHECKING:
@@ -271,7 +273,9 @@ def before_build(
             claimed.task_run_id,
             type(exc).__name__,
         )
-        return TaskOutcome(FailureKind.TRANSIENT, RUN_ERROR_MESSAGE, environment)
+        return TaskOutcome(
+            FailureKind.TRANSIENT, RUN_ERROR_MESSAGE, environment, failure_code=FailureCode.INTERNAL
+        )
     finally:
         session.rollback()
 
@@ -316,6 +320,7 @@ def _landed_rollback(
         message,
         environment,
         checks=(*_check_lines(results), f"  rollback: {outcome.value}"),
+        failure_code=check_failure_code(blocking),
     )
 
 
@@ -386,7 +391,7 @@ def _stop_if_asked(session: Session, keeper: LeaseKeeper, run_id: uuid.UUID) -> 
     """
     stop = cancel_kind(session, keeper, run_id)
     if stop is not None:
-        raise TaskFailure(stop[0], stop[1] or RUN_CANCELLED_MESSAGE)
+        raise TaskFailure(stop[0], stop[1] or RUN_CANCELLED_MESSAGE, stop_code(stop[0]))
 
 
 def _count_one(
@@ -474,7 +479,9 @@ def _count_one(
         cause = counted.error_cause or cause
     if retryable and claimed.attempt < claimed.max_attempts:
         raise TaskFailure(
-            FailureKind.TRANSIENT, RETRY_MESSAGE.format(check=shown(spec.name), cause=cause)
+            FailureKind.TRANSIENT,
+            RETRY_MESSAGE.format(check=shown(spec.name), cause=cause),
+            FailureCode.CHECK_ERROR,
         )
     if counted is None:
         return None, CheckOutcome.ERRORED, crash
@@ -675,11 +682,13 @@ def _read_phase(session: Session, claimed: ClaimedTask) -> _Phase:
     env = session.get(Environment, run.environment_id) if run is not None else None
     version = session.get(JobVersion, run.job_version_id) if run is not None else None
     if run is None or env is None or version is None:
-        raise TaskFailure(FailureKind.PERMANENT, NO_RUN_MESSAGE)
+        raise TaskFailure(FailureKind.PERMANENT, NO_RUN_MESSAGE, FailureCode.NOT_FOUND)
     check_manifest_version(version.manifest_json)
     row = session.get(Principal, run.run_as_principal_id) if run.run_as_principal_id else None
     if row is None or (claimed.kind == SOURCE_CHECK and not row.is_active):
-        raise TaskFailure(FailureKind.PERMANENT, NO_PRINCIPAL_MESSAGE)
+        raise TaskFailure(
+            FailureKind.PERMANENT, NO_PRINCIPAL_MESSAGE, FailureCode.PERMISSION_DENIED
+        )
     read = read_manifest_checks(version.manifest_json)
     phase = _Phase(
         environment_id=env.id,
@@ -1085,13 +1094,21 @@ def _set_back_only(
     # A task handed back by a worker that stopped itself for memory carries the stop's text; a
     # lost worker leaves none. A run with `cancel_requested` shows the text of its stop whatever
     # was stored: a cancel by a user, or a run `fail_run` failed (it sets the flag too).
-    stored = session.scalar(select(TaskRun.error_message).where(TaskRun.id == claimed.task_run_id))
+    stored = session.execute(
+        select(TaskRun.error_message, TaskRun.failure_code).where(TaskRun.id == claimed.task_run_id)
+    ).one()
     session.rollback()
-    reason = stop_text if stop_text is not None else (stored or LOST_MESSAGE)
+    reason = stop_text if stop_text is not None else (stored.error_message or LOST_MESSAGE)
+    code = _set_back_code(kind, stored.failure_code)
     if could_not:
-        return TaskOutcome(kind, set_back_failed_message(reason), environment)
+        return TaskOutcome(kind, set_back_failed_message(reason), environment, failure_code=code)
     if done is None:
-        return TaskOutcome(kind, set_back_ending(reason, SET_BACK_NOTHING), environment)
+        return TaskOutcome(
+            kind,
+            set_back_ending(reason, SET_BACK_NOTHING),
+            environment,
+            failure_code=code,
+        )
     return TaskOutcome(
         kind,
         set_back_result_message(
@@ -1103,7 +1120,30 @@ def _set_back_only(
         ),
         environment,
         checks=(f"  rollback: {_rollback_word(done.rollback, done.refused)}",),
+        failure_code=code,
     )
+
+
+def _set_back_code(kind: FailureKind, stored: str | None) -> FailureCode:
+    """Pick the code a task ends with after its table was set back.
+
+    Parameters
+    ----------
+    kind
+        ``CANCELLED`` when the run was cancelled, else ``PERMANENT``.
+    stored
+        The code stored on the task run: the stop's, when a live worker handed the task back (a
+        memory stop); none when the scheduler put it back because its worker was lost.
+
+    Returns
+    -------
+    FailureCode
+        ``cancelled`` for a cancel; otherwise the stored code, or ``worker_lost`` when there is
+        none.
+    """
+    if kind is FailureKind.CANCELLED:
+        return FailureCode.CANCELLED
+    return FailureCode(stored) if stored is not None else FailureCode.WORKER_LOST
 
 
 @dataclass
@@ -1271,7 +1311,9 @@ def _checks_under(
             return built
         # The build was reported failed for good, but its write is in the table: only the
         # checks may end this task.
-        built = dataclasses.replace(built, kind=None, message=COMMITTED_BEFORE_RECORDED_MESSAGE)
+        built = dataclasses.replace(
+            built, kind=None, message=COMMITTED_BEFORE_RECORDED_MESSAGE, failure_code=None
+        )
     progress.written = not source
     if built.written is not None:
         # A Python asset: the stamp names the tip of the task run's own writes, not what the
@@ -1416,7 +1458,13 @@ def _checks_under(
                 dropped=dropped,
             )
         )
-        return dataclasses.replace(built, kind=FailureKind.PERMANENT, message=message, checks=lines)
+        return dataclasses.replace(
+            built,
+            kind=FailureKind.PERMANENT,
+            message=message,
+            checks=lines,
+            failure_code=check_failure_code(found.kept),
+        )
     if not found.blocking:
         # The checks passed. The record of the task's success carries what follows, so that it
         # lands with the success or not at all: a worker lost between a clear and the record
@@ -1514,7 +1562,15 @@ def _checks_under(
             refused=refused,
         )
     session.rollback()
-    return dataclasses.replace(built, kind=FailureKind.PERMANENT, message=message, checks=lines)
+    return dataclasses.replace(
+        built,
+        kind=FailureKind.PERMANENT,
+        message=message,
+        checks=lines,
+        failure_code=check_failure_code(
+            [*found.blocking, *found.kept] if source else found.blocking
+        ),
+    )
 
 
 def check_phase(
@@ -1576,7 +1632,7 @@ def check_phase(
             # read after that is known.
             kind = FailureKind.TRANSIENT
             message = unchecked_retry_message(message, claimed.run_id, environment or "")
-        return dataclasses.replace(built, kind=kind, message=message)
+        return dataclasses.replace(built, kind=kind, message=message, failure_code=failure.code)
     except Exception as exc:
         logger.exception(
             "Checking task run %s failed unexpectedly (%s); the checks run again.",
@@ -1586,6 +1642,8 @@ def check_phase(
         message = RUN_ERROR_MESSAGE
         if progress.written:
             message = unchecked_retry_message(message, claimed.run_id, environment or "")
-        return dataclasses.replace(built, kind=FailureKind.TRANSIENT, message=message)
+        return dataclasses.replace(
+            built, kind=FailureKind.TRANSIENT, message=message, failure_code=FailureCode.INTERNAL
+        )
     finally:
         keeper.stop()
