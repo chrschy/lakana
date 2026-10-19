@@ -224,7 +224,9 @@ every missing output of it means "run everything".
 - **`compose-smoke`** starts the real console scripts in containers, so it runs for any change under
   `packages/*/src/` as well as for the bundle, packaging and script files in the filter of its
   "Did the bundle change?" step. `test` has a 30-minute timeout.
-- **Coverage** is measured on 3.14 only (see the coverage ratchet below).
+- **Coverage** is measured on 3.14 only (see the coverage ratchet below). The job uploads the
+  report it measured, `coverage.json`, as the artifact `coverage-report` (kept 7 days), also when the
+  ratchet fails, and its log lists every file below 100 % with the missed lines.
 - **Duplication** is measured by the `lint` job: `jscpd`, pinned in `tools/jscpd`, scans
   `packages/*/src` (not the tests) and `scripts/duplication_ratchet.py` fails when the duplicated
   lines or the clones rise (see "The duplication ratchet" below).
