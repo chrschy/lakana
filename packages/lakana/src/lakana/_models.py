@@ -1307,6 +1307,10 @@ class Deploy:
     warnings
         What the deploy leaves for you to act on, as sentences; empty from a server that
         predates them.
+    waiting_for
+        Why a queued deploy has not started (the codes `no_worker`, `no_worker_of_kind`,
+        `workers_busy` and `starting`); `None` when it is not waiting, in a listing, and from
+        a server that predates the field.
     """
 
     id: str
@@ -1327,6 +1331,7 @@ class Deploy:
     hidden_adopted: int = 0
     checks: dict[str, list[dict[str, str]]] | None = None
     warnings: tuple[str, ...] = ()
+    waiting_for: WaitingFor | None = None
 
 
 @dataclass(frozen=True)

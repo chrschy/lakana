@@ -532,6 +532,7 @@ def query_wait_reason(
     limit: UserLimit | None = None,
     ahead_cap: int | None = None,
     passed_by_until: datetime | None = None,
+    thing: str = "query",
 ) -> WaitReason:
     """Say why a `QUEUED` query run has not started, tested in this order.
 
@@ -565,6 +566,9 @@ def query_wait_reason(
         The time, still in the future, until which workers pass the submitter's ad-hoc queries
         by (`Principal.query_passed_by_until`), or `None`. It counts only while a worker that
         takes this kind is free; with every such worker busy, `workers_busy` is the truth.
+    thing
+        What waits, as the sentences call it: ``query``, or ``deploy`` for a deploy run (which is
+        pipeline work and never capped).
 
     Returns
     -------
@@ -574,11 +578,11 @@ def query_wait_reason(
     if counts.alive == 0:
         return WaitReason(
             NO_WORKER,
-            f"No worker is running, so this query cannot start. {_START_A_WORKER}",
+            f"No worker is running, so this {thing} cannot start. {_START_A_WORKER}",
             workers=0,
         )
     if counts.taking == 0:
-        return _no_worker_of_kind(counts, kind, "maintenance run" if maintenance else "query")
+        return _no_worker_of_kind(counts, kind, "maintenance run" if maintenance else thing)
     if limit is not None and limit.running >= limit.limit and counts.free > 0:
         return _user_limit(limit)
     if passed_by_until is not None and counts.free > 0:
@@ -601,7 +605,7 @@ def query_wait_reason(
         queue = f"about {ahead} queries or deploys are ahead of this one"
     if counts.free > 0:
         message = (
-            "A worker is free; the query starts within about a second."
+            f"A worker is free; the {thing} starts within about a second."
             if ahead == 0
             else f"A worker is free; {queue}, and it starts as soon as they are taken."
         )

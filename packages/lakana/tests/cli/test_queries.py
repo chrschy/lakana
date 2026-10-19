@@ -21,7 +21,7 @@ from typer.testing import Result
 
 from lakana._models import QueryStatus, WaitingFor
 from lakana.cli._state import CliState
-from lakana.cli.queries import WAIT_LINE_AFTER_SECONDS, _WaitLine
+from lakana.cli._waiting import WAIT_LINE_AFTER_SECONDS, WaitLine
 
 _Q = "/api/v1/environments/dev/queries"
 
@@ -1243,7 +1243,7 @@ class _Clock:
         return self.now
 
 
-def _line(tmp_path: Path, clock: _Clock, output: str = "table") -> _WaitLine:
+def _line(tmp_path: Path, clock: _Clock, output: str = "table") -> WaitLine:
     """Build a wait line on a state with the given output mode.
 
     Parameters
@@ -1257,15 +1257,15 @@ def _line(tmp_path: Path, clock: _Clock, output: str = "table") -> _WaitLine:
 
     Returns
     -------
-    _WaitLine
+    WaitLine
         The callable under test.
     """
     state: CliState = make_state(tmp_path, FakeApi())
     state.output = output
-    return _WaitLine(state, monotonic=clock)
+    return WaitLine(state, monotonic=clock)
 
 
-def _primed(tmp_path: Path) -> tuple[_WaitLine, _Clock]:
+def _primed(tmp_path: Path) -> tuple[WaitLine, _Clock]:
     """Build a wait line that saw a QUEUED status without a reason at 0 s and is now at 5 s.
 
     Parameters
@@ -1275,7 +1275,7 @@ def _primed(tmp_path: Path) -> tuple[_WaitLine, _Clock]:
 
     Returns
     -------
-    tuple of (_WaitLine, _Clock)
+    tuple of (WaitLine, _Clock)
         The line and its clock.
     """
     clock = _Clock()
@@ -1625,7 +1625,7 @@ def _slow_clock(monkeypatch: pytest.MonkeyPatch) -> _Clock:
         The clock.
     """
     clock = _Clock()
-    monkeypatch.setattr("lakana.cli.queries._clock", clock)
+    monkeypatch.setattr("lakana.cli.queries.clock", clock)
     monkeypatch.setattr(
         "lakana.resources.queries.time.sleep",
         lambda _seconds: setattr(clock, "now", clock.now + 5.0),

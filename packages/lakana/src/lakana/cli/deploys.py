@@ -13,6 +13,7 @@ from lakana.cli import _output
 from lakana.cli._paging import more_results
 from lakana.cli._project import find_project_root, is_dirty, project_repo
 from lakana.cli._state import CliError, CliState, confirm, resolve_environment, state_of
+from lakana.cli._waiting import WaitLine, clock
 from lakana.client import Client
 from lakana.errors import LakanaError, NotFound
 
@@ -185,11 +186,17 @@ def _report(state: CliState, deploy: Deploy, verb: str) -> None:
         typer.echo(f"warning: {_output.inline(warning, 500)}", err=True)
 
 
-def _wait(client: Client, environment: str, deploy_id: str, timeout: float | None) -> Deploy:
+def _wait(
+    state: CliState, client: Client, environment: str, deploy_id: str, timeout: float | None
+) -> Deploy:
     """Wait for a run, turning a timeout into a message with the id to poll.
+
+    While the run is queued, a line on standard error says why (see `WaitLine`).
 
     Parameters
     ----------
+    state
+        The CLI state (for the output mode).
     client
         The SDK client.
     environment
@@ -210,7 +217,9 @@ def _wait(client: Client, environment: str, deploy_id: str, timeout: float | Non
         With code 1 if `timeout` elapses first; the run keeps going server-side.
     """
     try:
-        return client.deploys.wait(environment, deploy_id, timeout=timeout)
+        return client.deploys.wait(
+            environment, deploy_id, timeout=timeout, on_update=WaitLine(state, monotonic=clock)
+        )
     except TimeoutError as exc:
         typer.echo(
             f"error: {exc}. The deploy is still in progress; check it with "
@@ -300,7 +309,7 @@ def deploy(
         else:
             typer.echo(accepted.id)
         return
-    finished = _wait(client, environment, accepted.id, timeout)
+    finished = _wait(state, client, environment, accepted.id, timeout)
     _report(state, finished, "Dry run of" if dry_run else "Deployed")
     if not dry_run and state.output != "json":
         # A repository named on the command line must be named again: the short form only
@@ -354,7 +363,7 @@ def rollback(
         environment, repository, kind="rollback", to_sha=to, to_previous=to_previous
     )
     typer.echo(f"Queued rollback {accepted.id}", err=True)
-    _report(state, _wait(client, environment, accepted.id, timeout), "Rolled back")
+    _report(state, _wait(state, client, environment, accepted.id, timeout), "Rolled back")
 
 
 @deploys_app.command("list")
