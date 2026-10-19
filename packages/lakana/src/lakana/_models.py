@@ -827,6 +827,154 @@ class Grant:
 
 
 @dataclass(frozen=True)
+class GrantPage:
+    """One page of grants, newest first.
+
+    Parameters
+    ----------
+    items
+        The grants on this page.
+    next_cursor
+        Pass back as ``cursor=`` to fetch the next page; ``None`` on the last page.
+    """
+
+    items: list[Grant]
+    next_cursor: str | None
+
+
+@dataclass(frozen=True)
+class PrincipalPage:
+    """One page of principals, newest first.
+
+    Parameters
+    ----------
+    items
+        The principals on this page.
+    next_cursor
+        Pass back as ``cursor=`` to fetch the next page; ``None`` on the last page.
+    """
+
+    items: list[Principal]
+    next_cursor: str | None
+
+
+@dataclass(frozen=True)
+class GroupPage:
+    """One page of groups, newest first.
+
+    Parameters
+    ----------
+    items
+        The groups on this page.
+    next_cursor
+        Pass back as ``cursor=`` to fetch the next page; ``None`` on the last page.
+    """
+
+    items: list[Group]
+    next_cursor: str | None
+
+
+# jscpd:ignore-start
+# The SDK depends on no other package, so these mirror the server's response models.
+@dataclass(frozen=True)
+class Scope:
+    """The object a permission or a grant is on.
+
+    Parameters
+    ----------
+    kind
+        ``INSTANCE``, ``ENVIRONMENT``, ``NAMESPACE`` or ``TABLE``.
+    environment
+        The environment, below the instance.
+    namespace
+        The dot-joined namespace, for a namespace or a table.
+    table
+        The table, for a table.
+    """
+
+    kind: str
+    environment: str | None
+    namespace: str | None
+    table: str | None
+
+
+@dataclass(frozen=True)
+class PermissionVia:
+    """One grant that gives a permission, and how it reaches the principal.
+
+    Parameters
+    ----------
+    kind
+        ``grant`` (a single action granted to the principal), ``role`` (a role granted to it)
+        or ``group`` (either, granted to a group it is a member of).
+    grant_id
+        The grant's id, as `lakana grant revoke` takes it.
+    group
+        The group's name, for ``group``.
+    role
+        The role granted, or `None` for a single action.
+    scope
+        What the grant is on: the object asked about or an ancestor of it.
+    """
+
+    kind: str
+    grant_id: str
+    group: str | None
+    role: str | None
+    scope: Scope
+
+
+@dataclass(frozen=True)
+class Permission:
+    """Whether a principal may do one action on the object, and why.
+
+    Parameters
+    ----------
+    action
+        The action.
+    allowed
+        The answer of the authorizer the server's routes use.
+    via
+        The grants that give it, oldest first; empty when refused.
+    reason
+        Why it is refused, or `None` when allowed.
+    """
+
+    action: str
+    allowed: bool
+    via: list[PermissionVia]
+    reason: str | None
+
+
+@dataclass(frozen=True)
+class Permissions:
+    """A principal's effective permissions on one object.
+
+    Parameters
+    ----------
+    principal
+        The principal's name.
+    active
+        Whether it may sign in.
+    scope
+        The object asked about.
+    permissions
+        One per action the server asks for on an object of this kind.
+    note
+        Set for a deactivated principal: its tokens no longer work, whatever its grants allow.
+    """
+
+    principal: str
+    active: bool
+    scope: Scope
+    permissions: list[Permission]
+    note: str | None
+
+
+# jscpd:ignore-end
+
+
+@dataclass(frozen=True)
 class RowFilter:
     """A row filter restricting which rows a principal or group may read.
 

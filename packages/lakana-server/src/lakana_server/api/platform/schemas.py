@@ -1125,6 +1125,102 @@ class GrantOut(BaseModel):
     note: str | None = None
 
 
+# jscpd:ignore-start
+# The SDK (`lakana._models`) mirrors these field for field; it may not import the server.
+class ScopeOut(BaseModel):
+    """The object a permission or a grant is on.
+
+    Parameters
+    ----------
+    kind
+        ``INSTANCE``, ``ENVIRONMENT``, ``NAMESPACE`` or ``TABLE``.
+    environment
+        The environment, below the instance.
+    namespace
+        The dot-joined namespace, for a namespace or a table.
+    table
+        The table, for a table.
+    """
+
+    kind: SecurableKind
+    environment: str | None
+    namespace: str | None
+    table: str | None
+
+
+class ViaOut(BaseModel):
+    """One grant that gives a permission, and how it reaches the principal.
+
+    Parameters
+    ----------
+    kind
+        ``grant`` (a single action granted to the principal), ``role`` (a role granted to it)
+        or ``group`` (either, granted to a group it is a member of).
+    grant_id
+        The grant's id, as `lakana grant revoke` takes it.
+    group
+        The group's name, for ``group``.
+    role
+        The role granted, or `None` for a single action.
+    scope
+        What the grant is on: the object asked about or an ancestor of it.
+    """
+
+    kind: Literal["grant", "role", "group"]
+    grant_id: uuid.UUID
+    group: str | None
+    role: Role | None
+    scope: ScopeOut
+
+
+class PermissionOut(BaseModel):
+    """Whether a principal may do one action on the object, and why.
+
+    Parameters
+    ----------
+    action
+        The action.
+    allowed
+        The answer of the authorizer the routes use.
+    via
+        The grants that give it, oldest first; empty when refused.
+    reason
+        Why it is refused, or `None` when allowed.
+    """
+
+    action: Action
+    allowed: bool
+    via: list[ViaOut]
+    reason: str | None
+
+
+class PermissionsOut(BaseModel):
+    """A principal's effective permissions on one object.
+
+    Parameters
+    ----------
+    principal
+        The principal's name.
+    active
+        Whether it may sign in.
+    scope
+        The object asked about.
+    permissions
+        One per action the routes ask for on an object of this kind.
+    note
+        Set for a deactivated principal: its tokens no longer work, whatever its grants allow.
+    """
+
+    principal: str
+    active: bool
+    scope: ScopeOut
+    permissions: list[PermissionOut]
+    note: str | None
+
+
+# jscpd:ignore-end
+
+
 class RowFilterCreate(BaseModel):
     """Request body for creating a row filter.
 

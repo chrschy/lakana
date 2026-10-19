@@ -12,6 +12,7 @@ from lakana_core.auth import Action, AuthorizationService, PrincipalRef, Securab
 from lakana_core.errors import AlreadyExistsError, NotFoundError
 from lakana_core.grants.service import assert_admin_headroom
 from lakana_core.models import AuditEventType, Principal, PrincipalType
+from lakana_core.pagination import Page, name_contains, newest_first
 
 
 class PrincipalService:
@@ -141,26 +142,53 @@ class PrincipalService:
             raise NotFoundError(f"No principal named {name!r}.")
         return principal
 
-    def list_principals(self, p: PrincipalRef) -> list[Principal]:
-        """List every principal.
-
-        Unfiltered: per-row filtering is sub-project 2's call-site
-        change, not this service's (Constraint 9 carry-forward).
+    def list_principals(
+        self,
+        p: PrincipalRef,
+        *,
+        q: str | None = None,
+        limit: int = 100,
+        cursor: str | None = None,
+    ) -> Page[Principal]:
+        """List principals, newest first, one page at a time.
 
         Parameters
         ----------
         p
             The acting principal.
+        q
+            Only principals whose name contains this text, in any letter case; ``%`` and ``_``
+            are matched as themselves. Blank means every principal.
+        limit
+            Most principals returned.
+        cursor
+            The `next_cursor` of the previous page. Send the same `q` with every page.
 
         Returns
         -------
-        list of Principal
-            Every principal.
+        Page of Principal
+            The principals by creation time, newest first, equal times by id, and the cursor of
+            the next page.
 
         Raises
         ------
         PermissionDenied
             If the acting principal may not manage principals.
+        ValidationError
+            If `limit` is below 1 or `cursor` is not one this server issued for the principals
+            list.
         """
         self._authz.authorize(p, Action.MANAGE_PRINCIPAL, Securable.instance_scope())
-        return list(self._session.execute(select(Principal)).scalars().all())
+        query = select(Principal)
+        if q is not None and q.strip():
+            query = query.where(name_contains(Principal.name, q.strip()))
+        return newest_first(
+            self._session,
+            query,
+            kind="principals",
+            at=Principal.created_at,
+            row_id=Principal.id,
+            at_of=lambda row: row.created_at,
+            limit=limit,
+            cursor=cursor,
+        )

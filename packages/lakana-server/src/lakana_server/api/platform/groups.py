@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query, Response
 
 from lakana_core.auth import PrincipalRef
 from lakana_core.identity.groups import GroupService
+from lakana_server.api.platform.listing import set_next_cursor
 from lakana_server.api.platform.schemas import GroupCreate, GroupOut, PrincipalOut
 from lakana_server.api.routing import AuthenticateFirstRoute
 from lakana_server.deps import get_group_service, get_principal
@@ -46,13 +47,25 @@ def create_group(
 
 @router.get("", response_model=list[GroupOut])
 def list_groups(
+    response: Response,
+    q: str | None = Query(default=None, max_length=255),
+    limit: int = Query(default=100, ge=1, le=200),
+    cursor: str | None = Query(default=None, max_length=512),
     principal: PrincipalRef = Depends(get_principal),
     service: GroupService = Depends(get_group_service),
 ) -> list[GroupOut]:
-    """List every group.
+    """List groups, newest first; the cursor of the next page is in `X-Next-Cursor`.
 
     Parameters
     ----------
+    response
+        The response, for the cursor header.
+    q
+        Only groups whose name contains this text, in any letter case.
+    limit
+        Most groups returned (1 to 200).
+    cursor
+        The `X-Next-Cursor` of the previous page; send the same `q`.
     principal
         The authenticated caller.
     service
@@ -61,9 +74,11 @@ def list_groups(
     Returns
     -------
     list of GroupOut
-        Every group.
+        The groups of this page.
     """
-    return [GroupOut.model_validate(row) for row in service.list_groups(principal)]
+    page = service.list_groups(principal, q=q, limit=limit, cursor=cursor)
+    set_next_cursor(response, page.next_cursor)
+    return [GroupOut.model_validate(row) for row in page.items]
 
 
 @router.delete("/{name}", status_code=204)

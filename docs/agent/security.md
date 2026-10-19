@@ -1923,7 +1923,7 @@ carries any of the three, and a grant below instance scope never satisfied these
 - **A principal's own tokens** stay administrator-only: issuing, listing and revoking a personal
   access token needs `MANAGE_TOKEN` whoever it is for. This element adds no self-service; that
   belongs to the sign-in design (#32).
-- **Call sites.** `test_admin_only_call_sites.py` enumerates the fourteen call sites (five in
+- **Call sites.** `test_admin_only_call_sites.py` enumerates the thirteen call sites (four in
   `grants/service.py`, six in `identity/groups.py`, three in `identity/pats.py`) and fails on
   any other module that names one of the three actions. A new call site must go through the
   helper and into that test's `_GUARDED`.
@@ -2737,6 +2737,22 @@ exit criterion is being re-run after the M3f fixes above — see
 ## Authorization: `authorize()` vs `permits()`
 
 - **Use `authorize()` for actions, `permits()` for visibility.** `authorize(principal, action, scope)` raises `PermissionDenied` when a principal lacks the grant; it is the control for mutating operations — creating, updating, or deleting anything. `permits(principal, action, scope)` returns a boolean and is for visibility filtering — deciding what to return from a list. `permits()` does not audit, so never use it to gate an action.
+- **Explaining access goes through the decision itself (#147).** `GrantAuthorization.explain`
+  returns a `Decision` (allowed, the covering grants, the refusal's text); `authorize` raises from
+  it and `permits` is built on `authorize`, so there is one decision. `GET
+  /api/v1/principals/{name}/permissions` (`GrantService.explain`,
+  `lakana_core.grants.explain.explain_permissions`) asks it action by action and adds only what
+  the call sites add beyond the authorizer: for `MANAGE_GRANT`, `MANAGE_GROUP` and `MANAGE_TOKEN`
+  the `holds_instance_admin` check of `authorize_admin_only` (through `needs_admin_role`, so the
+  module is no call site). A new rule that a call site adds beyond the authorizer must be added
+  there too, or the explanation says "allowed" where the route refuses;
+  `tests/test_access_explain.py` compares every answer with the routes' own checks over a matrix
+  of direct, group and role grants at every level. Who may ask: a principal about itself with a
+  personal token (a task token never: it goes through `authorize_admin_only` and is refused),
+  anyone else only through `authorize_admin_only(MANAGE_GRANT)`, which runs before the principal
+  is looked up, so an unknown name is the same audited `403`. An administrator gets `404` for an
+  unknown principal or object; a principal asking about itself is answered for a missing object
+  as for one no grant names, so the route is no oracle for what exists.
 - **Any new `AuthorizationService` implementation must implement both.** This includes test doubles and mocks. `permits` is defined as "`authorize` would not raise" — if `authorize()` raises on a call, `permits()` must return False for the same inputs.
 
 ## Query reads and submitter scope

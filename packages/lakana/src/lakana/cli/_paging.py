@@ -1,15 +1,32 @@
-"""What the list commands share: the `--since` option and the line that names the next page."""
+"""What the list commands share: paging and search options, `--since`, the next-page line."""
 
 from __future__ import annotations
 
 import shlex
 from collections.abc import Mapping, Sequence
 from datetime import datetime
+from typing import Annotated
 
 import typer
 
 from lakana.cli import _output
 from lakana.cli._state import CliError, CliState
+
+LIMIT = Annotated[
+    int | None, typer.Option("--limit", min=1, max=200, help="Most rows to list (default 100).")
+]
+"""The `--limit` option of a paged list."""
+
+CURSOR = Annotated[
+    str | None, typer.Option("--cursor", help="Continue after the page that printed this cursor.")
+]
+"""The `--cursor` option of a paged list."""
+
+SEARCH = Annotated[
+    str | None,
+    typer.Option("--search", help="Only names that contain this text, in any letter case."),
+]
+"""The `--search` option of the principal and group lists."""
 
 
 def parse_since(value: str | None) -> datetime | None:

@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from lakana_core.audit.authorization import AuditingAuthorization
 from lakana_core.audit.denial_limiter import DenialAuditLimiter
-from lakana_core.auth import Action, PrincipalRef, SecurableKind
+from lakana_core.auth import Action, PrincipalRef, Securable, SecurableKind
 from lakana_core.errors import PermissionDenied, ValidationError
 from lakana_core.grants.admin import ADMIN_ONLY_ACTIONS, admin_only_message, holds_instance_admin
 from lakana_core.grants.authorization import GrantAuthorization
@@ -211,12 +211,11 @@ _GRANT_OPERATIONS: dict[str, Callable[[GrantService, Actors, PrincipalRef], obje
     "grant": lambda service, actors, p: service.grant(
         p, principal=actors.target.name, role=Role.ANALYST, kind=SecurableKind.INSTANCE
     ),
-    "list_for_principal": lambda service, actors, p: service.list_for_principal(
-        p, actors.target.name
+    "list_grants": lambda service, actors, p: service.list_grants(
+        p, principal_name=actors.target.name
     ),
-    "list_for_group": lambda service, actors, p: service.list_for_group(p, actors.group),
-    "list_for_securable": lambda service, actors, p: service.list_for_securable(
-        p, kind=SecurableKind.INSTANCE, environment=None, namespace=None, table=None
+    "explain": lambda service, actors, p: service.explain(
+        p, actors.target.name, Securable.instance_scope()
     ),
     "revoke": lambda service, actors, p: service.revoke(p, actors.grant_id),
 }
@@ -371,7 +370,7 @@ def test_the_holder_of_manage_token_cannot_issue_a_token_for_itself_or_an_admini
 
 
 _GUARDED = {
-    "grants/service.py": ("MANAGE_GRANT", 5),
+    "grants/service.py": ("MANAGE_GRANT", 4),
     "identity/groups.py": ("MANAGE_GROUP", 6),
     "identity/pats.py": ("MANAGE_TOKEN", 3),
 }
@@ -594,7 +593,7 @@ def _unguarded_methods(tree: ast.AST, class_name: str) -> list[str]:
 
 
 def test_the_three_actions_are_authorized_only_through_the_helper() -> None:
-    """A test enumerates the call sites. Fourteen calls, all `authorize_admin_only`."""
+    """A test enumerates the call sites. Thirteen calls, all `authorize_admin_only`."""
     core = Path(__file__).resolve().parents[1] / "src" / "lakana_core"
     for relative, (name, count) in _GUARDED.items():
         tree = ast.parse((core / relative).read_text(encoding="utf-8"))
