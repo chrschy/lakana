@@ -62,8 +62,8 @@ does. What it adds is the part that keeps several people, and production, safe:
   specification says. Your data is not kept in a format only Lakana understands.
 - **Other engines can read the tables.** Lakana serves an Iceberg REST catalog next to its own API.
   Another engine, or your own Iceberg client, can find the tables through it and, with access to
-  the storage, read them without Lakana's query engine; Lakana's own Python tasks read tables that way. Grants and protected
-  environments still apply to it.
+  the storage, read them without Lakana's query engine. Grants and protected environments still
+  apply to it.
 - **A standard interface.** The catalog speaks the Iceberg REST catalog protocol, not one of
   Lakana's own, so a tool that supports that protocol needs nothing from Lakana to connect.
 
@@ -77,8 +77,8 @@ What that choice costs:
   file has no field ids, when it adds more than 2,000 files, or when the check takes longer than
   60 seconds; split a large load into several commits
   ([the refusals](../reference/checks.md#when-a-commit-through-the-iceberg-rest-catalog-is-refused)).
-- **Data files must be Parquet.** Lakana reads only Parquet data files, and a commit that adds ORC
-  or Avro files is refused
+- **Iceberg tables need Parquet data files.** The data files of an Iceberg table must be Parquet,
+  and a commit that adds ORC or Avro files is refused
   ([the refusals](../reference/checks.md#when-a-commit-through-the-iceberg-rest-catalog-is-refused)).
 - **Filters and masks follow type rules.** Because a filter or mask runs on every stored value,
   Lakana refuses one that would need a conversion (`region = 5` on a text column), and a mask must
