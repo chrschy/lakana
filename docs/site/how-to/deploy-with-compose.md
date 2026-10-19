@@ -1217,3 +1217,6 @@ The bundle's known gaps (SeaweedFS's internal APIs, a venv build that a shutdown
 [The security overview](../explanation/security.md) and the [threat model](https://github.com/lakana-labs/lakana/blob/main/docs/security/threat-model.md) describe what `.env` and the
 bootstrap credential protect in team mode, and what team mode explicitly does not defend
 against.
+
+If you run an instance for other people, [Run Lakana for other people](operate-for-others.md) puts these
+steps in the order an operator needs them.
