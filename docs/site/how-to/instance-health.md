@@ -219,8 +219,9 @@ code, a cause and a next step. Both are shown where you look at the run:
 
 ## Log lines that matter
 
-Both programs write to standard error, one record per line with the time, the level and the logger
-name. Read them with `docker compose logs server` and `docker compose logs worker`; the default
+Lakana's own records go to standard error, one per line with the time, the level and the logger
+name; the web server's lines (startup and, if switched on, one per request) have a shorter form
+without the time. `docker compose logs` shows both together. Read them with `docker compose logs server` and `docker compose logs worker`; the default
 level, `INFO`, shows all of the lines below. How to change the level and what the lines of the
 sweep mean: [The sweep](deploy-with-compose.md#the-sweep) and
 [After a restore](deploy-with-compose.md#after-a-restore).
