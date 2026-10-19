@@ -9,7 +9,7 @@ process.
 Before you register an index: under the current runner a task runs as the worker's operating-system
 user, so everyone who may deploy Python code to the instance can read the index's credential (see
 [Isolation: one instance is one trust domain](../explanation/python-assets.md#isolation-one-instance-is-one-trust-domain)
-and `docs/security/threat-model.md` in the repository). Register an index only with a credential
+and the [threat model](https://github.com/lakana-labs/lakana/blob/main/docs/security/threat-model.md)). Register an index only with a credential
 you would give those people.
 
 You need: an instance that runs Python assets ([Projects and deploys](projects.md), "Python

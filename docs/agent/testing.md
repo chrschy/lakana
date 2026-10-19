@@ -311,6 +311,9 @@ the strict build fails on a broken link or anchor.
   is checked. Inline code is for names (a file, an option, a table).
 - **Output blocks show real output.** Run the command and paste what it printed. Do not
   write what you expect.
+- **No milestone names.** A reader does not know `M5c1` or `M7b`; say what the work is or "in a
+  later release". Only `explanation/scope.md` and `explanation/roadmap.md`, which define the
+  milestones, may use them; `scripts/tests/test_docs_site.py` fails on any other page.
 - **No feature that loads from a CDN.** The site must work on an internal network. Do not use
   mermaid diagrams, image zoom, editable or runnable code blocks, `repo_url` (it queries the
   GitHub API), analytics, or a font, image or script from a URL. Two things check this.
@@ -330,7 +333,15 @@ the strict build fails on a broken link or anchor.
   says which. The private package index page rose it from 45 to 48: three command blocks of
   `private-package-index.md` need a package index that asks for a password or the id of a
   deployed project version, which the docs-examples job cannot reach without a new service; the integration tests of the
-  "Private package indexes" paragraph below are the proof. The upgrade note of the next release rose it from 48 to 52 (two blocks with placeholders for names and ids, and the recovery `SELECT` and `UPDATE` of "Delegation needs the ADMIN role" in `upgrades.md`, which read and change a real database); its other commands run in `getting-started/run.sh`. "Why is my query or task waiting?" (M5c3b) rose it from 53 to 54 for `lakana query status QUERY_ID`, which needs the id of a query that is still queued; the tests of the wait line in `test_queries.py` assert the line the page shows. The upgrade note "A secret is bound to one use" rose it from 52 to 53 (placeholders for names; the commands run in `bind-a-secret/run.sh`). "Verify a download" in `deploy-with-compose.md` rose it from 53 to 54 (#130): its `pip download` and `gh attestation verify` need the network, the GitHub CLI and a published, attested release, which the example harness cannot provide. Lowering the ceiling when blocks become tested is still the expected direction.
+  "Private package indexes" paragraph below are the proof. The upgrade note of the next release rose it from 48 to 52 (two blocks with placeholders for names and ids, and the recovery `SELECT` and `UPDATE` of "Delegation needs the ADMIN role" in `upgrades.md`, which read and change a real database); its other commands run in `getting-started/run.sh`. "Why is my query or task waiting?" (M5c3b) rose it from 53 to 54 for `lakana query status QUERY_ID`, which needs the id of a query that is still queued; the tests of the wait line in `test_queries.py` assert the line the page shows. The upgrade note "A secret is bound to one use" rose it from 52 to 53 (placeholders for names; the commands run in `bind-a-secret/run.sh`). "Verify a download" in `deploy-with-compose.md` rose it from 53 to 54 (#130): its `pip download` and `gh attestation verify` need the network, the GitHub CLI and a published, attested release, which the example harness cannot provide. Sorting the pages (#55) lowered it from 55 to 48 by testing seven blocks (the new example `projects`, `uv lock` from `train-and-predict`, and the `*lakana-env` block, which now shows its anchor and is parsed) and giving the other 21 "moved as is" blocks a real reason; the reason `moved as is` is refused by `scripts/tests/test_docs_site.py`. Lowering the ceiling when blocks become tested is still the expected direction.
+
+### Text that leaves the repository
+
+A file `lakana init` writes, the generated Compose file, a message the CLI or server prints and
+the four PyPI readmes reach readers with no checkout, so they name a page by its URL
+(`https://lakana-labs.github.io/lakana/how-to/projects/`), never by `docs/site/...`.
+`scripts/tests/test_user_text_urls.py` fails on a `docs/` path in those files and on a URL
+whose page is not under `docs/site`; add a new such file to its `LEAVING` list.
 
 ### Code blocks and their markers
 

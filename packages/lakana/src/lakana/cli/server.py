@@ -1153,8 +1153,8 @@ def _refuse_remote_target(state: CliState, *, stopping: bool = False) -> None:
             f"{url} is a remote instance; 'lakana server stop' stops only the instance on "
             "this machine",
             hint="a Compose stack stops with 'docker compose down' in the bundle directory "
-            "(see docs/site/how-to/deploy-with-compose.md). To stop this machine's instance, "
-            "unset LAKANA_URL and leave out --url and --profile.",
+            "(see https://lakana-labs.github.io/lakana/how-to/deploy-with-compose/). "
+            "To stop this machine's instance, unset LAKANA_URL and leave out --url and --profile.",
         )
     if url is not None and not is_loopback_url(url):
         raise CliError(
@@ -1162,7 +1162,7 @@ def _refuse_remote_target(state: CliState, *, stopping: bool = False) -> None:
             "this machine",
             hint="to reset this machine's instance, unset LAKANA_URL and leave out --url and "
             "--profile. To start a team instance over, use the Compose bundle: see "
-            "'Starting over' in docs/site/how-to/deploy-with-compose.md",
+            "'Starting over' in https://lakana-labs.github.io/lakana/how-to/deploy-with-compose/",
         )
 
 
@@ -1208,7 +1208,7 @@ def reset(
             "'lakana server reset' resets the instance on this machine only; "
             "it can't reset a remote or Compose instance",
             hint="add --local for this machine's instance. For a Compose deployment, see "
-            "'Starting over' in docs/site/how-to/deploy-with-compose.md",
+            "'Starting over' in https://lakana-labs.github.io/lakana/how-to/deploy-with-compose/",
         )
     _refuse_remote_target(state)
     given = data_dir or default_data_dir()

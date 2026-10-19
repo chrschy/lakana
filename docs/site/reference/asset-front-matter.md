@@ -5,7 +5,7 @@ does with it. The layout of the files is in [Project layout](project-layout.md).
 
 An optional `/* lakana … */` block, first in the file:
 
-<!-- not tested: moved as is; sorted in the second pull request -->
+<!-- not tested: SQL is not parsed by the block checker; a test in `scripts/tests/test_docs_site.py` parses this header with the front-matter reader -->
 ```sql
 /* lakana
 description: Cleaned hourly weather observations, nulls dropped.

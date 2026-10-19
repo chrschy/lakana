@@ -315,5 +315,6 @@ def ineffective_grants_warning(session: Session) -> str | None:
         f"ability, give them the role: {command}. Their holders can no longer grant access, "
         "manage groups or issue tokens: an administrator (a principal with the ADMIN role on "
         "the instance) must do that now. If no administrator can sign in any more, read "
-        '"Upgrade policy" (docs/site/explanation/upgrades.md) in the documentation.'
+        '"Upgrade policy" '
+        "(https://lakana-labs.github.io/lakana/explanation/upgrades/) in the documentation."
     )

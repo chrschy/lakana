@@ -18,6 +18,22 @@ What the bundle does not do, or does not protect, today, and why. The steps to r
   SeaweedFS's own containers (`seaweedfs-core`, the `seaweedfs` S3 gateway and the one-shot
   `bucket`) join and which has no route out of the host. The server and every worker are not on it:
   from a worker, `seaweedfs-core` does not resolve, and `seaweedfs` answers over HTTP on port 8333 only, with
-  S3 that needs the keys. The filer also runs with `-disableHttp`. **Not protected:** the gateway's gRPC port 18333 (it includes IAM) has no authentication and is reachable from the worker. User SQL cannot use it, because DuckDB's HTTP filesystem cannot speak gRPC, but a Python task, which runs as trusted code in the worker, could remove the storage identity and make storage unavailable until a restart. The isolation relies on Docker's own network isolation (the default); `iptables: false`, Podman or rootless setups may not provide it. A person
+  S3 that needs the keys. The filer also runs with `-disableHttp`. **Not protected:** the gateway's gRPC port; see [The gRPC port of the SeaweedFS gateway](#the-grpc-port-of-the-seaweedfs-gateway). The isolation relies on Docker's own network isolation (the default); `iptables: false`, Podman or rootless setups may not provide it. A person
   with Docker access to the host can still reach SeaweedFS (`docker exec`), and the S3 keys in
   `.env` give full access to the `lakana` bucket, as always. The pinned SeaweedFS version is updated with Lakana releases.
+
+## The gRPC port of the SeaweedFS gateway
+
+The `seaweedfs` S3 gateway also listens on a gRPC port, 18333. SeaweedFS cannot turn it off, and it
+has no authentication. It is reachable from the worker, because the gateway is on the network the
+worker uses. User SQL cannot use it (DuckDB's HTTP filesystem cannot speak gRPC), but a Python
+task runs as trusted code in the worker and could remove the storage identity, which makes storage
+unavailable until the gateway restarts. See the SeaweedFS item above for what else is and is not
+protected.
+
+## A symlinked parent directory of the profile file
+
+The CLI and the SDK read a profile file (it holds your token) through a single `O_NOFOLLOW` open
+and refuse a file that anyone but you can read. A symlink as the file itself is therefore refused. A symlink in a *parent directory* of the file
+is a known limitation that the check does not close. Keep the profile directory (by default
+`~/.config/lakana`) a real directory that only you can write to.

@@ -203,7 +203,7 @@ never merged, so a source that sets one of `url`/`token` must set both:
    stricter) — the SDK refuses it otherwise, telling you the `chmod` to run. It is read
    through a single `O_NOFOLLOW` open, so a symlinked profile file is refused outright as a
    TOCTOU precaution; a symlinked *parent directory* is a known, unclosed limitation of that
-   check (see `docs/agent/security.md`).
+   check (see <https://lakana-labs.github.io/lakana/explanation/compose-known-gaps/#a-symlinked-parent-directory-of-the-profile-file>).
 
 If none of these resolves a URL and token, `Client(...)` raises `lakana.ConfigError`.
 
@@ -265,7 +265,7 @@ lakana search orders --kind column --limit 10 [--offset N]  # tables, columns, d
 - Ctrl-C in `lakana sql` and `lakana query wait` cancels the query they wait for, says what
   happened on stderr and exits with 130 (a second Ctrl-C while the cancel is sent exits at once and
   names `lakana query cancel ID`). The submitter and a holder of `MANAGE_ENVIRONMENT` may cancel;
-  anyone else gets a 404. `query wait` cancels someone else's query too if you hold `MANAGE_ENVIRONMENT`. See `docs/site/how-to/stop-a-query.md`.
+  anyone else gets a 404. `query wait` cancels someone else's query too if you hold `MANAGE_ENVIRONMENT`. See <https://lakana-labs.github.io/lakana/how-to/stop-a-query/>.
 - `lakana query list` shows your queries (everyone's with `MANAGE_ENVIRONMENT`): running first, then
   queued in the order they are taken, with the reason each waits; never the SQL or the error text.
   SDK: `client.queries.list(environment, include_ended=False, limit=100)` returns `QueryListEntry`
@@ -281,7 +281,7 @@ lakana search orders --kind column --limit 10 [--offset N]  # tables, columns, d
   run as many ad-hoc queries as the limit per user allows: wait, or cancel one of them; `running`
   is your own number and a manager reading someone else's row gets `limit` only). Code that
   branches on `code` should treat an unknown one as "waiting". See
-  `docs/site/how-to/why-is-it-waiting.md`.
+  <https://lakana-labs.github.io/lakana/how-to/why-is-it-waiting/>.
 - In a protected environment, writes outside runs need `--break-glass --reason "…"` (SDK:
   `break_glass_reason=`) and `MANAGE_ENVIRONMENT`.
 - `--env` picks the environment; without it, the profile's `default_environment` is used
@@ -314,7 +314,7 @@ lakana search orders --kind column --limit 10 [--offset N]  # tables, columns, d
 | 10 | Payload too large (413) |
 | 11 | Server error (5xx), connection failure, or a server too old for the command |
 
-### Repositories (M5b)
+### Repositories
 
 An admin (`MANAGE_REPOSITORY`) registers each git repository once; deployers name it.
 
@@ -332,9 +332,9 @@ time: key `token` for `https`, `private_key` for `ssh`. Secret values never leav
 `repo remove` is refused while any environment has a current deployment from the repository;
 `lakana undeploy` removes it first.
 
-### Deploying a project (M5b)
+### Deploying a project
 
-`lakana init [DIR]` scaffolds a project; see `docs/site/how-to/projects.md` for assets, `lakana.yaml`, deploys and CI setup.
+`lakana init [DIR]` scaffolds a project; see <https://lakana-labs.github.io/lakana/how-to/projects/> for assets, `lakana.yaml`, deploys and CI setup.
 
     lakana deploy [REPO] --env dev [--ref main] [--dry-run] [--no-wait]
     lakana rollback [REPO] --env dev (--to SHA | --to-previous)
@@ -360,7 +360,7 @@ state is deployed. Deploys record a project version; `lakana run` executes it (s
 `MANAGE_ENVIRONMENT`). `undeploy` removes the deployment pointer and binding (needs `DEPLOY`,
 refused while a run is active); tables and project versions stay.
 
-### Running a project (M5c1)
+### Running a project
 
     lakana run [REPO] --env dev [--select 'gold.*']... [--upstream] [--downstream] [--no-wait] [--timeout S]
     lakana runs list --env dev [--repo R] [--limit N] | lakana runs show ID --env dev
@@ -374,11 +374,11 @@ refused while a run is active); tables and project versions stay.
 first attempt, and `retrying after attempt 1/3` while a failed task waits to try again), and
 waits. Exit codes: 0 success; 1 failed,
 cancelled or timed out; 7 a run is already active. `--select` globs match dotted table names and
-`*` crosses namespace dots (see `docs/site/how-to/projects.md`). SDK: `client.runs.*`, `client.scheduler.status()`. `lakana worker list` (admin) shows the registered
+`*` crosses namespace dots (see <https://lakana-labs.github.io/lakana/how-to/projects/>). SDK: `client.runs.*`, `client.scheduler.status()`. `lakana worker list` (admin) shows the registered
 workers, `alive` or `lost`, the work each takes (`takes`: `all`, `interactive` or `pipeline`) and what
 each is doing; SDK: `client.workers.list()` returns `WorkerInfo` objects, with `WorkerInfo.takes`.
 
-### Jobs (M5d-b)
+### Jobs
 
     lakana job list --env dev [--repo R]
     lakana job run NAME --env dev [--repo R] [--no-wait] [--timeout S]
@@ -387,7 +387,7 @@ each is doing; SDK: `client.workers.list()` returns `WorkerInfo` objects, with `
     lakana job notify-test NAME --env dev [--repo R]
     lakana job notification DELIVERY_ID --env dev
 
-A job is a named selection in `lakana.yaml` (`jobs:`, see `docs/site/how-to/projects.md`).
+A job is a named selection in `lakana.yaml` (`jobs:`, see <https://lakana-labs.github.io/lakana/how-to/projects/>).
 `job list` shows, per job, its state (`scheduled`, `paused`, `waiting`, `no schedule` or `no run
 principal`), the schedule with its zone, the next run in the job's zone and in UTC, and the last
 run with what started it; under the table, the sentence of each job that waits. `job run` starts the
@@ -425,12 +425,12 @@ show` lists the notifications of a run under its tasks, each with its delivery i
 delivery id, `client.jobs.delivery(env, id)` a `Delivery`, and `Run.notifications` the list (empty
 from an older server).
 
-### Python assets (M5c2a)
+### Python assets
 
 SQL transforms, Python at the edges: a Python asset receives its declared inputs as polars
-DataFrames and returns the DataFrame that replaces its table; see `docs/site/how-to/projects.md`, "Python
+DataFrames and returns the DataFrame that replaces its table; see <https://lakana-labs.github.io/lakana/how-to/projects/>, "Python
 assets", for the rules, what a deploy checks and what a task may touch. With `output="artifact"` it
-stores a file or a directory (a trained model, say) instead; see "Artifacts (M5c2b)" below. The project also needs a
+stores a file or a directory (a trained model, say) instead; see "Artifacts" below. The project also needs a
 `pyproject.toml` that depends on `lakana[assets]` and a committed `uv.lock`.
 
 ```python
@@ -449,17 +449,17 @@ def station_scores(readings: pl.DataFrame, stations: pl.DataFrame) -> pl.DataFra
 
 The inputs are tables other assets build (here two SQL assets, `bronze.readings` and
 `bronze.stations`). The full walk-through, with those two files, the `pyproject.toml` and the
-deploy steps, is in `docs/site/how-to/projects.md`, "Python assets".
+deploy steps, is in <https://lakana-labs.github.io/lakana/how-to/projects/>, "Python assets".
 
 Python assets run as processes of the worker's user, not in a sandbox: one instance is one trust
 domain, so deploy only code you would run on the worker yourself.
 
-### Artifacts (M5c2b)
+### Artifacts
 
 An artifact is a named file or directory, such as a trained model, stored in numbered versions and
 governed like a table. An asset declared `@asset(output="artifact", keep_versions=5)` writes into
 `lakana.output_dir()` and returns a `pathlib.Path` inside it; a consuming asset gets a `Path` to a
-read-only copy. Everything is in `docs/site/reference/artifacts.md`; the SDK is `client.artifacts`.
+read-only copy. Everything is in <https://lakana-labs.github.io/lakana/reference/artifacts/>; the SDK is `client.artifacts`.
 
     lakana artifact list [--namespace NS] | upload NAME PATH | download NAME DIR [--version N]
     lakana artifact versions list NAME | versions delete NAME N [--yes]
@@ -467,14 +467,14 @@ read-only copy. Everything is in `docs/site/reference/artifacts.md`; the SDK is 
 
 `upload`, `versions delete` and `drop` take `--break-glass --reason "…"` in a protected
 environment. Loading a pickled model runs code: see
-`docs/site/explanation/artifacts.md`, "A pickled model is code".
+<https://lakana-labs.github.io/lakana/explanation/artifacts/>, "A pickled model is code".
 
-### Data quality checks (M5d-a)
+### Data quality checks
 
 A project keeps checks under `checks/<namespace>/<table>/<name>.sql`: a `SELECT` that returns the
 rows that are wrong. A run counts them after it writes the table; a failing blocking check sets
-the table back and stops what reads it. A guide is `docs/site/how-to/check-your-data.md`, the
-rules are in `docs/site/reference/checks.md`.
+the table back and stops what reads it. A guide is <https://lakana-labs.github.io/lakana/how-to/check-your-data/>, the
+rules are in <https://lakana-labs.github.io/lakana/reference/checks/>.
 
     lakana check list --env dev [--run RUN_ID] [--table NS.TABLE] [--limit N]
     lakana runs show RUN_ID --env dev        # the checks of each task, after the task table
@@ -592,6 +592,6 @@ immediately. By default the server binds to `127.0.0.1` only; `--bind 0.0.0.0` (
 specific address) exposes it on the network over plain HTTP, with a warning, and
 `--public-url` points the saved profile at a reverse proxy instead.
 
-See [`docs/site/how-to/deploy-with-compose.md`](../../docs/site/how-to/deploy-with-compose.md) for the full reference:
+See [the Compose deployment guide](https://lakana-labs.github.io/lakana/how-to/deploy-with-compose/) for the full reference:
 every `.env` key, exposing it with TLS, scaling workers, upgrading, backups, and revoking
 the bootstrap credential.

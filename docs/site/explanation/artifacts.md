@@ -165,14 +165,14 @@ storage, as it leaves the data of tables.
 - **Named pointers and pinned versions.** There is no `production` alias, and an asset cannot
   name the version it reads: it gets its own run's version or the current one. A person can
   still download any live version with `--version`. Named pointers arrive with the model
-  registry (M8).
-- **Experiment tracking.** Parameters and metrics of a run are not attached to a version. M8
-  builds that on the artifact store.
+  registry, in a later release.
+- **Experiment tracking.** Parameters and metrics of a run are not attached to a version. A
+  later release builds that on the artifact store.
 - **Direct transfer to object storage.** Files go through the server.
 - **A download cache.** Each task downloads its inputs again.
 - **SQL assets that read an artifact,** an asset with both a table and an artifact output, and an
   artifact that reads its own earlier version.
 - **Artifacts in the BI endpoint and in the Iceberg REST catalog.**
 
-The [roadmap](roadmap.md) plans the first two (named pointers and experiment tracking, in M8). The
+The [roadmap](roadmap.md) plans the first two (named pointers and experiment tracking, with the model registry). The
 others are not scheduled.

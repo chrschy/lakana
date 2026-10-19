@@ -1,11 +1,12 @@
 """Tests for the documentation site's configuration."""
 
+import re
 import subprocess
 from pathlib import Path
 
 import yaml
 
-from scripts.docs_blocks import check
+from scripts.docs_blocks import check, find_blocks
 
 ROOT = Path(__file__).resolve().parents[2]
 SITE = ROOT / "docs" / "site"
@@ -15,7 +16,7 @@ EXEMPT = (
     "scripts/tests/test_docs_site.py",
     "scripts/tests/test_docs_only.py",
 )
-NOT_TESTED_CEILING = 55
+NOT_TESTED_CEILING = 48
 """Blocks marked as not tested; it only goes down, apart from the rises below.
 
 The artifact pages left six when they were written: the `artifact uploads abort` command,
@@ -88,6 +89,16 @@ for real in `docs/examples/bind-a-secret/run.sh` and, for the index case, in
 The "Verify a download" block of `deploy-with-compose.md` rose it from 53 to 54 (#130): it runs
 `pip download` and `gh attestation verify` against a published, attested release, which needs
 the network, the GitHub CLI and a release that exists, none of which the example harness has.
+
+The sorting of the pages (#55) removed the 28 blocks marked "moved as is" and the count fell from
+55 to 48. Seven became tested: the `*lakana-env` block of `deploy-with-compose.md` shows its
+anchor and is parsed; `uv lock` is synced from `train-and-predict`; the project start, the
+two SQL assets of the first example and `lakana undeploy` from the new example `projects`.
+Twenty-one others stayed and now say why: Docker (the Compose commands, backups and the
+bundle's teardown),
+a reverse proxy's own configuration, a protected `prod` environment or a hosted repository's token
+that the one-instance examples do not set up, a command with optional parts or an id in brackets,
+and the two SQL headers that `test_the_front_matter_in_a_sql_block_is_valid` parses instead.
 """
 SECTIONS = ("tutorials", "how-to", "reference", "explanation")
 
@@ -294,3 +305,66 @@ def test_the_number_of_not_tested_blocks_does_not_rise() -> None:
         "parse); if it truly cannot be tested, raise NOT_TESTED_CEILING in "
         "scripts/tests/test_docs_site.py in the same pull request and say why."
     )
+
+
+def test_no_block_is_marked_as_moved_as_is() -> None:
+    """The placeholder reason of the first sorting pass is gone: every reason is a real one."""
+    left = [
+        f"{page.relative_to(ROOT).as_posix()}:{block.line}"
+        for page in sorted(SITE.rglob("*.md"))
+        for block in find_blocks(page)
+        if block.marker is not None
+        and block.marker.kind == "not-tested"
+        and "moved as is" in block.marker.value
+    ]
+    assert left == [], f"give each of these blocks a real reason, or sync or parse it: {left}"
+
+
+def test_the_front_matter_in_a_sql_block_is_valid() -> None:
+    """A SQL block of an asset page that opens with `/* lakana` carries a header Lakana accepts.
+
+    The block checker does not parse SQL, so this test hands the header to the parser that
+    reads the front matter of a real asset. A header with an unknown key or a bad value fails.
+    """
+    from lakana_core.projects.frontmatter import parse_front_matter
+
+    seen = 0
+    for name in (
+        "reference/asset-front-matter.md",
+        "reference/lakana-yaml.md",
+        "how-to/projects.md",
+    ):
+        page = SITE / name
+        for block in find_blocks(page):
+            if block.lang == "sql" and block.body.startswith("/* lakana"):
+                parse_front_matter(block.body, path=f"{page.name}:{block.line}")
+                seen += 1
+    assert seen >= 4, "expected the front-matter examples of the asset pages to be found"
+
+
+MILESTONE = re.compile(r"\bM[0-9]+(?:[a-z][0-9]*)*\b")
+MILESTONE_PAGES = ("explanation/scope.md", "explanation/roadmap.md")
+"""The pages that define the milestones; every other page says it in plain words."""
+
+
+def test_a_milestone_name_appears_only_on_the_pages_that_define_it() -> None:
+    """A reader does not know "M5c1" or "M7b"; say "in a later release" or what the work is."""
+    found = [
+        f"{page.relative_to(SITE).as_posix()}:{number}: {match.group(0)}"
+        for page in sorted(SITE.rglob("*.md"))
+        if page.relative_to(SITE).as_posix() not in MILESTONE_PAGES
+        for number, line in enumerate(page.read_text(encoding="utf-8").splitlines(), 1)
+        for match in MILESTONE.finditer(line)
+    ]
+    assert found == [], (
+        "replace each milestone name with plain words (the release that brought the change, or "
+        f"'in a later release'); only {', '.join(MILESTONE_PAGES)} may use them: {found}"
+    )
+
+
+def test_the_milestone_pattern_matches_the_names_it_is_meant_to_catch() -> None:
+    """M5c1, M7b, M10 and M5c2a match; a word that merely starts with M does not."""
+    for name in ("M5c1", "M7b", "M10", "M5c2a", "M8"):
+        assert MILESTONE.fullmatch(name), name
+    for text in ("Mb", "MB", "M5MB", "Memory", "M"):
+        assert MILESTONE.search(text) is None, text
