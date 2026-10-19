@@ -1034,3 +1034,44 @@ def test_the_undo_period_is_between_zero_days_and_one_year(days: int) -> None:
 
     with pytest.raises(PydanticValidationError, match="undo_days"):
         TableUndoConfig(undo_days=days)
+
+
+def test_the_worker_reads_the_undo_period_and_a_cap_on_expiries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from lakana_core.catalog.retention import DEFAULT_MAX_EXPIRIES
+    from lakana_core.catalog.tombstones import DEFAULT_UNDO_DAYS
+
+    monkeypatch.setenv("LAKANA_DATABASE__URL", "sqlite://")
+    tables = Settings().tables
+    assert (tables.undo_days, tables.max_expiries_per_sweep) == (
+        DEFAULT_UNDO_DAYS,
+        DEFAULT_MAX_EXPIRIES,
+    )
+    monkeypatch.setenv("LAKANA_TABLES__UNDO_DAYS", "3")
+    monkeypatch.setenv("LAKANA_TABLES__MAX_EXPIRIES_PER_SWEEP", "10")
+    tables = Settings().tables
+    assert (tables.undo_days, tables.max_expiries_per_sweep) == (3, 10)
+
+
+@pytest.mark.parametrize("count", [0, 10001])
+def test_the_cap_on_expiries_is_between_one_and_ten_thousand(count: int) -> None:
+    from lakana_core.config import TablesConfig
+
+    with pytest.raises(PydanticValidationError, match="max_expiries_per_sweep"):
+        TablesConfig(max_expiries_per_sweep=count)
+
+
+def test_the_server_warns_of_an_expiry_seven_days_ahead_by_default() -> None:
+    from lakana_core.catalog.retention import DEFAULT_EXPIRY_WARNING_DAYS
+    from lakana_core.config import TableUndoConfig
+
+    assert TableUndoConfig().expiry_warning_days == DEFAULT_EXPIRY_WARNING_DAYS == 7
+
+
+@pytest.mark.parametrize("days", [-1, 3651])
+def test_the_expiry_warning_is_between_zero_and_3650_days(days: int) -> None:
+    from lakana_core.config import TableUndoConfig
+
+    with pytest.raises(PydanticValidationError, match="expiry_warning_days"):
+        TableUndoConfig(expiry_warning_days=days)

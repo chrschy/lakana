@@ -1,4 +1,4 @@
-"""The table location sweep: resolve claims that never published, then remove their files.
+"""The table location sweep: expire tables, resolve claims that never published, remove files.
 
 Run in the housekeeping thread of the worker that holds the scheduler role, next to the artifact
 sweep, with the same clock (the database's), deadline, rotation and failure cap. It deletes
@@ -13,7 +13,13 @@ table data unattended, so the rules are the artifact store's:
 
 What it does, per environment:
 
-1. *Expiries* belong to retention (#87) and are not built yet.
+1. *Expiries* (`lakana_core.catalog.retention.expire_due`). A managed table whose retention has
+   passed is dropped through the drop path, under the environment's and the table's row locks,
+   after the decision is taken again with what is stored then: a tombstone with the undo period
+   (at least a day), ``reason: retention``, no principal. Protected environments, a deployed
+   project's assets, tables with a write queued or running, and tables whose location record is
+   not their own `LIVE` one are never dropped (`expiries_postponed` counts the last two). At most
+   `max_expiries` tables per run, the most overdue first.
 2. *Claims.* A `CLAIMED` record is resolved only when its holder run has ended (a query run or a
    task run in a final state), or, when it has no holder or the catalog does not know the
    holder, once it is older than ``LAKANA_TABLES__ABANDONED_GRACE_HOURS``. It is resolved under
@@ -81,6 +87,8 @@ from lakana_core.catalog.locations import (
     own_table_id,
     table_root_locations,
 )
+from lakana_core.catalog.retention import DEFAULT_MAX_EXPIRIES, expire_due
+from lakana_core.catalog.tombstones import DEFAULT_UNDO_DAYS
 from lakana_core.identifiers import shown
 from lakana_core.models import (
     AuditEventType,
@@ -140,6 +148,11 @@ class LocationSweepReport:
 
     Parameters
     ----------
+    tables_expired
+        Tables dropped because their retention had passed.
+    expiries_postponed
+        Due tables kept for now: a write to them is queued or running, or their location record
+        is not their own `LIVE` one; the next sweep looks again.
     claims_abandoned
         Claims moved to `ABANDONED`: their holder ended, or the grace period passed, and no table
         names their location.
@@ -173,6 +186,8 @@ class LocationSweepReport:
         Whether the run ended at its deadline or at shutdown with work left.
     """
 
+    tables_expired: int = 0
+    expiries_postponed: int = 0
     claims_abandoned: int = 0
     claims_published: int = 0
     claims_kept: int = 0
@@ -241,6 +256,8 @@ class _Run:
         The run's time; every age and ``purge_after`` is compared with it.
     grace
         How old a claim without a known holder must be to be resolved.
+    undo_days
+        ``LAKANA_TABLES__UNDO_DAYS``, for the tombstones of expired tables.
     monotonic
         The clock the deadline is read from.
     deadline
@@ -257,6 +274,7 @@ class _Run:
         environment: str,
         now: datetime,
         grace: timedelta,
+        undo_days: int,
         monotonic: Callable[[], float],
         deadline: float,
         should_stop: Callable[[], bool],
@@ -269,6 +287,7 @@ class _Run:
         self._environment = environment
         self._now = now
         self._grace = grace
+        self._undo_days = undo_days
         self._monotonic = monotonic
         self._deadline = deadline
         self._should_stop = should_stop
@@ -301,8 +320,8 @@ class _Run:
         """
         return root_relative_path(self._root, location) or location
 
-    def environment(self, environment_id: uuid.UUID, rotate: int) -> None:
-        """Sweep one environment: claims first, then purges.
+    def environment(self, environment_id: uuid.UUID, rotate: int, expiries: int) -> None:
+        """Sweep one environment: expiries first, then claims, then purges.
 
         Parameters
         ----------
@@ -310,6 +329,8 @@ class _Run:
             The environment.
         rotate
             Where in each list of records to start.
+        expiries
+            The most tables this environment may still expire in this run.
 
         Raises
         ------
@@ -318,6 +339,17 @@ class _Run:
         _GiveUp
             After too many failures in a row.
         """
+        expired = expire_due(
+            self._session,
+            environment_id=environment_id,
+            now=self._now,
+            undo_days=self._undo_days,
+            limit=expiries,
+            tick=self._tick,
+            guarded=self._guarded,
+        )
+        self.counts["tables_expired"] += expired.expired
+        self.counts["expiries_postponed"] += expired.postponed
         claims = list(
             self._session.scalars(
                 select(TableLocation.id)
@@ -886,12 +918,14 @@ def sweep_table_locations(
     *,
     now: datetime,
     grace_hours: int,
+    undo_days: int = DEFAULT_UNDO_DAYS,
+    max_expiries: int = DEFAULT_MAX_EXPIRIES,
     max_seconds: float = DEFAULT_MAX_SECONDS,
     monotonic: Callable[[], float] | None = None,
     rotation: int = 0,
     should_stop: Callable[[], bool] | None = None,
 ) -> LocationSweepReport:
-    """Resolve old claims and purge what never landed, in every environment, once.
+    """Expire due tables, resolve old claims and purge what is due, in every environment, once.
 
     Parameters
     ----------
@@ -905,6 +939,11 @@ def sweep_table_locations(
     grace_hours
         `LAKANA_TABLES__ABANDONED_GRACE_HOURS`: how old a claim with no known holder run must be
         before it is resolved.
+    undo_days
+        `LAKANA_TABLES__UNDO_DAYS`: how long an expired table can be restored (at least a day).
+    max_expiries
+        `LAKANA_TABLES__MAX_EXPIRIES_PER_SWEEP`: the most tables the run expires, in every
+        environment together.
     max_seconds
         How long the run may take, shared between the environments, before it stops at the next
         decision.
@@ -946,9 +985,11 @@ def sweep_table_locations(
         share = moment + (final - moment) / (len(environments) - position)
         try:
             resolved = storage.for_environment(name)
-            run = _Run(session, resolved.storage, root, name, now, grace, clock, share, stop)
+            run = _Run(
+                session, resolved.storage, root, name, now, grace, undo_days, clock, share, stop
+            )
             try:
-                run.environment(environment_id, rotation)
+                run.environment(environment_id, rotation, max_expiries - totals["tables_expired"])
                 key = root.rstrip("/")
                 if key not in walked:
                     known = _known_locations(session) if known is None else known
@@ -974,10 +1015,12 @@ def sweep_table_locations(
     quiet = {"left_alone", "unrecorded_directories", "claims_kept"}
     if any(getattr(report, key) for key in totals if key not in quiet):
         logger.info(
-            "Table location sweep: %d claims abandoned, %d claims found published, %d locations "
-            "purged (%d files, %d bytes); %d claims kept, %d purges blocked, %d purges waiting, "
-            "%d locations refused, %d objects left alone, %d records and %d environments "
-            "failed%s.",
+            "Table location sweep: %d tables expired, %d expiries postponed, %d claims abandoned, "
+            "%d claims found published, %d locations purged (%d files, %d bytes); %d claims "
+            "kept, %d purges blocked, %d purges waiting, %d locations refused, %d objects left "
+            "alone, %d records and %d environments failed%s.",
+            report.tables_expired,
+            report.expiries_postponed,
             report.claims_abandoned,
             report.claims_published,
             report.locations_purged,

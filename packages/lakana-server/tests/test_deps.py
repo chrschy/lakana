@@ -55,10 +55,14 @@ def test_get_catalog_builds_a_working_catalog_service(session: Session, tmp_path
     (see `fake_request` above).
     """
     catalog = get_catalog(
-        session=session, authz=cast(GrantAuthorization, AllowAllAuthorization()), undo_days=3
+        session=session,
+        authz=cast(GrantAuthorization, AllowAllAuthorization()),
+        undo_days=3,
+        expiry_warning_days=5,
     )
     assert isinstance(catalog, CatalogService)
     assert catalog._undo_days == 3
+    assert catalog._expiry_warning_days == 5
 
     # Persisted, not a bare `PrincipalRef`:
     # `create_environment` now records an `AuditEvent` whose `principal_id`
@@ -329,7 +333,9 @@ def test_get_query_service_uses_the_configured_lease(session: Session, tmp_path:
     session.add(Principal(id=principal.id, type=principal.type, name=principal.name))
     session.commit()
     allow = cast(GrantAuthorization, AllowAllAuthorization())
-    get_catalog(session=session, authz=allow, undo_days=7).create_environment(
+    get_catalog(
+        session=session, authz=allow, undo_days=7, expiry_warning_days=7
+    ).create_environment(
         principal, name="dev", storage=StorageConfig(scheme="file", root=f"file://{tmp_path}")
     )
     request = cast(
@@ -420,3 +426,18 @@ def test_the_undo_period_comes_from_the_settings() -> None:
         ),
     )
     assert get_undo_days(request) == 2
+
+
+def test_the_expiry_warning_comes_from_the_settings() -> None:
+    """`get_expiry_warning_days` reads `LAKANA_TABLES__EXPIRY_WARNING_DAYS`."""
+    from lakana_core.config import TableUndoConfig
+    from lakana_server.deps import get_expiry_warning_days
+
+    tables = TableUndoConfig(expiry_warning_days=4)
+    request = cast(
+        Request,
+        SimpleNamespace(
+            app=SimpleNamespace(state=SimpleNamespace(settings=SimpleNamespace(tables=tables)))
+        ),
+    )
+    assert get_expiry_warning_days(request) == 4

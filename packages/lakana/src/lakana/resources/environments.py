@@ -28,6 +28,7 @@ def _environment_from_json(data: dict[str, Any]) -> Environment:
         storage_secret_ref=data["storage_secret_ref"],
         is_protected=data["is_protected"],
         properties=data["properties"],
+        retention_days=data.get("retention_days"),
     )
 
 
@@ -181,5 +182,36 @@ class Environments:
             ROUTES["environments.set_protection"],
             path_params={"name": name},
             json={"is_protected": protected},
+        )
+        return _environment_from_json(response.json())
+
+    def set_retention(self, name: str, days: int | None) -> Environment:
+        """Set the retention of an environment's tables that set none of their own.
+
+        A table then expires `days` after its last activity (the later of its last change and
+        its last recorded read), and never earlier than `days` after this call. Tables in a
+        protected environment never expire. Needs `MANAGE_ENVIRONMENT` on the environment.
+
+        Parameters
+        ----------
+        name
+            The environment's name.
+        days
+            1 to 3,650 days, or `None` to turn the retention off.
+
+        Returns
+        -------
+        Environment
+            The environment.
+
+        Raises
+        ------
+        lakana.errors.NotFound
+            If no environment of this name exists.
+        lakana.errors.ValidationError
+            If `days` is out of range, or the environment is protected.
+        """
+        response = self._transport.request(
+            ROUTES["environments.set_retention"], path_params={"name": name}, json={"days": days}
         )
         return _environment_from_json(response.json())

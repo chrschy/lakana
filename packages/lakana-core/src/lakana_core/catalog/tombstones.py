@@ -28,16 +28,19 @@ import enum
 import uuid
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, TypeVar
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, class_mapper
 
+from lakana_core.audit.service import AuditService
+from lakana_core.auth import PrincipalRef, Securable
 from lakana_core.catalog.locations import lock_location
-from lakana_core.grants.revocation import POLICY_MODELS, RevokedPolicy
-from lakana_core.identifiers import NamespacePath
+from lakana_core.grants.revocation import POLICY_MODELS, RevokedPolicy, revoke_attached
+from lakana_core.identifiers import NamespacePath, TableRef
 from lakana_core.models import (
+    AuditEventType,
     ColumnDescription,
     Principal,
     Table,
@@ -162,11 +165,11 @@ def _encode(value: object) -> object:
     Returns
     -------
     object
-        A string for an id, a time (ISO 8601) and an enum; the value itself otherwise.
+        A string for an id, a time or a day (ISO 8601) and an enum; the value itself otherwise.
     """
     if isinstance(value, uuid.UUID):
         return str(value)
-    if isinstance(value, datetime):
+    if isinstance(value, date):
         return value.isoformat()
     if isinstance(value, enum.Enum):
         return value.value
@@ -194,6 +197,8 @@ def _decode(python_type: type, value: object) -> object:
         return uuid.UUID(str(value))
     if python_type is datetime:
         return datetime.fromisoformat(str(value))
+    if python_type is date:
+        return date.fromisoformat(str(value))
     if issubclass(python_type, enum.Enum):
         return python_type(value)
     return value
@@ -363,6 +368,73 @@ def tombstone(
     return None
 
 
+def drop_row(
+    session: Session,
+    actor: PrincipalRef | None,
+    ref: TableRef,
+    row: Table,
+    *,
+    now: datetime,
+    purge_after: datetime,
+    reason: str,
+    detail: Mapping[str, object] | None = None,
+) -> TableLocation | None:
+    """Drop a locked table row, inside the caller's transaction: the one drop path.
+
+    Revokes the grants, row filters and column masks bound to the table (each stamped `now`),
+    makes its location record a tombstone, records `TABLE_DROPPED`, and deletes the row. The
+    caller has authorized the drop and taken the row's lock, and commits.
+
+    Parameters
+    ----------
+    session
+        Database session; the drop's transaction.
+    actor
+        Who drops it; `None` for the system (an expiry).
+    ref
+        The table.
+    row
+        Its row, read under its lock.
+    now
+        The drop's time.
+    purge_after
+        From when on the sweep may delete its files.
+    reason
+        Why: ``user``, ``purge`` or ``retention``.
+    detail
+        More facts for the audit event.
+
+    Returns
+    -------
+    TableLocation or None
+        The tombstone; `None` for a table that leaves none (`tombstone`).
+    """
+    revoked = revoke_attached(session, actor, table_id=row.id, now=now)
+    record = tombstone(
+        session,
+        row,
+        snapshot=snapshot_table(session, row, ref.namespace),
+        revoked=revoked,
+        now=now,
+        purge_after=purge_after,
+    )
+    AuditService(session).record(
+        None if actor is None else actor.id,
+        AuditEventType.TABLE_DROPPED,
+        securable=Securable.table_scope(ref.environment, ref.namespace, ref.name),
+        detail={
+            "reason": reason,
+            "table_id": str(row.id),
+            "kind": row.kind,
+            "purge_after": None if record is None else purge_after.isoformat(),
+            "revoked_policies": len(revoked),
+            **(detail or {}),
+        },
+    )
+    session.delete(row)
+    return record
+
+
 def _snapshot_of(record: TableLocation) -> dict[str, Any] | None:
     """Return a record's snapshot when it is a tombstone that has one.
 
@@ -510,8 +582,8 @@ def restore_table(
 ) -> Table:
     """Insert a dropped table's row, column descriptions and columns again, uncommitted.
 
-    A principal deleted since the drop (the owner, the author of a description) is left out,
-    as the row's foreign key would have done had the row stayed.
+    A principal deleted since the drop (the owner, the author of a description, who set its
+    retention) is left out, as the row's foreign key would have done had the row stayed.
 
     Parameters
     ----------
@@ -532,15 +604,22 @@ def restore_table(
     stored = snapshot["row"]
     descriptions = snapshot["column_descriptions"]
     known = _known_principals(
-        session, [stored.get("owner_id"), *(d.get("updated_by") for d in descriptions)]
+        session,
+        [
+            stored.get("owner_id"),
+            stored.get("retention_set_by"),
+            *(d.get("updated_by") for d in descriptions),
+        ],
     )
     owner = stored.get("owner_id")
+    setter = stored.get("retention_set_by")
     row = _row_from_json(
         Table,
         stored,
         namespace_id=namespace_id,
         name=name,
         owner_id=uuid.UUID(owner) if owner in known else None,
+        retention_set_by=uuid.UUID(setter) if setter in known else None,
     )
     session.add(row)
     session.flush()

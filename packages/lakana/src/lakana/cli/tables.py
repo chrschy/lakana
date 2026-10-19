@@ -12,7 +12,7 @@ import typer
 
 import lakana
 from lakana._models import CheckHealth, Column, DroppedTable, Lineage, Table, TableHealth
-from lakana.cli import _files, _output
+from lakana.cli import _files, _output, _retention
 from lakana.cli._break_glass import BREAK_GLASS, REASON, break_glass_reason
 from lakana.cli._state import CliError, CliState, confirm, resolve_environment, state_of
 from lakana.cli.artifacts import human_size
@@ -102,10 +102,14 @@ def create(
             ),
         ),
     ] = None,
+    expire_after: _retention.EXPIRE_AFTER = None,
     break_glass: BREAK_GLASS = False,
     reason: REASON = None,
 ) -> None:
     """Create managed table NAME (namespace.table).
+
+    With --expire-after N the table expires N days after its last write or read: the worker's
+    clean-up then drops it, and `lakana table undrop` restores it during the undo period.
 
     Parameters
     ----------
@@ -119,6 +123,8 @@ def create(
         A JSON column-list file.
     column
         Column specs.
+    expire_after
+        `--expire-after`: the days after its last activity the table expires.
     break_glass
         `--break-glass`.
     reason
@@ -127,11 +133,14 @@ def create(
     Raises
     ------
     CliError
-        Unless exactly one of `--schema`/`--column` is given (exit 2).
+        Unless exactly one of `--schema`/`--column` is given, or with `--expire-after` and
+        `--break-glass` together (exit 2).
     """
     state = state_of(ctx)
     if (schema is None) == (not column):
         raise CliError("Pass exactly one of --schema FILE or --column name:type")
+    if expire_after is not None and break_glass:
+        raise CliError(_NO_EXPIRY_WITH_BREAK_GLASS)
     columns = (
         _load_schema_file(schema)
         if schema is not None
@@ -139,12 +148,19 @@ def create(
     )
     environment = resolve_environment(state, env)
     glass = break_glass_reason(break_glass, reason, environment)
-    table = state.client().tables.create(
-        environment, name, schema=columns, break_glass_reason=glass
-    )
-    _output.done(
-        state, f"Created table {_output.inline(environment)}/{_output.inline(name)}", table
-    )
+    client = state.client()
+    table = client.tables.create(environment, name, schema=columns, break_glass_reason=glass)
+    created = f"Created table {_output.inline(environment)}/{_output.inline(name)}"
+    if expire_after is not None:
+        created += _retention.set_expiry(client, environment, name, expire_after, created=created)
+    _output.done(state, created, table)
+
+
+_NO_EXPIRY_WITH_BREAK_GLASS = (
+    "--expire-after cannot go with --break-glass: tables in a protected environment never "
+    "expire. Leave out --expire-after."
+)
+"""Why `--expire-after` is refused together with `--break-glass`."""
 
 
 @table_app.command("create-external")
@@ -245,7 +261,8 @@ def list_tables(
     """List the tables in NAMESPACE, or with --dropped the tables dropped from it.
 
     A dropped table keeps its files until `purge_after` (the server's undo period, 7 days by
-    default); until then `lakana table undrop` restores it.
+    default); until then `lakana table undrop` restores it. A table that its retention lets
+    expire within the server's warning window (7 days by default) shows when, in `expires`.
 
     Parameters
     ----------
@@ -270,13 +287,32 @@ def list_tables(
         )
         return
     tables = state.client().tables.list(environment, namespace)
+    columns = ["name", "namespace", "kind", "state", "uuid"]
+    if any(table.expires_soon for table in tables):
+        columns.insert(4, "expires")
     _output.emit(
         state,
         tables,
-        columns=["name", "namespace", "kind", "state", "uuid"],
+        columns=columns,
         droppable=["kind", "uuid"],
-        derived={"state": _state_cell},
+        derived={"state": _state_cell, "expires": _expires_cell},
     )
+
+
+def _expires_cell(table: Table) -> str:
+    """Say when a table expires, for the `expires` column, within the server's warning window.
+
+    Parameters
+    ----------
+    table
+        A table as the server described it.
+
+    Returns
+    -------
+    str
+        ``in 3 days (date)`` and the like for a table that expires soon; empty otherwise.
+    """
+    return _retention.expires_cell(table.expires_at) if table.expires_soon else ""
 
 
 def _emit_description(state: CliState, table: Table) -> None:
@@ -315,7 +351,8 @@ def get(ctx: typer.Context, name: str, env: _ENV = None) -> None:
     """Show table or view NAME, its columns, and a view's SQL and references.
 
     A table whose first build did not finish, or failed a check, is shown as `not published`;
-    one that keeps the data that failed a check (`on_failure: keep`), as `kept`.
+    one that keeps the data that failed a check (`on_failure: keep`), as `kept`. A table that
+    its retention lets expire within the server's warning window says when.
     An artifact is shown with its name and a pointer to `lakana artifact versions list`.
 
     Parameters
@@ -356,6 +393,14 @@ def get(ctx: typer.Context, name: str, env: _ENV = None) -> None:
     _output.emit(state, table, columns=[*_GET_COLUMNS, "metadata_location"], derived=_DERIVED)
     if table.state_message:
         _output.emit(state, table.state_message)
+    if table.expires_soon and table.expires_at is not None:
+        environment = resolve_environment(state, env)
+        _output.emit(
+            state,
+            f"This table {_retention.expiry_text(table.expires_at)}. Keep it with: lakana table "
+            f"retention {shlex.quote(_output.inline(name))} --env "
+            f"{shlex.quote(_output.inline(environment))} --never",
+        )
     _emit_description(state, table)
     _emit_columns(state, table)
 
@@ -1079,6 +1124,120 @@ def lineage(
         _output.emit(state, graph)
         return
     typer.echo("\n".join(lineage_tree(graph)))
+
+
+@table_app.command("retention")
+def retention(
+    ctx: typer.Context,
+    name: str,
+    days: Annotated[
+        int | None,
+        typer.Option("--days", min=1, max=3650, help="Expire N days after the last write or read."),
+    ] = None,
+    on: Annotated[
+        str | None, typer.Option("--on", help="Expire on this day (YYYY-MM-DD, UTC).")
+    ] = None,
+    never: Annotated[
+        bool, typer.Option("--never", help="Never expire, whatever the environment says.")
+    ] = False,
+    env: _ENV = None,
+) -> None:
+    """Show when managed table NAME expires, or set it with --days, --on or --never.
+
+    An expired table is dropped by the worker's clean-up and can be restored with `lakana
+    table undrop` during the undo period. Its last activity is the later of its last write
+    (or other change) and its last read through Lakana's queries. Tables in a protected
+    environment and tables a deployed project builds never expire.
+
+    Without an option this shows the table's retention. The table's owner may set any.
+    Otherwise, making it expire sooner (or at all) needs the right to drop the table; making it
+    expire later, or --never, needs the right to write it.
+
+    Parameters
+    ----------
+    ctx
+        The Typer context.
+    name
+        The qualified table name.
+    days
+        `--days`.
+    on
+        `--on`.
+    never
+        `--never`.
+    env
+        The environment.
+
+    Raises
+    ------
+    CliError
+        With more than one of the options, or a malformed day (exit 2).
+    """
+    state = state_of(ctx)
+    environment = resolve_environment(state, env)
+    given = sum((days is not None, on is not None, never))
+    if given > 1:
+        raise CliError("Give one of --days, --on or --never, not several.")
+    day = None if on is None else _retention.parse_day(on)
+    tables = state.client().tables
+    if given == 0:
+        shown = tables.retention(environment, name)
+        if state.output == "json":
+            _output.emit(state, shown)
+            return
+        _output.emit(state, _retention.describe(environment, shown))
+        return
+    changed = tables.set_retention(environment, name, days=days, on=day, never=never)
+    message = f"Set the retention of {_output.inline(environment)}/{_output.inline(name)}. "
+    _output.done(state, message + _retention.describe(environment, changed), changed)
+
+
+@table_app.command("expiring")
+def expiring(
+    ctx: typer.Context,
+    within: Annotated[
+        str | None,
+        typer.Option(
+            "--within",
+            help="List what expires within this many days, such as 7d (default: the "
+            "server's warning window, 7 days).",
+        ),
+    ] = None,
+    env: _ENV = None,
+) -> None:
+    """List the managed tables that their retention lets expire soon, soonest first.
+
+    Each row says when, the rule (and whether the table or its environment sets it) and who set
+    it. Keep a table with `lakana table retention NAME --never`, or give it more days.
+
+    Parameters
+    ----------
+    ctx
+        The Typer context.
+    within
+        `--within`.
+    env
+        The environment.
+    """
+    state = state_of(ctx)
+    environment = resolve_environment(state, env)
+    days = None if within is None else _retention.parse_within(within)
+    found = state.client().tables.expiring(environment, within_days=days)
+    if not found and state.output != "json":
+        window = "the warning window" if days is None else f"{days} days"
+        typer.echo(f"No table in {_output.inline(environment)} expires within {window}.")
+        return
+    _output.emit(
+        state,
+        found,
+        columns=["table", "expires", "rule", "set_by"],
+        derived={
+            "table": lambda entry: f"{entry.namespace}.{entry.name}",
+            "expires": lambda entry: _retention.expires_cell(entry.expires_at),
+            "rule": _retention.rule_text,
+        },
+        flexible=["rule"],
+    )
 
 
 def register(app: typer.Typer) -> None:

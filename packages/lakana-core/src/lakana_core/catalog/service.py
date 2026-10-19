@@ -13,7 +13,7 @@ import uuid
 from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, Literal
 
 import pyarrow as pa
@@ -118,6 +118,22 @@ from lakana_core.catalog.metadata import (
     read_metadata,
     write_metadata,
 )
+from lakana_core.catalog.retention import (
+    DEFAULT_EXPIRY_WARNING_DAYS,
+    NOT_MANAGED_MESSAGE,
+    PROTECTED_ENVIRONMENT_MESSAGE,
+    PROTECTED_TABLE_MESSAGE,
+    TableRetention,
+    check_days,
+    check_rule,
+    describe_retention,
+    describe_retentions,
+    expiry_time,
+    last_reads,
+    lock_row,
+    planned_expiry,
+    retention_candidates,
+)
 from lakana_core.catalog.schema_compat import SchemaDiff, arrow_to_iceberg_schema, plan_schema
 from lakana_core.catalog.schema_inference import infer_schema
 from lakana_core.catalog.tombstones import (
@@ -129,14 +145,13 @@ from lakana_core.catalog.tombstones import (
     PERIOD_PASSED_MESSAGE,
     PURGE_STARTED_MESSAGE,
     DroppedTable,
+    drop_row,
     find_tombstone,
     list_tombstones,
     name_holder,
     restore_policies,
     restore_table,
     revive,
-    snapshot_table,
-    tombstone,
 )
 from lakana_core.catalog.watermark import Watermark, check_incremental_key, compute_watermark
 from lakana_core.catalog.writes import (
@@ -559,6 +574,11 @@ class TableDescription:
         The size of its data files (``total-files-size``); `None` when missing.
     file_count
         Its data files (``total-data-files``); `None` when missing.
+    expires_at
+        When a managed table's retention makes it expire; `None` when it never does, and for
+        every other kind.
+    expires_soon
+        Whether that is within ``LAKANA_TABLES__EXPIRY_WARNING_DAYS``.
     """
 
     ref: TableRef
@@ -581,6 +601,8 @@ class TableDescription:
     row_count: int | None = None
     size_bytes: int | None = None
     file_count: int | None = None
+    expires_at: datetime | None = None
+    expires_soon: bool = False
 
 
 _NO_UNPUBLISHING = (
@@ -1003,6 +1025,9 @@ class CatalogService:
     undo_days
         `LAKANA_TABLES__UNDO_DAYS`: how many days a dropped managed table keeps its files and
         can be restored (`undrop_table`). 0 makes every drop due at the next sweep.
+    expiry_warning_days
+        `LAKANA_TABLES__EXPIRY_WARNING_DAYS`: a table that expires within this many days is
+        described as expiring soon.
     """
 
     def __init__(
@@ -1012,11 +1037,13 @@ class CatalogService:
         authz: AuthorizationService,
         *,
         undo_days: int = DEFAULT_UNDO_DAYS,
+        expiry_warning_days: int = DEFAULT_EXPIRY_WARNING_DAYS,
     ) -> None:
         self._session = session
         self._storage = storage
         self._authz = authz
         self._undo_days = undo_days
+        self._expiry_warning_days = expiry_warning_days
         self._guard = ProtectedWriteGuard(session, authz)
         self._commit_sent = False
         self._track_writes()
@@ -2732,6 +2759,13 @@ class CatalogService:
         _, row = self._find_table(ref)
         described = self._describe_row(p, ref, row)
         shown_text = table_description(row)
+        expires_at = None
+        expires_soon = False
+        if row.table_type is TableType.ICEBERG:
+            env = self._find_environment(ref.environment)
+            expires_at = describe_retention(self._session, env, row, ref).expires_at
+            warning = db_now(self._session) + timedelta(days=self._expiry_warning_days)
+            expires_soon = expires_at is not None and expires_at <= warning
         return replace(
             described,
             description=None if shown_text is None else shown_text.text,
@@ -2739,7 +2773,222 @@ class CatalogService:
             column_descriptions=column_descriptions(
                 self._session, row.id, (c.name for c in described.columns)
             ),
+            expires_at=expires_at,
+            expires_soon=expires_soon,
         )
+
+    def table_retention(self, p: PrincipalRef, ref: TableRef) -> TableRetention:
+        """Show a managed table's retention, where it comes from and when the table expires.
+
+        Parameters
+        ----------
+        p
+            The acting principal.
+        ref
+            The table reference.
+
+        Returns
+        -------
+        TableRetention
+            The retention.
+
+        Raises
+        ------
+        NotFoundError
+            If the table does not exist.
+        PermissionDenied
+            If `p` may not read it.
+        ValidationError
+            If it is not a managed table.
+        """
+        self._authz.authorize(
+            p, Action.READ_TABLE, Securable.table_scope(ref.environment, ref.namespace, ref.name)
+        )
+        _, row = self._find_table(ref)
+        if row.table_type is not TableType.ICEBERG:
+            raise ValidationError(NOT_MANAGED_MESSAGE.format(table=shown(ref.dotted())))
+        return describe_retention(self._session, self._find_environment(ref.environment), row, ref)
+
+    def set_table_retention(
+        self,
+        p: PrincipalRef,
+        ref: TableRef,
+        *,
+        days: int | None = None,
+        on: date | None = None,
+        never: bool = False,
+    ) -> TableRetention:
+        """Set when a managed table expires: `days` after its last activity, `on` a day, or `never`.
+
+        Who may: the table's owner always. Anyone else needs `DROP_TABLE` to set a retention
+        that makes the table expire earlier than it would now (or at all, when it would not),
+        and `WRITE_TABLE` to make it expire later or never. The change is the table's activity,
+        so a retention by days counts from now. One `TABLE_RETENTION_SET` (or, for `never`,
+        `TABLE_RETENTION_CLEARED`) audit event records it.
+
+        Parameters
+        ----------
+        p
+            The acting principal.
+        ref
+            The table reference.
+        days
+            Expire this many days (1 to 3,650) after the table's last activity.
+        on
+            Expire from midnight UTC of this day on; it must be after today.
+        never
+            Never expire, whatever the environment's retention says.
+
+        Returns
+        -------
+        TableRetention
+            The retention now.
+
+        Raises
+        ------
+        NotFoundError
+            If the table does not exist and `p` may write where it would be.
+        PermissionDenied
+            Without the right the change needs.
+        ValidationError
+            Unless exactly one valid rule is given; for anything but a managed table; and for
+            `days` or `on` in a protected environment, whose tables never expire.
+        """
+        now = db_now(self._session)
+        check_rule(days=days, on=on, never=never, today=now.date())
+        scope = Securable.table_scope(ref.environment, ref.namespace, ref.name)
+        try:
+            _, row = self._find_table(ref)
+        except NotFoundError:
+            self._authz.authorize(p, Action.WRITE_TABLE, scope)
+            raise
+        env = self._find_environment(ref.environment)
+        before = planned_expiry(row, env, last_reads(self._session, [row.id]).get(row.id))
+        after = None if never else expiry_time(days=days, on=on, activity=now, floor=None)
+        shortened = after is not None and (before is None or after < before)
+        if row.owner_id != p.id:
+            self._authz.authorize(p, Action.DROP_TABLE if shortened else Action.WRITE_TABLE, scope)
+        if row.table_type is not TableType.ICEBERG:
+            raise ValidationError(NOT_MANAGED_MESSAGE.format(table=shown(ref.dotted())))
+        if env.is_protected and not never:
+            raise ValidationError(PROTECTED_TABLE_MESSAGE.format(environment=shown(env.name)))
+        row = self._lock_table_row(ref, row.id)
+        previous = {
+            "days": row.retention_days,
+            "on": None if row.retention_on is None else row.retention_on.isoformat(),
+            "never": row.retention_never,
+        }
+        row.retention_days, row.retention_on, row.retention_never = days, on, never
+        row.retention_set_by, row.retention_set_at = p.id, now
+        AuditService(self._session).record(
+            p.id,
+            AuditEventType.TABLE_RETENTION_CLEARED if never else AuditEventType.TABLE_RETENTION_SET,
+            securable=scope,
+            detail={
+                "table_id": str(row.id),
+                "days": days,
+                "on": None if on is None else on.isoformat(),
+                "shortened": shortened,
+                "previous": previous,
+                "expires_at": None if after is None else after.isoformat(),
+            },
+        )
+        self._session.commit()
+        return describe_retention(self._session, env, row, ref)
+
+    def set_environment_retention(
+        self, p: PrincipalRef, name: str, days: int | None
+    ) -> Environment:
+        """Set the retention of an environment's tables that set none of their own, or turn it off.
+
+        Needs `MANAGE_ENVIRONMENT` on the environment. A table then expires `days` after its last
+        activity, and never earlier than `days` after this change. One
+        `ENVIRONMENT_RETENTION_SET` audit event records it, with `days: null` for off.
+
+        Parameters
+        ----------
+        p
+            The acting principal.
+        name
+            Environment name.
+        days
+            1 to 3,650 days, or `None` to turn it off.
+
+        Returns
+        -------
+        Environment
+            The environment.
+
+        Raises
+        ------
+        NotFoundError
+            If no environment has that name.
+        PermissionDenied
+            Without `MANAGE_ENVIRONMENT` on it.
+        ValidationError
+            If `days` is out of range, or the environment is protected (turning it off is
+            allowed there).
+        """
+        self._authz.authorize(p, Action.MANAGE_ENVIRONMENT, Securable.environment_scope(name))
+        env = self._find_environment(name)
+        if days is not None:
+            check_days(days, "An environment's retention")
+            if env.is_protected:
+                raise ValidationError(PROTECTED_ENVIRONMENT_MESSAGE.format(environment=shown(name)))
+        previous = env.retention_days
+        env.retention_days = days
+        env.retention_set_by, env.retention_set_at = p.id, db_now(self._session)
+        AuditService(self._session).record(
+            p.id,
+            AuditEventType.ENVIRONMENT_RETENTION_SET,
+            securable=Securable.environment_scope(name),
+            detail={"days": days, "previous_days": previous},
+        )
+        self._session.commit()
+        return env
+
+    def list_expiring_tables(
+        self, p: PrincipalRef, environment: str, *, within_days: int
+    ) -> list[TableRetention]:
+        """List the managed tables of an environment that expire within some days, soonest first.
+
+        Parameters
+        ----------
+        p
+            The acting principal.
+        environment
+            Environment name.
+        within_days
+            The window, 1 to 3,650 days from now; a table already due is listed too.
+
+        Returns
+        -------
+        list of TableRetention
+            The tables `p` may read whose expiry falls within the window; a table that never
+            expires (a protected environment, a deployed project's asset) is not listed.
+
+        Raises
+        ------
+        NotFoundError
+            If no environment has that name.
+        PermissionDenied
+            Without `READ_ENVIRONMENT` on it.
+        ValidationError
+            If `within_days` is out of range.
+        """
+        check_days(within_days, "The window")
+        self._authz.authorize(p, Action.READ_ENVIRONMENT, Securable.environment_scope(environment))
+        env = self._find_environment(environment)
+        until = db_now(self._session) + timedelta(days=within_days)
+        found = describe_retentions(self._session, env, retention_candidates(self._session, env))
+        due = [
+            entry
+            for entry in found
+            if entry.expires_at is not None
+            and entry.expires_at <= until
+            and self.can_read_table(p, entry.ref)
+        ]
+        return sorted(due, key=lambda entry: (entry.expires_at, entry.ref.dotted()))
 
     def table_health(
         self,
@@ -6117,29 +6366,15 @@ class CatalogService:
             )
         row = self._lock_table_row(ref, row.id)
         now = db_now(self._session)
-        revoked = revoke_attached(self._session, p, table_id=row.id, now=now)
-        purge_after = now if purge else now + timedelta(days=self._undo_days)
-        record = tombstone(
+        drop_row(
             self._session,
+            p,
+            ref,
             row,
-            snapshot=snapshot_table(self._session, row, ref.namespace),
-            revoked=revoked,
             now=now,
-            purge_after=purge_after,
+            purge_after=now if purge else now + timedelta(days=self._undo_days),
+            reason="purge" if purge else "user",
         )
-        AuditService(self._session).record(
-            p.id,
-            AuditEventType.TABLE_DROPPED,
-            securable=Securable.table_scope(ref.environment, ref.namespace, ref.name),
-            detail={
-                "reason": "purge" if purge else "user",
-                "table_id": str(row.id),
-                "kind": row.kind,
-                "purge_after": None if record is None else purge_after.isoformat(),
-                "revoked_policies": len(revoked),
-            },
-        )
-        self._session.delete(row)
         self._guard.record_pending()
         self._session.commit()
 
@@ -6167,19 +6402,12 @@ class CatalogService:
         NotFoundError
             If the row is gone (dropped at the same moment).
         """
-        locked = self._session.execute(
-            update(Table)
-            .where(Table.id == table_id)
-            .values(name=Table.name, updated_at=Table.updated_at)
-            .execution_options(synchronize_session=False)
-        )
-        if rowcount(locked) != 1:
+        row = lock_row(self._session, Table, table_id)
+        if row is None:
             raise NotFoundError(
                 f"Table '{shown(ref.name)}' not found in {shown(str(ref.namespace))}."
             )
-        return self._session.scalars(
-            select(Table).where(Table.id == table_id).execution_options(populate_existing=True)
-        ).one()
+        return row
 
     def undrop_table(
         self, p: PrincipalRef, ref: TableRef, *, new_name: str | None = None
@@ -6277,10 +6505,17 @@ class CatalogService:
             self._session.rollback()
             raise ConflictError(FILES_GONE_MESSAGE.format(table=shown(ref.dotted())))
         namespace_id = namespace.id
+        now = db_now(self._session)
         try:
             row = restore_table(
                 self._session, snapshot, namespace_id=namespace_id, name=target.name
             )
+            retention_cleared = row.retention_on is not None and row.retention_on <= now.date()
+            if retention_cleared:
+                row.retention_on = None
+                row.retention_set_by = p.id
+                row.retention_set_at = now
+            row.updated_at = datetime.now(UTC)
             restored = restore_policies(
                 self._session,
                 record,
@@ -6298,6 +6533,7 @@ class CatalogService:
                     "dropped_name": ref.name,
                     "dropped_at": record.dropped_at.isoformat(),
                     "restored_policies": restored,
+                    "retention_cleared": retention_cleared,
                 },
             )
             revive(record)

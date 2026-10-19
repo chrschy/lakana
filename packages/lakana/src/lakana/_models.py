@@ -8,7 +8,7 @@ response bodies, field for field — the resource modules in
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 
@@ -30,6 +30,9 @@ class Environment:
         refused.
     properties
         Free-form metadata.
+    retention_days
+        The retention of its tables that set none of their own, in days; `None` when off, and
+        from a server older than retention.
     """
 
     name: str
@@ -37,6 +40,7 @@ class Environment:
     storage_secret_ref: str | None
     is_protected: bool
     properties: dict[str, str]
+    retention_days: int | None = None
 
 
 @dataclass(frozen=True)
@@ -197,6 +201,11 @@ class Table:
         The size of its data files; `None` when the server does not know.
     file_count
         Its data files; `None` when the server does not know.
+    expires_at
+        When the table's retention makes it expire; `None` when it never does, and from a
+        server older than retention.
+    expires_soon
+        Whether that is within the server's warning window (7 days by default).
     """
 
     name: str
@@ -217,6 +226,56 @@ class Table:
     row_count: int | None = None
     size_bytes: int | None = None
     file_count: int | None = None
+    expires_at: datetime | None = None
+    expires_soon: bool = False
+
+
+@dataclass(frozen=True)
+class TableRetention:
+    """A managed table's retention, and when it expires.
+
+    Parameters
+    ----------
+    name
+        The table's name.
+    namespace
+        Dot-joined namespace path.
+    uuid
+        The table's id.
+    source
+        ``table`` when the table sets its own retention, ``environment`` when its
+        environment's applies; `None` when it has none.
+    days
+        The days after its last activity it expires.
+    on
+        The day it expires on.
+    never
+        Whether the table says it never expires.
+    set_by
+        Who set the retention that applies; `None` when nobody did or that principal is gone.
+    set_at
+        When it was set.
+    last_activity_at
+        The later of the table's last change and its last recorded read.
+    expires_at
+        When it expires; `None` when it never does.
+    kept
+        Why a table that has a retention never expires: ``protected`` (a protected
+        environment) or ``project_asset`` (a deployed project declares it); `None` otherwise.
+    """
+
+    name: str
+    namespace: str
+    uuid: str
+    source: str | None
+    days: int | None
+    on: date | None
+    never: bool
+    set_by: str | None
+    set_at: datetime | None
+    last_activity_at: datetime
+    expires_at: datetime | None
+    kept: str | None
 
 
 # jscpd:ignore-start

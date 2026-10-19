@@ -832,6 +832,17 @@ def test_housekeeping_also_sweeps_table_locations_with_the_grace_period(
     assert call.kwargs["should_stop"]() is False
 
 
+def test_housekeeping_expires_tables_with_the_undo_period_and_the_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LAKANA_TABLES__UNDO_DAYS", "3")
+    monkeypatch.setenv("LAKANA_TABLES__MAX_EXPIRIES_PER_SWEEP", "12")
+    locations = mock.MagicMock()
+    _housekeeping(tmp_path, monkeypatch, mock.MagicMock(), mock.MagicMock(), locations=locations)
+    assert locations.call_args.kwargs["undo_days"] == 3
+    assert locations.call_args.kwargs["max_expiries"] == 12
+
+
 def test_a_failing_table_location_sweep_is_logged_and_the_others_still_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

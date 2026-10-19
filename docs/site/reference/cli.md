@@ -54,6 +54,8 @@ Usage: `lakana sql [OPTIONS] {query}`
 
 Run SQL and print (or save) the result, or write it into a table.
 
+With `--into T --mode create --expire-after N` the new table expires N days after its last write or read.
+
 A query that stays queued for 3 seconds prints a line on standard error that says why ('Waiting: ...'), and again when the reason changes; the result still goes to standard output only. Nothing is printed about waiting with --output json.
 
 | Name | Type | Default | Description |
@@ -68,6 +70,7 @@ A query that stays queued for 3 seconds prints a line on standard error that say
 | `--mode` | text | none | create, replace, append or view (needs --into). |
 | `--incremental-key` | text | none | Append only rows past the target's max of this column. |
 | `--evolve-schema` | flag | off | Let the target adopt the result's schema. |
+| `--expire-after` | whole number, 1 to 3650 | none | Let the new table expire this many days after its last write or read. |
 | `--break-glass` | flag | off | Write to a protected environment outside a run (needs MANAGE_ENVIRONMENT; audited). |
 | `--reason` | text | none | Why, 10-500 characters on one line (with --break-glass). |
 
@@ -284,6 +287,21 @@ Remove protection from environment NAME.
 | `NAME` | text | required |  |
 | `--yes` | flag | off | Don't ask for confirmation. |
 
+### `lakana env retention`
+
+Usage: `lakana env retention [OPTIONS] {name}`
+
+Show environment NAME's retention, or set it with --days or turn it off with --off.
+
+The retention applies to every managed table in the environment that sets none of its own (`lakana table retention`). Such a table expires N days after its last activity, and never sooner than N days after this command, so turning it on gives every table its full period. Expired tables are dropped by the worker's clean-up and can be restored with `lakana table undrop` during the undo period. Off unless set. Needs MANAGE_ENVIRONMENT; refused for a protected environment, whose tables never expire.
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `NAME` | text | required |  |
+| `--days` | whole number, 1 to 3650 | none | Tables that set no retention expire N days after their last write or read. |
+| `--off` | flag | off | Turn the environment's retention off. |
+| `--yes` | flag | off | Don't ask for confirmation. |
+
 ## `lakana ns`
 
 Usage: `lakana ns [OPTIONS] COMMAND [ARGS]...`
@@ -351,12 +369,15 @@ Usage: `lakana table create [OPTIONS] {name}`
 
 Create managed table NAME (namespace.table).
 
+With --expire-after N the table expires N days after its last write or read: the worker's clean-up then drops it, and `lakana table undrop` restores it during the undo period.
+
 | Name | Type | Default | Description |
 |---|---|---|---|
 | `NAME` | text | required |  |
 | `--env` | text | none | Environment (default: the profile's). |
 | `--schema` | path | none | JSON file with the column list. |
 | `--column` | text, repeatable | none | name:type, ? suffix = nullable (repeatable). Quote a ? spec, e.g. 'region:string?', so the shell doesn't glob it. |
+| `--expire-after` | whole number, 1 to 3650 | none | Let the new table expire this many days after its last write or read. |
 | `--break-glass` | flag | off | Write to a protected environment outside a run (needs MANAGE_ENVIRONMENT; audited). |
 | `--reason` | text | none | Why, 10-500 characters on one line (with --break-glass). |
 
@@ -381,7 +402,7 @@ Usage: `lakana table list [OPTIONS] {namespace}`
 
 List the tables in NAMESPACE, or with --dropped the tables dropped from it.
 
-A dropped table keeps its files until `purge_after` (the server's undo period, 7 days by default); until then `lakana table undrop` restores it.
+A dropped table keeps its files until `purge_after` (the server's undo period, 7 days by default); until then `lakana table undrop` restores it. A table that its retention lets expire within the server's warning window (7 days by default) shows when, in `expires`.
 
 | Name | Type | Default | Description |
 |---|---|---|---|
@@ -395,7 +416,7 @@ Usage: `lakana table get [OPTIONS] {name}`
 
 Show table or view NAME, its columns, and a view's SQL and references.
 
-A table whose first build did not finish, or failed a check, is shown as `not published`; one that keeps the data that failed a check (`on_failure: keep`), as `kept`. An artifact is shown with its name and a pointer to `lakana artifact versions list`.
+A table whose first build did not finish, or failed a check, is shown as `not published`; one that keeps the data that failed a check (`on_failure: keep`), as `kept`. A table that its retention lets expire within the server's warning window says when. An artifact is shown with its name and a pointer to `lakana artifact versions list`.
 
 | Name | Type | Default | Description |
 |---|---|---|---|
@@ -532,6 +553,37 @@ Show table NAME's lineage as a tree (or JSON with --output json).
 | `--env` | text | none | Environment (default: the profile's). |
 | `--downstream` | flag | off | Show what NAME feeds, not what feeds it. |
 | `--depth` | whole number, 1 to 10 | `3` | Hops to walk. |
+
+### `lakana table retention`
+
+Usage: `lakana table retention [OPTIONS] {name}`
+
+Show when managed table NAME expires, or set it with --days, --on or --never.
+
+An expired table is dropped by the worker's clean-up and can be restored with `lakana table undrop` during the undo period. Its last activity is the later of its last write (or other change) and its last read through Lakana's queries. Tables in a protected environment and tables a deployed project builds never expire.
+
+Without an option this shows the table's retention. The table's owner may set any. Otherwise, making it expire sooner (or at all) needs the right to drop the table; making it expire later, or --never, needs the right to write it.
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `NAME` | text | required |  |
+| `--days` | whole number, 1 to 3650 | none | Expire N days after the last write or read. |
+| `--on` | text | none | Expire on this day (YYYY-MM-DD, UTC). |
+| `--never` | flag | off | Never expire, whatever the environment says. |
+| `--env` | text | none | Environment (default: the profile's). |
+
+### `lakana table expiring`
+
+Usage: `lakana table expiring [OPTIONS]`
+
+List the managed tables that their retention lets expire soon, soonest first.
+
+Each row says when, the rule (and whether the table or its environment sets it) and who set it. Keep a table with `lakana table retention NAME --never`, or give it more days.
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `--within` | text | none | List what expires within this many days, such as 7d (default: the server's warning window, 7 days). |
+| `--env` | text | none | Environment (default: the profile's). |
 
 ## `lakana artifact`
 

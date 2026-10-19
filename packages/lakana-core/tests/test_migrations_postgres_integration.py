@@ -2192,3 +2192,60 @@ def test_0043_on_postgres() -> None:
         assert "purge_started_at" not in names and "dropped_table" not in names
         assert records() == before
         engine.dispose()
+
+
+def test_0044_on_postgres() -> None:
+    """0044 adds the retention columns, empty on every row, and drops them down."""
+    revision_0043 = "c2f9a5d8b4e0"
+    revision_0044 = "d3a0b6e9c5f1"
+    with PostgresContainer("postgres:16", driver="pg8000") as pg:
+        url = pg.get_connection_url()
+        migrate.upgrade(url, revision_0043)
+        engine = sqlalchemy.create_engine(url)
+        now = datetime.now(UTC)
+        env_id, ns_id, table_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+        with engine.begin() as conn:
+            conn.execute(
+                sqlalchemy.text(
+                    "INSERT INTO environments (id, name, storage_root, storage_options, "
+                    "is_protected, properties, created_at, updated_at) "
+                    "VALUES (:id, 'dev', 's3://bucket/dev', '{}', false, '{}', :now, :now)"
+                ),
+                {"id": env_id, "now": now},
+            )
+            conn.execute(
+                sqlalchemy.text(
+                    "INSERT INTO namespaces (id, environment_id, path, properties) "
+                    "VALUES (:id, :env, 'gold', '{}')"
+                ),
+                {"id": ns_id, "env": env_id},
+            )
+            conn.execute(
+                sqlalchemy.text(
+                    "INSERT INTO tables (id, namespace_id, name, table_type, created_at, "
+                    "updated_at) VALUES (:id, :ns, 'orders', 'ICEBERG', :now, :now)"
+                ),
+                {"id": table_id, "ns": ns_id, "now": now},
+            )
+
+        migrate.upgrade(url, revision_0044)
+        assert _alembic_version(engine) == revision_0044
+        with engine.connect() as conn:
+            assert conn.execute(
+                sqlalchemy.text(
+                    "SELECT retention_days, retention_on, retention_never, retention_set_by, "
+                    "retention_set_at FROM tables"
+                )
+            ).all() == [(None, None, False, None, None)]
+            assert conn.execute(
+                sqlalchemy.text(
+                    "SELECT retention_days, retention_set_by, retention_set_at FROM environments"
+                )
+            ).all() == [(None, None, None)]
+
+        migrate.downgrade(url, revision_0043)
+        assert _alembic_version(engine) == revision_0043
+        for table in ("tables", "environments"):
+            names = {c["name"] for c in sqlalchemy.inspect(engine).get_columns(table)}
+            assert not {n for n in names if n.startswith("retention_")}
+        engine.dispose()

@@ -197,6 +197,23 @@ and are counted in the worker's log as directories without a record. A later rel
 to remove them on request. Going back to the previous release drops the records, as above, and keeps
 every file; a table dropped in the meantime can no longer be restored.
 
+### Tables can expire, and nothing does unless you say so
+
+A table can now have a retention: `lakana table retention NAMESPACE.TABLE --days N` (or `--on` a
+day, or `--never`), `--expire-after N` on `lakana table create` and on `lakana sql --into ... --mode
+create`, and a retention for every table of an environment that sets none, `lakana env retention
+ENV --days N`. The worker's sweep then drops a table once its retention has passed, as a drop with
+an undo period of at least a day, so `lakana table undrop` restores it. Protected environments and
+the tables a deployed project builds never expire. See [Let tables expire](../how-to/let-tables-expire.md).
+
+**Nothing expires because of the upgrade.** Migration `0044` adds the retention columns to
+`tables` and `environments`, empty on every row, which means no retention; it changes and deletes
+nothing. Three settings are new: `LAKANA_TABLES__EXPIRY_WARNING_DAYS` (server, 7),
+`LAKANA_TABLES__MAX_EXPIRIES_PER_SWEEP` (workers, 100), and the workers now read
+`LAKANA_TABLES__UNDO_DAYS` too, so set it for the server and the workers alike if you changed it.
+Going back to the previous release drops the columns: every retention is forgotten, and a table that
+expired meanwhile can still be restored within its undo period.
+
 ## Notes for 0.16.0
 
 ### Grants, principals and groups are listed in pages

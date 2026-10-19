@@ -88,10 +88,11 @@ and no later than one sweep after it**. The sweep runs every `LAKANA_RUN__SWEEP_
 (an hour by default); see [The sweep](deploy-with-compose.md#the-sweep). With the sweep turned off
 (`LAKANA_RUN__SWEEP_INTERVAL=0`) nothing is deleted.
 
-- **The length of the undo period** is `LAKANA_TABLES__UNDO_DAYS`, a setting of the server (7 by
-  default, 0 to 365; see [Settings](../reference/settings.md)). Each drop records the end of its own
-  period, so a change applies to later drops only. With 0, every drop is deleted at the next sweep
-  and cannot be restored.
+- **The length of the undo period** is `LAKANA_TABLES__UNDO_DAYS`, a setting of the server and the
+  workers (7 by default, 0 to 365; see [Settings](../reference/settings.md)); set the same value for
+  both. Each drop records the end of its own period, so a change applies to later drops only. With
+  0, every drop is deleted at the next sweep and cannot be restored, except a table that expired
+  because of its retention, which can always be restored for at least a day.
 - **With versioning on the bucket**, a deleted file stays as an older version of its object, and the
   bucket's own rules decide when it is gone.
 - **A table nested inside another table's directory** (in a namespace named after that directory)
@@ -132,10 +133,12 @@ and no later than one sweep after it**. The sweep runs every `LAKANA_RUN__SWEEP_
 ## What the audit log records
 
 - `TABLE_DROPPED` for every drop, by the person who dropped it: `reason` (`user`, or `purge` for a
-  drop with `--purge`), `table_id`, `kind`, `purge_after` (empty for a table whose files are not
+  drop with `--purge`, or `retention` with no person for a table that expired: see
+  [Let tables expire](let-tables-expire.md)), `table_id`, `kind`, `purge_after` (empty for a table whose files are not
   deleted, such as an external table) and `revoked_policies`, the number of grants, row filters and
   column masks the drop took away.
-- `TABLE_UNDROPPED` for a restore: `table_id`, `name`, `dropped_name`, `dropped_at` and
-  `restored_policies`, the kind and id of each grant, row filter and column mask that came back.
+- `TABLE_UNDROPPED` for a restore: `table_id`, `name`, `dropped_name`, `dropped_at`,
+  `restored_policies`, the kind and id of each grant, row filter and column mask that came back,
+  and `retention_cleared`, whether the restore removed an expiry day that had passed.
 - `TABLE_PURGED` when the sweep deletes the files, with no person: see
   [The sweep](deploy-with-compose.md#the-sweep).

@@ -1,11 +1,12 @@
 """The environment model."""
 
 import uuid
+from datetime import datetime
 
-from sqlalchemy import JSON, Boolean, String, Uuid
+from sqlalchemy import JSON, Boolean, ForeignKey, Integer, String, Uuid
 from sqlalchemy.orm import Mapped, mapped_column
 
-from lakana_core.models.base import Base, TimestampMixin
+from lakana_core.models.base import Base, TimestampMixin, UTCDateTime
 
 
 class Environment(Base, TimestampMixin):
@@ -37,3 +38,17 @@ class Environment(Base, TimestampMixin):
     storage_secret_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
     is_protected: Mapped[bool] = mapped_column(Boolean, default=False)
     properties: Mapped[dict[str, str]] = mapped_column(JSON, default=dict)
+    retention_days: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    """The retention of the tables here that set none of their own, in days; `None` is off.
+
+    Set only by `CatalogService.set_environment_retention`. A table expires this many days after
+    its last activity (`lakana_core.catalog.retention`), and never in a protected environment.
+    """
+    retention_set_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("principals.id", ondelete="SET NULL"), nullable=True, default=None
+    )
+    """Who last set or turned off `retention_days`; `NULL` once that principal is deleted."""
+    retention_set_at: Mapped[datetime | None] = mapped_column(
+        UTCDateTime, nullable=True, default=None
+    )
+    """When `retention_days` was last set; no table expires earlier than this plus the days."""

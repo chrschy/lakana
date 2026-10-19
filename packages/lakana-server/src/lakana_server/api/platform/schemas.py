@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StrictBool, model_validator
@@ -121,6 +121,8 @@ class EnvironmentOut(BaseModel):
         refused.
     properties
         Free-form metadata.
+    retention_days
+        The retention of its tables that set none of their own, in days; `null` when off.
     """
 
     name: str
@@ -128,8 +130,92 @@ class EnvironmentOut(BaseModel):
     storage_secret_ref: str | None
     is_protected: bool
     properties: dict[str, str]
+    retention_days: int | None = None
 
     model_config = {"from_attributes": True}
+
+
+class EnvironmentRetentionIn(BaseModel):
+    """Request body that sets an environment's retention, or turns it off.
+
+    Parameters
+    ----------
+    days
+        Its tables that set no retention of their own expire this many days (1 to 3,650) after
+        their last activity; `null` turns it off. The field must be sent.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    days: int | None
+
+
+class TableRetentionIn(BaseModel):
+    """Request body that sets when a managed table expires: exactly one of the three fields.
+
+    Parameters
+    ----------
+    days
+        Expire this many days (1 to 3,650) after the table's last activity: the later of its
+        last change and its last recorded read.
+    on
+        Expire from midnight UTC of this day on (``YYYY-MM-DD``); it must be after today.
+    never
+        `true`: never expire, whatever the environment's retention says.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    days: int | None = None
+    on: date | None = None
+    never: StrictBool = False
+
+
+class TableRetentionOut(BaseModel):
+    """A managed table's retention, and when it expires.
+
+    Parameters
+    ----------
+    name
+        The table's name.
+    namespace
+        Dot-joined namespace path.
+    uuid
+        The table's id.
+    source
+        ``table`` when the table sets its own, ``environment`` when its environment's applies;
+        `null` when it has none.
+    days
+        The days after its last activity it expires.
+    on
+        The day it expires on.
+    never
+        Whether the table says it never expires.
+    set_by
+        Who set the retention that applies; `null` when nobody did or that principal is gone.
+    set_at
+        When it was set.
+    last_activity_at
+        The later of the table's last change and its last recorded read.
+    expires_at
+        When it expires; `null` when it never does.
+    kept
+        Why a table that has a retention never expires: ``protected`` (a protected environment)
+        or ``project_asset`` (a deployed project declares it); `null` otherwise.
+    """
+
+    name: str
+    namespace: str
+    uuid: str
+    source: Literal["table", "environment"] | None
+    days: int | None
+    on: date | None
+    never: bool
+    set_by: str | None
+    set_at: datetime | None
+    last_activity_at: datetime
+    expires_at: datetime | None
+    kept: Literal["protected", "project_asset"] | None
 
 
 class EnvironmentPatch(BaseModel):
@@ -622,6 +708,11 @@ class TableOut(BaseModel):
         The size of its data files, from its summary; `None` when missing.
     file_count
         Its data files, from its summary; `None` when missing.
+    expires_at
+        When a managed table's retention makes it expire; `None` when it never does.
+    expires_soon
+        Whether that is within the server's warning window
+        (``LAKANA_TABLES__EXPIRY_WARNING_DAYS``, 7 days by default).
     """
 
     name: str
@@ -642,6 +733,8 @@ class TableOut(BaseModel):
     row_count: int | None = None
     size_bytes: int | None = None
     file_count: int | None = None
+    expires_at: datetime | None = None
+    expires_soon: bool = False
 
 
 class LastMaintenanceOut(BaseModel):

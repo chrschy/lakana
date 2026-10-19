@@ -380,11 +380,28 @@ def get_undo_days(request: Request) -> int:
     return request.app.state.settings.tables.undo_days
 
 
+def get_expiry_warning_days(request: Request) -> int:
+    """Read how many days ahead a table's expiry is shown as soon.
+
+    Parameters
+    ----------
+    request
+        The current request, used to reach `app.state.settings`.
+
+    Returns
+    -------
+    int
+        `LAKANA_TABLES__EXPIRY_WARNING_DAYS`.
+    """
+    return request.app.state.settings.tables.expiry_warning_days
+
+
 def get_catalog(
     session: Session = Depends(get_session),
     authz: AuthorizationService = Depends(get_grant_authorization),
     key_provider: KeyProvider = Depends(get_key_provider),
     undo_days: int = Depends(get_undo_days),
+    expiry_warning_days: int = Depends(get_expiry_warning_days),
 ) -> CatalogService:
     """Build a CatalogService for the current request.
 
@@ -398,6 +415,8 @@ def get_catalog(
         Decrypts a secret-backed environment's storage credentials.
     undo_days
         How long a table dropped in this request stays restorable.
+    expiry_warning_days
+        How many days ahead a table's expiry is described as soon.
 
     Returns
     -------
@@ -405,7 +424,11 @@ def get_catalog(
         A catalog service using real authorization.
     """
     return CatalogService(
-        session, StorageResolver(session, key_provider), authz, undo_days=undo_days
+        session,
+        StorageResolver(session, key_provider),
+        authz,
+        undo_days=undo_days,
+        expiry_warning_days=expiry_warning_days,
     )
 
 
