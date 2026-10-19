@@ -125,6 +125,17 @@ Each cell is a summary. The page named in the last column has the detail. The ch
 
 ## Notes for the next release
 
+### Table health: the numbers of a table, and who reads it
+
+Migration `0038` adds the table `table_reads`. It starts empty: the worker counts the reads of the
+queries that complete from now on, so `lakana table health` shows readers only for queries run after
+the upgrade. Reads are kept for 90 days and shown over 30 by default; an administrator changes both
+with `LAKANA_TABLE_READS__KEEP_DAYS` and `LAKANA_TABLE_READS__DEFAULT_DAYS` (the server and every
+worker read them). The JSON of a table gains `last_write_at`, `row_count`, `size_bytes` and
+`file_count`; nothing is removed. A new route and command show the rest; see
+[Table health](../reference/table-health.md). Python tasks that read through the Iceberg REST
+catalog record no reads yet. Going back to the previous release drops the counts.
+
 ### Tables and columns have descriptions
 
 Migration `0037` adds the two texts of a description to `tables` and a table `column_descriptions`.

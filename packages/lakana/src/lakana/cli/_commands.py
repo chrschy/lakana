@@ -28,6 +28,7 @@ COMMANDS: dict[str, tuple[str, ...]] = {
     "table get": ("tables.get",),
     "table delete": ("tables.delete",),
     "table describe": ("tables.describe",),
+    "table health": ("tables.health",),
     "table append": ("tables.get", "tables.append"),
     "table replace": ("tables.get", "tables.replace"),
     "table lineage": ("tables.lineage",),

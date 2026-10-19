@@ -863,6 +863,10 @@ _NOTHING_OF_A_KEPT_TABLE = {
     ),
     "describe_table": "the state `kept`, the schema and snapshot ids; no rows, no file locations",
     "can_read_table": "a boolean about a grant",
+    "table_health": (
+        "the newest result of each check and the last maintenance's counts, which are numbers "
+        "and names; no rows, no snapshot, no file location"
+    ),
     "set_table_description": "a write of text; it returns nothing of the table",
     "set_column_description": "a write of text; it returns nothing of the table",
     "commit_answer": (

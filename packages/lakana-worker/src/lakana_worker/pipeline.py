@@ -82,6 +82,7 @@ from lakana_core.auth import (
 from lakana_core.catalog.datafiles import list_data_files
 from lakana_core.catalog.external_location import check_claim_free, parse_external_location
 from lakana_core.catalog.field_ids import read_fields, refuse_changed_nested_fields
+from lakana_core.catalog.health import record_table_reads
 from lakana_core.catalog.maintenance import (
     DEFAULT_KEEP_DAYS,
     DEFAULT_KEEP_LAST,
@@ -2580,6 +2581,15 @@ def _run_one(
             return failure_exc
     if run.status is QueryRunStatus.SUCCEEDED and row_count is None:
         row_count = run.rows_written  # a failure that followed a commit: the run says SUCCEEDED
+    if run.status is QueryRunStatus.SUCCEEDED:
+        # Same transaction as the completion: a read is counted if and only if the run succeeded.
+        record_table_reads(
+            session,
+            environment=environment.name,
+            principal_id=principal.id,
+            dotted_refs=dotted_refs,
+            now=run.finished_at or datetime.now(UTC),
+        )
     AuditService(session).record(
         run.principal_id,
         AuditEventType.QUERY_COMPLETED,

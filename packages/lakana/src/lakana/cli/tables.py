@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import json
 import shlex
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 
 import typer
 
 import lakana
-from lakana._models import Column, Lineage, Table
+from lakana._models import CheckHealth, Column, Lineage, Table, TableHealth
 from lakana.cli import _files, _output
 from lakana.cli._break_glass import BREAK_GLASS, REASON, break_glass_reason
 from lakana.cli._state import CliError, CliState, confirm, resolve_environment, state_of
+from lakana.cli.artifacts import human_size
 
 table_app = typer.Typer(help="Manage tables and load data.", no_args_is_help=True)
 
@@ -318,6 +320,153 @@ def get(ctx: typer.Context, name: str, env: _ENV = None) -> None:
 
 _DESCRIBE_COLUMNS = ["name", "type", "nullable", "description"]
 """The columns of a table's schema listing in `table get`."""
+
+
+def _utc(moment: datetime) -> str:
+    """Write a time as people read it.
+
+    Parameters
+    ----------
+    moment
+        A time with a zone.
+
+    Returns
+    -------
+    str
+        ``2026-10-11 12:00 UTC``.
+    """
+    return moment.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _plural(count: int, noun: str) -> str:
+    """Write a count and its noun.
+
+    Parameters
+    ----------
+    count
+        The count.
+    noun
+        The noun in the singular.
+
+    Returns
+    -------
+    str
+        ``1 tag``, ``3 tags``.
+    """
+    return f"{count} {noun}" + ("" if count == 1 else "s")
+
+
+def _maintenance_line(health: TableHealth, environment: str, name: str) -> str:
+    """Say what the last maintenance did, or how to run it.
+
+    Parameters
+    ----------
+    health
+        The table's health.
+    environment
+        The environment.
+    name
+        The qualified table name.
+
+    Returns
+    -------
+    str
+        One line.
+    """
+    last = health.last_maintenance
+    if last is None:
+        return (
+            "Last maintenance: none yet. Run it with: "
+            f"lakana table maintain {shlex.quote(_output.inline(name))} "
+            f"--env {shlex.quote(_output.inline(environment))}"
+        )
+    line = (
+        f"Last maintenance: {_utc(last.finished_at)}, {last.status}. "
+        f"Expired {_plural(last.snapshots_expired, 'snapshot')}, "
+        f"deleted {_plural(last.files_deleted, 'file')} ({human_size(last.bytes_deleted)})"
+    )
+    if last.tags_removed:
+        line += f", removed {_plural(last.tags_removed, 'tag')} of failed checks"
+    if last.status == "stopped":
+        line += ". It stopped at its time limit; run it again to continue where it stopped"
+    return line
+
+
+def _check_state(check: CheckHealth) -> str:
+    """Name a check's state as the check history does.
+
+    Parameters
+    ----------
+    check
+        The check's newest result.
+
+    Returns
+    -------
+    str
+        The outcome, with ``(kept)`` for a failure whose data was kept and ``(not published)``
+        for one whose table was left not published.
+    """
+    if check.kept:
+        return f"{check.outcome} (kept)"
+    if check.not_published:
+        return f"{check.outcome} (not published)"
+    return check.outcome
+
+
+@table_app.command("health")
+def health(
+    ctx: typer.Context,
+    name: str,
+    days: Annotated[
+        int | None,
+        typer.Option(
+            "--days",
+            min=1,
+            help="Readers over this many days (up to the server's kept period, 90 by default).",
+        ),
+    ] = None,
+    env: _ENV = None,
+) -> None:
+    """Show table NAME's last maintenance, the newest result of each check, and who reads it.
+
+    Readers are counted from the queries that succeeded, per person and day. You see them only
+    with the ADMIN role. Python tasks that read through the Iceberg catalog are not counted yet.
+    Use --output json for every field.
+
+    Parameters
+    ----------
+    ctx
+        The Typer context.
+    name
+        The qualified table name.
+    days
+        The window of the readers in days.
+    env
+        The environment.
+    """
+    state = state_of(ctx)
+    environment = resolve_environment(state, env)
+    found = state.client().tables.health(environment, name, days=days)
+    if state.output == "json":
+        _output.emit(state, found)
+        return
+    _output.emit(state, _maintenance_line(found, environment, name))
+    if found.checks:
+        _output.emit(
+            state,
+            found.checks,
+            columns=["check", "state", "failing_rows", "finished_at"],
+            derived={"state": _check_state},
+        )
+    else:
+        _output.emit(state, "Checks: none recorded.")
+    if found.readers is None:
+        _output.emit(state, "Readers: not shown. Seeing who reads a table needs the ADMIN role.")
+    elif found.readers:
+        _output.emit(state, f"Readers, last {found.days} days:")
+        _output.emit(state, found.readers)
+    else:
+        _output.emit(state, f"Readers, last {found.days} days: none.")
 
 
 @table_app.command("describe")

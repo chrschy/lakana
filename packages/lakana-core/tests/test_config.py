@@ -964,3 +964,36 @@ def test_webhook_allow_hosts_refuses_a_numeric_last_label(entry: str) -> None:
     """An IP address cannot be allowed; the message says to use its name."""
     with pytest.raises(PydanticValidationError, match="use its host name"):
         WebhookConfig(allow_hosts=entry)
+
+
+def test_table_reads_keep_90_days_and_show_30_by_default() -> None:
+    from lakana_core.config import TableReadsConfig
+
+    config = TableReadsConfig()
+    assert (config.keep_days, config.default_days) == (90, 30)
+
+
+def test_table_reads_settings_read_their_environment_variables(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LAKANA_DATABASE__URL", "sqlite:///x.db")
+    monkeypatch.setenv("LAKANA_TABLE_READS__KEEP_DAYS", "365")
+    monkeypatch.setenv("LAKANA_TABLE_READS__DEFAULT_DAYS", "7")
+    settings = Settings()
+    assert (settings.table_reads.keep_days, settings.table_reads.default_days) == (365, 7)
+
+
+@pytest.mark.parametrize("name", ["keep_days", "default_days"])
+def test_table_reads_days_must_be_at_least_one(name: str) -> None:
+    from lakana_core.config import TableReadsConfig
+
+    with pytest.raises(PydanticValidationError):
+        TableReadsConfig(**{name: 0})
+
+
+def test_the_default_window_cannot_exceed_the_kept_period() -> None:
+    from lakana_core.config import TableReadsConfig
+
+    with pytest.raises(PydanticValidationError, match="LAKANA_TABLE_READS__DEFAULT_DAYS"):
+        TableReadsConfig(keep_days=10, default_days=11)
+    assert TableReadsConfig(keep_days=10, default_days=10).default_days == 10

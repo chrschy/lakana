@@ -144,6 +144,33 @@ def authorize_admin_only(
     raise PermissionDenied(admin_only_message(action))
 
 
+def may_see_grants(session: Session, authz: AuthorizationService, p: PrincipalRef) -> bool:
+    """Say whether `p` may see who holds access: the same rule as the grants listing.
+
+    That is `authorize_admin_only` for `MANAGE_GRANT`, asked as a yes or no: nothing is
+    recorded for a `False`, since a caller who may not see the grants is not attempting
+    anything.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    authz
+        The authorization service of the calling service.
+    p
+        The acting principal.
+
+    Returns
+    -------
+    bool
+        `True` if `authz` permits `MANAGE_GRANT` at instance scope and `p` holds the `ADMIN`
+        role there (or `authz` is `AllowAllAuthorization`, which asks for no role).
+    """
+    if not authz.permits(p, Action.MANAGE_GRANT, Securable.instance_scope()):
+        return False
+    return isinstance(authz, AllowAllAuthorization) or holds_instance_admin(session, p.id)
+
+
 _WARNED = 20
 """Most grants the start-up warning names (and the most rows it loads)."""
 

@@ -20,6 +20,7 @@ from lakana_core.artifacts.sweep import DEFAULT_MAX_SECONDS, sweep_artifacts
 from lakana_core.audit.authorization import AuditingAuthorization, flush_suppressed
 from lakana_core.audit.denial_limiter import DenialAuditLimiter
 from lakana_core.auth import AuthorizationService
+from lakana_core.catalog.health import sweep_table_reads
 from lakana_core.config import QueryLimitsConfig, Settings, warn_about_tokens_in_url_paths
 from lakana_core.db import create_engine
 from lakana_core.errors import LakanaError
@@ -422,7 +423,7 @@ def main() -> None:
     sweeps = itertools.count()
 
     def housekeeping(now: datetime, stop: threading.Event) -> None:
-        """Sweep the artifact store, the code archives and the old job fires.
+        """Sweep the artifact store, the code archives, the old job fires and the old table reads.
 
         One sweep failing does not stop the others.
 
@@ -462,12 +463,18 @@ def main() -> None:
                 sweep_job_fires(session)
         except Exception as exc:
             logger.warning("The job fire sweep failed (%s).", type(exc).__name__, exc_info=True)
+        try:
+            with session_factory() as session:
+                sweep_table_reads(session, keep_days=settings.table_reads.keep_days, now=now)
+        except Exception as exc:
+            logger.warning("The table reads sweep failed (%s).", type(exc).__name__, exc_info=True)
 
     if settings.run.sweep_interval <= 0:
         logger.info(
             "LAKANA_RUN__SWEEP_INTERVAL=0: the sweeps are off, so expired artifact uploads, "
-            "artifact files nothing names, code archives of failed deploys and attempt "
-            "directories and deploy checkouts of dead workers are not removed. Set it to a number "
+            "artifact files nothing names, code archives of failed deploys, table read counts past "
+            "their kept period and attempt directories and deploy checkouts of dead workers are "
+            "not removed. Set it to a number "
             "of seconds (3600 is the default) to turn them on."
         )
     scheduler = SchedulerLoop(

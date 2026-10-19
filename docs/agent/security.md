@@ -282,6 +282,15 @@ SQLite alike.
 
 Audited in the same transaction (`TABLE_DESCRIBED`, `COLUMN_DESCRIBED`; `detail`: `table`, `column`, `old_length`, `new_length`, `reset`); the text is never in `detail`. A deploy writes only `description_project` and the project rows of `column_descriptions`; it never touches an edit (`catalog/descriptions.py`). Pins: `test_descriptions.py`.
 
+## Table health: who sees the readers
+
+| Action | Needs | Notes |
+|---|---|---|
+| `GET .../tables/{name}/health` | `READ_TABLE` on the table | Checked first, so a missing right is `403` before anything is read. |
+| The `readers` of that answer | `MANAGE_GRANT` and the `ADMIN` role at instance scope (`grants.admin.may_see_grants`) | The grants listing's rule asked as a yes or no: nothing is recorded as `AUTHORIZATION_DENIED` for a `False`, and the field is `null`, not an error. The helper lives in `grants/admin.py` because `test_admin_only_call_sites.py` allows the three actions nowhere else. |
+
+`table_reads` holds who read what, by day; it is written only by the worker, in the transaction that completes a succeeded query (`catalog/health.py`, `record_table_reads`), and deleted by the housekeeping sweep after `LAKANA_TABLE_READS__KEEP_DAYS`. Python tasks read through the Iceberg REST catalog and record nothing. Pins: `test_table_health.py`, `test_tables_health.py`.
+
 ## Jobs: who may start, pause and resume (M5d-b)
 
 A job is a named selection in the manifest; starting one is starting a run, so it has the run's

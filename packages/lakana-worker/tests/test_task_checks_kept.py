@@ -251,10 +251,12 @@ def _note_of(world: World, dotted: str) -> tuple[uuid.UUID | None, uuid.UUID | N
         return row[0], row[1], row[2]
 
 
-_STATEMENTS = {False: 54, True: 115}
+_STATEMENTS = {False: 54, True: 119}
 """Statements of a task's own thread, by whether it has checks (measured before the note).
 
-Two of them look for the project's descriptions of the table the task creates."""
+Two of them look for the project's descriptions of the table the task creates. With checks, each
+of the two check queries that name the table also counts a read of it (a lookup of the table and
+an upsert), which is the four more."""
 
 
 def _statements_of(world: World, claimed: ClaimedTask) -> int:

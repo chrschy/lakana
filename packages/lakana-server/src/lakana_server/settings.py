@@ -11,6 +11,7 @@ from lakana_core.config import (
     QueryLimitsConfig,
     RunConfig,
     SecretsConfig,
+    TableReadsConfig,
     TaskTokensConfig,
     validate_repo_roots,
 )
@@ -123,6 +124,10 @@ class Settings(BaseSettings):
     artifacts
         Artifact-store bounds (`LAKANA_ARTIFACTS__*`): file size, total size, file
         count and upload lifetime.
+    table_reads
+        How long the reads of a table are kept and how far back its health shows them
+        (`LAKANA_TABLE_READS__KEEP_DAYS`, `LAKANA_TABLE_READS__DEFAULT_DAYS`); the worker reads
+        the kept period too.
     append
         Governed Arrow-append bounds: body size (`LAKANA_APPEND__MAX_BYTES`),
         concurrency (`LAKANA_APPEND__MAX_CONCURRENT`), body-read deadline
@@ -165,6 +170,7 @@ class Settings(BaseSettings):
     secrets: SecretsConfig = SecretsConfig()
     task_tokens: TaskTokensConfig = TaskTokensConfig()
     artifacts: ArtifactsConfig = ArtifactsConfig()
+    table_reads: TableReadsConfig = TableReadsConfig()
     append: AppendConfig = AppendConfig()
     request_body: RequestBodyConfig = RequestBodyConfig()
     auth_audit: AuthAuditConfig = AuthAuditConfig()

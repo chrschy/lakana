@@ -823,6 +823,46 @@ class DenialAuditConfig(BaseModel):
     per_principal_per_minute: int = Field(default=30, gt=0)
 
 
+class TableReadsConfig(BaseModel):
+    """How long the reads of a table are kept, and how far back its health shows them.
+
+    Read from ``LAKANA_TABLE_READS__KEEP_DAYS`` and ``LAKANA_TABLE_READS__DEFAULT_DAYS``.
+
+    Parameters
+    ----------
+    keep_days
+        Days a day's count of reads of a table is kept (default 90). The worker's sweep deletes
+        older rows, and `GET .../tables/{name}/health` accepts `days` up to this.
+    default_days
+        The window the health of a table shows when the request names none (default 30); at most
+        `keep_days`.
+    """
+
+    keep_days: int = Field(default=90, ge=1)
+    default_days: int = Field(default=30, ge=1)
+
+    @model_validator(mode="after")
+    def _window_fits_the_kept_period(self) -> Self:
+        """Require the default window to lie within the kept period.
+
+        Returns
+        -------
+        Self
+            `self`.
+
+        Raises
+        ------
+        ValueError
+            If `default_days` is above `keep_days`.
+        """
+        if self.default_days > self.keep_days:
+            raise ValueError(
+                "LAKANA_TABLE_READS__DEFAULT_DAYS must not be above LAKANA_TABLE_READS__KEEP_DAYS: "
+                "lower the window or raise the kept period."
+            )
+        return self
+
+
 DEFAULT_MAX_STATEMENT_CHARS = 100_000
 """The default of `QueryLimitsConfig.max_statement_chars` and of a deploy's SQL limit."""
 
@@ -1244,6 +1284,9 @@ class Settings(BaseSettings):
     artifacts
         Artifact-store bounds (`LAKANA_ARTIFACTS__*`): file size, total size, file
         count and upload lifetime.
+    table_reads
+        How long the reads of a table are kept and how far back its health shows them
+        (`LAKANA_TABLE_READS__*`).
     repo_roots
         Absolute directories local repositories must lie under
         (`LAKANA_REPO_ROOTS`, a JSON list). Empty refuses every local
@@ -1266,6 +1309,7 @@ class Settings(BaseSettings):
     task_tokens: TaskTokensConfig = TaskTokensConfig()
     denial_audit: DenialAuditConfig = DenialAuditConfig()
     artifacts: ArtifactsConfig = ArtifactsConfig()
+    table_reads: TableReadsConfig = TableReadsConfig()
     repo_roots: list[str] = []
 
     @field_validator("repo_roots")

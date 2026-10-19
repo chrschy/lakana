@@ -26,12 +26,16 @@ from lakana._arrow import (
 from lakana._http import HttpTransport
 from lakana._models import (
     AppendResult,
+    CheckHealth,
     Column,
     ExternalTable,
+    LastMaintenance,
     Lineage,
     LineageEdge,
     LineageNode,
+    Reader,
     Table,
+    TableHealth,
     TableReference,
     WriteResult,
 )
@@ -103,6 +107,79 @@ def _split_namespace_table(qualified_name: str) -> tuple[str, str]:
     return namespace, name
 
 
+def _when(value: str | None) -> datetime | None:
+    """Parse a time the platform API sent.
+
+    Parameters
+    ----------
+    value
+        An ISO 8601 time, or `None`.
+
+    Returns
+    -------
+    datetime or None
+        The time, or `None` for `None`.
+    """
+    return None if value is None else datetime.fromisoformat(value)
+
+
+def _health_from_json(data: dict[str, Any]) -> TableHealth:
+    """Build a `TableHealth` from the platform API's JSON response body.
+
+    Parameters
+    ----------
+    data
+        The decoded `TableHealthOut` JSON body.
+
+    Returns
+    -------
+    TableHealth
+        The parsed health.
+    """
+    maintenance = data["last_maintenance"]
+    readers = data["readers"]
+    return TableHealth(
+        days=data["days"],
+        last_maintenance=None
+        if maintenance is None
+        else LastMaintenance(
+            run_id=maintenance["run_id"],
+            finished_at=datetime.fromisoformat(maintenance["finished_at"]),
+            status=maintenance["status"],
+            snapshots_expired=maintenance["snapshots_expired"],
+            files_deleted=maintenance["files_deleted"],
+            bytes_deleted=maintenance["bytes_deleted"],
+            tags_removed=maintenance["tags_removed"],
+        ),
+        checks=[
+            CheckHealth(
+                name=c["name"],
+                check=c["check"],
+                run_id=c["run_id"],
+                outcome=c["outcome"],
+                on_failure=c["on_failure"],
+                failing_rows=c["failing_rows"],
+                error=c["error"],
+                rollback_outcome=c["rollback_outcome"],
+                kept=c["kept"],
+                not_published=c["not_published"],
+                finished_at=datetime.fromisoformat(c["finished_at"]),
+            )
+            for c in data["checks"]
+        ],
+        readers=None
+        if readers is None
+        else [
+            Reader(
+                principal=r["principal"],
+                read_count=r["read_count"],
+                last_read_at=datetime.fromisoformat(r["last_read_at"]),
+            )
+            for r in readers
+        ],
+    )
+
+
 def _table_from_json(data: dict[str, Any]) -> Table:
     """Build a `Table` from the platform API's JSON response body.
 
@@ -144,6 +221,10 @@ def _table_from_json(data: dict[str, Any]) -> Table:
         state_message=data.get("state_message"),
         description=data.get("description"),
         description_source=data.get("description_source"),
+        last_write_at=_when(data.get("last_write_at")),
+        row_count=data.get("row_count"),
+        size_bytes=data.get("size_bytes"),
+        file_count=data.get("file_count"),
     )
 
 
@@ -389,6 +470,44 @@ class Tables:
             ROUTES["tables.get"], path_params={"env": environment, "path": namespace, "name": name}
         )
         return _table_from_json(response.json())
+
+    def health(
+        self, environment: str, qualified_name: str, *, days: int | None = None
+    ) -> TableHealth:
+        """Show a table's last maintenance, the newest result of each check, and its readers.
+
+        Parameters
+        ----------
+        environment
+            The environment name.
+        qualified_name
+            Dot-joined `"namespace.table"` name.
+        days
+            The window of the readers in days, from 1 to the server's kept period (90 by
+            default); the server's default window (30) when `None`.
+
+        Returns
+        -------
+        TableHealth
+            The health. `readers` is `None` unless you may see the table's grants (the `ADMIN`
+            role).
+
+        Raises
+        ------
+        lakana.errors.NotFound
+            If no such table exists.
+        lakana.errors.PermissionDenied
+            Without `READ_TABLE` on the table.
+        lakana.errors.ValidationError
+            If `days` is outside the range; the message names it.
+        """
+        namespace, name = _split_namespace_table(qualified_name)
+        response = self._transport.request(
+            ROUTES["tables.health"],
+            path_params={"env": environment, "path": namespace, "name": name},
+            params=None if days is None else {"days": days},
+        )
+        return _health_from_json(response.json())
 
     def describe(
         self,

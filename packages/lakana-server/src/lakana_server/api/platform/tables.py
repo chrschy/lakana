@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import struct
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Literal, TypeVar
 
 import pyarrow as pa
@@ -56,6 +57,7 @@ from lakana_server.api.platform.schemas import (
     QuerySubmitOut,
     ReplaceOut,
     TableCreate,
+    TableHealthOut,
     TableOut,
     TableReferenceOut,
 )
@@ -597,6 +599,10 @@ def _describe_out(namespace: str, description: TableDescription) -> TableOut:
         state_message=description.state_message,
         description=description.description,
         description_source=description.description_source,
+        last_write_at=description.last_write_at,
+        row_count=description.row_count,
+        size_bytes=description.size_bytes,
+        file_count=description.file_count,
     )
 
 
@@ -920,6 +926,65 @@ def get_table(
     ns = NamespacePath.from_parts(path.split("."))
     ref = TableRef(environment=env, namespace=ns, name=name)
     return _describe_out(path, catalog.describe_table(principal, ref))
+
+
+@router.get("/{name}/health", response_model=TableHealthOut)
+def get_table_health(
+    env: str,
+    path: str,
+    name: str,
+    request: Request,
+    days: int | None = Query(default=None),
+    principal: PrincipalRef = Depends(get_principal),
+    catalog: CatalogService = Depends(get_catalog),
+) -> TableHealthOut:
+    """Show a table's last maintenance, the newest result of each of its checks and its readers.
+
+    Parameters
+    ----------
+    env
+        Environment name.
+    path
+        Dot-joined namespace path.
+    name
+        Table name.
+    request
+        The current request, for the `LAKANA_TABLE_READS__*` settings.
+    days
+        The window of the readers in days, from 1 to the kept period
+        (`LAKANA_TABLE_READS__KEEP_DAYS`, 90 by default); the default window
+        (`LAKANA_TABLE_READS__DEFAULT_DAYS`, 30) when absent.
+    principal
+        The authenticated caller.
+    catalog
+        The catalog service for this request.
+
+    Returns
+    -------
+    TableHealthOut
+        The health. `readers` is `null` unless the caller may see the table's grants.
+
+    Raises
+    ------
+    lakana_core.errors.ValidationError
+        Mapped to 422 when `days` is outside 1 to the kept period.
+    lakana_core.errors.NotFoundError
+        Mapped to 404.
+    lakana_core.errors.PermissionDenied
+        Mapped to 403 without READ_TABLE.
+    """
+    reads = request.app.state.settings.table_reads
+    if days is None:
+        days = reads.default_days
+    elif not 1 <= days <= reads.keep_days:
+        raise ValidationError(
+            f"days must be between 1 and {reads.keep_days} (got {days}). The platform keeps "
+            f"reads for {reads.keep_days} days; an administrator can change that with "
+            "LAKANA_TABLE_READS__KEEP_DAYS."
+        )
+    ref = TableRef(environment=env, namespace=NamespacePath.from_parts(path.split(".")), name=name)
+    health = catalog.table_health(principal, ref, days=days, now=datetime.now(UTC))
+    return TableHealthOut.model_validate(health, from_attributes=True)
 
 
 @router.patch("/{name}", response_model=TableOut)
