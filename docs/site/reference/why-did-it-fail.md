@@ -55,10 +55,10 @@ converted: the old rows stay as they are.
 - A run is `failed` when a task failed or could not start. The task that failed has its own code; the
   tasks below it have `upstream_failed`.
 - A cancelled run has `cancelled` on every task it ended, and a task whose worker was lost after it
-  had written is first set back (see [A worker that is lost](check-your-data.md#a-worker-that-is-lost))
+  had written is first set back (see [A worker that is lost](../how-to/check-your-data.md#a-worker-that-is-lost))
   and then ends with the code of why.
 - `lakana runs resume RUN_ID` starts a new run of the tasks that did not succeed; each gets a fresh
   record.
 
-See also [Check your data](check-your-data.md) for the checks and [Stop a query](stop-a-query.md) for
+See also [Check your data](../how-to/check-your-data.md) for the checks and [Stop a query](../how-to/stop-a-query.md) for
 cancelling.
