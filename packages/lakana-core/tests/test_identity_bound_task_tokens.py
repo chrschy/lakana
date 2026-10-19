@@ -124,12 +124,13 @@ def test_mint_for_task_binds_the_token_to_the_attempt(
     task = python_task_run(session, principal.id, claim=3)
     before = datetime.now(UTC)
     minted = _service(session).mint_for_task(task.id, 3, ttl_seconds=130)
+    after = datetime.now(UTC)
     row = _row(session, minted.key_id)
     assert (row.task_run_id, row.claim) == (task.id, 3)
     assert row.principal_id == principal.id
     assert row.environment == "dev"
     assert row.asset_scope == ["bronze.stations", "gold.scores", "silver.weather"]
-    assert before + timedelta(seconds=129) <= row.expires_at <= before + timedelta(seconds=131)
+    assert before + timedelta(seconds=130) <= row.expires_at <= after + timedelta(seconds=130)
     event = session.execute(
         select(AuditEvent).where(AuditEvent.event_type == AuditEventType.TASK_TOKEN_MINTED)
     ).scalar_one()
@@ -151,7 +152,8 @@ def test_the_lifetime_is_capped_by_the_operator_maximum(
     task = python_task_run(session, principal.id)
     before = datetime.now(UTC)
     minted = _service(session, max_ttl=60).mint_for_task(task.id, 1, ttl_seconds=3600)
-    assert minted.expires_at <= before + timedelta(seconds=61)
+    after = datetime.now(UTC)
+    assert before + timedelta(seconds=60) <= minted.expires_at <= after + timedelta(seconds=60)
 
 
 def test_verify_resolves_the_bound_task_from_the_manifest(

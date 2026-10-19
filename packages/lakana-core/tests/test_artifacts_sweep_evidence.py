@@ -1550,12 +1550,15 @@ def test_the_warning_about_named_files_survives_a_run_that_stops_inside_the_arti
     _lose_records_of_named_files(session, tmp_path, principal, contents)
     monkeypatch.setattr(sweep_module, "_FILE_BATCH", 2)
     stop = [False]
+    named = {_sha(value) for value in contents.values()}
     real = sweep_module.unreferenced_hashes
 
     def stopping_after_the_first_batch(*args: object, **kwargs: object) -> set[str]:
         found = real(*args, **kwargs)  # ty: ignore[invalid-argument-type]
-        if _sha(b"x0") in set(args[2]):  # ty: ignore[invalid-argument-type]
-            stop[0] = True  # the next listed object ends the run
+        # The first batch of the named files, whichever two the listing gives first, ends the
+        # run at the next listed object; looking for one file made the stop depend on the order.
+        if named & set(args[2]):  # ty: ignore[invalid-argument-type]
+            stop[0] = True
         return found
 
     monkeypatch.setattr(sweep_module, "unreferenced_hashes", stopping_after_the_first_batch)

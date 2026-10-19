@@ -36,19 +36,21 @@ validation of that expression text — see `TableSource` and `_reader_select_sql
 
 from __future__ import annotations
 
+import functools
 import hashlib
+import logging
 import re
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import NamedTuple
+from typing import NamedTuple, ParamSpec, TypeVar
 
 import sqlglot
 import sqlglot.expressions as exp
 from sqlglot.optimizer.qualify import qualify
 from sqlglot.optimizer.scope import Scope, build_scope, traverse_scope
 
-from lakana_core.errors import ValidationError
+from lakana_core.errors import LakanaError, ValidationError
 from lakana_core.sql_syntax import SQL_SYNTAX_ERRORS
 
 _BLACKLISTED_FUNCTIONS = frozenset(
@@ -697,6 +699,105 @@ def _dotted_table_name(table: exp.Table) -> str:
     return ".".join(part.name for part in name_parts if part)
 
 
+logger = logging.getLogger(__name__)
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+_PARSER_FAULTS = (ValueError, AttributeError)
+"""What sqlglot's parser raises, besides its own syntax errors, on text it half-reads."""
+
+
+def _parse_sql(sql: str, dialect: str) -> exp.Expr:
+    """Parse submitted SQL; a parser fault on malformed text is a syntax refusal.
+
+    Parameters
+    ----------
+    sql
+        The text to parse.
+    dialect
+        The SQL dialect to parse `sql` as.
+
+    Returns
+    -------
+    sqlglot.expressions.Expr
+        The parsed statement.
+
+    Raises
+    ------
+    sqlglot.errors.ParseError
+        If sqlglot's parser itself fails on the text with an error that is not a
+        `ParseError`: a `ValueError` (it assumes a name is a string where the text put a
+        placeholder) or an `AttributeError` (it reads a struct key from a node it left empty).
+        It is a `ParseError` so that every handler of `SQL_SYNTAX_ERRORS`, such as the one
+        that names a broken stored view, treats it as the syntax error it is.
+    """
+    try:
+        return sqlglot.parse_one(sql, dialect=dialect)
+    except _PARSER_FAULTS as exc:
+        raise sqlglot.errors.ParseError("the text could not be read") from exc
+
+
+def _fail_closed(func: Callable[_P, _R]) -> Callable[_P, _R]:
+    """Make a guard entry point refuse, never raise, on an unexpected error.
+
+    Parameters
+    ----------
+    func
+        A public entry point that parses and walks submitted SQL.
+
+    Returns
+    -------
+    collections.abc.Callable
+        `func`, except that an exception other than the expected ones (`ValidationError`,
+        another `LakanaError`, the syntax errors in `SQL_SYNTAX_ERRORS`, `MemoryError`)
+        becomes a `ValidationError`. The exception's type is logged at WARNING, never the
+        SQL. The result is a refusal on every path: nothing here ever allows a query.
+    """
+
+    @functools.wraps(func)
+    def guarded(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+        """Call the wrapped entry point.
+
+        Parameters
+        ----------
+        *args
+            The entry point's positional arguments.
+        **kwargs
+            The entry point's keyword arguments.
+
+        Returns
+        -------
+        object
+            What the entry point returns.
+
+        Raises
+        ------
+        ValidationError
+            If the entry point failed in an unexpected way.
+        LakanaError
+            As the entry point raises it, unchanged.
+        MemoryError
+            As the entry point raises it, unchanged.
+        """
+        try:
+            return func(*args, **kwargs)
+        except (LakanaError, MemoryError, *SQL_SYNTAX_ERRORS):
+            raise
+        except Exception as exc:
+            logger.warning(
+                "query guard refused a query after an unexpected %s in %s",
+                type(exc).__name__,
+                getattr(func, "__name__", "entry point"),
+            )
+            raise ValidationError(
+                "We could not parse your SQL. Check its syntax and submit it again; "
+                "if the query is valid, report this."
+            ) from exc
+
+    return guarded
+
+
 def _reject_recursive_ctes(parsed: exp.Expr) -> None:
     """Refuse a statement containing a `WITH RECURSIVE` clause anywhere in it.
 
@@ -1011,7 +1112,7 @@ def _parse_checked(sql: str, dialect: str) -> exp.Expr:
         keep that promise here, so it must not be reachable by a future
         caller that skips the blacklist.
     """
-    parsed = sqlglot.parse_one(sql, dialect=dialect)
+    parsed = _parse_sql(sql, dialect)
     if isinstance(parsed, exp.Values):
         parsed = _select_of_values(parsed)
     _reject_placeholders(parsed)
@@ -1332,6 +1433,7 @@ def named_columns(sql: str, dialect: str = "duckdb") -> frozenset[str]:
     return frozenset(column.name.lower() for column in parsed.find_all(exp.Column))
 
 
+@_fail_closed
 def extract_table_refs(sql: str, dialect: str = "duckdb") -> list[str]:
     """List every distinct qualified table name a query references.
 
@@ -1692,6 +1794,7 @@ def _cte_alias(dotted: str) -> str:
     return "__lakana_" + re.sub(r"\W", "_", dotted) + "_" + digest
 
 
+@_fail_closed
 def rewrite_query(
     sql: str, sources: Mapping[str, TableSource], dialect: str = "duckdb"
 ) -> RewrittenQuery:
@@ -1812,6 +1915,7 @@ def rewrite_query(
     return RewrittenQuery(sql=parsed.sql(dialect=dialect), parameters=parameters)
 
 
+@_fail_closed
 def check_blacklist(sql: str, dialect: str = "duckdb") -> None:
     """Reject SQL that is not a plain read, or that reads files directly.
 
@@ -1870,7 +1974,7 @@ def check_blacklist(sql: str, dialect: str = "duckdb") -> None:
         is not a read sits anywhere inside it; or if it
         contains a `WITH RECURSIVE` clause.
     """
-    parsed = sqlglot.parse_one(sql, dialect=dialect)
+    parsed = _parse_sql(sql, dialect)
     for item in parsed.find_all(exp.Table, exp.Lateral):
         function = _from_item_function_name(item)
         if function is not None and function not in _ALLOWED_TABLE_FUNCTIONS:

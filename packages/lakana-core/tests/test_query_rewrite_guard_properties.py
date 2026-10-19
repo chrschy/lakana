@@ -8,7 +8,7 @@ from hypothesis import strategies as st
 
 from lakana_core.errors import ValidationError
 from lakana_core.query_rewrite import check_blacklist, extract_table_refs
-from lakana_core.sql_syntax import SQL_SYNTAX_ERRORS
+from lakana_core.sql_syntax import SQL_SYNTAX_ERRORS, describe_syntax_error
 
 _STATEMENTS = (
     "DELETE FROM bronze.t RETURNING *",
@@ -91,3 +91,25 @@ def test_no_nesting_of_reads_lets_a_statement_through(
     for check in (check_blacklist, extract_table_refs):
         with pytest.raises((ValidationError, *SQL_SYNTAX_ERRORS)):
             check(sql)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT id fROM goLd.v_ouELECT $1 At",
+        "WITH x AS (SELCET {'id'.id,: 1} AS orders) SELECT id FROM gold.orders "
+        "WHERE EXISTS (SELECT 1 FROM x WHERE gold.orders.id = 3)",
+    ],
+)
+def test_found_by_mutation_a_half_parsed_statement_is_refused_by_both_checks(sql: str) -> None:
+    """Statements a random mutation of the corpus made the parser fault on are refused (#215, #216).
+
+    Parameters
+    ----------
+    sql
+        A malformed statement the parser raises a non-syntax error on.
+    """
+    for check in (check_blacklist, extract_table_refs):
+        with pytest.raises(SQL_SYNTAX_ERRORS) as caught:
+            check(sql)
+        assert describe_syntax_error(caught.value, sql).startswith("SQL syntax error")
