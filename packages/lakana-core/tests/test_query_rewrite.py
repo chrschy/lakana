@@ -1,9 +1,12 @@
 """Tests for SQL query rewriting and the AST blacklist."""
 
 import re
+from collections.abc import Callable
+from typing import NoReturn
 
 import pytest
 import sqlglot
+import sqlglot.errors
 import sqlglot.expressions as exp
 
 from lakana_core import query_rewrite
@@ -1805,3 +1808,76 @@ def test_an_argument_on_values_with_no_name_yet_is_refused_all_the_same() -> Non
 
     with pytest.raises(ValidationError, match="takes no NOVEL"):
         query_rewrite._reject_values_clauses(values)
+
+
+_WITNESS_PLACEHOLDER_NAME = "SELECT id fROM goLd.v_ouELECT $1 At"
+"""A half-parsed table alias: sqlglot's parser raises `ValueError` on the placeholder (#215)."""
+
+_WITNESS_EMPTY_NODE = (
+    "WITH x AS (SELCET {'id'.id,: 1} AS orders) SELECT id FROM gold.orders "
+    "WHERE EXISTS (SELECT 1 FROM x WHERE gold.orders.id = 3)"
+)
+"""A half-parsed struct literal: sqlglot's parser raises `AttributeError` on `None` (#216)."""
+
+_SYNTAX_MESSAGE = "SQL syntax error: the query could not be read"
+
+
+@pytest.mark.parametrize(
+    "check",
+    [query_rewrite.check_blacklist, query_rewrite.extract_table_refs, query_rewrite.rewrite_query],
+)
+def test_a_parser_value_error_is_refused_with_the_syntax_message(
+    check: Callable[..., object],
+) -> None:
+    """A placeholder where the parser expects a name is refused, not raised as `ValueError` (#215).
+
+    Parameters
+    ----------
+    check
+        A public entry point of the guard.
+    """
+    args = (
+        (_WITNESS_PLACEHOLDER_NAME, {})
+        if check is query_rewrite.rewrite_query
+        else (_WITNESS_PLACEHOLDER_NAME,)
+    )
+    with pytest.raises(ValidationError, match=_SYNTAX_MESSAGE):
+        check(*args)
+
+
+@pytest.mark.parametrize("entry", ["check_blacklist", "extract_table_refs", "rewrite_query"])
+def test_an_unexpected_error_in_the_walk_is_refused_and_logged_without_the_sql(
+    entry: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Whatever else breaks while the guard reads a query refuses it; the SQL is not logged.
+
+    Parameters
+    ----------
+    entry
+        The name of the public entry point to call.
+    monkeypatch
+        Makes the first internal step raise.
+    caplog
+        Captures the warning.
+    """
+
+    def explode(*_args: object, **_kwargs: object) -> NoReturn:
+        raise KeyError("secret-table-name")
+
+    monkeypatch.setattr(query_rewrite, "_reject_placeholders", explode)
+    monkeypatch.setattr(query_rewrite, "_cte_reference_ids", explode)
+    args = ("SELECT 1 AS a FROM gold.t",) + (({},) if entry == "rewrite_query" else ())
+    with (
+        caplog.at_level("WARNING", logger="lakana_core.query_rewrite"),
+        pytest.raises(ValidationError, match="could not parse your SQL"),
+    ):
+        getattr(query_rewrite, entry)(*args)
+    assert "KeyError" in caplog.text
+    assert "secret-table-name" not in caplog.text
+    assert "gold.t" not in caplog.text
+
+
+def test_expected_errors_pass_through_the_safety_net() -> None:
+    """A syntax error keeps its own type; the net does not rewrite it."""
+    with pytest.raises(sqlglot.errors.ParseError):
+        query_rewrite.check_blacklist("SELECT FROM WHERE (")
