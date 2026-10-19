@@ -996,6 +996,28 @@ that load the asset's inputs are served even when there is only one worker. The 
 (`print` and tracebacks included), up to 1 MiB, with the task's token redacted. What fails, what is
 retried and what the messages mean: "Python assets", "Failure, retry and cancel".
 
+`lakana runs logs RUN_ID --follow` asks the server only for what is new: it remembers the byte it
+reached per task and fetches from there, so a long log travels once. It ends when the run has
+finished or, with `--task`, when that task has finished and its log is read to the end. Without
+`--follow` the whole log is printed, as before.
+
+The same works over REST and in the SDK (`client.runs.log(env, run_id, asset, offset=N)`):
+`GET /api/v1/environments/{env}/runs/{run_id}/tasks/{asset}/log?offset=N`. Without `offset` the answer
+is the whole log. With it, `text` starts at byte `N` of the log and the answer adds:
+
+| Field | Meaning |
+|---|---|
+| `next_offset` | The byte where `text` ends. Send it as the next `offset`. Always present. |
+| `more` | `true` when stored bytes remain after `next_offset`: one answer holds at most 1 MiB, so ask again at once. |
+| `complete` | `true` when the task has finished and `text` reaches the end of its log: stop asking. |
+| `reset` | `true` when `offset` was beyond the end of the log (it is shorter than before, for example removed). `text` is empty; continue from `next_offset`. |
+
+Offsets count the bytes of the text you receive, which is stored already redacted, so a cut between
+two answers never reveals a secret. An answer never ends inside a multi-byte character: it stops
+before it, and `next_offset` says where to continue. An `offset` that falls inside a character
+starts at that character's first byte. An `offset` that is negative or not a whole number is a 422;
+one beyond the end is not an error. Rights are those of the whole-log request.
+
 `lakana scheduler status` (admin) shows which worker holds the scheduler role and the queue.
 Set `LAKANA_RUN__*` and `LAKANA_QUERY_LIMITS__*` where both the server and the workers read them (the
 Compose bundle's shared `x-lakana-env` block).

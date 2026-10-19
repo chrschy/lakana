@@ -98,6 +98,10 @@ def _log_out(view: TaskLogView) -> TaskLogOut:
         asset=view.asset,
         text=view.text,
         attempts=[TaskAttemptOut(**dataclasses.asdict(a)) for a in view.attempts],
+        next_offset=view.next_offset,
+        more=view.more,
+        complete=view.complete,
+        reset=view.reset,
     )
 
 
@@ -421,10 +425,16 @@ def task_log(
     env: str,
     run_id: uuid.UUID,
     asset: str,
+    offset: int | None = Query(
+        None, ge=0, description="Read the log from this byte; omit for the whole log."
+    ),
     principal: PrincipalRef = Depends(get_principal),
     service: RunService = Depends(get_run_service),
 ) -> TaskLogOut:
     """Return a task's free-text log and attempts (needs `READ_ENVIRONMENT` or `RUN`).
+
+    With `offset`, only the text from that byte on (at most 1 MiB, ending before a half
+    character) and `next_offset` to continue from.
 
     Parameters
     ----------
@@ -434,6 +444,8 @@ def task_log(
         The run.
     asset
         The task's dotted table name.
+    offset
+        The byte to read from.
     principal
         The authenticated caller.
     service
@@ -442,9 +454,9 @@ def task_log(
     Returns
     -------
     TaskLogOut
-        Text and attempts.
+        Text, where to continue, and attempts.
     """
-    return _log_out(service.task_log(principal, env, run_id, asset))
+    return _log_out(service.task_log(principal, env, run_id, asset, offset))
 
 
 @scheduler_router.get("/scheduler", response_model=SchedulerOut)

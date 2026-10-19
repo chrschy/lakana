@@ -9,6 +9,8 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from lakana_core.models import Run, RunStatus, TaskRun, TaskStatus
+from lakana_core.runs.service import task_log_path
+from lakana_core.storage.resolver import StorageResolver
 from tests.api.platform.test_deployments_run_as import _deploy
 from tests.api.platform.test_deploys import _token_for
 from tests.conftest import AUTH_HEADER
@@ -31,7 +33,39 @@ def test_start_show_list_and_log(client: TestClient) -> None:
     assert listed[0]["tasks"] == []
     log = client.get(f"{_RUNS}/{body['id']}/tasks/silver.clean/log", headers=AUTH_HEADER)
     assert log.status_code == 200
-    assert log.json() == {"run_id": body["id"], "asset": "silver.clean", "text": "", "attempts": []}
+    assert log.json() == {
+        "run_id": body["id"],
+        "asset": "silver.clean",
+        "text": "",
+        "attempts": [],
+        "next_offset": 0,
+        "more": False,
+        "complete": False,
+        "reset": False,
+    }
+
+
+def test_task_log_from_an_offset(client: TestClient) -> None:
+    """`offset` returns the text from that byte and where to continue; bad values are 422."""
+    _deploy(client)
+    run = client.post(_RUNS, headers=AUTH_HEADER, json={"repository": "analytics"}).json()
+    url = f"{_RUNS}/{run['id']}/tasks/silver.clean/log"
+    with Session(client.app.state.engine) as session:
+        StorageResolver(session).for_environment("dev").storage.write(
+            task_log_path(uuid.UUID(run["id"]), "silver.clean"), "ä one\ntwo\n".encode()
+        )
+    whole = client.get(url, headers=AUTH_HEADER).json()
+    assert (whole["text"], whole["next_offset"]) == ("ä one\ntwo\n", 11)
+    tail = client.get(url, headers=AUTH_HEADER, params={"offset": 7}).json()
+    assert (tail["text"], tail["next_offset"], tail["reset"]) == ("two\n", 11, False)
+    zero = client.get(url, headers=AUTH_HEADER, params={"offset": 0}).json()
+    assert zero["text"] == whole["text"]
+    past = client.get(url, headers=AUTH_HEADER, params={"offset": 50})
+    assert past.status_code == 200
+    assert (past.json()["text"], past.json()["next_offset"], past.json()["reset"]) == ("", 11, True)
+    for bad in ("-1", "abc", "1.5"):
+        assert client.get(url, headers=AUTH_HEADER, params={"offset": bad}).status_code == 422
+    assert client.get(url).status_code == 401
 
 
 def test_second_start_is_409_and_cancel_then_resume(client: TestClient) -> None:

@@ -2367,12 +2367,26 @@ class TaskLogOut(BaseModel):
         Free-text log.
     attempts
         Structured attempts.
+    next_offset
+        The byte offset of the end of `text` in the stored log; send it as `offset` to
+        read only what comes after.
+    more
+        Whether stored bytes remain after `next_offset` (one response is cut at 1 MiB).
+    complete
+        Whether the task has finished and `text` reaches the end of its log.
+    reset
+        Whether the requested `offset` lay beyond the end of the log, which only happens when
+        the log is shorter than before; start again from `next_offset`.
     """
 
     run_id: uuid.UUID
     asset: str
     text: str
     attempts: list[TaskAttemptOut]
+    next_offset: int
+    more: bool
+    complete: bool
+    reset: bool
 
 
 class QueryListOut(BaseModel):

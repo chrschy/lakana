@@ -768,6 +768,173 @@ def test_task_log_returns_text_and_attempts(
         _service(session).task_log(principal, "dev", started.id, "gold.ghost")
 
 
+def _log_of(session: Session, run_id: uuid.UUID, data: bytes) -> None:
+    """Store `data` as the log of ``gold.daily``.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    run_id
+        The run.
+    data
+        The log's bytes.
+    """
+    StorageResolver(session).for_environment("dev").storage.write(
+        task_log_path(run_id, "gold.daily"), data
+    )
+
+
+def test_task_log_without_an_offset_is_the_whole_log_with_its_end(
+    session: Session, version: JobVersion, principal: PrincipalRef
+) -> None:
+    """No offset: all of the text, `next_offset` is its byte length, nothing is cut."""
+    started = _service(session).start(principal, "dev", "analytics", Selection())
+    _log_of(session, started.id, "ä line\n".encode())
+    log = _service(session).task_log(principal, "dev", started.id, "gold.daily")
+    assert (log.text, log.next_offset, log.more, log.reset) == ("ä line\n", 8, False, False)
+    assert log.complete is False
+
+
+def test_task_log_follows_appends_and_reads_each_byte_once(
+    session: Session, version: JobVersion, principal: PrincipalRef
+) -> None:
+    """Offset 0 is the whole log; continuing from `next_offset` yields only what was appended."""
+    started = _service(session).start(principal, "dev", "analytics", Selection())
+    service = _service(session)
+    first = service.task_log(principal, "dev", started.id, "gold.daily", offset=0)
+    assert (first.text, first.next_offset) == ("", 0)
+    seen = ""
+    offset = 0
+    for block in ("one\n", "zwei ä\n", "", "drei\n"):
+        _log_of(session, started.id, (seen + block).encode())
+        part = service.task_log(principal, "dev", started.id, "gold.daily", offset=offset)
+        assert part.text == block
+        seen += block
+        offset = part.next_offset
+        assert offset == len(seen.encode())
+
+
+def test_task_log_never_splits_a_character(
+    session: Session,
+    version: JobVersion,
+    principal: PrincipalRef,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A chunk ends before a half character; an offset inside one starts at its first byte."""
+    monkeypatch.setattr("lakana_core.runs.service.LOG_CHUNK_BYTES", 4)
+    started = _service(session).start(principal, "dev", "analytics", Selection())
+    _log_of(session, started.id, "abcä€xyz".encode())  # a=0 b=1 c=2 ä=3-4 €=5-7 x=8
+    service = _service(session)
+    first = service.task_log(principal, "dev", started.id, "gold.daily", offset=0)
+    assert (first.text, first.next_offset, first.more) == ("abc", 3, True)
+    middle = service.task_log(principal, "dev", started.id, "gold.daily", offset=3)
+    assert (middle.text, middle.next_offset, middle.more) == ("ä", 5, True)
+    second = service.task_log(principal, "dev", started.id, "gold.daily", offset=5)
+    assert (second.text, second.next_offset, second.more) == ("€x", 9, True)
+    third = service.task_log(principal, "dev", started.id, "gold.daily", offset=9)
+    assert (third.text, third.next_offset, third.more) == ("yz", 11, False)
+    inside = service.task_log(principal, "dev", started.id, "gold.daily", offset=6)
+    assert (inside.text, inside.next_offset) == ("€x", 9)
+
+
+def test_a_secret_never_shows_in_any_chunk_of_a_log_read_in_pieces(
+    session: Session,
+    version: JobVersion,
+    principal: PrincipalRef,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The log is stored redacted, so no chunk boundary can reveal what was cut out of it."""
+    secret = "tok-123456"
+    stored = "connect with token=<redacted> now\n"
+    started = _service(session).start(principal, "dev", "analytics", Selection())
+    _log_of(session, started.id, stored.encode())
+    for size in range(1, len(stored) + 1):
+        monkeypatch.setattr("lakana_core.runs.service.LOG_CHUNK_BYTES", size)
+        chunks: list[str] = []
+        offset = 0
+        more = True
+        while more:
+            part = _service(session).task_log(
+                principal, "dev", started.id, "gold.daily", offset=offset
+            )
+            chunks.append(part.text)
+            offset, more = part.next_offset, part.more
+        assert "".join(chunks) == stored
+        assert not any(secret in chunk for chunk in chunks)
+
+
+def test_task_log_beyond_the_end_is_empty_and_says_the_log_shrank(
+    session: Session, version: JobVersion, principal: PrincipalRef
+) -> None:
+    """An offset past the end is not an error: empty text, the real length, `reset`."""
+    started = _service(session).start(principal, "dev", "analytics", Selection())
+    _log_of(session, started.id, b"abc\n")
+    log = _service(session).task_log(principal, "dev", started.id, "gold.daily", offset=99)
+    assert (log.text, log.next_offset, log.reset) == ("", 4, True)
+    at_end = _service(session).task_log(principal, "dev", started.id, "gold.daily", offset=4)
+    assert (at_end.text, at_end.next_offset, at_end.reset) == ("", 4, False)
+
+
+def test_task_log_is_complete_once_the_task_is_finished_and_everything_was_read(
+    session: Session, version: JobVersion, principal: PrincipalRef
+) -> None:
+    """`complete` needs a terminal task and the end of the log in this response."""
+    started = _service(session).start(principal, "dev", "analytics", Selection())
+    _log_of(session, started.id, b"abcdefgh")
+    task = session.scalars(select(TaskRun).where(TaskRun.asset == "gold.daily")).one()
+    task.status = TaskStatus.SUCCEEDED
+    session.commit()
+    service = _service(session)
+    whole = service.task_log(principal, "dev", started.id, "gold.daily", offset=0)
+    assert (whole.complete, whole.more) == (True, False)
+    task.status = TaskStatus.RUNNING
+    session.commit()
+    running = service.task_log(principal, "dev", started.id, "gold.daily", offset=8)
+    assert running.complete is False
+
+
+def test_task_log_is_not_complete_while_more_is_left(
+    session: Session,
+    version: JobVersion,
+    principal: PrincipalRef,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A finished task whose log is read in several chunks is complete only in the last."""
+    monkeypatch.setattr("lakana_core.runs.service.LOG_CHUNK_BYTES", 4)
+    started = _service(session).start(principal, "dev", "analytics", Selection())
+    _log_of(session, started.id, b"abcdefgh")
+    task = session.scalars(select(TaskRun).where(TaskRun.asset == "gold.daily")).one()
+    task.status = TaskStatus.FAILED
+    session.commit()
+    service = _service(session)
+    first = service.task_log(principal, "dev", started.id, "gold.daily", offset=0)
+    assert (first.text, first.complete, first.more) == ("abcd", False, True)
+    last = service.task_log(principal, "dev", started.id, "gold.daily", offset=4)
+    assert (last.text, last.complete, last.more) == ("efgh", True, False)
+
+
+def test_task_log_with_a_storage_failure_keeps_the_offset(
+    session: Session,
+    version: JobVersion,
+    principal: PrincipalRef,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unreadable storage returns no text and does not move the client's offset."""
+    started = _service(session).start(principal, "dev", "analytics", Selection())
+
+    class Broken:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def for_environment(self, name: str) -> object:
+            raise OSError("storage down")
+
+    monkeypatch.setattr("lakana_core.runs.service.StorageResolver", Broken)
+    log = _service(session).task_log(principal, "dev", started.id, "gold.daily", offset=7)
+    assert (log.text, log.next_offset, log.reset, log.complete) == ("", 7, False, False)
+
+
 def test_scheduler_status_counts_and_needs_admin(
     session: Session, version: JobVersion, principal: PrincipalRef
 ) -> None:

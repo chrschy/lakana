@@ -1738,12 +1738,25 @@ class TaskLog:
         The free-text log.
     attempts
         Attempts, oldest first.
+    next_offset
+        The byte offset where `text` ends in the stored log; pass it as `offset` to read on.
+    more
+        Whether stored bytes remain after `next_offset` (one answer holds at most 1 MiB).
+    complete
+        Whether the task is finished and `text` reaches the end of its log.
+    reset
+        Whether the requested offset lay beyond the end of the log (it shrank); continue
+        from `next_offset`.
     """
 
     run_id: str
     asset: str
     text: str
     attempts: list[TaskAttempt]
+    next_offset: int
+    more: bool
+    complete: bool
+    reset: bool
 
 
 @dataclass(frozen=True)
