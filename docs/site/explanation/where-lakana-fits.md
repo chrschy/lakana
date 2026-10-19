@@ -77,6 +77,9 @@ What that choice costs:
   file has no field ids, when it adds more than 2,000 files, or when the check takes longer than
   60 seconds; split a large load into several commits
   ([the refusals](../reference/checks.md#when-a-commit-through-the-iceberg-rest-catalog-is-refused)).
+- **Data files must be Parquet.** Lakana reads only Parquet data files, and a commit that adds ORC
+  or Avro files is refused
+  ([the refusals](../reference/checks.md#when-a-commit-through-the-iceberg-rest-catalog-is-refused)).
 - **Filters and masks follow type rules.** Because a filter or mask runs on every stored value,
   Lakana refuses one that would need a conversion (`region = 5` on a text column), and a mask must
   give a value of the column's own type. A filter or mask names a column, so after a rename reads
