@@ -407,12 +407,55 @@ error. Making it a `SELECT` of the list would quietly run text DuckDB itself rej
 refused here with the spelling that works.
 """
 
+_VALUES_CLAUSE_MESSAGE = (
+    "A VALUES list on its own takes no {clause}; write "
+    "SELECT * FROM (VALUES ...) AS t(a, b) {clause} ... instead."
+)
+"""Why a bare `VALUES` list carrying a clause other than `ORDER BY`, `LIMIT` or `OFFSET` is
+refused, naming the clause and the form that takes it."""
+
 _VALUES_MODIFIERS = ("order", "limit", "offset")
 """The `exp.Values` arguments that apply to the whole result and move to the `SELECT` around it.
 
-Read from `sqlglot.expressions.Values.arg_types`: besides these it has only `expressions` (the
-rows) and `alias`. An `ORDER BY` left inside a derived table need not order the outer result.
+An `ORDER BY` left inside a derived table need not order the outer result.
 """
+
+_VALUES_ARGS = frozenset({"expressions", *_VALUES_MODIFIERS})
+"""The only arguments a bare `VALUES` list may carry: its rows and `_VALUES_MODIFIERS`.
+
+An allow-list: sqlglot attaches every query modifier (`WHERE`, `GROUP BY`, `JOIN`, `SORT BY`,
+`FOR UPDATE`, ...) to whatever a query parses to, an `exp.Values` included, although
+`exp.Values.arg_types` lists none of them. DuckDB refuses each of them on a bare `VALUES`, and
+`_select_of_values` would drop them or render them in the wrong place, so any argument not
+listed here is refused, also one a later sqlglot adds.
+"""
+
+_VALUES_CLAUSES = {
+    "alias": "alias",
+    "where": "WHERE",
+    "group": "GROUP BY",
+    "having": "HAVING",
+    "qualify": "QUALIFY",
+    "windows": "WINDOW",
+    "joins": "JOIN",
+    "laterals": "LATERAL",
+    "pivots": "PIVOT",
+    "sample": "TABLESAMPLE",
+    "sort": "SORT BY",
+    "cluster": "CLUSTER BY",
+    "distribute": "DISTRIBUTE BY",
+    "locks": "FOR UPDATE",
+    "connect": "CONNECT BY",
+    "match": "MATCH_RECOGNIZE",
+    "prewhere": "PREWHERE",
+    "settings": "SETTINGS",
+    "format": "FORMAT",
+    "options": "OPTION",
+    "for_": "FOR",
+}
+"""How a refusal names each argument of `exp.Values.arg_types` and `exp.QUERY_MODIFIERS`
+outside `_VALUES_ARGS`. An argument missing here is refused all the same, under its own key;
+a test fails when sqlglot adds one, so it gets a name."""
 
 
 @dataclass(frozen=True)
@@ -872,9 +915,10 @@ def _select_of_values(values: exp.Values) -> exp.Select:
     Raises
     ------
     ValidationError
-        If the list carries an alias, which DuckDB refuses on a bare `VALUES`.
+        If the list carries an alias or a clause DuckDB refuses on a bare `VALUES`; see
+        `_reject_values_clauses`.
     """
-    _reject_aliased_values(values)
+    _reject_values_clauses(values)
     select = exp.Select(expressions=[exp.Star()])
     for key in _VALUES_MODIFIERS:
         modifier = values.args.get(key)
@@ -885,8 +929,8 @@ def _select_of_values(values: exp.Values) -> exp.Select:
     return select.from_(values, copy=False)
 
 
-def _reject_aliased_values(values: exp.Values) -> None:
-    """Refuse a bare `VALUES` list that carries an alias.
+def _reject_values_clauses(values: exp.Values) -> None:
+    """Refuse a bare `VALUES` list that carries anything but its rows, an order and a limit.
 
     Parameters
     ----------
@@ -896,10 +940,16 @@ def _reject_aliased_values(values: exp.Values) -> None:
     Raises
     ------
     ValidationError
-        If it has an alias; see `_ALIASED_VALUES_MESSAGE`.
+        If it carries an argument outside `_VALUES_ARGS` — an alias (`_ALIASED_VALUES_MESSAGE`)
+        or a clause such as `WHERE` or `JOIN` (`_VALUES_CLAUSE_MESSAGE`, naming the clause).
     """
-    if values.args.get("alias") is not None:
-        raise ValidationError(_ALIASED_VALUES_MESSAGE)
+    for key, value in values.args.items():
+        if key in _VALUES_ARGS or value is None or value == []:
+            continue
+        if key == "alias":
+            raise ValidationError(_ALIASED_VALUES_MESSAGE)
+        clause = _VALUES_CLAUSES.get(key, key.upper())
+        raise ValidationError(_VALUES_CLAUSE_MESSAGE.format(clause=clause))
 
 
 def _parse_checked(sql: str, dialect: str) -> exp.Expr:
@@ -927,7 +977,8 @@ def _parse_checked(sql: str, dialect: str) -> exp.Expr:
         bindings `_cte_reference_ids` cannot classify soundly — see
         `_reject_recursive_ctes`. Or if it holds a statement that is not a read
         anywhere, see `_reject_statements_inside`. Or if it is a bare `VALUES` list with an
-        alias, see `_reject_aliased_values`. `check_blacklist` already refuses these
+        alias or a clause other than `ORDER BY`, `LIMIT` and `OFFSET`, see
+        `_reject_values_clauses`. `check_blacklist` already refuses these
         first in `lakana_worker.pipeline.run_one`, so this is defence in
         depth: the promise `extract_table_refs` makes its caller is that
         every name it leaves out is genuinely not a table, and it cannot
@@ -1788,7 +1839,8 @@ def check_blacklist(sql: str, dialect: str = "duckdb") -> None:
         the pinned `sqlglot` version, not assumed); if it is a `LOAD` or
         `CREATE SECRET` command; if it contains a query parameter or
         placeholder; if the statement as a whole is neither a query nor a `VALUES`
-        list, or is a `VALUES` list with an alias; if a statement that
+        list, or is a `VALUES` list with an alias or a clause other than `ORDER BY`,
+        `LIMIT` and `OFFSET`; if a statement that
         is not a read sits anywhere inside it; or if it
         contains a `WITH RECURSIVE` clause.
     """
@@ -1818,6 +1870,6 @@ def check_blacklist(sql: str, dialect: str = "duckdb") -> None:
             "submit one SELECT statement."
         )
     if isinstance(parsed, exp.Values):
-        _reject_aliased_values(parsed)
+        _reject_values_clauses(parsed)
     _reject_statements_inside(parsed, dialect)
     _reject_recursive_ctes(parsed)

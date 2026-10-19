@@ -2204,7 +2204,9 @@ tree, so the rows of a `VALUES` list are checked as a `SELECT` list is, with the
 table functions, blacklisted functions (`read_csv`, `getvariable`, `query`, `current_query`),
 placeholders, statements inside and `WITH RECURSIVE`. sqlglot builds no scope for a top-level
 `exp.Values`, so `_parse_checked` makes it `SELECT * FROM (VALUES ...) AS __lakana_values`
-(its `ORDER BY`, `LIMIT` and `OFFSET` move to the `SELECT`) before the scope-based steps run:
+(its `ORDER BY`, `LIMIT` and `OFFSET` move to the `SELECT`; any other argument — an alias,
+`WHERE`, `JOIN`, `SORT BY`, `FOR UPDATE`, which sqlglot attaches and DuckDB refuses there — is
+refused by the allow-list `_VALUES_ARGS`) before the scope-based steps run:
 the ambiguity gate, `WITH` binding resolution and the rewrite's CTEs then see the subqueries in
 its rows. `_reject_statements_inside` then walks the
 whole tree: a node of a statement class (`exp.DML`, which covers `INSERT`, `UPDATE`, `DELETE`,

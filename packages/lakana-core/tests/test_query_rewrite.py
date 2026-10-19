@@ -1734,3 +1734,66 @@ def test_a_bare_values_list_with_an_alias_is_refused_as_duckdb_refuses_it(sql: s
         extract_table_refs(sql)
     with pytest.raises(ValidationError, match=message):
         rewrite_query(sql, {})
+
+
+_VALUES_CLAUSES_DUCKDB_REFUSES = [
+    pytest.param("SORT BY 1", "SORT BY", id="sort-by"),
+    pytest.param("CLUSTER BY 1", "CLUSTER BY", id="cluster-by"),
+    pytest.param("DISTRIBUTE BY 1", "DISTRIBUTE BY", id="distribute-by"),
+    pytest.param("FOR UPDATE", "FOR UPDATE", id="for-update"),
+    pytest.param("WHERE TRUE", "WHERE", id="where"),
+    pytest.param("QUALIFY TRUE", "QUALIFY", id="qualify"),
+    pytest.param("HAVING TRUE", "HAVING", id="having"),
+    pytest.param("WINDOW w AS (ORDER BY 1)", "WINDOW", id="window"),
+    pytest.param("TABLESAMPLE (10 ROWS)", "TABLESAMPLE", id="tablesample"),
+    pytest.param("USING SAMPLE 10", "TABLESAMPLE", id="using-sample"),
+    pytest.param("GROUP BY 1", "GROUP BY", id="group-by"),
+    pytest.param("JOIN bronze.x ON TRUE", "JOIN", id="join"),
+]
+"""Clauses sqlglot attaches to a bare `VALUES` and DuckDB refuses there, with the name refused."""
+
+
+@pytest.mark.parametrize(("clause", "name"), _VALUES_CLAUSES_DUCKDB_REFUSES)
+def test_a_clause_duckdb_does_not_take_on_a_bare_values_list_is_refused(
+    clause: str, name: str
+) -> None:
+    """The rewrite would drop the clause or render it in the wrong place; it is refused instead.
+
+    Parameters
+    ----------
+    clause
+        The clause after the `VALUES` list.
+    name
+        The clause's name, as the refusal states it.
+    """
+    sql = f"VALUES (1) {clause}"
+    message = (
+        f"A VALUES list on its own takes no {name}; write "
+        f"SELECT * FROM (VALUES ...) AS t(a, b) {name} ... instead."
+    )
+    for check in (check_blacklist, extract_table_refs, lambda text: rewrite_query(text, {})):
+        with pytest.raises(ValidationError) as caught:
+            check(sql)
+        assert str(caught.value) == message
+
+
+def test_every_argument_sqlglot_can_set_on_values_is_allowed_or_refused_by_name() -> None:
+    """A sqlglot upgrade that gives `exp.Values` a new argument fails here, not in production.
+
+    sqlglot sets the query modifiers (`WHERE`, `JOIN`, ...) on any expression a query parses to,
+    so they are listed beside `exp.Values.arg_types`.
+    """
+    known = set(exp.Values.arg_types) | set(exp.QUERY_MODIFIERS)
+
+    assert known <= query_rewrite._VALUES_ARGS | set(query_rewrite._VALUES_CLAUSES)
+    assert not query_rewrite._VALUES_ARGS & set(query_rewrite._VALUES_CLAUSES)
+
+
+def test_an_argument_on_values_with_no_name_yet_is_refused_all_the_same() -> None:
+    """Allow-list, not deny-list: an argument nobody named is refused under its own key."""
+    values = sqlglot.parse_one("VALUES (1)", dialect="duckdb")
+    assert isinstance(values, exp.Values)
+    values.set("novel", exp.Literal.number(1))
+
+    with pytest.raises(ValidationError, match="takes no NOVEL"):
+        query_rewrite._reject_values_clauses(values)
