@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.16.0](https://github.com/lakana-labs/lakana/compare/v0.15.0...v0.16.0) (2026-10-19)
+
+
+### ⚠ BREAKING CHANGES
+
+* **server:** `GET /api/v1/grants` without a filter now returns every grant, paged (100 per page; follow `X-Next-Cursor`), where it returned only the instance grants. To list the instance grants, filter the result to grants without an environment. The principal and group lists now come newest first, 100 per page, and are paged the same way; pass `limit` and follow `X-Next-Cursor` to read them all.
+
+### Features
+
+* **catalog:** describe tables and columns ([#183](https://github.com/lakana-labs/lakana/issues/183)) ([daeb547](https://github.com/lakana-labs/lakana/commit/daeb547dd4a91827cd971df53fd2c4eee14707ba)), closes [#140](https://github.com/lakana-labs/lakana/issues/140)
+* **catalog:** show a table's health ([#184](https://github.com/lakana-labs/lakana/issues/184)) ([d0cd6eb](https://github.com/lakana-labs/lakana/commit/d0cd6eb50961b105acb08b8198351844a68f1586)), closes [#141](https://github.com/lakana-labs/lakana/issues/141)
+* **core:** stable failure codes with a next step for tasks ([#188](https://github.com/lakana-labs/lakana/issues/188)) ([9f7068c](https://github.com/lakana-labs/lakana/commit/9f7068cc4cc31d5a0028c2e95d558c51914322a4)), closes [#145](https://github.com/lakana-labs/lakana/issues/145)
+* **server:** filter and page the runs, queries and deploys lists ([#186](https://github.com/lakana-labs/lakana/issues/186)) ([c29a457](https://github.com/lakana-labs/lakana/commit/c29a4572e9062deb5ede196bb36aefe7c1e6c530)), closes [#143](https://github.com/lakana-labs/lakana/issues/143)
+* **server:** list grants, explain permissions, search principals and groups ([#191](https://github.com/lakana-labs/lakana/issues/191)) ([225df7c](https://github.com/lakana-labs/lakana/commit/225df7cb6405f601995265ab5b28fc6092de8615)), closes [#147](https://github.com/lakana-labs/lakana/issues/147)
+* **server:** read a task's log from an offset ([#187](https://github.com/lakana-labs/lakana/issues/187)) ([f117cd6](https://github.com/lakana-labs/lakana/commit/f117cd67e4e693d5f0175f9f13f39ffa91ed44cd)), closes [#144](https://github.com/lakana-labs/lakana/issues/144)
+* **server:** search tables, columns, runs and people ([#185](https://github.com/lakana-labs/lakana/issues/185)) ([217df80](https://github.com/lakana-labs/lakana/commit/217df80f662aaea8b51ace8a2ac570130199d400)), closes [#139](https://github.com/lakana-labs/lakana/issues/139)
+* **server:** show a job's triggers ([#190](https://github.com/lakana-labs/lakana/issues/190)) ([3c222b2](https://github.com/lakana-labs/lakana/commit/3c222b2a4140070bd921cec85d73830b66dc9b94)), closes [#146](https://github.com/lakana-labs/lakana/issues/146)
+
+
+### Bug Fixes
+
+* keep file names in long paths, bound commit-check reads, name a lock wait, faster CLI tests ([#193](https://github.com/lakana-labs/lakana/issues/193)) ([f99dd50](https://github.com/lakana-labs/lakana/commit/f99dd50b4c475cc8dd89cf9fee1106f50d463df8)), closes [#165](https://github.com/lakana-labs/lakana/issues/165) [#171](https://github.com/lakana-labs/lakana/issues/171) [#95](https://github.com/lakana-labs/lakana/issues/95) [#101](https://github.com/lakana-labs/lakana/issues/101)
+* **policy:** check a row filter's or column mask's types at creation, and keep a mask's column type ([#177](https://github.com/lakana-labs/lakana/issues/177)) ([42710ba](https://github.com/lakana-labs/lakana/commit/42710ba76403fadce4a5dbedfa516612ba15c5fa)), closes [#126](https://github.com/lakana-labs/lakana/issues/126)
+* **worker:** create the attempts directory at start, not in the image ([#181](https://github.com/lakana-labs/lakana/issues/181)) ([ba6c97a](https://github.com/lakana-labs/lakana/commit/ba6c97a619104ad3d1be503ddc4bd09b1a556874)), closes [#173](https://github.com/lakana-labs/lakana/issues/173)
+
 ## [0.15.0](https://github.com/lakana-labs/lakana/compare/v0.14.0...v0.15.0) (2026-10-18)
 
 
