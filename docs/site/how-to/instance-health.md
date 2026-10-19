@@ -129,12 +129,12 @@ lakana runs list --env dev --status queued,running
 
 Use the name of your own environment instead of `dev`. You see your own queries; with
 `MANAGE_ENVIRONMENT` on the environment you see everyone's. The `waiting_for` column of the query
-listing gives the reason each one waits. To see what failed lately, change the date of this
-listing:
+listing gives the reason each one waits. To see what failed in the last day, use this listing (on macOS, write `date -u -v-1d +%Y-%m-%dT%H:%M:%SZ`
+instead of the `date` command shown):
 
 <!-- source: docs/examples/getting-started/run.sh#find-failed-run -->
 ```bash
-lakana runs list --env dev --status failed --since 2026-10-18
+lakana runs list --env dev --status failed --since "$(date -u -d '1 day ago' +%Y-%m-%dT%H:%M:%SZ)"
 ```
 
 More filters and paging: [Find a run, a query or a deploy](find-a-run.md).

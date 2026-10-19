@@ -7,11 +7,11 @@ the [reference](../reference/lists.md).
 ## Find a failed run since yesterday
 
 `lakana runs list` takes a status and a time. `--since` accepts a date, which is read in your time
-zone, or a full time such as `2026-10-18T09:30:00Z`. Use yesterday's date:
+zone, or a full time such as `2026-10-18T09:30:00Z`. `date` writes the time of 24 hours ago, which lists what failed since then. On macOS, write `date -u -v-1d +%Y-%m-%dT%H:%M:%SZ` instead:
 
 <!-- source: docs/examples/getting-started/run.sh#find-failed-run -->
 ```bash
-lakana runs list --env dev --status failed --since 2026-10-18
+lakana runs list --env dev --status failed --since "$(date -u -d '1 day ago' +%Y-%m-%dT%H:%M:%SZ)"
 ```
 
 When nothing failed, the list is empty. Add `--job nightly` to see one job's runs, `--trigger

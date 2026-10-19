@@ -123,9 +123,9 @@ python3 -c 'import json,sys; assert json.loads(sys.argv[1]) == [], sys.argv[1]' 
 # The how-to "Find a run, a query or a deploy" shows one filter per list. The run above succeeded
 # and nothing failed or was cancelled, so a filter on `failed` finds nothing.
 # docs:start find-failed-run
-lakana runs list --env dev --status failed --since 2026-10-18
+lakana runs list --env dev --status failed --since "$(date -u -d '1 day ago' +%Y-%m-%dT%H:%M:%SZ)"
 # docs:end find-failed-run
-out=$(lakana --output json runs list --env dev --status failed --since 2026-10-18)
+out=$(lakana --output json runs list --env dev --status failed --since "$(date -u -d '1 day ago' +%Y-%m-%dT%H:%M:%SZ)")
 python3 -c 'import json,sys; assert json.loads(sys.argv[1]) == [], sys.argv[1]' "$out"
 out=$(lakana --output json runs list --env dev --status succeeded,failed,cancelled --since 2020-01-01 --trigger manual)
 python3 -c 'import json,sys; assert json.loads(sys.argv[1]) == [], sys.argv[1]' "$out"
