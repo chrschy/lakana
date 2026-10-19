@@ -20,6 +20,13 @@ from lakana_core.runs.checks import (
     RUN_STOPPED_MESSAGE,
     SET_BACK_LOST,
 )
+from lakana_core.runs.failures import FailureCode
+
+_ENDING_CODES: Mapping[TaskStatus, FailureCode] = {
+    TaskStatus.CANCELLED: FailureCode.CANCELLED,
+    TaskStatus.UPSTREAM_FAILED: FailureCode.UPSTREAM_FAILED,
+}
+"""The code of a task the scheduler ends without a failure of its own."""
 
 MAX_BACKOFF_SECONDS = 600.0
 """No retry waits longer than ten minutes."""
@@ -245,6 +252,10 @@ class TaskTransition:
         *written* stamp or the evidence) instead.
     error_message
         For a failure, why.
+    failure_code
+        For a failure, a cancel or an upstream failure, the code that goes with `error_message`;
+        `None` for any other move (a retry is no ending: the lost attempt gets its code in the
+        store).
     ready_at
         For a task becoming ready, the moment it did (the FIFO claim key).
     unchecked
@@ -273,6 +284,7 @@ class TaskTransition:
     next_attempt_at: datetime | None = None
     lost: bool = False
     error_message: str | None = None
+    failure_code: FailureCode | None = None
     ready_at: datetime | None = None
     unchecked: bool = False
     setting_back: bool = False
@@ -390,6 +402,7 @@ def _tick_run(run: RunSnapshot, now: datetime, rand: Callable[[], float]) -> lis
         next_attempt_at: datetime | None = None,
         lost: bool = False,
         error_message: str | None = None,
+        failure_code: FailureCode | None = None,
         ready_at: datetime | None = None,
         unchecked: bool = False,
         setting_back: bool = False,
@@ -413,6 +426,9 @@ def _tick_run(run: RunSnapshot, now: datetime, rand: Callable[[], float]) -> lis
             As for `TaskTransition`.
         error_message
             As for `TaskTransition`.
+        failure_code
+            As for `TaskTransition`; a task that ends ``cancelled`` or ``upstream_failed`` gets
+            the code of that ending when none is given.
         ready_at
             As for `TaskTransition`.
         unchecked
@@ -422,6 +438,7 @@ def _tick_run(run: RunSnapshot, now: datetime, rand: Callable[[], float]) -> lis
         ends_set_back
             As for `TaskTransition`.
         """
+        failure_code = failure_code or _ENDING_CODES.get(new)
         out.append(
             TaskTransition(
                 run.id,
@@ -433,6 +450,7 @@ def _tick_run(run: RunSnapshot, now: datetime, rand: Callable[[], float]) -> lis
                 next_attempt_at=next_attempt_at,
                 lost=lost,
                 error_message=error_message,
+                failure_code=failure_code,
                 ready_at=ready_at,
                 unchecked=unchecked,
                 setting_back=setting_back,
@@ -462,6 +480,9 @@ def _tick_run(run: RunSnapshot, now: datetime, rand: Callable[[], float]) -> lis
                     expected_claim=task.claim,
                     lost=True,
                     error_message=SET_BACK_LOST,
+                    failure_code=(
+                        FailureCode.CANCELLED if run.cancel_requested else FailureCode.WORKER_LOST
+                    ),
                     ends_set_back=True,
                 )
         elif task.unchecked and run.cancel_requested:
@@ -525,6 +546,7 @@ def _tick_run(run: RunSnapshot, now: datetime, rand: Callable[[], float]) -> lis
                 expected_claim=task.claim,
                 lost=True,
                 error_message=LOST_MESSAGE,
+                failure_code=FailureCode.WORKER_LOST,
             )
 
     if run.cancel_requested:

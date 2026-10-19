@@ -35,6 +35,7 @@ from lakana_core.models import (
     TaskStatus,
 )
 from lakana_core.models.run import ACTIVE_RUN_STATUSES
+from lakana_core.runs.failures import FailureCode
 from lakana_core.runs.scheduler import next_attempt_time
 from lakana_core.runs.store import awaiting_checks, may_have_written
 
@@ -662,6 +663,29 @@ def _must_be_set_back(
     return bool(wrote and ends_for_good)
 
 
+def _stored_code(kind: FailureKind | None, code: FailureCode | None) -> str | None:
+    """Pick the failure code an ending stores.
+
+    Parameters
+    ----------
+    kind
+        How the attempt ended, after the caller's conversions.
+    code
+        The code the caller gave.
+
+    Returns
+    -------
+    str or None
+        `None` for a success and a release; ``cancelled`` for a cancel; the caller's code for any
+        other failure, or ``internal`` when it gave none.
+    """
+    if kind is None or kind is FailureKind.RELEASED:
+        return None
+    if kind is FailureKind.CANCELLED:
+        return FailureCode.CANCELLED.value
+    return (code or FailureCode.INTERNAL).value
+
+
 def record_attempt(
     session: Session,
     task_run_id: uuid.UUID,
@@ -671,6 +695,7 @@ def record_attempt(
     kind: FailureKind | None,
     rand: Callable[[], float],
     error_message: str | None = None,
+    failure_code: FailureCode | None = None,
     rows_written: int | None = None,
     on_committed: str | None = None,
     stopped: bool = False,
@@ -719,6 +744,10 @@ def record_attempt(
         Jitter source for the backoff.
     error_message
         The safe, redacted failure text.
+    failure_code
+        Why it failed, stored with the text on the task run and on the attempt. Dropped for a
+        success or a release, which are no failure; always ``cancelled`` for a cancel. A failure
+        recorded without one is ``internal``: only a failure nobody expected may be.
     rows_written
         Rows the write wrote.
     on_committed
@@ -794,10 +823,12 @@ def record_attempt(
             kind, error_message, rows_written = None, on_committed, written
     attempt = task.attempt
     now = db_now(session)
+    stored_code = _stored_code(kind, failure_code)
     values: dict[str, object] = {
         "lease_owner": None,
         "lease_expires_at": None,
         "error_message": error_message,
+        "failure_code": stored_code,
     }
     hand_back = not setting_back and _must_be_set_back(session, task, kind, stopped=stopped)
     if hand_back:
@@ -830,8 +861,9 @@ def record_attempt(
                 next_attempt_at=now,
             )
             # The stored text is the reason the task will end with (a handed-back task keeps
-            # the stop's); a drain has none of its own.
+            # the stop's); a drain has none of its own. The same holds for its code.
             del values["error_message"]
+            del values["failure_code"]
         else:
             values.update(status=TaskStatus.PENDING, attempt=attempt - 1, next_attempt_at=now)
         outcome = AttemptOutcome.RELEASED
@@ -879,6 +911,7 @@ def record_attempt(
             finished_at=now,
             rows_written=rows_written,
             error_message=error_message,
+            failure_code=stored_code,
         )
         .execution_options(synchronize_session=False)
     )

@@ -957,6 +957,11 @@ column, and the line of `lakana run` for a task ends with the same sentence (for
 waits to try again prints the time of the next attempt instead of `retrying after attempt n/max`.
 [Why is my query or task waiting?](why-is-it-waiting.md) lists every sentence and what to do about it.
 
+A task that fails has a stable code and a next step. `lakana runs show` prints both under the
+error, and `lakana run` prints the next step when a task fails: `failed: timeout. Next: Make the
+task faster, or raise its timeout in the project and deploy again.`
+[Why did it fail?](../reference/why-did-it-fail.md) lists every code and what to do about it.
+
 ### Selection patterns
 
 `--select` (repeatable) takes case-sensitive shell globs (`*`, `?`, `[abc]`) over dotted table

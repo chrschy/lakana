@@ -229,6 +229,10 @@ class TaskRun(Base):
     upstream_json: Mapped[list] = mapped_column(JSON, default=list)
     conflict_retried: Mapped[bool] = mapped_column(Boolean, default=False)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    failure_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    """A `lakana_core.runs.failures.FailureCode` value, stored with `error_message`: why the task
+    failed. Null for a task that did not fail, and for a row from before the codes existed
+    (shown as ``unknown``)."""
     started_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
 
@@ -251,6 +255,8 @@ class TaskAttempt(Base):
     )
     rows_written: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    failure_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    """Why this attempt did not succeed (a `FailureCode` value); null otherwise and for old rows."""
 
 
 class SchedulerLease(Base):

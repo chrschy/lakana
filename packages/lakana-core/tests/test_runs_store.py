@@ -3454,3 +3454,78 @@ def test_a_stale_cancel_misses_a_waiting_task_that_has_unchecked_rows_since(
     assert apply_transitions(session, stale, NOW) is False
     assert scheduler_tick(session, NOW, _half) > 0
     assert _task(session, "silver.clean").setting_back is True
+
+
+def test_a_reclaimed_lease_gives_its_attempt_the_worker_lost_code(
+    session: Session, run_id: uuid.UUID
+) -> None:
+    """A retry is no failure of the task, but the lost attempt says why it did not finish."""
+    task = _running_with_open_attempt(session, NOW - timedelta(seconds=1))
+    scheduler_tick(session, NOW, _half)
+
+    attempt = session.scalars(select(TaskAttempt)).one()
+    session.refresh(task)
+    assert (task.status, task.failure_code) == (TaskStatus.PENDING, None)
+    assert (attempt.outcome, attempt.failure_code) == (AttemptOutcome.LOST, "worker_lost")
+
+
+def test_a_task_that_runs_out_of_attempts_after_a_lost_worker_stores_worker_lost(
+    session: Session, run_id: uuid.UUID
+) -> None:
+    """The failed task and its attempt carry the code; the task below it is `upstream_failed`."""
+    task = _running_with_open_attempt(session, NOW - timedelta(seconds=1))
+    task.attempt = task.max_attempts
+    session.commit()
+    scheduler_tick(session, NOW, _half)
+
+    attempt = session.scalars(select(TaskAttempt)).one()
+    session.refresh(task)
+    assert (task.status, task.failure_code, attempt.failure_code) == (
+        TaskStatus.FAILED,
+        "worker_lost",
+        "worker_lost",
+    )
+    assert _task(session, "gold.daily").failure_code == "upstream_failed"
+
+
+def test_a_cancelled_run_stores_the_cancelled_code_on_the_tasks_it_ends(
+    session: Session, run_id: uuid.UUID
+) -> None:
+    """The cancel loop ends the waiting tasks with the `cancelled` code."""
+    run = session.get(Run, run_id)
+    assert run is not None
+    run.cancel_requested = True
+    session.commit()
+    scheduler_tick(session, NOW, _half)
+
+    assert _task(session, "silver.clean").failure_code == "cancelled"
+    assert _task(session, "gold.daily").failure_code == "cancelled"
+
+
+def test_a_set_back_reclaim_clears_the_code_an_earlier_attempt_stored(
+    session: Session, run_id: uuid.UUID
+) -> None:
+    """The next worker ends the task with a reason of its own; an earlier failure's code goes."""
+    task, _ = _lost_task_with_write(session, run_id, rows=None, attempt=1)
+    _stamp(session, task)
+    _cancel(session, run_id)
+    stored = _task(session, "silver.clean")
+    stored.failure_code = "timeout"
+    stored.error_message = "too slow"
+    session.commit()
+    reclaim = TaskTransition(
+        run_id,
+        task.id,
+        TaskStatus.RUNNING,
+        TaskStatus.READY,
+        expected_owner="w1",
+        expected_claim=1,
+        lost=True,
+        ready_at=NOW,
+        setting_back=True,
+    )
+
+    assert apply_transitions(session, [reclaim], NOW) is True
+
+    stored = _task(session, "silver.clean")
+    assert (stored.error_message, stored.failure_code) == (None, None)

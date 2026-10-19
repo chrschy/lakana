@@ -125,6 +125,18 @@ Each cell is a summary. The page named in the last column has the detail. The ch
 
 ## Notes for the next release
 
+### Every task failure has a code and a next step
+
+Migration `0040` adds a nullable `failure_code` to `task_runs` and `task_attempts`. The rows that
+exist stay as they are: a task that failed before the upgrade has no code, and the API shows it as
+`unknown` (a display value that is never stored), with `error_message` unchanged. Every failure
+after the upgrade stores one of the codes in [Why did it fail?](../reference/why-did-it-fail.md).
+New: `failure` (`code`, `cause`, `next_step`) on each task and each attempt of the run routes, and
+`failed_tasks` on a run; `lakana runs show` prints the code and the next step, `lakana run` prints
+the next step of a task that fails. Nothing is removed: `error_message` stays as the detail. Going
+back to the previous release drops the codes. A worker that is older than the server stores none,
+so upgrade the workers together with the server.
+
 ### Search across tables, columns, runs and people
 
 Migration `0039` adds the table `table_columns`, which search reads to find columns. It starts empty
