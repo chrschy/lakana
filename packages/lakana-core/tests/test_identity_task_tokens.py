@@ -131,8 +131,8 @@ def test_mint_sets_expires_at_from_ttl(session: Session) -> None:
         _admin(session), "worker-1", environment="dev", asset_scope=[], ttl_seconds=300
     )
 
-    assert minted.expires_at > before
-    assert minted.expires_at <= before + timedelta(seconds=301)
+    after = datetime.now(UTC)
+    assert before + timedelta(seconds=300) <= minted.expires_at <= after + timedelta(seconds=300)
 
 
 def test_verify_rejects_an_expired_task_token(session: Session) -> None:

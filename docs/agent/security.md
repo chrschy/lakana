@@ -2284,6 +2284,20 @@ against a writer who holds storage credentials. Files committed before the check
 not checked; a file without field ids reads as NULL in every column. The check runs inside the
 request while its database session is open; releasing it before the reads is not done.
 
+**A query the guard cannot read is refused, never allowed.** sqlglot's parser sometimes fails
+on malformed text with an error that is not a `ParseError`: a `ValueError` (a placeholder where
+it expects a name) or an `AttributeError` (a node it left empty). `_parse_sql` turns these two
+into a `ParseError`, so every `except SQL_SYNTAX_ERRORS` handler gives the usual syntax message
+and a stored view that trips one is named, not the reader's query. Beyond them, `_fail_closed` wraps the
+three entry points (`check_blacklist`, `extract_table_refs`, `rewrite_query`): any other
+unexpected exception becomes a `ValidationError` ("We could not parse your SQL..."), logged at
+WARNING with the exception's type and the entry point, never the SQL. No path returns normally
+after an exception, so a fault cannot become an allow. `LakanaError` (so `ValidationError`),
+`SQL_SYNTAX_ERRORS` and `MemoryError` pass through unchanged: the first two are the expected
+refusals that callers (the pipeline's `except SQL_SYNTAX_ERRORS`) already map to a precise user
+message, and a `MemoryError` is the resource limit's signal, which must not be disguised as a
+syntax problem.
+
 **A submitted query holds no statement but a read, at any depth.** `check_blacklist` requires
 the statement as a whole to be one of `_TOP_LEVEL_READS`: an `exp.Query` (a `SELECT`, a
 `WITH ... SELECT`, a `FROM`-first query, a set operation) or a bare `exp.Values` list
