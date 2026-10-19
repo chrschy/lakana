@@ -712,14 +712,10 @@ def test_rename_refreshes_display_columns_for_bound_grants_and_policies(
     destination = TableRef(environment="dev", namespace=ns, name="sales2")
     catalog.rename_table(admin, source, destination)
 
-    at_new_name = grants.list_for_securable(
-        admin, kind=SecurableKind.TABLE, environment="dev", namespace=ns.joined(), table="sales2"
-    )
-    assert [g.id for g in at_new_name] == [grant.id]
-    at_old_name = grants.list_for_securable(
-        admin, kind=SecurableKind.TABLE, environment="dev", namespace=ns.joined(), table="sales"
-    )
-    assert at_old_name == []
+    at_new_name = grants.list_grants(admin, scope=Securable.table_scope("dev", ns, "sales2"))
+    assert [g.id for g in at_new_name.items] == [grant.id]
+    at_old_name = grants.list_grants(admin, scope=Securable.table_scope("dev", ns, "sales"))
+    assert at_old_name.items == []
 
     filters_at_new_name = row_filters.list_for_table(
         admin, environment="dev", namespace=ns.joined(), table="sales2"

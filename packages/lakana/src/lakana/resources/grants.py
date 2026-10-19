@@ -7,11 +7,12 @@ storage form itself, so the SDK never needs to.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import datetime
-from typing import Any
+from typing import Any, TypedDict, Unpack
 
-from lakana._http import HttpTransport, query_params
-from lakana._models import Grant
+from lakana._http import NEXT_CURSOR_HEADER, HttpTransport, every_page, query_params
+from lakana._models import Grant, GrantPage
 from lakana._routes import ROUTES
 
 
@@ -42,6 +43,17 @@ def _grant_from_json(data: dict[str, Any]) -> Grant:
         granted_at=datetime.fromisoformat(data["granted_at"]),
         note=data.get("note"),
     )
+
+
+class GrantFilters(TypedDict, total=False):
+    """The filters of a grants listing; each is optional, as in `Grants.list_page`."""
+
+    principal_name: str | None
+    group_name: str | None
+    action: str | None
+    environment: str | None
+    namespace: str | None
+    table: str | None
 
 
 _GrantList = list[Grant]
@@ -138,48 +150,113 @@ class Grants:
     def list(
         self,
         *,
-        principal_name: str | None = None,
-        group_name: str | None = None,
-        environment: str | None = None,
-        namespace: str | None = None,
-        table: str | None = None,
+        limit: int | None = None,
+        cursor: str | None = None,
+        **filters: Unpack[GrantFilters],
     ) -> _GrantList:
-        """List grants for a principal, a group, or a specific securable.
+        """List active grants, newest first; every filter is optional and they combine.
 
-        Exactly one of `principal_name`/`group_name`/a securable filter
-        should be given, matching
-        `lakana_server.api.platform.grants.list_grants`'s own rules.
+        The grants of one page; `list_page` also returns the cursor of the next one, and
+        `iter` walks every page.
 
         Parameters
         ----------
-        principal_name
-            List this principal's own direct grants.
-        group_name
-            List this group's own direct grants.
-        environment
-            The environment to match, for a securable-scoped listing.
-        namespace
-            The dot-joined namespace to match, for a securable-scoped
-            listing.
-        table
-            The table to match, for a securable-scoped listing.
+        limit
+            Most grants returned (1 to 200); `None` leaves it to the server (100).
+        cursor
+            A previous page's `next_cursor`. Send the same filters with every page.
+        **filters
+            The filters of `list_page`: `principal_name`, `group_name`, `action`,
+            `environment`, `namespace`, `table`.
 
         Returns
         -------
         list of Grant
-            The matching grants.
+            Newest first.
+
+        Raises
+        ------
+        lakana.errors.ValidationError
+            If both `principal_name` and `group_name` are given, an object filter has a gap,
+            `action` is unknown, or `cursor` is not one the server issued for the grants list.
+        lakana.errors.PermissionDenied
+            Without the `ADMIN` role on the instance.
+        """
+        return self.list_page(limit=limit, cursor=cursor, **filters).items
+
+    def list_page(
+        self,
+        *,
+        principal_name: str | None = None,
+        group_name: str | None = None,
+        action: str | None = None,
+        environment: str | None = None,
+        namespace: str | None = None,
+        table: str | None = None,
+        limit: int | None = None,
+        cursor: str | None = None,
+    ) -> GrantPage:
+        """List one page of grants, newest first, with the cursor of the next page.
+
+        Parameters
+        ----------
+        principal_name
+            Only grants made to this principal.
+        group_name
+            Only grants made to this group.
+        action
+            Only grants that give this action.
+        environment
+            The environment of an object filter.
+        namespace
+            The dot-joined namespace of an object filter.
+        table
+            The table of an object filter.
+        limit
+            Most grants returned (1 to 200); `None` leaves it to the server (100).
+        cursor
+            A previous page's `next_cursor`. Send the same filters with every page.
+
+        Returns
+        -------
+        GrantPage
+            The grants, and the cursor for the next page (`None` on the last).
         """
         response = self._transport.request(
             ROUTES["grants.list"],
             params=query_params(
                 principal_name=principal_name,
                 group_name=group_name,
+                action=action,
                 environment=environment,
                 namespace=namespace,
                 table=table,
+                limit=limit,
+                cursor=cursor,
             ),
         )
-        return [_grant_from_json(item) for item in response.json()]
+        return GrantPage(
+            items=[_grant_from_json(item) for item in response.json()],
+            next_cursor=response.headers.get(NEXT_CURSOR_HEADER),
+        )
+
+    def iter(self, *, page_size: int = 100, **filters: Unpack[GrantFilters]) -> Iterator[Grant]:
+        """Yield every matching grant, newest first, fetching pages as needed.
+
+        Parameters
+        ----------
+        page_size
+            Grants per request (1 to 200).
+        **filters
+            The filters of `list_page`: `principal_name`, `group_name`, `action`,
+            `environment`, `namespace`, `table`.
+
+        Returns
+        -------
+        Iterator of Grant
+            Each grant, once.
+        """
+        return every_page(lambda cursor: self.list_page(limit=page_size, cursor=cursor, **filters))
 
     def revoke(self, grant_id: str) -> None:
         """Revoke a grant.

@@ -10,6 +10,7 @@ Pages:
 - [Get told when a job fails](get-told-when-a-job-fails.md): send a message to your chat tool or a webhook when a run fails and when the job works again, test it, and verify its signature.
 - [Deploying with Compose (team mode)](deploy-with-compose.md): run a team instance with Docker Compose.
 - [Give a second person access](give-a-second-person-access.md): create a user, grant the smallest set to query one environment, issue a token, and take access away.
+- [Why may (or may not) someone do this?](why-may-someone-do-this.md): see what a principal may do on an object, and through which grant, role or group.
 - [Upgrade to the release with artifacts](upgrade-to-artifacts.md): the migration, the order and the way back.
 - [Manage secrets](manage-secrets.md): see how each stored secret is encrypted and set an older one again.
 - [Use a private package index](private-package-index.md): install your team's own package in Python assets, with a password that stays out of the project.

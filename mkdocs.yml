@@ -35,6 +35,7 @@ nav:
       - how-to/get-told-when-a-job-fails.md
       - how-to/deploy-with-compose.md
       - how-to/give-a-second-person-access.md
+      - how-to/why-may-someone-do-this.md
       - how-to/upgrade-to-artifacts.md
       - how-to/manage-secrets.md
       - how-to/private-package-index.md
@@ -59,6 +60,7 @@ nav:
       - reference/table-health.md
       - reference/search.md
       - reference/lists.md
+      - reference/access.md
       - reference/why-did-it-fail.md
   - Explanation:
       - explanation/index.md

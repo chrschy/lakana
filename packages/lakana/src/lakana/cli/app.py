@@ -18,6 +18,7 @@ from typer.models import CommandInfo, TyperInfo
 import lakana
 from lakana.cli import (
     _output,
+    access,
     artifacts,
     audit,
     auth,
@@ -412,6 +413,7 @@ _REGISTRARS: tuple[Callable[[typer.Typer], None], ...] = (
     groups.register,
     tokens.register,
     grants.register,
+    access.register,
     policies.register,
     secrets.register,
     repos.register,

@@ -80,6 +80,25 @@ asked for directly and the action cannot be granted on its own.
 """
 
 
+def needs_admin_role(action: Action) -> bool:
+    """Say whether an action works only for a holder of the `ADMIN` role on the instance.
+
+    For a reader that explains access (`lakana_core.grants.explain`): the call sites of these
+    actions authorize through `authorize_admin_only`, never through this.
+
+    Parameters
+    ----------
+    action
+        Any action.
+
+    Returns
+    -------
+    bool
+        `True` for one of `ADMIN_ONLY_ACTIONS`.
+    """
+    return action in ADMIN_ONLY_ACTIONS
+
+
 def admin_only_message(action: Action) -> str:
     """Say that an action needs the `ADMIN` role, and how to get on.
 

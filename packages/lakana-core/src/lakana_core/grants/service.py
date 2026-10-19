@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from lakana_core.audit.service import AuditService
@@ -13,9 +13,11 @@ from lakana_core.auth import Action, AuthorizationService, PrincipalRef, Securab
 from lakana_core.catalog.identity import namespace_exists, resolve_environment_id, resolve_table_id
 from lakana_core.errors import ConflictError, NotFoundError, ValidationError
 from lakana_core.grants.admin import ADMIN_ONLY_ACTIONS, authorize_admin_only
-from lakana_core.grants.roles import Role
+from lakana_core.grants.explain import PermissionReport, explain_permissions, grant_scope
+from lakana_core.grants.roles import ROLE_ACTIONS, Role
 from lakana_core.identifiers import NamespacePath
 from lakana_core.models import AuditEventType, Grant, Group, GroupMembership, Principal
+from lakana_core.pagination import Page, newest_first
 
 _EXPECTED_FIELDS: dict[SecurableKind, frozenset[str]] = {
     SecurableKind.INSTANCE: frozenset(),
@@ -61,22 +63,71 @@ def _validate_securable_fields(
             )
 
 
+def scope_filter(
+    environment: str | None, namespace: str | None, table: str | None
+) -> Securable | None:
+    """Read the object a grants listing or an explanation is about from its three names.
+
+    The kind follows from the names given: `table` makes a table, else `namespace` a
+    namespace, else `environment` an environment.
+
+    Parameters
+    ----------
+    environment
+        The environment's name, or `None`.
+    namespace
+        The namespace, dot-joined (``gold.sales``), or `None`.
+    table
+        The table's name, or `None`.
+
+    Returns
+    -------
+    Securable or None
+        The object, or `None` when no name is given (the instance, for an explanation; no
+        filter, for a listing).
+
+    Raises
+    ------
+    ValidationError
+        If a namespace is given without its environment, a table without its namespace, or a
+        namespace is not a valid path.
+    """
+    if namespace is not None and environment is None:
+        raise ValidationError(
+            "A namespace needs its environment: pass `environment` too (`--env` on the "
+            "command line)."
+        )
+    if table is not None and namespace is None:
+        raise ValidationError(
+            "A table needs its namespace and environment: pass `namespace` and `environment` "
+            "too (`--ns` and `--env` on the command line)."
+        )
+    if environment is None:
+        return None
+    if namespace is None:
+        return Securable.environment_scope(environment)
+    path = NamespacePath.from_parts(namespace.split("."))
+    if table is None:
+        return Securable.namespace_scope(environment, path)
+    return Securable.table_scope(environment, path, table)
+
+
 class GrantService:
-    """Create, list, and revoke grants.
+    """Create, list, and revoke grants, and explain a principal's access.
 
     Parameters
     ----------
     session
         Database session. Each mutating method commits internally.
     authz
-        Authorization service consulted before every operation, including
-        the two list methods — matching `GroupService`/`PrincipalService`'s
-        precedent of gating list operations the same as mutations.
+        Authorization service consulted before every operation, the listing
+        included — matching `GroupService`/`PrincipalService`'s precedent of
+        gating list operations the same as mutations.
 
     Notes
     -----
     Every operation needs the `ADMIN` role on the instance, through
-    `authorize_admin_only`.
+    `authorize_admin_only`, except a principal explaining its own access.
     """
 
     def __init__(self, session: Session, authz: AuthorizationService) -> None:
@@ -306,129 +357,131 @@ class GrantService:
             self._session.commit()
         return row
 
-    def list_for_principal(self, p: PrincipalRef, principal_name: str) -> list[Grant]:
-        """List a principal's own active, direct grants.
+    def list_grants(
+        self,
+        p: PrincipalRef,
+        *,
+        principal_name: str | None = None,
+        group_name: str | None = None,
+        action: Action | None = None,
+        scope: Securable | None = None,
+        limit: int = 100,
+        cursor: str | None = None,
+    ) -> Page[Grant]:
+        """List active grants, newest first, one page at a time; every filter is optional.
 
-        Not group-expanded — literal rows, so "why does X have this" stays
-        inspectable.
+        Literal rows, not expanded: a principal's filter does not add its groups' grants, and a
+        scope's filter does not add grants on an ancestor of it — `explain` answers what a
+        principal may do. Filters combine with AND.
 
         Parameters
         ----------
         p
             The acting principal.
         principal_name
-            The principal whose grants to list.
-
-        Returns
-        -------
-        list of Grant
-            Every active grant made directly to this principal.
-
-        Raises
-        ------
-        NotFoundError
-            If no principal has `principal_name`.
-        PermissionDenied
-            If the acting principal does not hold the `ADMIN` role on the instance
-            (`MANAGE_GRANT` works only with it).
-        """
-        authorize_admin_only(self._session, self._authz, p, Action.MANAGE_GRANT)
-        principal = self._get_principal(principal_name)
-        return list(
-            self._session.execute(
-                select(Grant).where(Grant.principal_id == principal.id, Grant.revoked_at.is_(None))
-            )
-            .scalars()
-            .all()
-        )
-
-    def list_for_group(self, p: PrincipalRef, group_name: str) -> list[Grant]:
-        """List a group's active, direct grants.
-
-        Parameters
-        ----------
-        p
-            The acting principal.
+            Only grants made to this principal.
         group_name
-            The group whose grants to list.
+            Only grants made to this group.
+        action
+            Only grants that give this action: the action itself, or a role that carries it.
+        scope
+            Only grants on exactly this object.
+        limit
+            Most grants returned.
+        cursor
+            The `next_cursor` of the previous page. Send the same filters with every page.
 
         Returns
         -------
-        list of Grant
-            Every active grant made directly to this group.
+        Page of Grant
+            The grants by time granted, newest first, equal times by id, and the cursor of the
+            next page.
 
         Raises
         ------
+        ValidationError
+            If both `principal_name` and `group_name` are given, `limit` is below 1, or
+            `cursor` is not one this server issued for the grants list.
         NotFoundError
-            If no group has `group_name`.
+            If no principal has `principal_name`, or no group has `group_name`.
         PermissionDenied
             If the acting principal does not hold the `ADMIN` role on the instance
             (`MANAGE_GRANT` works only with it).
         """
         authorize_admin_only(self._session, self._authz, p, Action.MANAGE_GRANT)
-        group = self._get_group(group_name)
-        return list(
-            self._session.execute(
-                select(Grant).where(Grant.group_id == group.id, Grant.revoked_at.is_(None))
+        if principal_name is not None and group_name is not None:
+            raise ValidationError(
+                "Pass at most one of `principal_name` and `group_name`: a grant is made to a "
+                "principal or to a group, never to both."
             )
-            .scalars()
-            .all()
+        query = select(Grant).where(Grant.revoked_at.is_(None))
+        if principal_name is not None:
+            query = query.where(Grant.principal_id == self._get_principal(principal_name).id)
+        if group_name is not None:
+            query = query.where(Grant.group_id == self._get_group(group_name).id)
+        if action is not None:
+            roles = [role for role, actions in ROLE_ACTIONS.items() if action in actions]
+            query = query.where(or_(Grant.action == action, Grant.role.in_(roles)))
+        if scope is not None:
+            query = query.where(
+                Grant.kind == scope.kind,
+                Grant.environment == scope.environment,
+                Grant.namespace
+                == (scope.namespace.joined() if scope.namespace is not None else None),
+                Grant.table == scope.table,
+            )
+        return newest_first(
+            self._session,
+            query,
+            kind="grants",
+            at=Grant.granted_at,
+            row_id=Grant.id,
+            at_of=lambda grant: grant.granted_at,
+            limit=limit,
+            cursor=cursor,
         )
 
-    def list_for_securable(
-        self,
-        p: PrincipalRef,
-        *,
-        kind: SecurableKind,
-        environment: str | None,
-        namespace: str | None,
-        table: str | None,
-    ) -> list[Grant]:
-        """List every active grant on a specific securable — an exact match.
-
-        Does not expand ancestor grants (a grant on the enclosing
-        environment is not returned when listing a table within it) — that
-        expansion is `GrantAuthorization`'s job during an authorization
-        decision, not this listing's.
+    def explain(self, p: PrincipalRef, principal_name: str, scope: Securable) -> PermissionReport:
+        """Say what a principal may do on an object, and through which grant or group.
 
         Parameters
         ----------
         p
-            The acting principal.
-        kind
-            Which tier of the securable hierarchy to list grants for.
-        environment
-            The environment to match, or `None`.
-        namespace
-            The namespace (unit-separator-joined) to match, or `None`.
-        table
-            The table to match, or `None`.
+            The acting principal. It may ask about itself with no right at all (not through a
+            task token); about anyone else it needs what listing grants needs.
+        principal_name
+            The principal asked about.
+        scope
+            The object.
 
         Returns
         -------
-        list of Grant
-            Every active grant whose stored securable exactly matches.
+        PermissionReport
+            The answer of the authorizer the routes use, action by action.
 
         Raises
         ------
         PermissionDenied
-            If the acting principal does not hold the `ADMIN` role on the instance
-            (`MANAGE_GRANT` works only with it).
+            If `p` asks about another principal, or through a task token, without the `ADMIN`
+            role on the instance; before anything is looked up, so the refusal says nothing
+            about whether the principal exists.
+        NotFoundError
+            If an administrator asks about a principal, environment, namespace or table that
+            does not exist. Asking about oneself, an object that does not exist is answered
+            like one no grant names, so the answer never tells whether it exists.
         """
-        authorize_admin_only(self._session, self._authz, p, Action.MANAGE_GRANT)
-        return list(
-            self._session.execute(
-                select(Grant).where(
-                    Grant.kind == kind,
-                    Grant.environment == environment,
-                    Grant.namespace == namespace,
-                    Grant.table == table,
-                    Grant.revoked_at.is_(None),
-                )
+        own = p.task_scope is None and principal_name == p.name
+        if not own:
+            authorize_admin_only(self._session, self._authz, p, Action.MANAGE_GRANT)
+        target = self._get_principal(principal_name)
+        if not own:
+            self._resolve_securable_ids(
+                scope.kind,
+                scope.environment,
+                scope.namespace.joined() if scope.namespace is not None else None,
+                scope.table,
             )
-            .scalars()
-            .all()
-        )
+        return explain_permissions(self._session, target, scope)
 
     def revoke(self, p: PrincipalRef, grant_id: uuid.UUID) -> None:
         """Revoke a grant.
@@ -466,14 +519,7 @@ class GrantService:
         AuditService(self._session).record(
             p.id,
             AuditEventType.GRANT_REVOKED,
-            securable=Securable(
-                kind=grant.kind,
-                environment=grant.environment,
-                namespace=(
-                    NamespacePath.parse(grant.namespace) if grant.namespace is not None else None
-                ),
-                table=grant.table,
-            ),
+            securable=grant_scope(grant),
             detail={
                 "grant_id": str(grant.id),
                 "principal_id": str(grant.principal_id) if grant.principal_id is not None else None,

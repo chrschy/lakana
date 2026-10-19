@@ -258,7 +258,7 @@ def test_a_backslash_in_a_name_does_not_widen_the_listing(
     character. Left undoubled, the `\b` in `a\b` is read as an escaped `b`
     -- a literal `b` -- so the pattern silently becomes `ab...` and the
     listing returns another namespace's children. This is the test that
-    fails if `_escape_like` drops its backslash clause.
+    fails if `escape_like` drops its backslash clause.
     """
     catalog.create_environment(principal, name="dev", storage=_config(tmp_path))
     for parts in ([r"a\b"], [r"a\b", "child"], ["ab"], ["ab", "intruder"]):

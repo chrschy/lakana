@@ -169,10 +169,8 @@ def test_list_for_securable_infers_environment_kind_when_only_environment_given(
     assert [g["id"] for g in listed.json()] == [created.json()["id"]]
 
 
-def test_list_for_securable_infers_instance_kind_when_no_filter_given(
-    client: TestClient,
-) -> None:
-    """Listing with no filters at all finds only exact INSTANCE-kind matches."""
+def test_listing_without_a_filter_includes_the_instance_grants(client: TestClient) -> None:
+    """Listing with no filters at all lists every grant, the bootstrap admin's among them."""
     listed = client.get("/api/v1/grants", headers=AUTH_HEADER)
     assert listed.status_code == 200
     assert any(g["role"] == "ADMIN" for g in listed.json())

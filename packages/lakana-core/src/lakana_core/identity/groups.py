@@ -21,6 +21,7 @@ from lakana_core.models import (
     Principal,
     RowFilter,
 )
+from lakana_core.pagination import Page, name_contains, newest_first
 
 
 class GroupService:
@@ -216,27 +217,57 @@ class GroupService:
         self._session.delete(group)
         self._session.commit()
 
-    def list_groups(self, p: PrincipalRef) -> list[Group]:
-        """List every group.
+    def list_groups(
+        self,
+        p: PrincipalRef,
+        *,
+        q: str | None = None,
+        limit: int = 100,
+        cursor: str | None = None,
+    ) -> Page[Group]:
+        """List groups, newest first, one page at a time.
 
         Parameters
         ----------
         p
             The acting principal.
+        q
+            Only groups whose name contains this text, in any letter case; ``%`` and ``_``
+            are matched as themselves. Blank means every group.
+        limit
+            Most groups returned.
+        cursor
+            The `next_cursor` of the previous page. Send the same `q` with every page.
 
         Returns
         -------
-        list of Group
-            Every group.
+        Page of Group
+            The groups by creation time, newest first, equal times by id, and the cursor of
+            the next page.
 
         Raises
         ------
         PermissionDenied
             If the acting principal does not hold the `ADMIN` role on the instance
             (`MANAGE_GROUP` works only with it).
+        ValidationError
+            If `limit` is below 1 or `cursor` is not one this server issued for the groups
+            list.
         """
         authorize_admin_only(self._session, self._authz, p, Action.MANAGE_GROUP)
-        return list(self._session.execute(select(Group)).scalars().all())
+        query = select(Group)
+        if q is not None and q.strip():
+            query = query.where(name_contains(Group.name, q.strip()))
+        return newest_first(
+            self._session,
+            query,
+            kind="groups",
+            at=Group.created_at,
+            row_id=Group.id,
+            at_of=lambda row: row.created_at,
+            limit=limit,
+            cursor=cursor,
+        )
 
     def add_member(self, p: PrincipalRef, group_name: str, principal_name: str) -> None:
         """Add a principal to a group, idempotently.

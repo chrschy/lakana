@@ -7,6 +7,7 @@ from typing import Annotated
 import typer
 
 from lakana.cli import _output
+from lakana.cli._paging import CURSOR, LIMIT, SEARCH, more_results
 from lakana.cli._state import confirm, state_of
 
 group_app = typer.Typer(help="Manage groups.", no_args_is_help=True)
@@ -30,16 +31,34 @@ def create(ctx: typer.Context, name: str) -> None:
 
 
 @group_app.command("list")
-def list_groups(ctx: typer.Context) -> None:
-    """List groups.
+def list_groups(
+    ctx: typer.Context, search: SEARCH = None, limit: LIMIT = None, cursor: CURSOR = None
+) -> None:
+    """List groups, newest first.
+
+    `--search TEXT` lists those whose name contains TEXT, in any letter case. A long list
+    prints a "More results" line with the command that shows the next page.
 
     Parameters
     ----------
     ctx
         The Typer context.
+    search
+        Only names that contain this text.
+    limit
+        Most groups returned (1 to 200); the server's default when omitted.
+    cursor
+        The cursor of the page to show.
     """
     state = state_of(ctx)
-    _output.emit(state, state.client().groups.list())
+    page = state.client().groups.list_page(search=search, limit=limit, cursor=cursor)
+    _output.emit(state, page.items)
+    more_results(
+        state,
+        ["lakana", "group", "list"],
+        {"--search": search, "--limit": limit},
+        page.next_cursor,
+    )
 
 
 @group_app.command("delete")
