@@ -65,7 +65,7 @@ from pyiceberg.types import (
 )
 
 from lakana_core.errors import StorageUnavailableError, UnsupportedTableError, ValidationError
-from lakana_core.identifiers import shown
+from lakana_core.identifiers import shown, shown_path
 from lakana_core.query_rewrite import ReadField
 from lakana_core.storage.resolver import is_within_location
 
@@ -513,7 +513,7 @@ def _open_avro(
             raise ValidationError(
                 _MANIFEST_TOO_LARGE.format(
                     table=shown(table),
-                    file=shown(path),
+                    file=shown_path(path),
                     size=size,
                 )
             )
@@ -764,7 +764,7 @@ def check_added_files_have_field_ids(
         if data_file.file_format != FileFormat.PARQUET:
             raise ValidationError(
                 _NOT_PARQUET.format(
-                    file=shown(data_file.file_path),
+                    file=shown_path(data_file.file_path),
                     table=shown(table),
                     format=data_file.file_format.value,
                 )
@@ -784,13 +784,17 @@ def check_added_files_have_field_ids(
             if outcome == "unavailable":
                 raise StorageUnavailableError(_STORAGE_UNAVAILABLE.format(table=shown(table)))
             if outcome == "unreadable":
-                raise ValidationError(_UNREADABLE_FILE.format(file=shown(path), table=shown(table)))
+                raise ValidationError(
+                    _UNREADABLE_FILE.format(file=shown_path(path), table=shown(table))
+                )
             if outcome == "too_large":
                 raise ValidationError(
-                    _FOOTER_TOO_LARGE.format(file=shown(path), table=shown(table))
+                    _FOOTER_TOO_LARGE.format(file=shown_path(path), table=shown(table))
                 )
             if outcome == "no_ids":
-                raise ValidationError(_NO_FIELD_IDS.format(file=shown(path), table=shown(table)))
+                raise ValidationError(
+                    _NO_FIELD_IDS.format(file=shown_path(path), table=shown(table))
+                )
     finally:
         # A read that is stuck is not waited for: the commit is refused now.
         pool.shutdown(wait=False, cancel_futures=True)

@@ -40,7 +40,7 @@ from lakana_core.auth import PrincipalRef
 from lakana_core.catalog import field_ids as field_ids_module
 from lakana_core.catalog.service import CatalogService, LoadedTable
 from lakana_core.errors import ConflictError, StorageUnavailableError, ValidationError
-from lakana_core.identifiers import NamespacePath, TableRef, shown
+from lakana_core.identifiers import NamespacePath, TableRef, shown_path
 from lakana_core.models import Table, WriteMode
 
 _SCHEMA = Schema(
@@ -325,8 +325,8 @@ def _no_field_ids(uri: str) -> str:
     Parameters
     ----------
     uri
-        The file; it appears as messages show it, escaped and cut at 200 characters, which
-        a long temporary directory (macOS's) reaches.
+        The file; it appears as messages show it, escaped and, when long, cut in the middle, which a
+        long temporary directory (macOS's) reaches.
 
     Returns
     -------
@@ -334,7 +334,7 @@ def _no_field_ids(uri: str) -> str:
         The message.
     """
     return (
-        f"The commit adds `{shown(uri)}` to `gold.sales`, which has no Iceberg field ids. "
+        f"The commit adds `{shown_path(uri)}` to `gold.sales`, which has no Iceberg field ids. "
         "Lakana reads Iceberg data by field id, as the Iceberg specification requires. Write "
         "the file with a client that sets field ids."
     )
@@ -356,6 +356,28 @@ def test_a_commit_that_adds_a_file_without_field_ids_is_refused_whole(
 
     assert str(caught.value) == _no_field_ids(uri)
     assert catalog.load_table(principal, ref).metadata_location == created.metadata_location
+
+
+def test_a_long_storage_root_keeps_the_file_name_in_the_refusal(
+    catalog: CatalogService, principal: PrincipalRef, tmp_path: Path
+) -> None:
+    """With a 300-character root the message stays short and still names the file."""
+    root = tmp_path.joinpath(*["r" * 100] * 3)
+    ref, created = _created(catalog, principal, root)
+    uri = _parquet(created, "plain-file-name.parquet", field_ids=False)
+    assert len(uri) > 300
+    transaction = StaticTable.from_metadata(created.metadata_location).transaction()
+    transaction.add_files([uri])
+
+    with pytest.raises(ValidationError) as caught:
+        catalog.commit_table(
+            principal, ref, requirements=transaction._requirements, updates=transaction._updates
+        )
+
+    message = str(caught.value)
+    assert "…/plain-file-name.parquet`" in message
+    assert uri not in message
+    assert len(message) < 600
 
 
 def test_a_commit_that_adds_files_with_field_ids_is_accepted(
@@ -443,9 +465,9 @@ def test_a_file_that_is_not_parquet_is_refused_without_the_readers_error_text(
         _commit_files(catalog, principal, ref, created, [uri], snapshot_id=900_000_020)
 
     assert str(caught.value) == (
-        f"The commit adds `{shown(uri)}` to `gold.sales`, which could not be read as a Parquet "
-        "file, so nothing was applied. Write the data file before the commit, as Parquet with "
-        "Iceberg field ids."
+        f"The commit adds `{shown_path(uri)}` to `gold.sales`, which could not be read as a "
+        "Parquet file, so nothing was applied. Write the data file before the commit, as Parquet "
+        "with Iceberg field ids."
     )
     assert "magic" not in str(caught.value).lower()
 
@@ -507,7 +529,7 @@ def test_an_orc_file_is_refused(
         )
 
     assert str(caught.value) == (
-        f"The commit adds `{shown(uri)}` to `gold.sales` as ORC, so nothing was applied. "
+        f"The commit adds `{shown_path(uri)}` to `gold.sales` as ORC, so nothing was applied. "
         "Lakana reads Parquet data files only; write the file as Parquet."
     )
 
@@ -537,7 +559,7 @@ def test_a_missing_data_file_is_refused(
         _commit_files(catalog, principal, ref, created, [uri], 900_000_070)
 
     assert "could not be read as a Parquet file" in str(caught.value)
-    assert shown(uri) in str(caught.value)
+    assert shown_path(uri) in str(caught.value)
 
 
 def test_a_file_name_with_a_line_break_is_escaped_in_the_refusal(
@@ -551,7 +573,7 @@ def test_a_file_name_with_a_line_break_is_escaped_in_the_refusal(
         _commit_files(catalog, principal, ref, created, [uri], 900_000_071)
 
     assert "\n" not in str(caught.value)
-    assert shown(uri) in str(caught.value)
+    assert shown_path(uri) in str(caught.value)
 
 
 def test_a_commit_of_too_many_files_is_refused_before_any_footer_is_read(
@@ -612,7 +634,7 @@ def test_a_footer_above_the_limit_is_refused(
         _commit_files(catalog, principal, ref, created, [uri], 900_000_100)
 
     assert str(caught.value) == (
-        f"The commit adds `{shown(uri)}` to `gold.sales`, whose Parquet footer is larger than "
+        f"The commit adds `{shown_path(uri)}` to `gold.sales`, whose Parquet footer is larger than "
         "16 MiB, so nothing was applied. Write the file with fewer columns and row groups."
     )
 
@@ -797,7 +819,7 @@ def test_a_garbled_footer_is_the_files_fault_not_a_storage_failure(
         _commit_files(catalog, principal, ref, created, [uri], 900_000_160)
 
     assert "could not be read as a Parquet file" in str(caught.value)
-    assert shown(uri) in str(caught.value)
+    assert shown_path(uri) in str(caught.value)
 
 
 def test_collecting_stops_once_the_cap_is_passed(
@@ -1102,7 +1124,7 @@ def test_a_manifest_above_the_byte_limit_is_refused_before_it_is_read(
         _commit_snapshots(catalog, principal, ref, [snapshot])
 
     message = str(caught.value)
-    assert shown(snapshot.manifest_list) in message
+    assert shown_path(snapshot.manifest_list) in message
     assert "64 MiB" in message
     assert "nothing was applied" in message
 

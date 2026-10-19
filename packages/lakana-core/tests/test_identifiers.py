@@ -8,6 +8,7 @@ from lakana_core.identifiers import (
     NamespacePath,
     TableRef,
     shown,
+    shown_path,
     validate_path_component,
 )
 
@@ -170,3 +171,25 @@ def test_a_table_reference_refuses_a_nul_in_its_name_or_environment() -> None:
     with pytest.raises(ValidationError, match="environment name must not contain a NUL byte"):
         TableRef("de\x00v", namespace, "churn")
     assert TableRef("dev", namespace, "churn").dotted() == "models.churn"
+
+
+def test_shown_path_keeps_the_start_and_the_whole_file_name_of_a_long_path() -> None:
+    """A long storage path loses its middle, so the message still names the file."""
+    short = "s3://bucket/warehouse/t/data/00000-1.parquet"
+    assert shown_path(short) == short
+    long = "s3://bucket/" + "/".join(["d" * 90] * 4) + "/data/00000-1-abc.parquet"
+    cut = shown_path(long)
+    assert len(cut) <= 200
+    assert cut.startswith("s3://bucket/ddd")
+    assert cut.endswith("…/00000-1-abc.parquet")
+    assert shown_path("s3://b/" + "x" * 500 + "/f\n.parquet").endswith("/f\\n.parquet")
+
+
+def test_shown_path_cuts_a_file_name_that_is_itself_too_long_from_its_front() -> None:
+    """The end of the name, where its extension is, survives."""
+    cut = shown_path("s3://bucket/" + "n" * 400 + ".parquet")
+    assert len(cut) <= 200
+    assert cut.startswith("s3://bucket/")
+    assert cut.endswith("n.parquet")
+    assert shown_path("n" * 400 + ".parquet").endswith(".parquet")
+    assert shown_path(7) == "int"
