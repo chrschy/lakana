@@ -114,6 +114,7 @@ Each cell is a summary. The page named in the last column has the detail. The ch
 
 | Release | What it asks | Where |
 |---|---|---|
+| 0.16.0 | Migrations `0036` to `0041`. `GET /api/v1/grants` without a filter now returns every grant, in pages of 100 (follow `X-Next-Cursor`), and the principal and group lists come newest first, paged the same way. Filters and masks that exist are not checked again; a new one is type-checked when it is created. Descriptions appear after the next deploy; table readers count from the upgrade on; search finds the columns of existing tables once the sweep has filled them in (1,000 tables take about 20 hours). Upgrade the workers together with the server, so that every task failure gets its code. | [Notes for 0.16.0](#notes-for-0160) |
 | 0.15.0 | Migration `0035` (a database check on a secret's use; it stops and names any inconsistent secret). While an environment has a storage secret, changing its storage options needs `MANAGE_SECRET` there as well as `MANAGE_ENVIRONMENT`; the Compose set-up attaches its storage secret to `dev` only together with the bundle's own options. A commit through the Iceberg REST catalog is refused when one of its manifest files is over 64 MiB. | [Notes for 0.15.0](#notes-for-0150) |
 | 0.14.0 | Migration `0034` (binds each secret to one use). New images are `ghcr.io/lakana-labs/lakana`: change `LAKANA_IMAGE` in a bundle's `.env` before you pull. Replace the bundle's `compose.yaml`: SeaweedFS runs as two containers behind an S3 gateway, and `docker compose down` must come before `up`. A secret has one use (a package index, a repository, or its own environment) and is refused for any other; a secret the migration could not bind is bound by an administrator with `lakana secret bind`. | [Notes for 0.14.0](#notes-for-0140) |
 | 0.13.0 | Migration `0033` (adds `schema_id` to row filters and column masks). Iceberg tables are read by field id: a renamed column keeps its data; a column dropped and added again, also by a type change with `evolve_schema`, is a new column whose older rows read as NULL; reads of a table whose nested fields were renamed or re-added, that has a column type Lakana cannot read, or whose column names differ only in letter case are refused. A commit through the Iceberg REST catalog that adds a data file without field ids is refused, as is one of more than 2,000 data files or one whose check takes over 60 seconds; files committed earlier without field ids read as NULL. A read under a row filter or column mask is refused when a column the policy uses was renamed or replaced since the policy was created: create the policy again for its column, then revoke the old one. A query that changes data is refused wherever the statement sits. Errors on reads under a row filter or column mask show a fixed message. | [Notes for 0.13.0](#notes-for-0130) |
@@ -123,7 +124,19 @@ Each cell is a summary. The page named in the last column has the detail. The ch
 | 0.10.0 | A package index URL with a query string is refused; move a `uv.toml` into `pyproject.toml`; lineage and failure causes changed. | This row |
 | 0.9.0 | Upgrade every worker before you deploy Python assets; rewrite `asset(deps=...)` as `asset(inputs=...)`; move helper modules out of `assets/`; an older bundle needs three additions. | [Upgrading](../how-to/deploy-with-compose.md#upgrading), [Projects and deploys](../how-to/projects.md) |
 
-## Notes for the next release
+## Notes for 0.16.0
+
+### Grants, principals and groups are listed in pages
+
+`GET /api/v1/grants` takes every filter as optional now. Without one it returns every grant, where it
+returned only the instance grants, 100 per page by default (`limit`, at most 200). The next page's
+cursor is in the response header `X-Next-Cursor`, which is absent on the last page; the body stays a
+JSON array. To list only the instance grants, keep the grants that have no environment. The principal
+and group lists are paged the same way and come newest first (they had no set order before); `?q=` finds a name.
+A script that reads one of these lists in one request reads only its first page now: pass `limit` and
+follow `X-Next-Cursor`, or use the SDK's `iter()`. `lakana grant list`, `lakana principal list` and
+`lakana group list` print a `More results: … --cursor X` line when there is more. See
+[Access](../reference/access.md).
 
 ### A query that is passed by says so
 
