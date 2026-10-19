@@ -17,4 +17,7 @@ Pages:
 
 - [Jobs](jobs.md): the triggers of a job, the fields of the job listing, routes, commands and SDK.
 
+- [Command line](cli.md): every `lakana` command and sub-command with its arguments and options. Generated from the code.
+- [Settings](settings.md): every `LAKANA_*` environment variable with its type, default, reader and description. Generated from the code.
+
 Pages are added here as they are written.

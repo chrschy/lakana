@@ -62,6 +62,8 @@ nav:
       - reference/lists.md
       - reference/access.md
       - reference/jobs.md
+      - reference/cli.md
+      - reference/settings.md
       - reference/why-did-it-fail.md
   - Explanation:
       - explanation/index.md

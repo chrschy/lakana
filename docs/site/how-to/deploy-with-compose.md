@@ -226,7 +226,9 @@ the people and the server for the artifacts you store.
 
 Set these where the server and the worker read them. In the bundle, the lines under `x-lakana-env`
 in `compose.yaml` reach the `migrate` job, the `server`, the `worker` and the two optional worker services
-`worker-interactive` and `worker-pipeline` (see the example below).
+`worker-interactive` and `worker-pipeline` (see the example below). Every variable with its type,
+default and reader is in the [settings reference](../reference/settings.md); the table below explains
+the ones an operator changes most.
 
 | Variable | Default | Meaning |
 |---|---|---|
