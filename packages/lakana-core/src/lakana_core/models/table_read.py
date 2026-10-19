@@ -13,7 +13,7 @@ class TableRead(Base):
     """How often a principal read a table on one day.
 
     One row per table, principal and day (UTC). The worker adds one for each table a query that
-    succeeded names (`lakana_core.catalog.table_reads.record_table_reads`), and a sweep deletes the
+    succeeded names (`lakana_core.catalog.health.record_table_reads`), and a sweep deletes the
     rows older than `LAKANA_TABLE_READS__KEEP_DAYS`. A Python task that reads through the Iceberg
     REST catalog records nothing.
 

@@ -219,6 +219,8 @@ class Table:
     file_count: int | None = None
 
 
+# jscpd:ignore-start
+# The SDK depends on no other package, so these mirror the server's response models.
 @dataclass(frozen=True)
 class LastMaintenance:
     """The last maintenance run that changed a table.
@@ -311,6 +313,9 @@ class Reader:
     principal: str
     read_count: int
     last_read_at: datetime
+
+
+# jscpd:ignore-end
 
 
 @dataclass(frozen=True)

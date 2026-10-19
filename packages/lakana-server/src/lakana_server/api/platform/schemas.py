@@ -672,32 +672,32 @@ class LastMaintenanceOut(BaseModel):
 
 
 class CheckHealthOut(BaseModel):
-    """The newest result of one check of a table.
+    """The newest result of one check of a table, as `CheckHealth` holds it.
 
     Parameters
     ----------
     name
-        ``<table>/<check>``.
+        `CheckHealth.name`.
     check
-        The check's short name.
+        `CheckHealth.check`.
     run_id
-        The run the result belongs to.
+        `CheckHealth.run_id`.
     outcome
-        ``passed``, ``failed``, ``warned`` or ``errored``.
+        `CheckHealth.outcome`.
     on_failure
-        ``block``, ``keep`` or ``warn``.
+        `CheckHealth.on_failure`.
     failing_rows
-        The count of rows that are wrong, when the check ran.
+        `CheckHealth.failing_rows`.
     error
-        Why the check could not run.
+        `CheckHealth.error`.
     rollback_outcome
-        What the rollback after a failed blocking check did, if there was one.
+        `CheckHealth.rollback_outcome`.
     kept
-        The check failed or errored and its ``keep`` setting left the data in the table.
+        `CheckHealth.kept`.
     not_published
-        The rollback left the table not published.
+        `CheckHealth.not_published`.
     finished_at
-        When the check ended.
+        `CheckHealth.finished_at`.
     """
 
     name: str
