@@ -7,6 +7,7 @@ import re
 import subprocess
 from pathlib import Path
 
+import httpx
 import pytest
 from conftest import FakeApi, invoke, make_state, write_profile_file
 
@@ -1103,3 +1104,167 @@ def test_a_deploy_without_job_changes_prints_no_jobs_section(tmp_path: Path) -> 
         invoke(make_state(tmp_path, api), "deploy", "analytics", "--env", "dev", env=_CI).stdout
     )
     assert "Jobs:" not in out
+
+
+_NO_WORKER = (
+    "No worker is running, so this deploy cannot start. Ask the operator to start a worker; "
+    "on a local instance, start it again with 'lakana server start --local'."
+)
+_OF_KIND = (
+    "No worker that takes pipeline work is running (1 worker takes interactive work only), so "
+    "this deploy cannot start. Ask the operator to start a worker with "
+    "LAKANA_WORKER__TAKES=pipeline or all."
+)
+
+
+class _Clock:
+    """A clock the test moves by hand.
+
+    Parameters
+    ----------
+    now
+        The time it shows.
+    """
+
+    def __init__(self, now: float = 0.0) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        """Read the clock.
+
+        Returns
+        -------
+        float
+            The time.
+        """
+        return self.now
+
+
+@pytest.fixture
+def _slow_clock(monkeypatch: pytest.MonkeyPatch) -> _Clock:
+    """Make every sleep of a poll five seconds on the clock of the wait line.
+
+    Parameters
+    ----------
+    monkeypatch
+        Pytest's monkeypatch.
+
+    Returns
+    -------
+    _Clock
+        The clock.
+    """
+    clock = _Clock()
+    monkeypatch.setattr("lakana.cli.deploys.clock", clock)
+    monkeypatch.setattr(
+        "lakana.resources.deploys.time.sleep",
+        lambda _seconds: setattr(clock, "now", clock.now + 5.0),
+    )
+    return clock
+
+
+def _waiting_api(polls: list[dict[str, object]]) -> FakeApi:
+    """Build a fake whose deploy polls answer `polls` in order, the last one repeating.
+
+    Parameters
+    ----------
+    polls
+        The bodies.
+
+    Returns
+    -------
+    FakeApi
+        The fake.
+    """
+    api = _api()
+    answers = iter(polls)
+    last = polls[-1]
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal last
+        last = next(answers, last)
+        return httpx.Response(200, json=last)
+
+    api.routes["GET", f"/api/v1/environments/dev/deploys/{_ID}"] = respond
+    return api
+
+
+def _queued(code: str, message: str, **overrides: object) -> dict[str, object]:
+    """Build a queued deploy body with a reason.
+
+    Parameters
+    ----------
+    code
+        The reason's code.
+    message
+        Its sentence.
+    **overrides
+        Fields of the run.
+
+    Returns
+    -------
+    dict
+        The body.
+    """
+    return _deploy("queued", waiting_for={"code": code, "message": message}, **overrides)
+
+
+@pytest.mark.usefixtures("_slow_clock")
+def test_deploy_prints_why_it_waits_once_per_change_of_reason(tmp_path: Path) -> None:
+    api = _waiting_api(
+        [
+            _queued("no_worker", _NO_WORKER),
+            _queued("no_worker", _NO_WORKER),
+            _queued("no_worker_of_kind", _OF_KIND),
+            _queued("no_worker_of_kind", _OF_KIND),
+            _deploy("succeeded"),
+        ]
+    )
+    result = invoke(make_state(tmp_path, api), "deploy", "analytics", "--env", "dev", env=_CI)
+    assert result.exit_code == 0, result.stderr
+    assert _SHA in result.stdout and "Waiting" not in result.stdout
+    lines = [line for line in result.stderr.splitlines() if line.startswith("Waiting:")]
+    assert lines == [f"Waiting: {_NO_WORKER}", f"Waiting: {_OF_KIND}"]
+
+
+@pytest.mark.usefixtures("_slow_clock")
+def test_rollback_prints_why_it_waits(tmp_path: Path) -> None:
+    api = _waiting_api(
+        [
+            _queued("no_worker", _NO_WORKER, kind="rollback"),
+            _queued("no_worker", _NO_WORKER, kind="rollback"),
+            _deploy("succeeded", kind="rollback"),
+        ]
+    )
+    result = invoke(
+        make_state(tmp_path, api),
+        "rollback",
+        "analytics",
+        "--env",
+        "dev",
+        "--to-previous",
+        env=_CI,
+    )
+    assert result.exit_code == 0, result.stderr
+    assert f"Waiting: {_NO_WORKER}" in result.stderr.splitlines()
+
+
+def test_a_short_wait_prints_no_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("lakana.resources.deploys.time.sleep", lambda _seconds: None)
+    api = _waiting_api([_queued("starting", "A worker is free."), _deploy("succeeded")])
+    result = invoke(make_state(tmp_path, api), "deploy", "analytics", "--env", "dev", env=_CI)
+    assert result.exit_code == 0, result.stderr
+    assert "Waiting:" not in result.stderr
+
+
+@pytest.mark.usefixtures("_slow_clock")
+def test_no_wait_line_with_json_output(tmp_path: Path) -> None:
+    api = _waiting_api(
+        [_queued("no_worker", _NO_WORKER), _queued("no_worker", _NO_WORKER), _deploy("succeeded")]
+    )
+    result = invoke(
+        make_state(tmp_path, api), "--output", "json", "deploy", "analytics", "--env", "dev"
+    )
+    assert result.exit_code == 0, result.stderr
+    assert "Waiting:" not in result.stderr
+    assert json.loads(result.stdout)["status"] == "succeeded"

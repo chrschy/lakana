@@ -697,6 +697,7 @@ def get_package_index_service(
 
 
 def get_deploy_service(
+    request: Request,
     session: Session = Depends(get_session),
     authz: AuthorizationService = Depends(get_grant_authorization),
 ) -> DeployService:
@@ -704,6 +705,9 @@ def get_deploy_service(
 
     Parameters
     ----------
+    request
+        The current request, for `app.state.settings`: the run lease decides which workers a
+        queued deploy's wait reason counts as alive.
     session
         The current request's database session.
     authz
@@ -712,9 +716,9 @@ def get_deploy_service(
     Returns
     -------
     DeployService
-        A service using real authorization.
+        A service using real authorization, with the operator's run lease.
     """
-    return DeployService(session, authz)
+    return DeployService(session, authz, lease_seconds=request.app.state.settings.run.lease_seconds)
 
 
 def get_run_service(

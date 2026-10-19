@@ -1851,6 +1851,10 @@ class DeployOut(BaseModel):
     warnings
         What the deploy leaves for its owner to act on, as sentences (a removed asset whose
         table is kept after a failed check).
+    waiting_for
+        Why a queued deploy has not started: a stable `code`, one sentence in `message` that
+        names the next step, and the numbers it uses; null when it is not waiting. Set on the
+        single read (`GET .../deploys/{id}`) only, null in the history.
     """
 
     id: uuid.UUID
@@ -1871,6 +1875,13 @@ class DeployOut(BaseModel):
     hidden_adopted: int = 0
     checks: dict[str, list[dict[str, str]]] | None = None
     warnings: list[str] = Field(default_factory=list)
+    waiting_for: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Why this is waiting, or null when it is not: a stable `code`, one sentence in "
+            "`message`, and the numbers the sentence uses."
+        ),
+    )
 
 
 class DeploymentOut(BaseModel):

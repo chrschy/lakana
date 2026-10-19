@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
@@ -18,6 +19,7 @@ from lakana._models import (
 )
 from lakana._routes import ROUTES
 from lakana.errors import DeployFailed
+from lakana.resources.queries import waiting_for_from_json
 
 
 def _when(value: str | None) -> datetime | None:
@@ -68,6 +70,7 @@ def deploy_from_json(data: dict[str, Any]) -> Deploy:
         hidden_adopted=data.get("hidden_adopted", 0),
         checks=data.get("checks"),
         warnings=tuple(data.get("warnings", ())),
+        waiting_for=waiting_for_from_json(data.get("waiting_for")),
     )
 
 
@@ -267,6 +270,7 @@ class Deploys:
         timeout: float | None = None,
         poll_interval: float = 0.25,
         max_interval: float = 2.0,
+        on_update: Callable[[Deploy], None] | None = None,
     ) -> Deploy:
         """Poll a run until it succeeds or fails.
 
@@ -282,6 +286,12 @@ class Deploys:
             First interval, doubling up to `max_interval`.
         max_interval
             Largest interval.
+        on_update
+            Called with every polled `Deploy`, including the last one, before `wait` returns or
+            raises (so a progress display can show why a deploy is `queued`:
+            `deploy.waiting_for`). It is called on every poll, not only when something
+            changed. An exception it raises ends the wait and propagates. `None` (the default)
+            calls nothing.
 
         Returns
         -------
@@ -299,6 +309,8 @@ class Deploys:
         interval = poll_interval
         while True:
             deploy = self.get(environment, deploy_id)
+            if on_update is not None:
+                on_update(deploy)
             if deploy.status == "succeeded":
                 return deploy
             if deploy.status == "failed":

@@ -63,6 +63,7 @@ def _to_out(view: DeployRunView) -> DeployOut:
         hidden_adopted=view.hidden_adopted,
         checks=view.checks,
         warnings=view.warnings,
+        waiting_for=None if view.waiting_for is None else view.waiting_for.to_json(),
     )
 
 
