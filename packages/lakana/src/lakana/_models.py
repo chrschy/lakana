@@ -1328,6 +1328,54 @@ class CheckResultPage:
 
 
 @dataclass(frozen=True)
+class RunPage:
+    """One page of runs, newest first.
+
+    Parameters
+    ----------
+    items
+        The runs on this page, without tasks.
+    next_cursor
+        Pass back as ``cursor=`` to fetch the next page; ``None`` on the last page.
+    """
+
+    items: list[Run]
+    next_cursor: str | None
+
+
+@dataclass(frozen=True)
+class QueryListPage:
+    """One page of the queries of an environment.
+
+    Parameters
+    ----------
+    items
+        The entries on this page.
+    next_cursor
+        Pass back as ``cursor=`` to fetch the next page; ``None`` on the last page.
+    """
+
+    items: list[QueryListEntry]
+    next_cursor: str | None
+
+
+@dataclass(frozen=True)
+class DeployPage:
+    """One page of deploy runs, newest first.
+
+    Parameters
+    ----------
+    items
+        The deploy runs on this page.
+    next_cursor
+        Pass back as ``cursor=`` to fetch the next page; ``None`` on the last page.
+    """
+
+    items: list[Deploy]
+    next_cursor: str | None
+
+
+@dataclass(frozen=True)
 class RunTask:
     """One task run of a run.
 

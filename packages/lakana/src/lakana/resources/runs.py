@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from datetime import datetime
 from typing import Any
 
-from lakana._http import HttpTransport
+from lakana._http import NEXT_CURSOR_HEADER, HttpTransport, csv_param, query_params
 from lakana._models import (
     Notification,
     Run,
+    RunPage,
     RunTask,
     SchedulerStatus,
     TaskAttempt,
@@ -188,9 +189,21 @@ class Runs:
         return run_from_json(response.json())
 
     def list(
-        self, environment: str, *, repository: str | None = None, limit: int | None = None
+        self,
+        environment: str,
+        *,
+        repository: str | None = None,
+        status: str | Sequence[str] | None = None,
+        trigger: str | Sequence[str] | None = None,
+        job: str | None = None,
+        since: datetime | None = None,
+        limit: int | None = None,
+        cursor: str | None = None,
     ) -> _RunList:
         """List runs, newest first, without tasks.
+
+        The runs of one page; `list_page` also returns the cursor of the next one, and `iter`
+        walks every page.
 
         Parameters
         ----------
@@ -198,8 +211,19 @@ class Runs:
             Environment name.
         repository
             Only this repository's runs.
+        status
+            Only runs in this status or one of these (``queued``, ``running``, ``succeeded``,
+            ``failed``, ``cancelled``).
+        trigger
+            Only runs started this way or one of these (``schedule``, ``api``, ``manual``).
+        job
+            Only runs of this job.
+        since
+            Only runs created at or after this time, which needs a time zone.
         limit
             Most runs returned (1 to 200); `None` leaves it to the server (100).
+        cursor
+            A previous page's `next_cursor`. Send the same filters with every page.
 
         Returns
         -------
@@ -209,17 +233,134 @@ class Runs:
         Raises
         ------
         lakana.errors.ValidationError
-            If `limit` is outside 1 to 200.
+            If `limit` is outside 1 to 200, a filter value is unknown, `since` has no time zone,
+            or `cursor` is not one the server issued for the runs list.
         """
-        params: dict[str, str | int] = {}
-        if repository is not None:
-            params["repository"] = repository
-        if limit is not None:
-            params["limit"] = limit
+        return self.list_page(
+            environment,
+            repository=repository,
+            status=status,
+            trigger=trigger,
+            job=job,
+            since=since,
+            limit=limit,
+            cursor=cursor,
+        ).items
+
+    def list_page(
+        self,
+        environment: str,
+        *,
+        repository: str | None = None,
+        status: str | Sequence[str] | None = None,
+        trigger: str | Sequence[str] | None = None,
+        job: str | None = None,
+        since: datetime | None = None,
+        limit: int | None = None,
+        cursor: str | None = None,
+    ) -> RunPage:
+        """List one page of runs, newest first, with the cursor of the next page.
+
+        Parameters
+        ----------
+        environment
+            Environment name.
+        repository
+            Only this repository's runs.
+        status
+            Only runs in this status or one of these (``queued``, ``running``, ``succeeded``,
+            ``failed``, ``cancelled``).
+        trigger
+            Only runs started this way or one of these (``schedule``, ``api``, ``manual``).
+        job
+            Only runs of this job.
+        since
+            Only runs created at or after this time, which needs a time zone.
+        limit
+            Most runs returned (1 to 200); `None` leaves it to the server (100).
+        cursor
+            A previous page's `next_cursor`. Send the same filters with every page.
+
+        Returns
+        -------
+        RunPage
+            The runs, and the cursor for the next page (`None` on the last).
+
+        Raises
+        ------
+        lakana.errors.ValidationError
+            If `limit` is outside 1 to 200, a filter value is unknown, `since` has no time zone,
+            or `cursor` is not one the server issued for the runs list.
+        """
         response = self._transport.request(
-            ROUTES["runs.list"], path_params={"env": environment}, params=params or None
+            ROUTES["runs.list"],
+            path_params={"env": environment},
+            params=query_params(
+                repository=repository,
+                status=csv_param(status),
+                trigger=csv_param(trigger),
+                job=job,
+                since=None if since is None else since.isoformat(),
+                limit=limit,
+                cursor=cursor,
+            ),
         )
-        return [run_from_json(item) for item in response.json()]
+        return RunPage(
+            items=[run_from_json(item) for item in response.json()],
+            next_cursor=response.headers.get(NEXT_CURSOR_HEADER),
+        )
+
+    def iter(
+        self,
+        environment: str,
+        *,
+        repository: str | None = None,
+        status: str | Sequence[str] | None = None,
+        trigger: str | Sequence[str] | None = None,
+        job: str | None = None,
+        since: datetime | None = None,
+        page_size: int = 100,
+    ) -> Iterator[Run]:
+        """Yield every matching run, newest first, fetching pages as needed.
+
+        Parameters
+        ----------
+        environment
+            Environment name.
+        repository
+            Only this repository's runs.
+        status
+            Only runs in this status or one of these.
+        trigger
+            Only runs started this way or one of these.
+        job
+            Only runs of this job.
+        since
+            Only runs created at or after this time, which needs a time zone.
+        page_size
+            Runs per request (1 to 200).
+
+        Yields
+        ------
+        Run
+            Each run, once.
+        """
+        cursor: str | None = None
+        while True:
+            page = self.list_page(
+                environment,
+                repository=repository,
+                status=status,
+                trigger=trigger,
+                job=job,
+                since=since,
+                limit=page_size,
+                cursor=cursor,
+            )
+            yield from page.items
+            if page.next_cursor is None:
+                return
+            cursor = page.next_cursor
 
     def get(self, environment: str, run_id: str) -> Run:
         """Show one run with its tasks.

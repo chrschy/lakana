@@ -17,6 +17,7 @@ import typer
 from lakana._models import QueryListEntry, QueryStatus, WaitingFor
 from lakana.cli import _files, _output
 from lakana.cli._break_glass import BREAK_GLASS, REASON, break_glass_reason
+from lakana.cli._paging import more_results
 from lakana.cli._state import CliError, CliState, resolve_environment, state_of
 from lakana.errors import (
     AuthenticationError,
@@ -721,16 +722,34 @@ def list_queries(
         bool,
         typer.Option("--all", help="Also the queries that ended in the last 24 hours."),
     ] = False,
+    status: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--status",
+            help="Only queries in this status: queued, running, succeeded, failed or cancelled. "
+            "Repeat the option or separate the values with commas. An ended status lists the "
+            "ended queries of the last 24 hours without --all.",
+        ),
+    ] = None,
+    submitter: Annotated[
+        str | None,
+        typer.Option("--submitter", help="Only the queries this principal submitted."),
+    ] = None,
     limit: Annotated[
         int, typer.Option("--limit", min=1, max=_LIST_MOST, help="Most queries to list.")
     ] = 100,
+    cursor: Annotated[
+        str | None,
+        typer.Option("--cursor", help="Continue after the page that printed this cursor."),
+    ] = None,
 ) -> None:
     """List the queued and running queries of an environment.
 
     Running queries come first, then queued ones in the order they will be taken, with the
     reason each waits. You see your own queries; with MANAGE_ENVIRONMENT on the environment,
-    everyone's. The SQL and the error text are not listed: read them with 'lakana query
-    status ID'.
+    everyone's, and --submitter narrows them to one principal's. The SQL and the error text are
+    not listed: read them with 'lakana query status ID'. A long list prints a "More results"
+    line with the command that shows the next page.
 
     Parameters
     ----------
@@ -740,66 +759,56 @@ def list_queries(
         The environment.
     all_
         Add the queries that ended in the last 24 hours, newest first, after the others.
+    status
+        Status filter.
+    submitter
+        Submitter filter.
     limit
         Most queries listed (1 to 200).
+    cursor
+        The cursor of the page to show.
     """
     state = state_of(ctx)
     environment = resolve_environment(state, env)
-    # One row more than asked for tells whether the list was cut; at the most the server
-    # returns, the extra row cannot be asked for and a full answer only says "may be more".
-    asked = min(limit + 1, _LIST_MOST)
-    found = state.client().queries.list(environment, include_ended=all_, limit=asked)
-    entries = found[:limit]
-    if not entries and state.output != "json":
+    page = state.client().queries.list_page(
+        environment,
+        include_ended=all_,
+        status=status,
+        submitter=submitter,
+        limit=limit,
+        cursor=cursor,
+    )
+    if not page.items and state.output != "json":
         where = _output.inline(environment)
-        typer.echo(
-            f"No queries in {where} in the last 24 hours."
-            if all_
-            else f"No queued or running queries in {where}."
-        )
+        if status or submitter is not None or cursor is not None:
+            typer.echo(f"No queries in {where} match.")
+        else:
+            typer.echo(
+                f"No queries in {where} in the last 24 hours."
+                if all_
+                else f"No queued or running queries in {where}."
+            )
         return
     _output.emit(
         state,
-        entries,
+        page.items,
         columns=_LIST_COLUMNS,
         droppable=_LIST_DROPPABLE,
         derived={"kind": _kind, "age": _age, "waiting_for": _waiting},
         flexible=["waiting_for"],
     )
-    if (
-        state.output != "json"
-        and len(found) >= asked
-        and (len(found) > limit or limit == _LIST_MOST)
-    ):
-        typer.echo(_cut_line(limit, all_))
-
-
-def _cut_line(limit: int, include_ended: bool) -> str:
-    """Say that a listing was cut and what to do about it.
-
-    Parameters
-    ----------
-    limit
-        The `--limit` the user gave.
-    include_ended
-        Whether `--all` was given.
-
-    Returns
-    -------
-    str
-        One sentence with the next step.
-    """
-    if limit < _LIST_MOST:
-        return (
-            f"Showing the first {limit} queries; there are more. "
-            f"Use --limit N (at most {_LIST_MOST}) to see more."
-        )
-    advice = (
-        "Leave out --all to list only the queued and running ones."
-        if include_ended
-        else "Cancel the ones you no longer need with 'lakana query cancel ID', or wait."
+    more_results(
+        state,
+        ["lakana", "query", "list"],
+        {
+            "--env": environment,
+            "--all": all_,
+            "--status": status,
+            "--submitter": submitter,
+            "--limit": limit if limit != 100 else None,
+        },
+        page.next_cursor,
     )
-    return f"Showing {_LIST_MOST} queries, the most one call returns; there may be more. {advice}"
 
 
 @query_app.command("submit")

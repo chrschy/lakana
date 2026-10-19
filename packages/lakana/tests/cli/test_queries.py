@@ -989,7 +989,7 @@ def test_query_list_shows_the_table(tmp_path: Path) -> None:
     assert "bob" in out
     request = api.requests[-1]
     assert request.url.params["include_ended"] == "false"
-    assert request.url.params["limit"] == "101"  # one more than asked: tells a cut list
+    assert request.url.params["limit"] == "100"
 
 
 def test_query_list_all_asks_for_ended_runs(tmp_path: Path) -> None:
@@ -999,7 +999,7 @@ def test_query_list_all_asks_for_ended_runs(tmp_path: Path) -> None:
     )
     assert result.exit_code == 0, result.stderr
     assert api.requests[-1].url.params["include_ended"] == "true"
-    assert api.requests[-1].url.params["limit"] == "8"
+    assert api.requests[-1].url.params["limit"] == "7"
     assert "SUCCEEDED" in result.stdout
 
 
@@ -1080,6 +1080,8 @@ def test_an_empty_list_says_so(tmp_path: Path) -> None:
 def _limited_api(count: int) -> FakeApi:
     """Build a fake whose list route returns at most the `limit` it is sent of `count` rows.
 
+    It sends the cursor `cursor-<limit>` when it holds more.
+
     Parameters
     ----------
     count
@@ -1094,13 +1096,15 @@ def _limited_api(count: int) -> FakeApi:
     api = FakeApi()
 
     def respond(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json=rows[: int(request.url.params["limit"])])
+        limit = int(request.url.params["limit"])
+        headers = {"X-Next-Cursor": f"cursor-{limit}"} if count > limit else {}
+        return httpx.Response(200, json=rows[:limit], headers=headers)
 
     api.routes["GET", _Q] = respond
     return api
 
 
-def test_a_cut_list_says_so_only_when_more_exist_and_names_the_next_step(tmp_path: Path) -> None:
+def test_a_cut_list_names_the_command_for_the_next_page(tmp_path: Path) -> None:
     wide = {"COLUMNS": "200"}
     cut = invoke(
         make_state(tmp_path, _limited_api(5)),
@@ -1110,12 +1114,17 @@ def test_a_cut_list_says_so_only_when_more_exist_and_names_the_next_step(tmp_pat
         "dev",
         "--limit",
         "3",
+        "--all",
+        "--status",
+        "queued,failed",
+        "--submitter",
+        "bob",
         env=wide,
     )
     assert cut.stdout.count("-8b7a-4c55") == 3
     assert (
-        "Showing the first 3 queries; there are more. Use --limit N (at most 200) to see more."
-        in cut.stdout
+        "More results: lakana query list --env dev --all --status queued,failed "
+        "--submitter bob --limit 3 --cursor cursor-3" in cut.stdout
     )
     exact = invoke(
         make_state(tmp_path, _limited_api(3)),
@@ -1128,18 +1137,10 @@ def test_a_cut_list_says_so_only_when_more_exist_and_names_the_next_step(tmp_pat
         env=wide,
     )
     assert exact.stdout.count("-8b7a-4c55") == 3
-    assert "Showing" not in exact.stdout
-    short = invoke(
-        make_state(tmp_path, _limited_api(2)),
-        "query",
-        "list",
-        "--env",
-        "dev",
-        "--limit",
-        "3",
-        env=wide,
-    )
-    assert "Showing" not in short.stdout
+    assert "More results" not in exact.stdout
+
+
+def test_the_next_page_hint_of_a_json_listing_goes_to_stderr(tmp_path: Path) -> None:
     as_json = invoke(
         make_state(tmp_path, _limited_api(5)),
         "--output",
@@ -1151,25 +1152,22 @@ def test_a_cut_list_says_so_only_when_more_exist_and_names_the_next_step(tmp_pat
         "--limit",
         "3",
     )
-    assert "Showing" not in as_json.stdout
+    assert "More results" not in as_json.stdout
+    assert "--cursor cursor-3" in as_json.stderr
     assert len(json.loads(as_json.stdout)) == 3
 
 
-def test_a_list_at_the_most_one_call_returns_says_there_may_be_more(tmp_path: Path) -> None:
-    api = _limited_api(200)
+def test_a_cursor_is_sent_and_a_filter_that_finds_nothing_says_so(tmp_path: Path) -> None:
+    api = _list_api()
     state = make_state(tmp_path, api)
-    plain = invoke(state, "query", "list", "--env", "dev", "--limit", "200")
-    assert (
-        "Showing 200 queries, the most one call returns; there may be more. Cancel the ones you "
-        "no longer need with 'lakana query cancel ID', or wait." in plain.stdout
-    )
-    ended = invoke(state, "query", "list", "--env", "dev", "--limit", "200", "--all")
-    assert "Leave out --all to list only the queued and running ones." in ended.stdout
-    assert api.requests[-1].url.params["limit"] == "200"
-    fewer = invoke(
-        make_state(tmp_path, _limited_api(199)), "query", "list", "--env", "dev", "--limit", "200"
-    )
-    assert "Showing" not in fewer.stdout
+    result = invoke(state, "query", "list", "--env", "dev", "--status", "failed", "--cursor", "abc")
+    assert "No queries in dev match." in result.stdout
+    params = api.requests[-1].url.params
+    assert (params["status"], params["cursor"]) == ("failed", "abc")
+    assert "submitter" not in params
+    named = invoke(state, "query", "list", "--env", "dev", "--submitter", "bob")
+    assert "No queries in dev match." in named.stdout
+    assert api.requests[-1].url.params["submitter"] == "bob"
 
 
 def test_query_list_limit_is_bounded_before_a_request(tmp_path: Path) -> None:

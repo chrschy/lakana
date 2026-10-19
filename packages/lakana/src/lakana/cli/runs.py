@@ -11,6 +11,7 @@ import typer
 
 from lakana._models import CheckResult, Notification, Run, RunTask, WorkerInfo
 from lakana.cli import _output
+from lakana.cli._paging import more_results, parse_since
 from lakana.cli._state import CliState, resolve_environment, state_of
 from lakana.cli.deploys import resolve_repository
 from lakana.errors import RunFailed
@@ -671,12 +672,43 @@ def list_runs(
     ctx: typer.Context,
     env: _ENV = None,
     repo: Annotated[str | None, typer.Option("--repo", help="Only this repository.")] = None,
+    status: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--status",
+            help="Only runs in this status: queued, running, succeeded, failed or cancelled. "
+            "Repeat the option or separate the values with commas.",
+        ),
+    ] = None,
+    trigger: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--trigger",
+            help="Only runs started this way: schedule, api or manual. Repeat the option or "
+            "separate the values with commas.",
+        ),
+    ] = None,
+    job: Annotated[str | None, typer.Option("--job", help="Only runs of this job.")] = None,
+    since: Annotated[
+        str | None,
+        typer.Option(
+            "--since",
+            help="Only runs created at or after this date or time, such as 2026-10-18 or "
+            "2026-10-18T09:30:00Z. Without a time zone it is read in yours.",
+        ),
+    ] = None,
     limit: Annotated[
         int | None,
         typer.Option("--limit", min=1, max=200, help="Most runs to list (default 100)."),
     ] = None,
+    cursor: Annotated[
+        str | None,
+        typer.Option("--cursor", help="Continue after the page that printed this cursor."),
+    ] = None,
 ) -> None:
     """List runs, newest first.
+
+    A long list prints a "More results" line with the command that shows the next page.
 
     Parameters
     ----------
@@ -686,12 +718,46 @@ def list_runs(
         Environment.
     repo
         Repository filter.
+    status
+        Status filter.
+    trigger
+        Trigger filter.
+    job
+        Job filter.
+    since
+        Only runs created at or after this time.
     limit
         Most runs returned (1 to 200); the server's default when omitted.
+    cursor
+        The cursor of the page to show.
     """
     state = state_of(ctx)
-    runs = state.client().runs.list(resolve_environment(state, env), repository=repo, limit=limit)
-    _output.emit(state, runs, columns=_RUN_COLUMNS, droppable=_RUN_DROPPABLE)
+    environment = resolve_environment(state, env)
+    page = state.client().runs.list_page(
+        environment,
+        repository=repo,
+        status=status,
+        trigger=trigger,
+        job=job,
+        since=parse_since(since),
+        limit=limit,
+        cursor=cursor,
+    )
+    _output.emit(state, page.items, columns=_RUN_COLUMNS, droppable=_RUN_DROPPABLE)
+    more_results(
+        state,
+        ["lakana", "runs", "list"],
+        {
+            "--env": environment,
+            "--repo": repo,
+            "--status": status,
+            "--trigger": trigger,
+            "--job": job,
+            "--since": since,
+            "--limit": limit,
+        },
+        page.next_cursor,
+    )
 
 
 @runs_app.command("show")

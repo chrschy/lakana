@@ -10,6 +10,7 @@ import typer
 
 from lakana._models import Deploy, ProjectVersion
 from lakana.cli import _output
+from lakana.cli._paging import more_results
 from lakana.cli._project import find_project_root, is_dirty, project_repo
 from lakana.cli._state import CliError, CliState, confirm, resolve_environment, state_of
 from lakana.client import Client
@@ -357,8 +358,22 @@ def rollback(
 
 
 @deploys_app.command("list")
-def list_deploys(ctx: typer.Context, env: _ENV = None) -> None:
+def list_deploys(
+    ctx: typer.Context,
+    env: _ENV = None,
+    repo: Annotated[str | None, typer.Option("--repo", help="Only this repository.")] = None,
+    limit: Annotated[
+        int | None,
+        typer.Option("--limit", min=1, max=200, help="Most deploys to list (default 100)."),
+    ] = None,
+    cursor: Annotated[
+        str | None,
+        typer.Option("--cursor", help="Continue after the page that printed this cursor."),
+    ] = None,
+) -> None:
     """List deploy history, newest first.
+
+    A long list prints a "More results" line with the command that shows the next page.
 
     Parameters
     ----------
@@ -366,14 +381,29 @@ def list_deploys(ctx: typer.Context, env: _ENV = None) -> None:
         The Typer context.
     env
         Environment.
+    repo
+        Repository filter.
+    limit
+        Most deploys returned (1 to 200); the server's default when omitted.
+    cursor
+        The cursor of the page to show.
     """
     state = state_of(ctx)
-    runs = state.client().deploys.list(resolve_environment(state, env))
+    environment = resolve_environment(state, env)
+    page = state.client().deploys.list_page(
+        environment, repository=repo, limit=limit, cursor=cursor
+    )
     _output.emit(
         state,
-        runs,
+        page.items,
         columns=["id", "repository", "kind", "status", "resolved_sha", "created_at"],
         droppable=["kind", "resolved_sha", "repository", "created_at"],
+    )
+    more_results(
+        state,
+        ["lakana", "deploys", "list"],
+        {"--env": environment, "--repo": repo, "--limit": limit},
+        page.next_cursor,
     )
 
 
