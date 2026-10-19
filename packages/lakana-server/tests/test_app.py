@@ -536,6 +536,23 @@ def test_a_minting_start_without_a_token_file_fails_naming_the_setting(tmp_path:
         pass
 
 
+def test_a_half_set_credential_stops_start_up_and_logs_nothing_false(
+    caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    """A key id without its secret is refused; the log never claims a supplied token was used."""
+    settings = _minting_settings(tmp_path).model_copy(update={"bootstrap_pat_key_id": "k"})
+
+    with (
+        _app_logger_enabled(),
+        caplog.at_level(logging.DEBUG),
+        pytest.raises(ValidationError, match="LAKANA_BOOTSTRAP_PAT_SECRET"),
+        TestClient(create_app(settings)),
+    ):
+        pass
+
+    assert "was supplied" not in caplog.text
+
+
 def test_a_minting_start_refuses_an_existing_token_file(tmp_path: Path) -> None:
     """An earlier file is not overwritten; start-up stops and the file is untouched."""
     settings = _minting_settings(tmp_path)

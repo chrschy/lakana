@@ -362,8 +362,8 @@ def bootstrap_if_needed(
     Raises
     ------
     ValidationError
-        If a random token would be minted and no `token_file` is given. Raised before anything
-        changes.
+        If only one of `key_id` and `secret` is given, or if a random token would be minted and
+        no `token_file` is given. Raised before anything changes.
     ConflictError
         If `key_id` is supplied and some PAT already uses it (a collision never mints a
         different token); if `ensure_bootstrap_principal` cannot create or find the
@@ -371,6 +371,12 @@ def bootstrap_if_needed(
     """
     if admin_exists(session):
         return None
+    if (key_id is None) != (secret is None):
+        raise ValidationError(
+            "Only one of LAKANA_BOOTSTRAP_PAT_KEY_ID and LAKANA_BOOTSTRAP_PAT_SECRET is set, and "
+            "a token cannot be made from half a credential. Set both, or neither and set "
+            "LAKANA_BOOTSTRAP_TOKEN_FILE to have a new token written to a file."
+        )
     if key_id is None and token_file is None:
         raise ValidationError(
             "The server has to create the first administrator and no token was supplied, so "

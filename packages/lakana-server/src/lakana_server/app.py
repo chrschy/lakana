@@ -158,7 +158,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
             if token is not None:
                 configured_key_id = resolved_settings.bootstrap_pat_key_id
-                if configured_key_id is not None:
+                if configured_key_id is not None and (
+                    resolved_settings.bootstrap_pat_secret is not None
+                ):
                     # The caller (e.g. `lakana server start --local`, the Compose bundle)
                     # supplied this credential and already knows the full token. The normal
                     # first start of a local instance, and of a restored Compose instance:

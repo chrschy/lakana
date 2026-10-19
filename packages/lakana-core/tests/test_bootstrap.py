@@ -433,6 +433,26 @@ def test_a_token_file_that_cannot_be_written_is_a_clear_error(
     assert admin_exists(session) is False
 
 
+@pytest.mark.parametrize(
+    ("key_id", "secret"),
+    [("testkey", None), (None, "testsecret")],
+    ids=["key-id-only", "secret-only"],
+)
+def test_half_a_supplied_credential_is_refused_before_anything_changes(
+    session: Session, tmp_path: Path, key_id: str | None, secret: str | None
+) -> None:
+    """A key id without its secret (or the reverse) would silently lose the minted token."""
+    with pytest.raises(
+        ValidationError, match=r"LAKANA_BOOTSTRAP_PAT_KEY_ID.*LAKANA_BOOTSTRAP_PAT_SECRET"
+    ):
+        bootstrap_if_needed(
+            session, "admin", key_id=key_id, secret=secret, token_file=tmp_path / "token"
+        )
+
+    assert session.execute(select(Principal)).scalars().all() == []
+    assert not (tmp_path / "token").exists()
+
+
 def test_a_directory_the_server_cannot_write_to_is_a_clear_error(
     session: Session, tmp_path: Path
 ) -> None:
