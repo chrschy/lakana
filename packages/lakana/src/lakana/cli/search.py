@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 from enum import StrEnum
 from typing import Annotated
 
@@ -51,6 +52,9 @@ def search(
     limit: Annotated[
         int, typer.Option("--limit", min=1, max=100, help="Most results to show (1 to 100).")
     ] = 20,
+    offset: Annotated[
+        int, typer.Option("--offset", min=0, help="Results to skip, to show the next page.")
+    ] = 0,
     env: Annotated[
         str | None, typer.Option("--env", help="Environment (default: the profile's).")
     ] = None,
@@ -72,13 +76,19 @@ def search(
         Only this kind of result.
     limit
         Most results to show.
+    offset
+        Results to skip.
     env
         The environment.
     """
     state = state_of(ctx)
     environment = resolve_environment(state, env)
     page = state.client().search(
-        environment, text, kind=kind.value if kind is not None else None, limit=limit
+        environment,
+        text,
+        kind=kind.value if kind is not None else None,
+        limit=limit,
+        offset=offset,
     )
     if state.output == "json":
         _output.emit(state, page)
@@ -99,7 +109,18 @@ def search(
         droppable=["snippet", "where"],
     )
     if page.has_more:
-        _output.emit(state, f"More results follow. Show more with --limit {min(limit * 2, 100)}.")
+        parts = ["lakana", "search", shlex.quote(_output.inline(text))]
+        if kind is not None:
+            parts += ["--kind", kind.value]
+        if limit != 20:
+            parts += ["--limit", str(limit)]
+        parts += [
+            "--offset",
+            str(offset + limit),
+            "--env",
+            shlex.quote(_output.inline(environment)),
+        ]
+        _output.emit(state, "More results: " + " ".join(parts))
 
 
 def register(app: typer.Typer) -> None:

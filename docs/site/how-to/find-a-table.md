@@ -49,8 +49,8 @@ lakana --output json search status --kind column
 ```
 
 The JSON has `results`, `limit`, `offset` and `has_more`. When `has_more` is `true`, ask for the
-next page with the SDK's or REST's `offset`; the command shows the first page, 20 results unless you
-pass `--limit` (at most 100).
+next page with `--offset`; the command prints the exact command to run. It shows 20 results unless
+you pass `--limit` (at most 100).
 
 ## What you see
 
@@ -59,6 +59,9 @@ so does a description: a text of a table you cannot read is never shown, not eve
 result. Runs need the right to read the environment. People appear only for a caller who may list
 them (`MANAGE_PRINCIPAL`, which administrators hold). What you may not see is left out, not refused, so a search never tells you
 that something exists.
+
+Matching ignores case for ASCII letters on SQLite (local mode) and for all letters on Postgres, so
+`äpfel` does not find `Äpfel` on SQLite.
 
 A text that finds nothing says what search looks at. The facts (limits, ranking, the route, how
 existing tables are filled in) are in [Search](../reference/search.md).

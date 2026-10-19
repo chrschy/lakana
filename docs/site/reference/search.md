@@ -20,7 +20,8 @@ description. The *shown* description is the edit if there is one, else the proje
 ([Descriptions](descriptions.md)); a column's text is searched only while the column is in the
 table's schema.
 
-Matching ignores case and finds the text anywhere. `%`, `_` and `\` in the text match themselves. The
+Matching ignores case and finds the text anywhere. Case is ignored for ASCII letters on SQLite (local
+mode) and for all letters on Postgres. `%`, `_` and `\` in the text match themselves. The
 text is trimmed and must be 1 to 200 characters.
 
 ## Ranking and paging
@@ -72,7 +73,7 @@ the first hit. A bad `q`, `limit`, `offset` or `kind` is `422` and says the rang
 
 ## Command and SDK
 
-`lakana search TEXT [--kind KIND] [--limit N] [--env ENV]` shows the first page; with `--output json`
+`lakana search TEXT [--kind KIND] [--limit N] [--offset N] [--env ENV]` shows one page and, when more follow, the command for the next; with `--output json`
 it prints the whole answer. `client.search(environment, q, kind=None, limit=20, offset=0)` returns a
 `SearchPage` with `results` (`SearchHit` objects with the fields above), `limit`, `offset` and
 `has_more`.

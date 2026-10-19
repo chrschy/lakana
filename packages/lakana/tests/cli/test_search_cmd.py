@@ -158,11 +158,43 @@ def test_search_with_no_hits_says_so_and_how_to_widen_it(tmp_path: Path) -> None
     assert "table names, column names" in plain
 
 
-def test_search_says_when_more_hits_follow(tmp_path: Path) -> None:
+def test_search_names_the_next_page_exactly_when_more_hits_follow(tmp_path: Path) -> None:
+    _, result = _search(
+        tmp_path,
+        _page(_hit("table", "silver.orders"), has_more=True),
+        "my text",
+        "--kind",
+        "column",
+        "--limit",
+        "5",
+        "--offset",
+        "10",
+    )
+
+    assert (
+        "More results: lakana search 'my text' --kind column --limit 5 --offset 15 --env dev"
+        in (_plain(result.stdout))
+    )
+
+
+def test_search_keeps_the_default_limit_out_of_the_hint(tmp_path: Path) -> None:
     _, result = _search(tmp_path, _page(_hit("table", "silver.orders"), has_more=True), "o")
 
-    assert "More results follow" in _plain(result.stdout)
-    assert "--limit" in _plain(result.stdout)
+    assert "More results: lakana search o --offset 20 --env dev" in _plain(result.stdout)
+
+
+def test_search_gives_no_hint_when_nothing_follows(tmp_path: Path) -> None:
+    _, result = _search(tmp_path, _page(_hit("table", "silver.orders")), "o")
+
+    assert "More results" not in _plain(result.stdout)
+
+
+def test_search_passes_the_offset_on_and_refuses_a_negative_one(tmp_path: Path) -> None:
+    api, result = _search(tmp_path, _page(), "x", "--offset", "40")
+    assert api.requests[-1].url.params["offset"] == "40"
+
+    refused = invoke(make_state(tmp_path, FakeApi()), "search", "x", "--offset", "-1")
+    assert result.exit_code == 0 and refused.exit_code == 2
 
 
 def test_search_refuses_a_limit_outside_the_range_and_an_unknown_kind(tmp_path: Path) -> None:
