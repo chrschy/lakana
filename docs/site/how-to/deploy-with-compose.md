@@ -829,23 +829,32 @@ migrated before the new server or worker code runs against it.
 
 ## Backups
 
-Quiesce the stack first (`docker compose stop` and `docker compose start` afterwards, or an
-equivalent maintenance window) so the dump and the volume snapshot are consistent with each
-other.
+The catalog (Postgres) and the object storage are one state, so a backup is only consistent if
+nothing writes to either while you take it. Stop what writes, dump the catalog while Postgres
+still runs, stop the storage and archive its volume, then start everything again. The stack is
+unavailable for the time this takes.
 
-**Postgres (the catalog):**
+1. Stop the server and every worker service, so nothing writes any more.
+2. Dump the catalog; this needs `postgres` to be running.
+3. Stop the two storage services and archive the `seaweed` volume. Its name starts with the
+   Compose project name (`lakana_seaweed` unless you set `COMPOSE_PROJECT_NAME`, see
+   [Running more than one bundle on a host](#running-more-than-one-bundle-on-a-host)).
+4. Start everything again, and keep a copy of `.env` and `compose.yaml` with the two backups: `.env`
+   holds the master key.
 
-<!-- not tested: dumps the Postgres of a running Docker Compose stack, and the example runner has no Docker -->
+<!-- not tested: stops and dumps a running Docker Compose stack and archives its volume, and the example runner has no Docker -->
 ```bash
-docker compose exec postgres pg_dump -U lakana lakana > lakana.sql
-```
-
-**SeaweedFS (object storage):**
-
-<!-- not tested: archives a Docker volume of a running stack, and the example runner has no Docker -->
-```bash
+docker compose stop server worker worker-interactive worker-pipeline
+docker compose exec -T postgres pg_dump -U lakana lakana > lakana.sql
+docker compose stop seaweedfs seaweedfs-core
 docker run --rm -v lakana_seaweed:/data -v "$PWD":/backup busybox tar czf /backup/seaweed.tgz /data
+docker compose up -d --wait
 ```
+
+A backup taken while the stack runs is not consistent, whatever the order: a file removed
+between the two (a dropped artifact, or a deleted version after the sweep) is still listed by the
+restored catalog, and a version stored between them is missing from it. Take backups with the steps
+above.
 
 ## After a restore
 
@@ -855,7 +864,7 @@ manifests that the restored catalog has never heard of, or the catalog may list 
 are gone. This section assumes that the catalog came from a consistent backup, a database dump or
 point-in-time recovery.
 
-**Before you restore, if you are unsure:** set `LAKANA_RUN__SWEEP_INTERVAL=0` on the workers so that
+**Before you restore, if you are unsure:** set `LAKANA_RUN__SWEEP_INTERVAL: "0"` in the shared `x-lakana-env` block of `compose.yaml` (the workers read it there, not from `.env`; apply it as under [Settings](#settings)) so that
 no sweep runs while the two disagree, and set it back when you have checked what follows. The same
 holds after a failover that lost the last commits, and when you point a fresh database at an
 existing bucket.
@@ -1217,3 +1226,6 @@ The bundle's known gaps (SeaweedFS's internal APIs, a venv build that a shutdown
 [The security overview](../explanation/security.md) and the [threat model](https://github.com/lakana-labs/lakana/blob/main/docs/security/threat-model.md) describe what `.env` and the
 bootstrap credential protect in team mode, and what team mode explicitly does not defend
 against.
+
+If you run an instance for other people, [Run Lakana for other people](operate-for-others.md) puts these
+steps in the order an operator needs them.
