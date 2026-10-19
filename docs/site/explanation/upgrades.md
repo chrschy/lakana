@@ -125,6 +125,15 @@ Each cell is a summary. The page named in the last column has the detail. The ch
 
 ## Notes for the next release
 
+### A query that is passed by says so
+
+Migration `0041` adds a nullable `query_passed_by_until` to `principals`; every row stays empty. When a
+worker waits too long for the lock that serialises the start of one user's queries, it now writes
+the time (30 seconds ahead) until which workers pass that user's ad-hoc queries by, and the query's
+wait reason is the new `lock_timeout` instead of `starting`
+([Why is it waiting?](../how-to/why-is-it-waiting.md)). Nothing is removed. Going back to the
+previous release drops the column; that release keeps this in its workers' memory only.
+
 ### Every task failure has a code and a next step
 
 Migration `0040` adds a nullable `failure_code` to `task_runs` and `task_attempts`. The rows that

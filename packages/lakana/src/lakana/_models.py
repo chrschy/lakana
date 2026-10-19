@@ -505,7 +505,9 @@ class WaitingFor:
         be claimed), `workers_busy` (workers are running that take this kind of work and none
         is free), `no_worker_of_kind` (workers are running and none takes this kind of work),
         `user_limit` (the submitter already runs as many ad-hoc queries as the limit per user
-        allows), `upstream` (a task waits for upstream tasks of its run), `retry` (a task
+        allows), `lock_timeout` (a worker waited too long for the lock that serialises the
+        start of the submitter's queries, so workers pass them by for a few seconds),
+        `upstream` (a task waits for upstream tasks of its run), `retry` (a task
         failed and its next attempt is in the future), `job_waits` (a start of a job waits for
         the active run of its project) or `no_run_principal` (a job has a schedule and no run
         principal is bound, so it does not start by itself).
@@ -529,7 +531,8 @@ class WaitingFor:
     max_attempts
         Attempts allowed; for `retry`.
     next_attempt_at
-        When the next attempt may start (timezone-aware, UTC); for `retry`.
+        When the next attempt may start (timezone-aware, UTC); for `retry`. For `lock_timeout`,
+        until when the submitter's queries are passed by.
     other_workers
         Workers that are running although none takes this kind of work (they take the other
         kind only); for `no_worker_of_kind`. `None` from a server that predates the field.

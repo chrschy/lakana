@@ -2,11 +2,12 @@
 
 import enum
 import uuid
+from datetime import datetime
 
 from sqlalchemy import Boolean, Enum, String, Uuid
 from sqlalchemy.orm import Mapped, mapped_column
 
-from lakana_core.models.base import Base, TimestampMixin
+from lakana_core.models.base import Base, TimestampMixin, UTCDateTime
 
 
 class PrincipalType(enum.StrEnum):
@@ -30,3 +31,8 @@ class Principal(Base, TimestampMixin):
     type: Mapped[PrincipalType] = mapped_column(Enum(PrincipalType, native_enum=False))
     name: Mapped[str] = mapped_column(String(255), unique=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    query_passed_by_until: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    """Until when workers pass this principal's ad-hoc queries by, written by a worker whose
+    claim timed out on the principal's cap lock (`pools.pass_by`). `None` when none was. Read by
+    the wait reason (`waiting.LOCK_TIMEOUT`); it ends by time only, and a past time means
+    nothing."""

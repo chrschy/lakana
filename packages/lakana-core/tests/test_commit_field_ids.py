@@ -1287,6 +1287,16 @@ def test_a_manifest_list_that_grows_after_its_size_check_is_cut_at_the_limit(
     assert 100_000 < io.stream.served <= 100_001 + 65_536
 
 
+def test_the_bytes_the_check_read_are_what_pyiceberg_opens() -> None:
+    """The held file reports the bytes it holds and opens them as a seekable stream."""
+    held = field_ids_module._HeldFile("s3://b/m.avro", b"abc")
+    assert (len(held), held.exists(), held.location) == (3, True, "s3://b/m.avro")
+    with held.open() as stream:
+        assert stream.read() == b"abc"
+        stream.seek(1)
+        assert stream.read(1) == b"b"
+
+
 def test_the_storage_reads_of_the_check_use_shorter_timeouts() -> None:
     """The check's FileIO is a copy with S3 timeouts; the table's own FileIO is untouched."""
     own = PyArrowFileIO({"s3.endpoint": "http://x", "s3.request-timeout": "600"})

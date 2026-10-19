@@ -32,6 +32,7 @@ from lakana_core.models import (
     WriteMode,
 )
 from lakana_core.runs.waiting import (
+    LOCK_TIMEOUT,
     MAX_UPSTREAM_BODY,
     MAX_UPSTREAM_NAMES,
     NO_WORKER,
@@ -1105,3 +1106,35 @@ def test_the_details_of_a_reason_hold_only_numbers_and_this_runs_own_data(
 def test_a_reason_is_a_value_object() -> None:
     reason = WaitReason(NO_WORKER, "m", workers=0)
     assert reason == WaitReason(NO_WORKER, "m", workers=0)
+
+
+_PASSED_BY_MESSAGE = (
+    "A worker waited too long for the lock that serialises the start of this user's queries, "
+    "so workers pass them by until 14:00:30 UTC. This query starts then, at the latest; "
+    "nothing needs doing."
+)
+
+
+def test_a_query_passed_by_after_a_lock_timeout_names_the_lock_instead_of_starting() -> None:
+    """#95: a worker is free, but the principal is passed by until a time the database holds."""
+    until = _NOW + timedelta(seconds=30)
+    reason = query_wait_reason(c(2, 2, 1), 0, passed_by_until=until)
+    assert LOCK_TIMEOUT == "lock_timeout"
+    assert (reason.code, reason.message) == (LOCK_TIMEOUT, _PASSED_BY_MESSAGE)
+    assert reason.to_json() == {
+        "code": "lock_timeout",
+        "message": _PASSED_BY_MESSAGE,
+        "workers": 2,
+        "next_attempt_at": until.isoformat(),
+    }
+
+
+def test_the_pass_by_comes_after_the_cases_that_hold_the_query_for_a_truer_reason() -> None:
+    """No worker, no worker of the kind, the user limit and busy workers all come first."""
+    until = _NOW + timedelta(seconds=30)
+    assert query_wait_reason(c(0, 0, 0), 0, passed_by_until=until).code == NO_WORKER
+    assert query_wait_reason(c(2, 0, 0), 0, passed_by_until=until).code == NO_WORKER_OF_KIND
+    reached = u(2, 2)
+    assert query_wait_reason(c(2, 2, 1), 0, limit=reached, passed_by_until=until).code == USER_LIMIT
+    assert query_wait_reason(c(2, 2, 0), 3, passed_by_until=until).code == WORKERS_BUSY
+    assert query_wait_reason(c(2, 2, 1), 0, passed_by_until=None).code == STARTING
