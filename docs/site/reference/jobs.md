@@ -42,7 +42,7 @@ do.
 
 | Command | Shows |
 |---|---|
-| `lakana job list [--env ENV] [--repo REPO]` | one row per job with a `triggers` column, for example `schedule 0 6 * * * Europe/Berlin, on demand`; a paused schedule reads `schedule 0 6 * * * Europe/Berlin (paused)` |
+| `lakana job list [--env ENV] [--repo REPO]` | one row per job with a `triggers` column that holds each trigger on its own line, for example `schedule 0 6 * * * Europe/Berlin` and `on demand`; a paused schedule reads `schedule 0 6 * * * Europe/Berlin (paused)` |
 | `lakana job show NAME [--env ENV] [--repo REPO]` | the job's state, selection and last run, and each trigger on its own line with the next run of a schedule |
 
 With `--output json` both print the whole body, `triggers` included.
