@@ -90,10 +90,15 @@ class Settings(BaseSettings):
         Name of the administrator created the first time the server starts, if no principal of
         that name exists. Its credential is shown once at the first start. Change it only before
         the first start.
-    bootstrap_pat_key_id, bootstrap_pat_secret
-        With `LAKANA_BOOTSTRAP_PAT_SECRET`, a fixed credential for the bootstrap administrator,
-        for tests and local development. Unset (the default), a random credential is created at
-        the first start and shown once. Do not set it in a deployment.
+    bootstrap_pat_key_id
+        The key id half of a fixed credential for the bootstrap administrator, for tests and
+        local development; set it together with `LAKANA_BOOTSTRAP_PAT_SECRET`. Unset (the
+        default), a random credential is created at the first start and shown once. The Compose
+        bundle sets both in its `.env` file.
+    bootstrap_pat_secret
+        The secret half of a fixed credential for the bootstrap administrator; set it together
+        with `LAKANA_BOOTSTRAP_PAT_KEY_ID`. Unset (the default), a random credential is created
+        at the first start and shown once. Treat it like a password.
     secrets
         Secrets subsystem configuration, in the same shape `lakana-core` uses.
     task_tokens

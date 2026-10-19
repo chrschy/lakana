@@ -22,8 +22,8 @@ Compose](../how-to/deploy-with-compose.md).
 | Variable | Type | Default | Read by | Description |
 |---|---|---|---|---|
 | `LAKANA_BOOTSTRAP_ADMIN` | text | `admin` | server, worker | Name of the administrator created the first time the server starts, if no principal of that name exists. Its credential is shown once at the first start. Change it only before the first start. |
-| `LAKANA_BOOTSTRAP_PAT_KEY_ID` | text | not set | server | With `LAKANA_BOOTSTRAP_PAT_SECRET`, a fixed credential for the bootstrap administrator, for tests and local development. Unset (the default), a random credential is created at the first start and shown once. Do not set it in a deployment. |
-| `LAKANA_BOOTSTRAP_PAT_SECRET` | text | not set | server | With `LAKANA_BOOTSTRAP_PAT_SECRET`, a fixed credential for the bootstrap administrator, for tests and local development. Unset (the default), a random credential is created at the first start and shown once. Do not set it in a deployment. |
+| `LAKANA_BOOTSTRAP_PAT_KEY_ID` | text | not set | server | The key id half of a fixed credential for the bootstrap administrator, for tests and local development; set it together with `LAKANA_BOOTSTRAP_PAT_SECRET`. Unset (the default), a random credential is created at the first start and shown once. The Compose bundle sets both in its `.env` file. |
+| `LAKANA_BOOTSTRAP_PAT_SECRET` | text | not set | server | The secret half of a fixed credential for the bootstrap administrator; set it together with `LAKANA_BOOTSTRAP_PAT_KEY_ID`. Unset (the default), a random credential is created at the first start and shown once. Treat it like a password. |
 | `LAKANA_HOST` | text | `127.0.0.1` | server | Address the server listens on. `127.0.0.1` (the default) accepts connections from this machine only; the Compose bundle publishes the port through `LAKANA_BIND`. |
 | `LAKANA_PORT` | whole number | `8000` | server | Port the server listens on (default 8000). |
 | `LAKANA_REPO_ROOTS` | list | empty | server, worker | Absolute directories that local repositories must lie under, as a JSON list, for example `["/repos"]`. Empty (the default) refuses every local repository. |

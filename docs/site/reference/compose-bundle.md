@@ -19,7 +19,7 @@ the workers, with its type and default, is in the [settings reference](settings.
 | `LAKANA_WORKER_MEMORY` | The memory limit of each worker container, of all three kinds (`4g`). The worker stops itself at 90 percent of it. See [Memory limits](../how-to/deploy-with-compose.md#memory-limits). |
 | `POSTGRES_PASSWORD` | The `lakana` Postgres user's password (also the catalog's connection string). |
 | `LAKANA_S3_ACCESS_KEY` / `LAKANA_S3_SECRET_KEY` | SeaweedFS's S3-compatible credentials, used by both SeaweedFS's own identity config and the `setup` job that binds them to the `dev` environment. |
-| `LAKANA_SECRETS__MASTER_KEY` | The envelope-encryption master key (`lakana_core.secrets`) — wraps every secret's own per-secret data key. Losing it makes every stored secret unrecoverable. |
+| `LAKANA_SECRETS__MASTER_KEY` | The master key that protects every stored secret: it wraps the key of each secret. Losing it makes every stored secret unrecoverable. |
 | `LAKANA_BOOTSTRAP_PAT_KEY_ID` / `LAKANA_BOOTSTRAP_PAT_SECRET` | The bootstrap admin credential (`lakana_pat_<key id>_<secret>`), saved into the `team` profile so the CLI can authenticate immediately. |
 
 ## The services
