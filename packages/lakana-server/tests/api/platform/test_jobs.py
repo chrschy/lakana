@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -338,3 +339,93 @@ def test_a_run_shows_its_notifications_to_whoever_may_read_it(client: TestClient
     outsider = _token_for(client, "outsider")
     stranger = client.get(f"{_ENV}/runs/{run['id']}", headers=outsider)
     assert stranger.status_code == 403 and "notifications" not in stranger.text
+
+
+def _set_schedule_row(client: TestClient, job: str, **fields: object) -> None:
+    """Change a job's schedule row.
+
+    Parameters
+    ----------
+    client
+        The test client.
+    job
+        The job.
+    **fields
+        Columns of the row to set.
+    """
+    with Session(client.app.state.engine) as session:
+        row = session.scalars(select(JobSchedule).where(JobSchedule.job == job)).one()
+        for key, value in fields.items():
+            setattr(row, key, value)
+        session.commit()
+
+
+def test_a_scheduled_job_lists_its_schedule_then_on_demand(client: TestClient) -> None:
+    """A schedule carries its cron, zone, pause state and next time; every job can be started."""
+    _deploy_jobs(client)
+    _set_schedule_row(client, "daily", next_fire_at=datetime(2026, 7, 1, 1, 0, tzinfo=UTC))
+    by_name = {j["name"]: j for j in client.get(f"{_ENV}/jobs", headers=AUTH_HEADER).json()}
+    schedule, on_demand = by_name["daily"]["triggers"]
+    assert schedule["kind"] == "schedule"
+    assert (schedule["cron"], schedule["timezone"], schedule["paused"]) == (
+        "0 3 * * *",
+        "Europe/Berlin",
+        False,
+    )
+    assert schedule["next_run_at"].startswith("2026-07-01T01:00:00")
+    assert on_demand == {"kind": "on_demand"}
+
+
+def test_a_paused_schedule_has_no_next_run(client: TestClient) -> None:
+    """Paused: `paused` is true and `next_run_at` is null."""
+    _deploy_jobs(client)
+    _set_schedule_row(client, "daily", paused=True, next_fire_at=datetime(2026, 7, 1, tzinfo=UTC))
+    daily = client.get(f"{_ENV}/jobs/daily", headers=AUTH_HEADER).json()
+    schedule = daily["triggers"][0]
+    assert (schedule["kind"], schedule["paused"], schedule["next_run_at"]) == (
+        "schedule",
+        True,
+        None,
+    )
+
+
+def test_a_job_without_a_schedule_has_only_on_demand(client: TestClient) -> None:
+    """No schedule here: the list holds just the on-demand trigger."""
+    _deploy_jobs(client)
+    manual = client.get(f"{_ENV}/jobs/manual", headers=AUTH_HEADER).json()
+    assert manual["triggers"] == [{"kind": "on_demand"}]
+
+
+def test_the_list_and_the_detail_agree(client: TestClient) -> None:
+    """`GET /jobs/{job}` answers the same body as its entry in `GET /jobs`."""
+    _deploy_jobs(client)
+    _set_schedule_row(client, "daily", next_fire_at=datetime(2026, 7, 1, 1, 0, tzinfo=UTC))
+    listed = {j["name"]: j for j in client.get(f"{_ENV}/jobs", headers=AUTH_HEADER).json()}
+    for name in ("daily", "manual"):
+        shown = client.get(f"{_ENV}/jobs/{name}", headers=AUTH_HEADER)
+        assert shown.status_code == 200, shown.text
+        assert shown.json() == listed[name]
+
+
+def test_the_detail_refuses_what_it_cannot_show(client: TestClient) -> None:
+    """Unknown job 404 with the names, no read right 403, a wrong repository 404."""
+    _deploy_jobs(client)
+    unknown = client.get(f"{_ENV}/jobs/nope", headers=AUTH_HEADER)
+    assert unknown.status_code == 404
+    assert "daily, manual" in unknown.json()["detail"]
+    other = client.get(f"{_ENV}/jobs/daily", headers=AUTH_HEADER, params={"repository": "nope"})
+    assert other.status_code == 404
+    assert client.get(f"{_ENV}/jobs/daily", headers=_token_for(client, "nosy2")).status_code == 403
+    assert client.get(f"{_ENV}/jobs/daily").status_code == 401
+    scoped = client.get(
+        f"{_ENV}/jobs/daily", headers=AUTH_HEADER, params={"repository": "analytics"}
+    )
+    assert scoped.status_code == 200
+
+
+def test_pause_answers_with_the_triggers(client: TestClient) -> None:
+    """The pause body is a `JobOut` too, so it carries the triggers."""
+    _deploy_jobs(client)
+    deployer = _grant(client, "deployer2", "DEPLOY")
+    paused = client.post(f"{_ENV}/jobs/daily/pause", headers=deployer, json=_BODY).json()
+    assert paused["triggers"][0]["paused"] is True

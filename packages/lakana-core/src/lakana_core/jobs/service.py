@@ -1383,3 +1383,49 @@ class JobService:
             for name, entry in sorted(manifest_jobs(version.manifest_json).items()):
                 views.append(self._view(env, repo, name, entry, rows.get((repo.id, name))))
         return views
+
+    def get(
+        self, p: PrincipalRef, environment: str, job: str, repository: str | None = None
+    ) -> JobView:
+        """Show one job of the deployed repositories of an environment.
+
+        Parameters
+        ----------
+        p
+            The caller.
+        environment
+            Environment name.
+        job
+            The job's name.
+        repository
+            The repository; needed only when several repositories declare a job of this name.
+
+        Returns
+        -------
+        JobView
+            The job, as `list` shows it.
+
+        Raises
+        ------
+        PermissionDenied
+            Without READ_ENVIRONMENT.
+        NotFoundError
+            If the environment or repository does not exist, or no deployed repository declares
+            the job; the message lists the jobs that exist.
+        ConflictError
+            If several repositories declare the job and none was named.
+        """
+        views = self.list(p, environment, repository)
+        found = [view for view in views if view.name == job]
+        if not found:
+            names = sorted({view.name for view in views})
+            where = f"in {repository!r} in {environment!r}" if repository else f"in {environment!r}"
+            listing = f"Its jobs: {', '.join(names)}." if names else "No job is deployed there."
+            raise NotFoundError(f"No job {job!r} {where}. {listing}")
+        if len(found) > 1:
+            repos = ", ".join(sorted(view.repository for view in found))
+            raise ConflictError(
+                f"Several repositories declare job {job!r} in {environment!r}: {repos}. "
+                "Name one with the `repository` parameter (`--repo` on the command line)."
+            )
+        return found[0]

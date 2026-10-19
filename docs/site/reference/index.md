@@ -14,4 +14,6 @@ Pages:
 - [Runs, queries and deploys lists](lists.md): the filters, the order and the cursor of the three lists, the refusals, commands, SDK and routes.
 - [Why did it fail?](why-did-it-fail.md): the stable failure codes of a task, what each means and what to do, where they appear and what old runs show.
 
+- [Jobs](jobs.md): the triggers of a job, the fields of the job listing, routes, commands and SDK.
+
 Pages are added here as they are written.
