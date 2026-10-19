@@ -243,6 +243,11 @@ tiebreaker (`id`), never an offset. Filters are not encoded in it; the client re
 them with every page. `GET /api/v1/audit-events` is the reference implementation, and the
 SDK exposes such an endpoint as `list(..., cursor=)` (one page) plus `iter()` (every page).
 
+An endpoint that already returned a bare JSON array before it was paged keeps that body, so
+its clients do not break, and carries the cursor in the `X-Next-Cursor` response header
+(absent on the last page) instead: the runs, queries, deploys, grants, principals and groups
+lists. Its cursor carries the list kind, so a cursor from another list is refused.
+
 ## Two ruff quirks worth knowing
 
 Both come from `preview = true` plus `select = [..., "RUF", ...]` in `pyproject.toml`.
