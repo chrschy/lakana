@@ -25,7 +25,7 @@ LEAVING = (
 )
 """Files whose text reaches a reader outside the repository."""
 _REPO_PATH = re.compile(r"docs/(?:site|agent)/")
-_URL = re.compile(re.escape(BASE) + r"([A-Za-z0-9_/-]*)(?:#[A-Za-z0-9_-]+)?")
+_URL = re.compile(re.escape(BASE) + r"([A-Za-z0-9_/.-]*[A-Za-z0-9_/-])?(?:#([A-Za-z0-9_-]+))?")
 
 
 def _page_of(url_path: str) -> Path:
@@ -51,6 +51,28 @@ def _page_of(url_path: str) -> Path:
     return SITE / f"{stripped}.md"
 
 
+def _anchors(page: Path) -> set[str]:
+    """Return the anchors of a page's headings, as the site builds them.
+
+    Parameters
+    ----------
+    page
+        The source page.
+
+    Returns
+    -------
+    set of str
+        Each heading lower-cased, without punctuation or backticks, spaces turned into hyphens.
+    """
+    anchors = set()
+    for line in page.read_text(encoding="utf-8").splitlines():
+        heading = re.match(r"#{1,6}\s+(.*?)\s*#*$", line)
+        if heading:
+            text = heading.group(1).replace("`", "").replace("*", "").lower()
+            anchors.add(re.sub(r"\s", "-", re.sub(r"[^\w\s-]", "", text)))
+    return anchors
+
+
 def test_text_that_leaves_the_repository_names_no_repository_path() -> None:
     """No file that reaches a reader outside the repository names a ``docs/`` path."""
     found = [
@@ -74,8 +96,13 @@ def test_every_documentation_url_in_that_text_points_to_a_page_that_exists() -> 
         text = (ROOT / name).read_text(encoding="utf-8")
         for match in _URL.finditer(text):
             seen += 1
-            if not _page_of(match.group(1)).is_file():
+            path = match.group(1) or ""
+            if path.endswith((".md", ".html")):
+                missing.append(f"{name}: {match.group(0)} (the site uses directory URLs)")
+            elif not _page_of(path + "/" if path else "").is_file():
                 missing.append(f"{name}: {match.group(0)}")
+            elif match.group(2) and match.group(2) not in _anchors(_page_of(path + "/")):
+                missing.append(f"{name}: {match.group(0)} (no such heading)")
     assert missing == [], f"no page under docs/site for these URLs: {missing}"
     assert seen >= 10, "expected the documentation URLs of the files that leave the repository"
 
@@ -86,3 +113,12 @@ def test_the_url_of_a_page_maps_to_its_source_file() -> None:
     assert _page_of("how-to/projects/") == SITE / "how-to" / "projects.md"
     assert _page_of("how-to/") == SITE / "how-to" / "index.md"
     assert _page_of("how-to/projects") == SITE / "how-to" / "projects.md"
+
+
+def test_the_anchors_of_a_page_are_its_slugged_headings() -> None:
+    """The anchors the links use exist, and a made-up one does not."""
+    anchors = _anchors(SITE / "explanation" / "compose-known-gaps.md")
+    assert "the-grpc-port-of-the-seaweedfs-gateway" in anchors
+    assert "a-symlinked-parent-directory-of-the-profile-file" in anchors
+    assert "no-such-heading" not in anchors
+    assert _URL.search(f"{BASE}how-to/projects.md").group(1) == "how-to/projects.md"

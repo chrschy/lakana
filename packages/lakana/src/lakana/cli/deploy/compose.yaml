@@ -27,13 +27,14 @@ services:
     restart: unless-stopped
 
   # SeaweedFS runs as two containers so that user SQL in the worker, which has DuckDB's HTTP
-  # filesystem enabled, can reach nothing of it but the S3 gateway (https://lakana-labs.github.io/lakana/explanation/security/, #14).
+  # filesystem enabled, can reach nothing of it but the S3 gateway (#14; what is and is not
+  # protected: https://lakana-labs.github.io/lakana/explanation/compose-known-gaps/).
   # `seaweedfs-core` runs the master (9333), volume server (8080) and filer, whose HTTP APIs need
   # no credentials, and joins only `seaweed-internal`, which no worker or server joins.
   # `seaweedfs` is the S3 gateway alone: the one container on both networks. It listens on 8333
   # and on its gRPC port 18333, which cannot be turned off and has no authentication (a residual,
-  # see https://lakana-labs.github.io/lakana/explanation/security/); its Iceberg and Lance ports are off. Its name is the endpoint
-  # everything else already uses.
+  # see https://lakana-labs.github.io/lakana/explanation/compose-known-gaps/#the-grpc-port-of-the-seaweedfs-gateway);
+  # its Iceberg and Lance ports are off. Its name is the endpoint everything else already uses.
   seaweedfs-core:
     image: chrislusf/seaweedfs:4.47
     # -disableHttp also closes the filer's plain-HTTP file route, so the gateway, which reaches

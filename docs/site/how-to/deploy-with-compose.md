@@ -1214,6 +1214,6 @@ The bundle's known gaps (SeaweedFS's internal APIs, a venv build that a shutdown
 
 ## See also
 
-`docs/agent/security.md` and `docs/security/threat-model.md` describe what `.env` and the
+[The security overview](../explanation/security.md) and the [threat model](https://github.com/lakana-labs/lakana/blob/main/docs/security/threat-model.md) describe what `.env` and the
 bootstrap credential protect in team mode, and what team mode explicitly does not defend
 against.

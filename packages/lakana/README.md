@@ -203,7 +203,7 @@ never merged, so a source that sets one of `url`/`token` must set both:
    stricter) — the SDK refuses it otherwise, telling you the `chmod` to run. It is read
    through a single `O_NOFOLLOW` open, so a symlinked profile file is refused outright as a
    TOCTOU precaution; a symlinked *parent directory* is a known, unclosed limitation of that
-   check (see <https://lakana-labs.github.io/lakana/explanation/security/>).
+   check (see <https://lakana-labs.github.io/lakana/explanation/compose-known-gaps/#a-symlinked-parent-directory-of-the-profile-file>).
 
 If none of these resolves a URL and token, `Client(...)` raises `lakana.ConfigError`.
 
@@ -314,7 +314,7 @@ lakana search orders --kind column --limit 10 [--offset N]  # tables, columns, d
 | 10 | Payload too large (413) |
 | 11 | Server error (5xx), connection failure, or a server too old for the command |
 
-### Repositories (M5b)
+### Repositories
 
 An admin (`MANAGE_REPOSITORY`) registers each git repository once; deployers name it.
 
@@ -332,7 +332,7 @@ time: key `token` for `https`, `private_key` for `ssh`. Secret values never leav
 `repo remove` is refused while any environment has a current deployment from the repository;
 `lakana undeploy` removes it first.
 
-### Deploying a project (M5b)
+### Deploying a project
 
 `lakana init [DIR]` scaffolds a project; see <https://lakana-labs.github.io/lakana/how-to/projects/> for assets, `lakana.yaml`, deploys and CI setup.
 
@@ -360,7 +360,7 @@ state is deployed. Deploys record a project version; `lakana run` executes it (s
 `MANAGE_ENVIRONMENT`). `undeploy` removes the deployment pointer and binding (needs `DEPLOY`,
 refused while a run is active); tables and project versions stay.
 
-### Running a project (M5c1)
+### Running a project
 
     lakana run [REPO] --env dev [--select 'gold.*']... [--upstream] [--downstream] [--no-wait] [--timeout S]
     lakana runs list --env dev [--repo R] [--limit N] | lakana runs show ID --env dev
@@ -378,7 +378,7 @@ cancelled or timed out; 7 a run is already active. `--select` globs match dotted
 workers, `alive` or `lost`, the work each takes (`takes`: `all`, `interactive` or `pipeline`) and what
 each is doing; SDK: `client.workers.list()` returns `WorkerInfo` objects, with `WorkerInfo.takes`.
 
-### Jobs (M5d-b)
+### Jobs
 
     lakana job list --env dev [--repo R]
     lakana job run NAME --env dev [--repo R] [--no-wait] [--timeout S]
@@ -425,12 +425,12 @@ show` lists the notifications of a run under its tasks, each with its delivery i
 delivery id, `client.jobs.delivery(env, id)` a `Delivery`, and `Run.notifications` the list (empty
 from an older server).
 
-### Python assets (M5c2a)
+### Python assets
 
 SQL transforms, Python at the edges: a Python asset receives its declared inputs as polars
 DataFrames and returns the DataFrame that replaces its table; see <https://lakana-labs.github.io/lakana/how-to/projects/>, "Python
 assets", for the rules, what a deploy checks and what a task may touch. With `output="artifact"` it
-stores a file or a directory (a trained model, say) instead; see "Artifacts (M5c2b)" below. The project also needs a
+stores a file or a directory (a trained model, say) instead; see "Artifacts" below. The project also needs a
 `pyproject.toml` that depends on `lakana[assets]` and a committed `uv.lock`.
 
 ```python
@@ -454,7 +454,7 @@ deploy steps, is in <https://lakana-labs.github.io/lakana/how-to/projects/>, "Py
 Python assets run as processes of the worker's user, not in a sandbox: one instance is one trust
 domain, so deploy only code you would run on the worker yourself.
 
-### Artifacts (M5c2b)
+### Artifacts
 
 An artifact is a named file or directory, such as a trained model, stored in numbered versions and
 governed like a table. An asset declared `@asset(output="artifact", keep_versions=5)` writes into
@@ -469,7 +469,7 @@ read-only copy. Everything is in <https://lakana-labs.github.io/lakana/reference
 environment. Loading a pickled model runs code: see
 <https://lakana-labs.github.io/lakana/explanation/artifacts/>, "A pickled model is code".
 
-### Data quality checks (M5d-a)
+### Data quality checks
 
 A project keeps checks under `checks/<namespace>/<table>/<name>.sql`: a `SELECT` that returns the
 rows that are wrong. A run counts them after it writes the table; a failing blocking check sets

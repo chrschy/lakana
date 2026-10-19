@@ -238,7 +238,7 @@ environment has a current deployment from it: undeploy it there first.
 
 ## Deploy, dry-run, roll back
 
-<!-- not tested: the optional parts in brackets and `<id>` are for the reader to fill in; the plain commands run in the examples `getting-started` and `projects` -->
+<!-- not tested: the optional parts in brackets and `<id>` are the reader's to fill in; every command except `project-version show` runs without them in the example `projects` -->
 ```bash
 lakana deploy --env dev [--ref main] [--dry-run]
 lakana rollback --env dev --to-previous      # or --to <full sha>
@@ -306,7 +306,7 @@ another is therefore not an orphan once the new owner has deployed it.
 
 ## Run
 
-<!-- not tested: the optional parts in brackets and `RUN_ID` are for the reader to fill in; the plain commands run in the examples `getting-started` and `check-your-data` -->
+<!-- not tested: the optional parts in brackets and `RUN_ID` are the reader's to fill in; `run` with its selections and `runs list` run in the example `projects`, while `runs show`, `logs`, `cancel` and `resume` need the id of a run -->
 ```bash
 lakana run --env dev                                   # the whole DAG, waits, exit 0/1
 lakana run --env dev --select 'gold.*' --upstream      # gold and everything it reads

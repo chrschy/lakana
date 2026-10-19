@@ -25,6 +25,6 @@ stop code that means harm.
 So one instance is one **trust domain**: everyone who may deploy Python code to it is trusted
 with everything the worker can read. Deploy only code and dependencies you would run on the
 worker itself, and run one instance per client or per group of people who do not trust each
-other. Task isolation comes with `DockerRunner` (#38), which is planned before the public
+other. Task isolation, which runs each Python task in its own container, is planned before the public
 beta; until then, treat a Python asset like code you run on the worker's machine
 yourself.

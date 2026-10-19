@@ -53,6 +53,18 @@ python3 -c 'import json,sys; assert json.loads(sys.argv[1]) == [{"n": 2}], sys.a
 deployed=$(lakana deployments --env dev)
 grep -q analytics <<<"$deployed"
 
+# "Deploy, dry-run, roll back" and "Run": the commands of the two blocks, without their optional
+# parts, against the deployment above (a second deploy gives rollback a previous one).
+git commit -q --allow-empty -m "A second deploy"
+lakana deploy --env dev --dry-run >/dev/null
+lakana deploy --env dev >/dev/null
+lakana rollback --env dev --to-previous >/dev/null
+lakana deploys list --env dev --repo analytics --limit 5 >/dev/null
+lakana orphans --env dev >/dev/null
+lakana run --env dev --select 'bronze.*' --upstream >/dev/null
+lakana run --env dev --select 'bronze.readings' --downstream >/dev/null
+lakana runs list --env dev --repo analytics --limit 5 >/dev/null
+
 # "Undeploy": the deployment goes, the tables stay.
 # docs:start undeploy
 lakana undeploy analytics --env dev --yes
