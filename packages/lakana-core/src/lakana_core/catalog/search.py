@@ -37,7 +37,6 @@ from sqlalchemy import (
 from sqlalchemy.orm import InstrumentedAttribute, Session
 
 from lakana_core.auth import Action, AuthorizationService, PrincipalRef, Securable
-from lakana_core.catalog.service import _escape_like
 from lakana_core.errors import NotFoundError, ValidationError
 from lakana_core.identifiers import NAMESPACE_SEPARATOR, NamespacePath
 from lakana_core.models import (
@@ -54,6 +53,7 @@ from lakana_core.models import (
     TableType,
 )
 from lakana_core.models.table import table_kind
+from lakana_core.pagination import escape_like
 
 MAX_QUERY_LENGTH = 200
 """The most characters a query may have."""
@@ -231,7 +231,7 @@ class _Match:
         needle
             The query, trimmed.
         """
-        escaped = _escape_like(needle)
+        escaped = escape_like(needle)
         self._exact = func.lower(literal(needle, String))
         self._prefix = func.lower(literal(escaped + "%", String))
         self._contains = func.lower(literal("%" + escaped + "%", String))

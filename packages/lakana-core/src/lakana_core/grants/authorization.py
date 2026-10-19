@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
@@ -166,6 +167,26 @@ def _matches_asset_pattern(dotted_table: str, pattern: str) -> bool:
     return dotted_table == pattern
 
 
+@dataclass(frozen=True)
+class Decision:
+    """The authorizer's answer to one question, and what produced it.
+
+    Parameters
+    ----------
+    allowed
+        Whether the action is permitted.
+    grants
+        Every active grant that covers the action at the object or an ancestor of it, direct
+        or through a group, oldest first; empty when `allowed` is false.
+    reason
+        Why it is refused (the text `authorize` raises), or `None` when it is permitted.
+    """
+
+    allowed: bool
+    grants: tuple[Grant, ...]
+    reason: str | None
+
+
 class GrantAuthorization:
     """Authorization backed by persisted grants.
 
@@ -230,29 +251,34 @@ class GrantAuthorization:
             )
         return self._table_id_cache[key]
 
-    def authorize(self, principal: PrincipalRef, action: Action, securable: Securable) -> None:
-        """Permit the action if a grant covers it, else raise.
+    def explain(self, principal: PrincipalRef, action: Action, securable: Securable) -> Decision:
+        """Decide whether a grant covers the action, and name the grants that do.
+
+        The one decision of this class: `authorize` and `permits` are implemented through it,
+        so an explanation can never differ from what a route decides.
 
         Parameters
         ----------
         principal
-            The actor requesting the action. If authenticated via a task
-            token, `principal.task_scope` narrows this check before any
-            grant is consulted.
+            The actor the question is about. If authenticated via a task token,
+            `principal.task_scope` narrows the decision before any grant is consulted.
         action
-            The action requested.
+            The action in question.
         securable
-            The object acted upon.
+            The object in question.
 
-        Raises
-        ------
-        PermissionDenied
-            If `principal`'s task scope (when present) does not cover
-            `securable`, or no grant — direct or via group membership —
-            covers `action` at `securable` or an ancestor of it.
+        Returns
+        -------
+        Decision
+            Permitted with the covering grants, or refused with the reason: the task scope
+            (when present) does not cover `securable`, or no grant (direct or via group
+            membership) covers `action` at `securable` or an ancestor of it.
         """
         if principal.task_scope is not None:
-            self._check_task_scope(principal, principal.task_scope, action, securable)
+            try:
+                self._check_task_scope(principal, principal.task_scope, action, securable)
+            except PermissionDenied as exc:
+                return Decision(allowed=False, grants=(), reason=str(exc))
         env_id = (
             self._resolve_environment_id(securable.environment)
             if securable.environment is not None
@@ -280,14 +306,51 @@ class GrantAuthorization:
         if group_ids:
             subject_filter = or_(subject_filter, Grant.group_id.in_(group_ids))
         grants = (
-            self._session.execute(select(Grant).where(Grant.revoked_at.is_(None), subject_filter))
+            self._session.execute(
+                select(Grant)
+                .where(Grant.revoked_at.is_(None), subject_filter)
+                .order_by(Grant.granted_at, Grant.id)
+            )
             .scalars()
             .all()
         )
-        for grant in grants:
-            if self._covers(grant, action) and self._applies_to(grant, securable, env_id, table_id):
-                return
-        raise PermissionDenied(f"{principal.name!r} may not {action.value} this.")
+        covering = tuple(
+            grant
+            for grant in grants
+            if self._covers(grant, action) and self._applies_to(grant, securable, env_id, table_id)
+        )
+        if covering:
+            return Decision(allowed=True, grants=covering, reason=None)
+        return Decision(
+            allowed=False, grants=(), reason=f"{principal.name!r} may not {action.value} this."
+        )
+
+    def authorize(self, principal: PrincipalRef, action: Action, securable: Securable) -> None:
+        """Permit the action if a grant covers it, else raise.
+
+        Implemented through `explain`.
+
+        Parameters
+        ----------
+        principal
+            The actor requesting the action. If authenticated via a task
+            token, `principal.task_scope` narrows this check before any
+            grant is consulted.
+        action
+            The action requested.
+        securable
+            The object acted upon.
+
+        Raises
+        ------
+        PermissionDenied
+            If `principal`'s task scope (when present) does not cover
+            `securable`, or no grant — direct or via group membership —
+            covers `action` at `securable` or an ancestor of it.
+        """
+        decision = self.explain(principal, action, securable)
+        if not decision.allowed:
+            raise PermissionDenied(decision.reason)
 
     def permits(self, principal: PrincipalRef, action: Action, securable: Securable) -> bool:
         """Answer as `authorize` would, as a boolean.

@@ -172,6 +172,7 @@ from lakana_core.models import (
     WriteMode,
 )
 from lakana_core.models.run import TERMINAL_TASK_STATUSES
+from lakana_core.pagination import escape_like
 from lakana_core.policy.resolver import PolicyResolver
 from lakana_core.query_rewrite import ViewDefinition
 from lakana_core.runs.checks import (
@@ -226,29 +227,6 @@ stays behind)."""
 LOCK_TIMEOUT_SECONDS = 5
 """How long the check after a failed commit waits for a transaction that is still moving the
 table's pointer (Postgres); a longer wait makes the outcome unknown, never "not landed"."""
-
-
-def _escape_like(value: str) -> str:
-    r"""Escape SQL ``LIKE`` wildcards in a literal prefix.
-
-    ``%`` and ``_`` are legal characters in a namespace component —
-    `validate_path_component` rejects only ``.`` anywhere, ``/``, NUL, the unit
-    separator, and empty or whitespace-only strings. Interpolating an
-    unescaped component into a ``LIKE`` pattern would therefore let a
-    namespace named ``a_b`` match ``axb``.
-
-    Parameters
-    ----------
-    value
-        The literal prefix to escape.
-
-    Returns
-    -------
-    str
-        The prefix with ``\``, ``%`` and ``_`` backslash-escaped, for use
-        with ``escape="\\"``.
-    """
-    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 _MEDALLION_TOP_LEVEL_NAMESPACES = frozenset({"bronze", "silver", "gold"})
@@ -1600,7 +1578,7 @@ class CatalogService:
         env = self._find_environment(environment)
         query = select(Namespace).where(Namespace.environment_id == env.id)
         if parent is not None:
-            prefix = _escape_like(parent.joined() + NAMESPACE_SEPARATOR)
+            prefix = escape_like(parent.joined() + NAMESPACE_SEPARATOR)
             query = query.where(Namespace.path.like(prefix + "%", escape="\\"))
         rows = self._session.execute(query).scalars().all()
         paths = [NamespacePath.parse(row.path) for row in rows]
@@ -1676,7 +1654,7 @@ class CatalogService:
                 f"Namespace {path} still contains artifacts; drop each first "
                 "(`lakana artifact drop`)."
             )
-        prefix = _escape_like(path.joined() + NAMESPACE_SEPARATOR)
+        prefix = escape_like(path.joined() + NAMESPACE_SEPARATOR)
         has_child = self._session.execute(
             select(Namespace.id).where(
                 Namespace.environment_id == env.id,

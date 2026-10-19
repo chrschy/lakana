@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import contextlib
 import time
-from collections.abc import Generator, Iterator, Mapping, Sequence
-from typing import Any, cast
+from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
+from typing import Any, Protocol, TypeVar, cast
 from urllib.parse import quote
 
 import httpx
@@ -106,6 +106,43 @@ def query_params(**params: object) -> dict[str, object]:
 
 NEXT_CURSOR_HEADER = "X-Next-Cursor"
 """The response header of a paged list that carries the cursor of the next page."""
+
+
+_T_co = TypeVar("_T_co", covariant=True)
+
+
+class _Page(Protocol[_T_co]):
+    """What a page of a paged list has: its rows and the cursor of the next page."""
+
+    @property
+    def items(self) -> Sequence[_T_co]:
+        """The rows of the page."""
+
+    @property
+    def next_cursor(self) -> str | None:
+        """The cursor of the next page, or `None` on the last."""
+
+
+def every_page(fetch: Callable[[str | None], _Page[_T_co]]) -> Iterator[_T_co]:
+    """Yield every row of a paged list, fetching one page after the other.
+
+    Parameters
+    ----------
+    fetch
+        Reads the page that starts at a cursor (`None` for the first).
+
+    Yields
+    ------
+    object
+        Each row, once, in the list's order.
+    """
+    cursor: str | None = None
+    while True:
+        page = fetch(cursor)
+        yield from page.items
+        if page.next_cursor is None:
+            return
+        cursor = page.next_cursor
 
 
 def csv_param(values: str | Sequence[str] | None) -> str | None:

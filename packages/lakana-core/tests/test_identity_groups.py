@@ -81,7 +81,7 @@ def test_create_group_persists_and_returns_it(session: Session) -> None:
     admin = _persisted_admin(session)
     service = GroupService(session, AllowAllAuthorization())
     service.create_group(admin, name="engineers")
-    assert {g.name for g in service.list_groups(admin)} == {"engineers"}
+    assert {g.name for g in service.list_groups(admin).items} == {"engineers"}
 
 
 def test_create_group_rejects_a_duplicate_name(session: Session) -> None:
@@ -99,7 +99,7 @@ def test_delete_group_removes_it(session: Session) -> None:
     service = GroupService(session, AllowAllAuthorization())
     service.create_group(admin, name="engineers")
     service.delete_group(admin, "engineers")
-    assert service.list_groups(admin) == []
+    assert service.list_groups(admin).items == []
 
 
 def test_delete_group_raises_when_missing(session: Session) -> None:
@@ -297,7 +297,7 @@ def test_delete_group_is_refused_while_an_active_grant_references_it(session: Se
     with pytest.raises(ConflictError, match="1 active grant"):
         groups.delete_group(admin, "analysts")
 
-    assert {g.name for g in groups.list_groups(admin)} == {"analysts"}
+    assert {g.name for g in groups.list_groups(admin).items} == {"analysts"}
 
 
 def test_delete_group_is_refused_while_an_active_row_filter_references_it(

@@ -7,7 +7,13 @@ import pytest
 from core_test_helpers import _catalog_with
 from sqlalchemy.orm import Session
 
-from lakana_core.auth import Action, AllowAllAuthorization, PrincipalRef, SecurableKind
+from lakana_core.auth import (
+    Action,
+    AllowAllAuthorization,
+    PrincipalRef,
+    Securable,
+    SecurableKind,
+)
 from lakana_core.errors import ConflictError, NotFoundError, ValidationError
 from lakana_core.grants.roles import Role
 from lakana_core.grants.service import GrantService, assert_admin_headroom
@@ -108,7 +114,7 @@ def test_grant_then_list_for_principal(session: Session, tmp_path: Path) -> None
     assert created.role == Role.ANALYST
     assert created.environment == "dev"
 
-    listed = grants.list_for_principal(admin, "alice")
+    listed = grants.list_grants(admin, principal_name="alice").items
     assert [g.id for g in listed] == [created.id]
 
 
@@ -123,11 +129,11 @@ def test_grant_then_list_for_group(session: Session) -> None:
     created = grants.grant(
         admin, group="engineers", action=Action.READ_TABLE, kind=SecurableKind.INSTANCE
     )
-    listed = grants.list_for_group(admin, "engineers")
+    listed = grants.list_grants(admin, group_name="engineers").items
     assert [g.id for g in listed] == [created.id]
 
 
-def test_list_for_securable_is_an_exact_match_not_ancestor_expanded(
+def test_a_scope_filter_is_an_exact_match_not_ancestor_expanded(
     session: Session, tmp_path: Path
 ) -> None:
     """A grant on the environment does not show up when listing a specific table."""
@@ -145,15 +151,12 @@ def test_list_for_securable_is_an_exact_match_not_ancestor_expanded(
         environment="dev",
     )
 
-    at_table = grants.list_for_securable(
-        admin, kind=SecurableKind.TABLE, environment="dev", namespace="bronze", table="orders"
-    )
-    assert at_table == []
+    bronze = NamespacePath.from_parts(["bronze"])
+    at_table = grants.list_grants(admin, scope=Securable.table_scope("dev", bronze, "orders"))
+    assert at_table.items == []
 
-    at_environment = grants.list_for_securable(
-        admin, kind=SecurableKind.ENVIRONMENT, environment="dev", namespace=None, table=None
-    )
-    assert len(at_environment) == 1
+    at_environment = grants.list_grants(admin, scope=Securable.environment_scope("dev"))
+    assert len(at_environment.items) == 1
 
 
 def test_revoke_sets_revoked_at_and_revoked_by(session: Session) -> None:
@@ -171,7 +174,7 @@ def test_revoke_sets_revoked_at_and_revoked_by(session: Session) -> None:
     assert row is not None
     assert row.revoked_at is not None
     assert row.revoked_by == admin.id
-    assert grants.list_for_principal(admin, "alice") == []
+    assert grants.list_grants(admin, principal_name="alice").items == []
 
 
 def test_revoke_raises_not_found_for_an_unknown_grant(session: Session) -> None:

@@ -99,6 +99,35 @@ as_alice() { XDG_CONFIG_HOME="$WORK/alice-config" "$@"; }
 refused() { local status=0; "$@" >/dev/null 2>&1 || status=$?; test "$status" -ne 0; }
 
 capture_start
+# docs:start explain
+lakana access explain alice --scope dev
+# docs:end explain
+capture_end
+grep -Fxq 'What alice may do on environment dev:' "$captured"
+lakana --output json access explain alice --scope dev | python3 -c '
+import json, sys
+answer = {p["action"]: p for p in json.load(sys.stdin)["permissions"]}
+assert answer["SUBMIT_QUERY"]["allowed"] and answer["SUBMIT_QUERY"]["via"][0]["role"] == "ANALYST"
+assert not answer["DEPLOY"]["allowed"] and answer["DEPLOY"]["via"] == []
+'
+
+# The person asks about themselves, with their own profile; about anyone else they are refused.
+export XDG_CONFIG_HOME="$WORK/alice-config"
+capture_start
+# docs:start explain-self
+lakana access explain alice --scope dev/silver/visits
+# docs:end explain-self
+capture_end
+export XDG_CONFIG_HOME=$admin_config
+grep -Fxq 'What alice may do on table silver.visits in environment dev:' "$captured"
+lakana --output json access explain alice --scope dev/silver/visits | python3 -c '
+import json, sys
+answer = {p["action"]: p["allowed"] for p in json.load(sys.stdin)["permissions"]}
+assert answer["READ_TABLE"] and not answer["WRITE_TABLE"], answer
+'
+refused as_alice lakana access explain admin
+
+capture_start
 # docs:start revoke-token
 lakana token revoke alice "$KEY_ID" --yes
 # docs:end revoke-token

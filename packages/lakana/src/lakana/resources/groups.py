@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any
 
-from lakana._http import HttpTransport
-from lakana._models import Group, Principal
+from lakana._http import NEXT_CURSOR_HEADER, HttpTransport, every_page, query_params
+from lakana._models import Group, GroupPage, Principal
 from lakana._routes import ROUTES
 from lakana.resources.principals import _principal_from_json
 
@@ -71,16 +72,75 @@ class Groups:
         response = self._transport.request(ROUTES["groups.create"], json={"name": name})
         return _group_from_json(response.json())
 
-    def list(self) -> _GroupList:
-        """List every group.
+    def list(
+        self, *, search: str | None = None, limit: int | None = None, cursor: str | None = None
+    ) -> _GroupList:
+        """List groups, newest first.
+
+        The groups of one page; `list_page` also returns the cursor of the next one, and
+        `iter` walks every page.
+
+        Parameters
+        ----------
+        search
+            Only groups whose name contains this text, in any letter case.
+        limit
+            Most groups returned (1 to 200); `None` leaves it to the server (100).
+        cursor
+            A previous page's `next_cursor`. Send the same `search` with every page.
 
         Returns
         -------
         list of Group
-            Every group.
+            Newest first.
         """
-        response = self._transport.request(ROUTES["groups.list"])
-        return [_group_from_json(item) for item in response.json()]
+        return self.list_page(search=search, limit=limit, cursor=cursor).items
+
+    def list_page(
+        self, *, search: str | None = None, limit: int | None = None, cursor: str | None = None
+    ) -> GroupPage:
+        """List one page of groups, newest first, with the cursor of the next page.
+
+        Parameters
+        ----------
+        search
+            Only groups whose name contains this text, in any letter case.
+        limit
+            Most groups returned (1 to 200); `None` leaves it to the server (100).
+        cursor
+            A previous page's `next_cursor`. Send the same `search` with every page.
+
+        Returns
+        -------
+        GroupPage
+            The groups, and the cursor for the next page (`None` on the last).
+        """
+        response = self._transport.request(
+            ROUTES["groups.list"], params=query_params(q=search, limit=limit, cursor=cursor)
+        )
+        return GroupPage(
+            items=[_group_from_json(item) for item in response.json()],
+            next_cursor=response.headers.get(NEXT_CURSOR_HEADER),
+        )
+
+    def iter(self, *, search: str | None = None, page_size: int = 100) -> Iterator[Group]:
+        """Yield every matching group, newest first, fetching pages as needed.
+
+        Parameters
+        ----------
+        search
+            Only groups whose name contains this text, in any letter case.
+        page_size
+            Groups per request (1 to 200).
+
+        Returns
+        -------
+        Iterator of Group
+            Each group, once.
+        """
+        return every_page(
+            lambda cursor: self.list_page(search=search, limit=page_size, cursor=cursor)
+        )
 
     def delete(self, name: str) -> None:
         """Delete a group.

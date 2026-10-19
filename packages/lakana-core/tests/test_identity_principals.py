@@ -87,7 +87,7 @@ def test_list_principals_returns_every_principal(session: Session) -> None:
     service = PrincipalService(session, AllowAllAuthorization())
     service.create_principal(admin, name="ci-bot", type=PrincipalType.SERVICE_ACCOUNT)
     service.create_principal(admin, name="alice", type=PrincipalType.USER)
-    names = {p.name for p in service.list_principals(admin)}
+    names = {p.name for p in service.list_principals(admin).items}
     assert names == {admin.name, "ci-bot", "alice"}
 
 

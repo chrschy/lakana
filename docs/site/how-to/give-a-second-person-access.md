@@ -147,16 +147,19 @@ that revokes a grant. If a name cannot be found (reading names needs the right t
 and groups), the table shows the id there and a notice says so. A column that is empty for every grant
 is left out, and when the terminal is too narrow a line under the table says which columns were
 left out; `--output json` always has every field. `--env dev` lists who has access to one
-environment, with their roles; without a filter `lakana grant list` shows the grants on the
-instance. The column `last_used_at` of `token list` shows whether a token is in use.
+environment, with their roles; without a filter `lakana grant list` shows every grant, newest
+first, and a long list ends with the command that shows the next page. The column `last_used_at`
+of `token list` shows whether a token is in use. To see what one person may do and through which
+grant, read [Why may (or may not) someone do this?](why-may-someone-do-this.md). Every filter and
+option is in [Grants, permissions, principals and groups](../reference/access.md).
 
 <!-- output -->
 ```text
 ┏━━━━━━━┳━━━━━━┳━━━━━━━━━━━┓
 ┃ name  ┃ type ┃ is_active ┃
 ┡━━━━━━━╇━━━━━━╇━━━━━━━━━━━┩
-│ admin │ USER │ True      │
 │ alice │ USER │ True      │
+│ admin │ USER │ True      │
 └───────┴──────┴───────────┘
 ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━━┓
 ┃ id                                   ┃ subject    ┃ role    ┃ environment ┃
@@ -232,6 +235,8 @@ with `lakana logout`.
 
 ## Where next
 
+- [Why may (or may not) someone do this?](why-may-someone-do-this.md) shows what a person may
+  do on an object, and through which grant, role or group.
 - [Show some people only some rows](filter-rows.md) and
   [Mask a column for some people](mask-a-column.md) narrow what a person with a grant sees.
 - [Deploying with Compose](deploy-with-compose.md#revoking-the-bootstrap-credential) replaces the

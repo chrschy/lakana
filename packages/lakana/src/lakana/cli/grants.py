@@ -10,6 +10,7 @@ import typer
 
 from lakana._models import Grant
 from lakana.cli import _output
+from lakana.cli._paging import CURSOR, LIMIT, more_results
 from lakana.cli._state import CliError, CliState, confirm, state_of
 from lakana.errors import LakanaError
 
@@ -23,6 +24,26 @@ _GROUP = Annotated[str | None, typer.Option("--group", help="Group name.")]
 _ENV = Annotated[str | None, typer.Option("--env", help="Environment.")]
 _NS = Annotated[str | None, typer.Option("--ns", help="Namespace (dotted).")]
 _TABLE = Annotated[str | None, typer.Option("--table", help="Table name.")]
+
+
+class HasScope(Protocol):
+    """What names the object a grant or a permission is on."""
+
+    @property
+    def kind(self) -> str:
+        """``INSTANCE``, ``ENVIRONMENT``, ``NAMESPACE`` or ``TABLE``."""
+
+    @property
+    def environment(self) -> str | None:
+        """The environment, below the instance."""
+
+    @property
+    def namespace(self) -> str | None:
+        """The dot-joined namespace, for a namespace or a table."""
+
+    @property
+    def table(self) -> str | None:
+        """The table, for a table."""
 
 
 class _HasSubject(Protocol):
@@ -99,13 +120,13 @@ _SUBJECT_KINDS = {"USER": "user", "SERVICE_ACCOUNT": "service"}
 """How a principal's type is written in front of its name."""
 
 
-def _securable_of(grant: Grant) -> str:
-    """Say what a grant is on, naming the environment.
+def securable_of(grant: HasScope) -> str:
+    """Say what a grant (or a permission) is on, naming the environment.
 
     Parameters
     ----------
     grant
-        A grant.
+        A grant, or the scope of a permission.
 
     Returns
     -------
@@ -146,17 +167,17 @@ def _names_of(client: Client, grants: Sequence[Grant]) -> dict[str, str]:
     wanted = {i for g in grants for i in (g.principal_id, g.group_id) if i is not None}
     found: dict[str, str] = {}
     try:
-        for principal in client.principals.list():
+        for principal in client.principals.iter():
             if wanted.issubset(found):
                 return found
             kind = _SUBJECT_KINDS.get(principal.type, "principal")
-            for grant in client.grants.list(principal_name=principal.name):
+            for grant in client.grants.iter(principal_name=principal.name):
                 if grant.principal_id is not None and grant.principal_id in wanted:
                     found[grant.principal_id] = f"{kind} {principal.name}"
-        for group in client.groups.list():
+        for group in client.groups.iter():
             if wanted.issubset(found):
                 return found
-            for grant in client.grants.list(group_name=group.name):
+            for grant in client.grants.iter(group_name=group.name):
                 if grant.group_id is not None and grant.group_id in wanted:
                     found[grant.group_id] = f"group {group.name}"
     except LakanaError:
@@ -326,7 +347,7 @@ def create(
     _output.done(
         state,
         f"Created grant {_output.inline(grant.id)} ({grant.role or grant.action} on "
-        f"{_output.inline(_securable_of(grant))}) to {recipient}",
+        f"{_output.inline(securable_of(grant))}) to {recipient}",
         grant,
     )
 
@@ -336,18 +357,29 @@ def list_grants(
     ctx: typer.Context,
     principal: _PRINCIPAL = None,
     group: _GROUP = None,
+    action: Annotated[
+        str | None,
+        typer.Option("--action", help="Only grants that give this action, e.g. READ_TABLE."),
+    ] = None,
     env: _ENV = None,
     ns: _NS = None,
     table: _TABLE = None,
+    limit: LIMIT = None,
+    cursor: CURSOR = None,
 ) -> None:
-    """List active grants, optionally filtered.
+    """List active grants, newest first; without a filter, every grant.
+
+    Filters combine. `--principal` and `--group` list the grants made to them (not those a
+    principal has through its groups: `lakana access explain` says that). `--action` lists the
+    grants that give an action, by itself or through a role. `--env`, with `--ns` and `--table`,
+    lists the grants on exactly that object. A long list prints a "More results" line with the
+    command that shows the next page.
 
     The table names who each grant is for in `subject` (`user alice`, `service ci-bot`,
     `group analysts`); the API sends ids only, so the names cost one request per principal
     and group until all are found, and a caller that may not list them sees the ids. A
-    column with nothing in it is left out. `--env NAME` lists who has access to one
-    environment, with names and roles. When the terminal is too narrow the table leaves out
-    `kind`, `namespace`, `table`, `environment` and `action`, in that order, and folds a
+    column with nothing in it is left out. When the terminal is too narrow the table leaves
+    out `kind`, `namespace`, `table`, `environment` and `action`, in that order, and folds a
     long `subject` onto more lines, so that the `id` that `grant revoke` needs always stays
     whole, and a line under the table shows the revoke command; `--output json` always has
     every field.
@@ -367,18 +399,33 @@ def list_grants(
         Only grants to this principal.
     group
         Only grants to this group.
+    action
+        Only grants that give this action.
     env
-        Only grants in this environment.
+        Only grants on this environment (or, with `ns`, inside it).
     ns
-        Only grants on this namespace.
+        Only grants on this namespace (or, with `table`, inside it).
     table
         Only grants on this table.
+    limit
+        Most grants returned (1 to 200); the server's default when omitted.
+    cursor
+        The cursor of the page to show.
     """
     state = state_of(ctx)
     client = state.client()
-    grants = client.grants.list(
-        principal_name=principal, group_name=group, environment=env, namespace=ns, table=table
+    wanted = action.upper() if action else None
+    page = client.grants.list_page(
+        principal_name=principal,
+        group_name=group,
+        action=wanted,
+        environment=env,
+        namespace=ns,
+        table=table,
+        limit=limit,
+        cursor=cursor,
     )
+    grants = page.items
     subject = (
         _subject_namer(state, client, grants, principal, group) if state.output != "json" else None
     )
@@ -407,6 +454,20 @@ def list_grants(
         derived={"subject": subject or subject_of, "note": _marker},
         whole=["note"],
         footnotes=footnotes,
+    )
+    more_results(
+        state,
+        ["lakana", "grant", "list"],
+        {
+            "--principal": principal,
+            "--group": group,
+            "--action": wanted,
+            "--env": env,
+            "--ns": ns,
+            "--table": table,
+            "--limit": limit,
+        },
+        page.next_cursor,
     )
 
 
