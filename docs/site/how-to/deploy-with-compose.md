@@ -146,7 +146,8 @@ exists with a *different* storage root, or its storage secret is already bound t
 name, `setup` treats it as **operator-managed** and leaves it completely untouched — no
 secret created, no rebind attempted — printing a line saying so instead. This is what lets an
 operator repoint `dev` at their own storage after the first run without `setup` fighting them
-on every subsequent `docker compose up`. When `dev` is at the bundle's root and has no storage secret yet, `setup` sets its storage options to
+on every subsequent `docker compose up`. `setup` looks after `dev` only; for another environment see
+[Add an environment to a Compose instance](#add-an-environment-to-a-compose-instance). When `dev` is at the bundle's root and has no storage secret yet, `setup` sets its storage options to
 the bundle's and attaches the secret in one request, and prints a line saying so, because the
 options decide where the secret is sent. Options an operator set there are replaced.
 
@@ -691,6 +692,71 @@ from it:
   changing it afterwards makes Compose treat the existing containers as belonging to a
   different, new project.
 
+## Add an environment to a Compose instance
+
+`bundle init` creates one environment, `dev`, and gives it the bundle's storage and the secret
+that holds the storage keys. A second environment (here `prod`) needs the same three things: the
+storage root and endpoint, a secret with the keys, and the secret attached to the environment. A
+secret belongs to one environment, so `prod` gets its own secret with the same keys under the
+same name, `seaweedfs-s3`.
+
+You need these rights, each at the scope shown: step 1 needs `MANAGE_ENVIRONMENT` on the instance;
+step 2 needs `MANAGE_SECRET` on `prod`; step 3 needs `MANAGE_ENVIRONMENT` on the instance (not
+only on `prod`) and, since 0.15.0, `MANAGE_SECRET` on `prod`. The bootstrap credential and
+anyone with the `ADMIN` role on the instance have them all; the `ADMIN` role on `prod` alone does
+not cover steps 1 and 3. Run the commands in the bundle's directory, with the
+profile `bundle init` saved (see [Quickstart](#quickstart)).
+
+1. Create the environment in the bundle's bucket, `lakana`, under its own prefix, with the
+   endpoint the services use inside the Compose network. It has no secret yet.
+
+<!-- source: docs/examples/compose-add-environment.sh#create -->
+```bash
+lakana env create prod --storage-root s3://lakana/prod --option s3.endpoint=http://seaweedfs:8333
+```
+
+2. Create the secret from the storage keys in `.env` and bind it to its environment
+   (`--own-env`). The keys go to the command on its standard input, so they appear in no
+   shell history and no process list.
+
+<!-- source: docs/examples/compose-add-environment.sh#secret -->
+```bash
+s3_key=$(grep '^LAKANA_S3_ACCESS_KEY=' .env | cut -d"'" -f2)
+s3_secret=$(grep '^LAKANA_S3_SECRET_KEY=' .env | cut -d"'" -f2)
+printf '{"s3.access-key-id": "%s", "s3.secret-access-key": "%s"}' "$s3_key" "$s3_secret" \
+  | lakana secret create seaweedfs-s3 --env prod --own-env --values-stdin
+unset s3_key s3_secret
+```
+
+3. Attach the secret to the environment. Pass the options again: attaching a secret approves the
+   options the environment has then, because `s3.endpoint` decides where the secret is sent.
+
+<!-- source: docs/examples/compose-add-environment.sh#attach -->
+```bash
+lakana env set-storage prod --option s3.endpoint=http://seaweedfs:8333 --secret-ref seaweedfs-s3
+```
+
+4. Check that it works: `env get` names the secret, and creating and dropping a table writes to
+   and removes from the storage with the secret's keys.
+
+<!-- source: docs/examples/compose-add-environment.sh#check -->
+```bash
+lakana env get prod
+lakana table create bronze.check --env prod --column id:long
+lakana table delete bronze.check --env prod --yes
+```
+
+`env get` shows `storage_secret_ref` as `seaweedfs-s3`. If the table cannot be created, the error
+names the cause: a refusal says which right is missing (ask an administrator for it), and a
+storage error means the keys or the endpoint are wrong (set the secret again with
+`lakana secret rotate seaweedfs-s3 --env prod --values-stdin`, and see
+[Manage secrets](manage-secrets.md)).
+
+The bundle has one pair of storage keys, so `prod` is kept apart from `dev` by its tables and
+its grants ([Give a second person access](give-a-second-person-access.md)), not by separate
+storage credentials. To give an environment storage of its own, with keys of its own, create it
+against that storage and bind a secret as [Manage secrets](manage-secrets.md) shows.
+
 ## Upgrading
 
 What every upgrade asks, and what a release may break, is in the
@@ -836,18 +902,20 @@ unavailable for the time this takes.
 
 1. Stop the server and every worker service, so nothing writes any more.
 2. Dump the catalog; this needs `postgres` to be running.
-3. Stop the two storage services and archive the `seaweed` volume. Its name starts with the
-   Compose project name (`lakana_seaweed` unless you set `COMPOSE_PROJECT_NAME`, see
+3. Stop the two storage services and archive the `seaweed` volume. Compose mounts the volume
+   into a one-off container of the `seaweedfs-core` service that runs `tar`, so it finds the right
+   volume whatever the project name is, whether you set `COMPOSE_PROJECT_NAME` in `.env`, in the
+   shell, or not at all (see
    [Running more than one bundle on a host](#running-more-than-one-bundle-on-a-host)).
 4. Start everything again, and keep a copy of `.env` and `compose.yaml` with the two backups: `.env`
    holds the master key.
 
-<!-- not tested: stops and dumps a running Docker Compose stack and archives its volume, and the example runner has no Docker -->
+<!-- source: docs/examples/compose-restore.sh#backup -->
 ```bash
 docker compose stop server worker worker-interactive worker-pipeline
 docker compose exec -T postgres pg_dump -U lakana lakana > lakana.sql
 docker compose stop seaweedfs seaweedfs-core
-docker run --rm -v lakana_seaweed:/data -v "$PWD":/backup busybox tar czf /backup/seaweed.tgz /data
+docker compose run --rm --no-deps -T -v "$PWD":/backup --entrypoint tar seaweedfs-core czf /backup/seaweed.tgz -C /data .
 docker compose up -d --wait
 ```
 
@@ -855,6 +923,93 @@ A backup taken while the stack runs is not consistent, whatever the order: a fil
 between the two (a dropped artifact, or a deleted version after the sweep) is still listed by the
 restored catalog, and a version stored between them is missing from it. Take backups with the steps
 above.
+
+## Restore
+
+A restore puts the catalog and the object storage back from one backup, taken as under
+"Backups". The project's `compose-smoke` job runs the backup and these steps: it backs up, changes
+a table, loses the instance, restores into a new directory, and compares the table, the runs and
+an artifact.
+
+**Where to restore.** Into the directory of the bundle you lost, if it is still there, or into a
+new, empty directory (on a new machine, say). The directory needs the `compose.yaml` and the
+`.env` of the same bundle: `.env` holds the master key, which decrypts the stored secrets, and the
+storage keys, which the restored storage was set up with. A bundle made by a new `bundle init` has
+other keys and cannot read the restored instance. So keep copies of `.env`, `compose.yaml`, the
+`repos/` directory (local repositories live there) and the two backup files together, and
+restore from them. Use the image version of the backup, or a newer one: `migrate` brings the catalog up to date when
+you start it. Never restore a catalog into an older image than the one that wrote it.
+
+1. In the directory, put the four files, and make sure `repos/` exists.
+
+<!-- source: docs/examples/compose-restore.sh#restore-directory -->
+```bash
+mkdir -p repos
+```
+
+2. Remove the volumes of the instance you are replacing. This **deletes** its catalog and its
+   data, so be sure the backups are good first. In a new directory on a new machine there is
+   nothing to remove, and it does nothing.
+
+<!-- source: docs/examples/compose-restore.sh#restore-clear -->
+```bash
+docker compose down -v
+```
+
+3. Start Postgres alone and load the dump. `ON_ERROR_STOP` and `--single-transaction` make a
+   failed load leave the database empty rather than half full.
+
+<!-- source: docs/examples/compose-restore.sh#restore-catalog -->
+```bash
+docker compose up -d --wait postgres
+docker compose exec -T postgres psql -U lakana -d lakana -v ON_ERROR_STOP=1 --single-transaction < lakana.sql
+```
+
+4. Unpack the archive into the storage volume. Compose creates the volume, with its own labels
+   and the project name from `.env`, and mounts it into a one-off container that runs `tar`.
+
+<!-- source: docs/examples/compose-restore.sh#restore-storage -->
+```bash
+docker compose run --rm --no-deps -T -v "$PWD":/backup --entrypoint tar seaweedfs-core xzf /backup/seaweed.tgz -C /data
+```
+
+5. Before you start everything, decide about the sweep (below), then start it.
+
+<!-- source: docs/examples/compose-restore.sh#restore-start -->
+```bash
+docker compose up -d --wait
+```
+
+6. Check the result. A table you know reads the rows it had at the backup (not the ones
+   written after it), and the runs of the backup are listed. `bronze.demo` and `dev` are examples;
+   use your own.
+
+<!-- source: docs/examples/compose-restore.sh#check -->
+```bash
+lakana sql "SELECT id, name FROM bronze.demo ORDER BY id"
+lakana runs list --env dev
+```
+
+Everything written after the backup is gone: rows, runs, grants and tokens. People whose token
+was issued after it must get a new one. Secrets are back as they were, because they are in the
+catalog, encrypted with the master key in `.env`.
+
+**The sweep.** Once an hour the sweep removes what a crash or an abandoned upload left behind. After a restore the catalog and the storage can
+disagree if they were not taken at the same moment, and the sweep is built to remove little then:
+it keeps an artifact directory the catalog does not know and the files a manifest it does not know
+names, and logs that it did. To keep it from removing anything at all while you check, set
+`LAKANA_RUN__SWEEP_INTERVAL: "0"` in the shared `x-lakana-env` block of `compose.yaml` before step
+5 (the workers read it there, not from `.env`), and remove the line once you have checked:
+
+```yaml
+x-lakana-env: &lakana-env
+  # ... the lines that are already here stay ...
+  LAKANA_RUN__SWEEP_INTERVAL: "0"
+```
+
+What each log line means is in [After a restore](#after-a-restore). There is no command yet to
+bring an artifact back into the catalog or to make it forget one on purpose; issue
+[#68](https://github.com/lakana-labs/lakana/issues/68) tracks it.
 
 ## After a restore
 
