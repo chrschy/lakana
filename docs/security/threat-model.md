@@ -733,6 +733,14 @@ table without its own `LIVE` location record are never dropped. The clock uses t
 time of the last commit and the recorded reads, never the client-written snapshot timestamp, so a
 client cannot backdate a table into expiry.
 
+Deleting an environment (#213) is a drop of every managed table in it, through the same drop path:
+each becomes a tombstone with the undo period, and the environment's row stays, hidden from every
+lookup by name and with its name taken, until the sweep has purged the last of them. A create or an
+undrop racing the deletion takes the environment's row lock before it publishes, so no table
+appears in a deleted environment. A restore needs `MANAGE_ENVIRONMENT`, brings back only the tables
+and policies that deletion took, and is refused whole once a purge of one of them has started. An
+external table's files are never deleted.
+
 ## M3 exit criteria
 
 The M3 epic defines three exit criteria:

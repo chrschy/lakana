@@ -59,6 +59,7 @@ from lakana_core.identifiers import TableRef
 from lakana_core.identity.task_tokens import TaskTokenService
 from lakana_core.kept_mark import KeptSeen
 from lakana_core.models import (
+    LIVE_ENVIRONMENT,
     Environment,
     JobVersion,
     Principal,
@@ -1694,7 +1695,7 @@ class PythonRuntime:
             """
             try:
                 row = session.execute(
-                    select(Environment).where(Environment.name == environment)
+                    select(Environment).where(Environment.name == environment, LIVE_ENVIRONMENT)
                 ).scalar_one_or_none()
                 if row is None:
                     raise VenvBuildRefused(

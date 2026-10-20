@@ -126,6 +126,7 @@ from lakana_core.db import rowcount
 from lakana_core.errors import NotFoundError
 from lakana_core.identifiers import NAMESPACE_SEPARATOR, shown
 from lakana_core.models import (
+    LIVE_ENVIRONMENT,
     ArtifactBlob,
     ArtifactUpload,
     ArtifactVersion,
@@ -1147,7 +1148,11 @@ def sweep_artifacts(
     totals = dict.fromkeys(_COUNTED, 0)
     stopped = False
     environments = list(
-        session.execute(select(Environment.id, Environment.name).order_by(Environment.name)).all()
+        session.execute(
+            select(Environment.id, Environment.name)
+            .where(LIVE_ENVIRONMENT)
+            .order_by(Environment.name)
+        ).all()
     )
     session.rollback()
     if environments:

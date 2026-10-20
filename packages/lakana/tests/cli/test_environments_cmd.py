@@ -65,20 +65,77 @@ def test_env_list_and_get(tmp_path: Path) -> None:
 
     assert listed.exit_code == 0, listed.stderr
     assert "file:///data" in listed.stdout
-    assert json.loads(got.stdout) == {**_DEV, "retention_days": None}
+    assert json.loads(got.stdout) == {
+        **_DEV,
+        "retention_days": None,
+        "deleted_at": None,
+        "purge_after": None,
+    }
+
+
+_DELETED = {
+    **_DEV,
+    "retention_days": None,
+    "deleted_at": "2026-10-20T10:00:00+00:00",
+    "purge_after": "2026-10-27T10:00:00+00:00",
+}
 
 
 def test_env_delete_requires_confirmation(tmp_path: Path) -> None:
     """Without a TTY, `env delete` refuses unless `--yes` is given."""
     api = FakeApi()
-    api.on("DELETE", "/api/v1/environments/dev", status=204)
+    api.on("DELETE", "/api/v1/environments/dev", json=_DELETED)
 
     refused = invoke(make_state(tmp_path, api), "env", "delete", "dev")
     deleted = invoke(make_state(tmp_path, api), "env", "delete", "dev", "--yes")
 
     assert refused.exit_code == 2
     assert deleted.exit_code == 0, deleted.stderr
+    assert "lakana env restore dev" in deleted.stdout
+    assert "2026-10-27" in deleted.stdout
     assert [r.method for r in api.requests] == ["DELETE"]
+
+
+def test_env_delete_purge_asks_differently_and_sends_purge(tmp_path: Path) -> None:
+    """`--purge` says it cannot be undone, and sends `purge=true`."""
+    api = FakeApi()
+    api.on("DELETE", "/api/v1/environments/dev", json=_DELETED)
+
+    asked = invoke(make_state(tmp_path, api), "env", "delete", "dev", "--purge")
+    deleted = invoke(make_state(tmp_path, api), "env", "delete", "dev", "--purge", "--yes")
+
+    assert asked.exit_code == 2
+    assert "cannot be undone" in asked.stderr
+    assert deleted.exit_code == 0, deleted.stderr
+    assert api.requests[-1].url.params["purge"] == "true"
+    assert "cannot be restored" in deleted.stdout
+
+
+def test_env_delete_against_an_older_server_still_succeeds(tmp_path: Path) -> None:
+    """A 204 without a body: the message says nothing about an undo period."""
+    api = FakeApi()
+    api.on("DELETE", "/api/v1/environments/dev", status=204)
+
+    deleted = invoke(make_state(tmp_path, api), "env", "delete", "dev", "--yes")
+
+    assert deleted.exit_code == 0, deleted.stderr
+    assert "Deleted environment dev" in deleted.stdout
+
+
+def test_env_restore_and_list_deleted(tmp_path: Path) -> None:
+    """`env restore` POSTs `/restore`; `env list --deleted` shows until when."""
+    api = FakeApi()
+    api.on("POST", "/api/v1/environments/dev/restore", json={**_DELETED, "deleted_at": None})
+    api.on("GET", "/api/v1/environments", json=[_DELETED])
+
+    restored = invoke(make_state(tmp_path, api), "env", "restore", "dev")
+    listed = invoke(make_state(tmp_path, api), "env", "list", "--deleted")
+
+    assert restored.exit_code == 0, restored.stderr
+    assert "Restored environment dev" in restored.stdout
+    assert listed.exit_code == 0, listed.stderr
+    assert "purge_after" in listed.stdout and "2026-10-27" in listed.stdout
+    assert api.requests[-1].url.params["deleted"] == "true"
 
 
 def test_env_set_storage_needs_something_to_change(tmp_path: Path) -> None:
@@ -216,3 +273,4 @@ def test_env_delete_help_says_to_undeploy_first(tmp_path: Path) -> None:
     text = _help(tmp_path, "delete")
     assert "Refused (409) while any repository is deployed to it" in text
     assert "lakana undeploy REPO --env NAME" in text
+    assert "lakana env restore NAME" in text

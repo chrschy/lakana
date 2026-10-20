@@ -4,7 +4,7 @@ from lakana_core.models.base import Base, TimestampMixin  # ruff: ignore[unsorte
 from lakana_core.models.column_description import ColumnDescription
 from lakana_core.models.column_mask import ColumnMask
 from lakana_core.models.credential import PersonalAccessToken, TaskToken
-from lakana_core.models.environment import Environment
+from lakana_core.models.environment import LIVE_ENVIRONMENT, Environment
 from lakana_core.models.principal import Principal, PrincipalType
 
 # Grant is imported after Principal: lakana_core.auth (which Grant depends on)
@@ -50,6 +50,7 @@ from lakana_core.models.run import (
 )
 
 __all__ = [
+    "LIVE_ENVIRONMENT",
     "OWN_TIP_NO_SNAPSHOT",
     "ArtifactBlob",
     "ArtifactUpload",

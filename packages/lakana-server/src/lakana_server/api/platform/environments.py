@@ -199,16 +199,20 @@ def get_environment(
 
 @router.get("", response_model=list[EnvironmentOut])
 def list_environments(
+    deleted: bool = False,
     principal: PrincipalRef = Depends(get_principal),
     catalog: CatalogService = Depends(get_catalog),
 ) -> list[EnvironmentOut]:
-    """List every environment.
+    """List every environment, or every deleted one.
 
     Filtered to the environments the caller may read — see
     `CatalogService.list_environments`.
 
     Parameters
     ----------
+    deleted
+        `true` lists the deleted environments whose files are not deleted yet, oldest
+        deletion first, each with its `purge_after`, instead.
     principal
         The authenticated caller.
     catalog
@@ -219,31 +223,82 @@ def list_environments(
     list of EnvironmentOut
         Every environment the caller may read.
     """
-    return [EnvironmentOut.model_validate(env) for env in catalog.list_environments(principal)]
+    found = (
+        catalog.list_deleted_environments(principal)
+        if deleted
+        else catalog.list_environments(principal)
+    )
+    return [EnvironmentOut.model_validate(env) for env in found]
 
 
-@router.delete("/{name}", status_code=204)
+@router.delete("/{name}", response_model=EnvironmentOut)
 def delete_environment(
+    name: str,
+    purge: bool = False,
+    principal: PrincipalRef = Depends(get_principal),
+    catalog: CatalogService = Depends(get_catalog),
+) -> EnvironmentOut:
+    """Delete an environment: its tables can be restored until `purge_after`.
+
+    Parameters
+    ----------
+    name
+        Environment name.
+    purge
+        `true` makes everything due at once: the worker's next clean-up deletes the tables'
+        files and the environment cannot be restored. Also accepted for an environment that is
+        already deleted.
+    principal
+        The authenticated caller; needs `MANAGE_ENVIRONMENT` on the environment.
+    catalog
+        The catalog service for this request.
+
+    Returns
+    -------
+    EnvironmentOut
+        The deleted environment, with `deleted_at` and `purge_after`.
+
+    Raises
+    ------
+    lakana_core.errors.NotFoundError
+        Mapped to 404 by `install_exception_handlers`; also for an environment already deleted
+        without `purge`.
+    lakana_core.errors.ConflictError
+        A repository is still deployed; mapped to 409.
+    lakana_core.errors.ValidationError
+        The environment is protected; mapped to 422.
+    """
+    return EnvironmentOut.model_validate(catalog.delete_environment(principal, name, purge=purge))
+
+
+@router.post("/{name}/restore", response_model=EnvironmentOut)
+def restore_environment(
     name: str,
     principal: PrincipalRef = Depends(get_principal),
     catalog: CatalogService = Depends(get_catalog),
-) -> None:
-    """Delete an environment.
+) -> EnvironmentOut:
+    """Restore a deleted environment within its undo period, with the tables it dropped.
 
     Parameters
     ----------
     name
         Environment name.
     principal
-        The authenticated caller.
+        The authenticated caller; needs `MANAGE_ENVIRONMENT` on the environment.
     catalog
         The catalog service for this request.
+
+    Returns
+    -------
+    EnvironmentOut
+        The restored environment.
 
     Raises
     ------
     lakana_core.errors.NotFoundError
-        Mapped to 404 by `install_exception_handlers`.
+        No environment of that name; mapped to 404.
     lakana_core.errors.ConflictError
-        A repository is still deployed; mapped to 409.
+        It is not deleted, its undo period has ended, or the clean-up has started deleting its
+        files; mapped to 409.
     """
-    catalog.delete_environment(principal, name)
+    return EnvironmentOut.model_validate(catalog.restore_environment(principal, name))

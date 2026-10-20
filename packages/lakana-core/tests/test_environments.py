@@ -13,6 +13,7 @@ from sqlalchemy.orm import ORMExecuteState, Session
 
 from lakana_core.auth import Action, AllowAllAuthorization, PrincipalRef, Securable, SecurableKind
 from lakana_core.catalog import CatalogService
+from lakana_core.catalog.location_sweep import sweep_table_locations
 from lakana_core.errors import (
     AlreadyExistsError,
     ConflictError,
@@ -228,33 +229,33 @@ def test_delete_unknown_raises_not_found(catalog: CatalogService, principal: Pri
 def test_delete_environment_cascades_to_its_namespaces(
     catalog: CatalogService, principal: PrincipalRef, tmp_path: Path, session: Session
 ) -> None:
-    """Deleting an environment also removes its namespace rows.
+    """The deletion keeps the namespace rows; the sweep's removal of the row cascades to them.
 
-    `delete_environment` relies on `session.delete(env)` triggering the
-    database-level ``ondelete="CASCADE"`` on `Namespace.environment_id`.
-    Postgres enforces that unconditionally, but SQLite only enforces
-    foreign keys, including this cascade, once
+    A deleted environment keeps its namespaces, which a restore needs, until the location
+    sweep deletes its row after the undo period. That relies on the database-level
+    ``ondelete="CASCADE"`` on `Namespace.environment_id`. Postgres enforces that
+    unconditionally, but SQLite only enforces foreign keys, including this cascade, once
     ``PRAGMA foreign_keys=ON`` has been issued on the connection, which
-    `lakana_core.db.create_engine` does for every engine Lakana builds. This
-    proves the cascade actually fires on SQLite, not only on Postgres.
+    `lakana_core.db.create_engine` does for every engine Lakana builds. This proves the cascade
+    actually fires on SQLite, not only on Postgres.
     """
     env = catalog.create_environment(principal, name="dev", storage=_config(tmp_path))
     ns_id = uuid.uuid4()
-    # "widgets", not "gold": `create_environment` now scaffolds `gold` itself,
-    # so a second namespace row of that name would collide on the
-    # `(environment_id, path)` unique constraint. The namespace's name is not
-    # the point of this test -- only that a namespace row cascades on delete.
+    # "widgets", not "gold": `create_environment` scaffolds `gold` itself, so a second namespace
+    # row of that name would collide on the `(environment_id, path)` unique constraint.
     session.add(Namespace(id=ns_id, environment_id=env.id, path="widgets", properties={}))
     session.commit()
 
-    catalog.delete_environment(principal, "dev")
+    deleted = catalog.delete_environment(principal, "dev", purge=True)
 
-    # A plain SELECT by the id captured above, rather than session.get() on
-    # the now-stale `Namespace` instance: `delete_environment`'s own commit
-    # expires every object in the session, so re-touching that instance's
-    # attributes would trigger a refresh against a row the DB-level cascade
-    # already removed, raising ObjectDeletedError instead of answering the
-    # question "does this row still exist?".
+    # A plain SELECT by the id captured above: the deletion's commit expires every object in
+    # the session, and the cascade removes the row under the stale instance.
+    kept = session.execute(select(Namespace).where(Namespace.id == ns_id)).scalar_one_or_none()
+    assert kept is not None
+    assert deleted.purge_after is not None
+    sweep_table_locations(
+        session, StorageResolver(session), now=deleted.purge_after, grace_hours=24
+    )
     remaining = session.execute(select(Namespace).where(Namespace.id == ns_id)).scalar_one_or_none()
     assert remaining is None
 

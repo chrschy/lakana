@@ -64,3 +64,50 @@ case "$message" in
   *"undo period ended"*"--purge cannot be restored"*) ;;
   *) echo "unexpected refusal: $message" >&2; exit 1 ;;
 esac
+
+# Deleting and restoring an environment, on an environment of its own.
+mkdir -p "$WORK/sandbox"
+lakana env create sandbox --storage-root "file://$WORK/sandbox"
+lakana table create silver.events --column id:long --env sandbox
+events=$(uuid "$(lakana --output json table get silver.events --env sandbox)")
+
+# docs:start env-delete
+lakana env delete sandbox --yes
+# docs:end env-delete
+
+if lakana env get sandbox >/dev/null 2>&1; then
+  echo "the deleted environment is still there" >&2
+  exit 1
+fi
+
+# docs:start env-list-deleted
+lakana env list --deleted
+# docs:end env-list-deleted
+
+out=$(lakana --output json env list --deleted)
+python3 -c '
+import json, sys
+(entry,) = json.loads(sys.argv[1])
+assert entry["name"] == "sandbox" and entry["purge_after"] > entry["deleted_at"], entry
+' "$out"
+
+# docs:start env-restore
+lakana env restore sandbox
+# docs:end env-restore
+
+test "$(uuid "$(lakana --output json table get silver.events --env sandbox)")" = "$events"
+test "$(lakana --output json env list --deleted)" = "[]"
+
+# docs:start env-purge
+lakana env delete sandbox --purge --yes
+# docs:end env-purge
+
+if message=$(lakana env restore sandbox 2>&1); then
+  echo "a purged environment was restored" >&2
+  exit 1
+fi
+message=$(printf '%s' "$message" | tr -s '\n ' '  ')
+case "$message" in
+  *"undo period ended"*) ;;
+  *) echo "unexpected refusal: $message" >&2; exit 1 ;;
+esac

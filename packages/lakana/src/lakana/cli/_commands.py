@@ -16,6 +16,7 @@ COMMANDS: dict[str, tuple[str, ...]] = {
     "env list": ("environments.list",),
     "env get": ("environments.get",),
     "env delete": ("environments.delete",),
+    "env restore": ("environments.restore",),
     "env set-storage": ("environments.update_storage",),
     "env protect": ("environments.set_protection",),
     "env unprotect": ("environments.set_protection",),

@@ -629,13 +629,19 @@ class StorageResolver:
             accept_format_1=self._key_provider.accepts_format_1,
         )
 
-    def for_environment(self, environment: str) -> ResolvedStorage:
+    def for_environment(
+        self, environment: str, *, include_deleted: bool = False
+    ) -> ResolvedStorage:
         """Resolve an environment's storage.
 
         Parameters
         ----------
         environment
             The environment's name.
+        include_deleted
+            Resolve a deleted environment's storage too. Only the location sweep, which deletes
+            a deleted environment's files after its undo period, and a restore ask for it;
+            everything else finds a deleted environment missing.
 
         Returns
         -------
@@ -650,8 +656,8 @@ class StorageResolver:
         Raises
         ------
         NotFoundError
-            If no environment has that name, or its `storage_secret_ref`
-            names no active secret.
+            If no environment has that name (or it is deleted, without `include_deleted`),
+            or its `storage_secret_ref` names no active secret.
         ValidationError
             If the environment's storage root has an unrecognised scheme,
             or it needs a secret decrypted but this `StorageResolver` was
@@ -664,7 +670,7 @@ class StorageResolver:
         env = self._session.execute(
             select(Environment).where(Environment.name == environment)
         ).scalar_one_or_none()
-        if env is None:
+        if env is None or (env.deleted_at is not None and not include_deleted):
             raise NotFoundError(f"No environment named {environment!r}.")
         options = dict(env.storage_options)
         if env.storage_secret_ref is not None:

@@ -75,15 +75,37 @@ def create(
 
 
 @env_app.command("list")
-def list_environments(ctx: typer.Context) -> None:
-    """List environments you can see.
+def list_environments(
+    ctx: typer.Context,
+    deleted: Annotated[
+        bool,
+        typer.Option(
+            "--deleted",
+            help="List the deleted environments that can still be restored, and until when.",
+        ),
+    ] = False,
+) -> None:
+    """List environments you can see, or with --deleted the deleted ones.
+
+    A deleted environment keeps its tables' files until `purge_after` (the server's undo
+    period, 7 days by default); until then `lakana env restore NAME` brings it back.
 
     Parameters
     ----------
     ctx
         The Typer context.
+    deleted
+        List the deleted environments instead.
     """
     state = state_of(ctx)
+    if deleted:
+        _output.emit(
+            state,
+            state.client().environments.list(deleted=True),
+            columns=["name", "deleted_at", "purge_after", "storage_root"],
+            droppable=["storage_root"],
+        )
+        return
     _output.emit(
         state,
         state.client().environments.list(),
@@ -108,12 +130,32 @@ def get(ctx: typer.Context, name: str) -> None:
 
 
 @env_app.command("delete")
-def delete(ctx: typer.Context, name: str, yes: _YES = False) -> None:
-    """Delete environment NAME.
+def delete(
+    ctx: typer.Context,
+    name: str,
+    purge: Annotated[
+        bool,
+        typer.Option(
+            "--purge",
+            help=(
+                "Delete the tables' files at the worker's next clean-up instead of after the "
+                "undo period; the environment cannot be restored then. Also for an environment "
+                "already deleted."
+            ),
+        ),
+    ] = False,
+    yes: _YES = False,
+) -> None:
+    """Delete environment NAME. Its tables' files are kept for the undo period, then deleted.
+
+    Within the server's undo period (`LAKANA_TABLES__UNDO_DAYS`, 7 days by default), `lakana
+    env restore NAME` brings the environment back with its tables, their data and their grants.
+    Until then the name stays taken, and `lakana env list --deleted` shows until when. Views
+    and external tables are removed; an external table's files are never deleted. `--purge`
+    skips the period.
 
     Refused (409) while any repository is deployed to it: run
     `lakana undeploy REPO --env NAME` for each first. Refused while protected.
-    Data in object storage is left alone.
 
     Parameters
     ----------
@@ -121,13 +163,63 @@ def delete(ctx: typer.Context, name: str, yes: _YES = False) -> None:
         The Typer context.
     name
         The environment.
+    purge
+        Make the files due at once.
     yes
         Skip the confirmation prompt.
     """
     state = state_of(ctx)
-    confirm(state, f"Delete environment {name!r}?", yes)
-    state.client().environments.delete(name)
-    _output.done(state, f"Deleted environment {_output.inline(name)}")
+    if purge:
+        question = (
+            f"Delete environment {name!r} and its tables' files at the next clean-up? This "
+            "cannot be undone."
+        )
+    else:
+        question = (
+            f"Delete environment {name!r}? It can be restored with its tables during the undo "
+            "period."
+        )
+    confirm(state, question, yes)
+    deleted = state.client().environments.delete(name, purge=purge)
+    shown = _output.inline(name)
+    if deleted is None or deleted.purge_after is None:
+        _output.done(state, f"Deleted environment {shown}", deleted)
+    elif purge:
+        _output.done(
+            state,
+            f"Deleted environment {shown}. Its tables' files are deleted at the next clean-up; "
+            "it cannot be restored.",
+            deleted,
+        )
+    else:
+        until = deleted.purge_after.strftime("%Y-%m-%d %H:%M UTC")
+        _output.done(
+            state,
+            f"Deleted environment {shown}. Restore it with its tables until {until} with "
+            f"`lakana env restore {shown}`.",
+            deleted,
+        )
+
+
+@env_app.command("restore")
+def restore(ctx: typer.Context, name: str) -> None:
+    """Restore the deleted environment NAME, with the tables, data and grants it had.
+
+    Works until the end of the undo period that `lakana env list --deleted` shows, and not
+    after `lakana env delete NAME --purge`. A table dropped before the environment was deleted
+    stays dropped; restore it afterwards with `lakana table undrop`. Needs MANAGE_ENVIRONMENT
+    (deleting the environment revoked the grants given on it, so usually an administrator's).
+
+    Parameters
+    ----------
+    ctx
+        The Typer context.
+    name
+        The environment.
+    """
+    state = state_of(ctx)
+    environment = state.client().environments.restore(name)
+    _output.done(state, f"Restored environment {_output.inline(name)}", environment)
 
 
 @env_app.command("set-storage")

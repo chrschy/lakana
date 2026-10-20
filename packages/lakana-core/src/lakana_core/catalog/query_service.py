@@ -31,6 +31,7 @@ from lakana_core.db import db_now, rowcount
 from lakana_core.errors import AlreadyExistsError, ConflictError, NotFoundError, ValidationError
 from lakana_core.identifiers import TableRef
 from lakana_core.models import (
+    LIVE_ENVIRONMENT,
     AuditEventType,
     Environment,
     Principal,
@@ -253,7 +254,7 @@ class QueryService:
         """
         self._authz.authorize(p, Action.SUBMIT_QUERY, Securable.environment_scope(environment))
         env = self._session.execute(
-            select(Environment).where(Environment.name == environment)
+            select(Environment).where(Environment.name == environment, LIVE_ENVIRONMENT)
         ).scalar_one_or_none()
         if env is None:
             raise NotFoundError(f"No environment named {environment!r}.")
@@ -308,7 +309,7 @@ class QueryService:
         """
         self._authz.authorize(p, Action.SUBMIT_QUERY, Securable.environment_scope(environment))
         env = self._session.execute(
-            select(Environment).where(Environment.name == environment)
+            select(Environment).where(Environment.name == environment, LIVE_ENVIRONMENT)
         ).scalar_one_or_none()
         if env is None:
             raise NotFoundError(f"No environment named {environment!r}.")
@@ -919,7 +920,7 @@ class QueryService:
             The environment's securable.
         """
         exists = self._session.execute(
-            select(Environment.id).where(Environment.name == environment)
+            select(Environment.id).where(Environment.name == environment, LIVE_ENVIRONMENT)
         ).scalar_one_or_none()
         if exists is not None and isinstance(self._authz, AuditingAuthorization):
             self._authz.record_denial(p, Action.MANAGE_ENVIRONMENT, scope, reason="not_submitter")
@@ -943,7 +944,7 @@ class QueryService:
             If it does not exist.
         """
         env = self._session.execute(
-            select(Environment).where(Environment.name == environment)
+            select(Environment).where(Environment.name == environment, LIVE_ENVIRONMENT)
         ).scalar_one_or_none()
         if env is None:
             raise NotFoundError(f"No environment named {environment!r}.")

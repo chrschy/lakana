@@ -40,6 +40,7 @@ from lakana_core.auth import Action, AuthorizationService, PrincipalRef, Securab
 from lakana_core.errors import NotFoundError, ValidationError
 from lakana_core.identifiers import NAMESPACE_SEPARATOR, NamespacePath
 from lakana_core.models import (
+    LIVE_ENVIRONMENT,
     ColumnDescription,
     Environment,
     Namespace,
@@ -477,7 +478,7 @@ class CatalogSearch:
         if offset < 0:
             raise ValidationError(f"offset must be 0 or more; got {offset}.")
         environment_id = self._session.scalar(
-            select(Environment.id).where(Environment.name == environment)
+            select(Environment.id).where(Environment.name == environment, LIVE_ENVIRONMENT)
         )
         may_read_environment = self._authz.permits(
             p, Action.READ_ENVIRONMENT, Securable.environment_scope(environment)

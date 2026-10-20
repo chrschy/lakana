@@ -715,16 +715,19 @@ def test_cleanup_location_reports_what_it_could_not_do(
     assert file.exists()
 
 
-def test_deleting_an_environment_removes_its_records_and_keeps_every_file(
+def test_deleting_an_environment_keeps_its_records_as_tombstones_and_every_file(
     session: Session, other: Session, principal: PrincipalRef, store: Path
 ) -> None:
-    """Without a record the sweep never deletes a directory, so the files stay, as they did."""
+    """Every record stays, `DROPPED`, and the files with it until the undo period has passed."""
     catalog = _catalog(session, principal, store)
     catalog.create_table(principal, _ref("gold.orders"), schema=_schema())
+    catalog.create_table(principal, _ref("gold.customers"), schema=_schema())
     catalog.drop_table(principal, _ref("gold.orders"))
     catalog.delete_environment(principal, "dev")
-    assert _records(other) == []
-    assert len(list(store.rglob("*.metadata.json"))) == 1
+    records = _records(other)
+    assert [r.state for r in records] == [TableLocationState.DROPPED] * 2
+    assert all(r.purge_after is not None and r.purge_started_at is None for r in records)
+    assert len(list(store.rglob("*.metadata.json"))) == 2
 
 
 def test_a_drop_makes_the_record_a_tombstone_in_its_own_transaction(

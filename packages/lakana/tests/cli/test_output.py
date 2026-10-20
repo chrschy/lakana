@@ -88,6 +88,8 @@ def test_emit_json_lists_dataclasses_with_their_field_names(
             "is_protected": False,
             "properties": {},
             "retention_days": None,
+            "deleted_at": None,
+            "purge_after": None,
         }
     ]
 

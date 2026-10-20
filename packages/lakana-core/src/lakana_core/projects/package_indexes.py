@@ -33,7 +33,8 @@ from lakana_core.errors import (
     ValidationError,
 )
 from lakana_core.identifiers import is_secret_name, shown, validate_path_component
-from lakana_core.models import AuditEventType, Environment, PackageIndex
+from lakana_core.models import AuditEventType, PackageIndex
+from lakana_core.projects.lookups import live_environment_names
 from lakana_core.projects.package_sources import RegisteredIndex, normalize_index_url
 from lakana_core.secrets.uses import (
     SecretBindingRefused,
@@ -235,7 +236,7 @@ class PackageIndexService:
             raise PermissionDenied("A task's token may not read the package index registry.")
         if self._authz.permits(p, Action.MANAGE_PACKAGE_INDEX, Securable.instance_scope()):
             return
-        for name in self._session.execute(select(Environment.name)).scalars():
+        for name in live_environment_names(self._session):
             if self._authz.permits(p, Action.READ_ENVIRONMENT, Securable.environment_scope(name)):
                 return
         self._authz.authorize(p, Action.READ_ENVIRONMENT, Securable.instance_scope())

@@ -214,6 +214,40 @@ nothing. Three settings are new: `LAKANA_TABLES__EXPIRY_WARNING_DAYS` (server, 7
 Going back to the previous release drops the columns: every retention is forgotten, and a table that
 expired meanwhile can still be restored within its undo period.
 
+### Deleting an environment deletes its tables' files after an undo period
+
+**This changes what deleting an environment does.** Until now `lakana env delete` removed the
+environment and everything in it from the catalog and kept every file for ever. From this release
+it drops every managed table of the environment as `lakana table delete` drops one: the files stay
+for the undo period (`LAKANA_TABLES__UNDO_DAYS`, 7 days by default), and then the worker's sweep
+deletes them, no earlier than the end of the period and no later than one sweep after it. Until
+then `lakana env restore ENV` brings the environment back with its tables, their data and the
+grants, row filters and column masks the deletion took away, and `lakana env list --deleted` shows
+until when. The environment's name stays taken meanwhile: creating an environment of that name is
+refused until its files are deleted. `lakana env delete ENV --purge` makes the files due at the next
+sweep; the sweep then also removes the environment. An external table's files are never deleted.
+See [Delete and restore an environment](../how-to/drop-and-restore-a-table.md#delete-and-restore-an-environment).
+
+- **To keep the data** of an environment you delete, restore it within the undo period, or set
+  `LAKANA_TABLES__UNDO_DAYS` higher on the server and the workers **before** you delete it.
+- **REST.** `DELETE /api/v1/environments/{name}` now answers 200 with the environment and its
+  `deleted_at` and `purge_after` instead of 204 without a body, and takes `?purge=true`. New:
+  `POST /api/v1/environments/{name}/restore` and `GET /api/v1/environments?deleted=true`.
+  `EnvironmentOut` gains `deleted_at` and `purge_after`. The SDK's `environments.delete` returns the
+  environment (`None` from an older server), and gains `purge`; `environments.restore` and
+  `environments.list(deleted=True)` are new.
+- **Who restores.** Deleting an environment revokes the grants given on it, so an environment admin
+  who deleted one cannot restore it; an administrator of the instance can, and the restore gives
+  those grants back.
+- **Environments deleted before this release** left no trace in the catalog and kept every file;
+  nothing changes for them. Their directories are counted in the worker's log as directories
+  without a record; a later release adds a command to remove them on request.
+
+Migration `0045` adds five columns to `environments`, empty on every row: no environment is deleted
+by the upgrade. Going back to the previous release drops the columns: an environment deleted
+meanwhile shows up again without its tables, each of which stays a dropped table that `lakana table
+undrop` restores within its undo period, as before.
+
 ## Notes for 0.16.0
 
 ### Grants, principals and groups are listed in pages

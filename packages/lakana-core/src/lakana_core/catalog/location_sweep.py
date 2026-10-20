@@ -16,10 +16,10 @@ What it does, per environment:
 1. *Expiries* (`lakana_core.catalog.retention.expire_due`). A managed table whose retention has
    passed is dropped through the drop path, under the environment's and the table's row locks,
    after the decision is taken again with what is stored then: a tombstone with the undo period
-   (at least a day), ``reason: retention``, no principal. Protected environments, a deployed
-   project's assets, tables with a write queued or running, and tables whose location record is
-   not their own `LIVE` one are never dropped (`expiries_postponed` counts the last two). At most
-   `max_expiries` tables per run, the most overdue first.
+   (at least a day), ``reason: retention``, no principal. Protected and deleted environments, a
+   deployed project's assets, tables with a write queued or running, and tables whose location
+   record is not their own `LIVE` one are never dropped (`expiries_postponed` counts the last
+   two). At most `max_expiries` tables per run, the most overdue first.
 2. *Claims.* A `CLAIMED` record is resolved only when its holder run has ended (a query run or a
    task run in a final state), or, when it has no holder or the catalog does not know the
    holder, once it is older than ``LAKANA_TABLES__ABANDONED_GRACE_HOURS``. It is resolved under
@@ -43,6 +43,13 @@ What it does, per environment:
    resumes. Before the first delete it marks the record ``purge_started_at`` under the lock,
    after checking again that the record is purgeable and due; an undrop of a dropped table
    takes the same lock and is refused once the mark is set.
+
+A *deleted* environment (`lakana_core.catalog.environment_deletion`) is swept like any other,
+with its storage resolved although it is hidden everywhere else, except that nothing in it
+expires and a claim in it is never made `LIVE` (no table can be published into it; the claim is
+abandoned once its holder ended or its grace period passed). After its purges, once its
+``purge_after`` has passed and no location record of it is left in any state, its row is
+deleted (`purge_environment`, ``environments_purged``, an `ENVIRONMENT_PURGED` event).
 
 Bounds: one run has a deadline (`max_seconds`) shared between the environments, and ends at the
 next decision past it or at shutdown; the starting environment and record rotate from run to
@@ -79,6 +86,7 @@ from lakana_core.artifacts.sweep import MAX_CONSECUTIVE_FAILURES
 from lakana_core.audit.service import AuditService
 from lakana_core.auth import Securable
 from lakana_core.catalog.append import root_relative_path
+from lakana_core.catalog.environment_deletion import purge_environment
 from lakana_core.catalog.locations import (
     abandon_claim,
     dropped_inside,
@@ -177,6 +185,8 @@ class LocationSweepReport:
         Listed objects outside the location being purged, or with a path that cannot be judged.
     unrecorded_directories
         Table directories under ``managed/`` that hold files and have no record; never deleted.
+    environments_purged
+        Deleted environments whose row went after their last record.
     failed_records
         Records skipped because a storage or database error stopped their step.
     failed_environments
@@ -199,6 +209,7 @@ class LocationSweepReport:
     locations_refused: int = 0
     left_alone: int = 0
     unrecorded_directories: int = 0
+    environments_purged: int = 0
     failed_records: int = 0
     failed_environments: int = 0
     stopped_early: bool = False
@@ -264,6 +275,8 @@ class _Run:
         The monotonic time after which no further decision is taken.
     should_stop
         Whether shutdown was asked for.
+    deleted
+        Whether the environment is deleted: no claim in it is made `LIVE`.
     """
 
     def __init__(
@@ -278,6 +291,8 @@ class _Run:
         monotonic: Callable[[], float],
         deadline: float,
         should_stop: Callable[[], bool],
+        *,
+        deleted: bool = False,
     ) -> None:
         self.counts: dict[str, int] = dict.fromkeys(_COUNTED, 0)
         self.stopped_early = False
@@ -291,6 +306,7 @@ class _Run:
         self._monotonic = monotonic
         self._deadline = deadline
         self._should_stop = should_stop
+        self._deleted = deleted
         self._failures = 0
 
     def _tick(self) -> None:
@@ -461,7 +477,7 @@ class _Run:
         record = lock_location(self._session, record_id)
         if record is None or record.state is not TableLocationState.CLAIMED:
             return  # published, or released by its create, since it was listed
-        table_id = own_table_id(self._session, record.location)
+        table_id = None if self._deleted else own_table_id(self._session, record.location)
         if table_id is not None:
             record.state = TableLocationState.LIVE
             record.table_id = table_id
@@ -969,24 +985,39 @@ def sweep_table_locations(
     stopped = False
     environments = list(
         session.execute(
-            select(Environment.id, Environment.name, Environment.storage_root).order_by(
-                Environment.name
-            )
+            select(
+                Environment.id,
+                Environment.name,
+                Environment.storage_root,
+                Environment.deleted_at.is_not(None),
+            ).order_by(Environment.name)
         ).all()
     )
     session.rollback()
     walked: dict[str, int] = defaultdict(int)
     known: set[str] | None = None
-    for position, (environment_id, name, root) in enumerate(_rotated(environments, rotation)):
+    for position, (environment_id, name, root, deleted) in enumerate(
+        _rotated(environments, rotation)
+    ):
         moment = clock()
         if stop() or moment >= final:
             stopped = True
             break
         share = moment + (final - moment) / (len(environments) - position)
         try:
-            resolved = storage.for_environment(name)
+            resolved = storage.for_environment(name, include_deleted=True)
             run = _Run(
-                session, resolved.storage, root, name, now, grace, undo_days, clock, share, stop
+                session,
+                resolved.storage,
+                root,
+                name,
+                now,
+                grace,
+                undo_days,
+                clock,
+                share,
+                stop,
+                deleted=bool(deleted),
             )
             try:
                 run.environment(environment_id, rotation, max_expiries - totals["tables_expired"])
@@ -997,6 +1028,8 @@ def sweep_table_locations(
                     if walked[key]:
                         logger.warning(UNRECORDED_MESSAGE, walked[key], shown(name))
                     totals["unrecorded_directories"] += walked[key]
+                if deleted and purge_environment(session, environment_id, now=now):
+                    run.counts["environments_purged"] += 1
             finally:
                 for key_name, value in run.counts.items():
                     totals[key_name] += value
@@ -1016,7 +1049,8 @@ def sweep_table_locations(
     if any(getattr(report, key) for key in totals if key not in quiet):
         logger.info(
             "Table location sweep: %d tables expired, %d expiries postponed, %d claims abandoned, "
-            "%d claims found published, %d locations purged (%d files, %d bytes); %d claims "
+            "%d claims found published, %d locations purged (%d files, %d bytes), %d deleted "
+            "environments removed; %d claims "
             "kept, %d purges blocked, %d purges waiting, %d locations refused, %d objects left "
             "alone, %d records and %d environments failed%s.",
             report.tables_expired,
@@ -1026,6 +1060,7 @@ def sweep_table_locations(
             report.locations_purged,
             report.files_deleted,
             report.bytes_deleted,
+            report.environments_purged,
             report.claims_kept,
             report.purges_blocked,
             report.purges_waiting,

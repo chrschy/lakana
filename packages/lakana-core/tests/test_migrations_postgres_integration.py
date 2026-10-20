@@ -2249,3 +2249,53 @@ def test_0044_on_postgres() -> None:
             names = {c["name"] for c in sqlalchemy.inspect(engine).get_columns(table)}
             assert not {n for n in names if n.startswith("retention_")}
         engine.dispose()
+
+
+def test_0045_on_postgres() -> None:
+    """0045 adds the deletion columns, empty on every row, and drops them down."""
+    revision_0044 = "d3a0b6e9c5f1"
+    revision_0045 = "ca4f68b6e89a"
+    columns = (
+        "deleted_at",
+        "deleted_by",
+        "purge_after",
+        "dropped_location_ids",
+        "revoked_policy_ids",
+    )
+    with PostgresContainer("postgres:16", driver="pg8000") as pg:
+        url = pg.get_connection_url()
+        migrate.upgrade(url, revision_0044)
+        engine = sqlalchemy.create_engine(url)
+        now = datetime.now(UTC)
+        with engine.begin() as conn:
+            conn.execute(
+                sqlalchemy.text(
+                    "INSERT INTO environments (id, name, storage_root, storage_options, "
+                    "is_protected, properties, created_at, updated_at) "
+                    "VALUES (:id, 'dev', 's3://bucket/dev', '{}', false, '{}', :now, :now)"
+                ),
+                {"id": uuid.uuid4(), "now": now},
+            )
+
+        migrate.upgrade(url, revision_0045)
+        assert _alembic_version(engine) == revision_0045
+        with engine.connect() as conn:
+            assert conn.execute(
+                sqlalchemy.text(f"SELECT {', '.join(columns)} FROM environments")
+            ).all() == [(None, None, None, None, None)]
+        foreign_keys = sqlalchemy.inspect(engine).get_foreign_keys("environments")
+        assert {
+            (tuple(fk["constrained_columns"]), fk["referred_table"], fk["options"].get("ondelete"))
+            for fk in foreign_keys
+            if fk["constrained_columns"] == ["deleted_by"]
+        } == {(("deleted_by",), "principals", "SET NULL")}
+
+        migrate.downgrade(url, revision_0044)
+        assert _alembic_version(engine) == revision_0044
+        names = {c["name"] for c in sqlalchemy.inspect(engine).get_columns("environments")}
+        assert not names & set(columns)
+        with engine.connect() as conn:
+            assert (
+                conn.execute(sqlalchemy.text("SELECT count(*) FROM environments")).scalar_one() == 1
+            )
+        engine.dispose()

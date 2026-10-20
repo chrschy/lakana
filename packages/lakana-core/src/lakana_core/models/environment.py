@@ -52,3 +52,33 @@ class Environment(Base, TimestampMixin):
         UTCDateTime, nullable=True, default=None
     )
     """When `retention_days` was last set; no table expires earlier than this plus the days."""
+    deleted_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True, default=None)
+    """When the environment was deleted; `None` while it is not.
+
+    A deleted environment is hidden from every lookup by name (`LIVE_ENVIRONMENT`), its managed
+    tables are tombstones, and its row keeps the storage settings the location sweep needs to
+    delete their files. `CatalogService.restore_environment` clears it within the undo period;
+    the sweep deletes the row once `purge_after` has passed and no location record is left
+    (`lakana_core.catalog.environment_deletion`).
+    """
+    deleted_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("principals.id", ondelete="SET NULL"), nullable=True, default=None
+    )
+    """Who deleted it; `NULL` once that principal is deleted."""
+    purge_after: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True, default=None)
+    """From when on its tables' files may be deleted, and it can no longer be restored."""
+    dropped_location_ids: Mapped[list | None] = mapped_column(JSON, nullable=True, default=None)
+    """The location records (ids as strings) of the tables the deletion dropped.
+
+    A restore brings back exactly these; a table dropped before the deletion stays a tombstone.
+    """
+    revoked_policy_ids: Mapped[list | None] = mapped_column(JSON, nullable=True, default=None)
+    """The grants, row filters and column masks the deletion revoked besides its tables' own.
+
+    As ``{"kind", "id"}`` objects (`lakana_core.grants.revocation.RevokedPolicy`): those bound
+    to the environment, its namespaces and its artifacts. A restore restores exactly these.
+    """
+
+
+LIVE_ENVIRONMENT = Environment.deleted_at.is_(None)
+"""The condition every lookup of an environment by name adds: a deleted one is not there."""

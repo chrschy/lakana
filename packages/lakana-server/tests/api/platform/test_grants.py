@@ -9,7 +9,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from lakana_core.auth import Action, SecurableKind
+from lakana_core.catalog.location_sweep import sweep_table_locations
+from lakana_core.db import create_engine
 from lakana_core.models import Grant, Principal
+from lakana_core.storage.resolver import StorageResolver
+from lakana_server.settings import Settings
 from tests.conftest import AUTH_HEADER
 from tests.server_test_helpers import create_environment, create_namespace, create_table
 
@@ -176,7 +180,9 @@ def test_listing_without_a_filter_includes_the_instance_grants(client: TestClien
     assert any(g["role"] == "ADMIN" for g in listed.json())
 
 
-def test_dropping_and_recreating_an_environment_revokes_its_stale_grant(client: TestClient) -> None:
+def test_dropping_and_recreating_an_environment_revokes_its_stale_grant(
+    client: TestClient, settings: Settings
+) -> None:
     """A grant on a dropped-and-recreated environment must not still authorize.
 
     `environments.id` is a `uuid.uuid4()`, so a re-created `prod` can never
@@ -206,8 +212,19 @@ def test_dropping_and_recreating_an_environment_revokes_its_stale_grant(client: 
     bob_headers = {"Authorization": f"Bearer {issued.json()['token']}"}
     assert client.get("/api/v1/environments/prod", headers=bob_headers).status_code == 200
 
-    deleted = client.delete("/api/v1/environments/prod", headers=AUTH_HEADER)
-    assert deleted.status_code == 204, deleted.text
+    deleted = client.delete("/api/v1/environments/prod?purge=true", headers=AUTH_HEADER)
+    assert deleted.status_code == 200, deleted.text
+    assert client.get("/api/v1/environments/prod", headers=bob_headers).status_code == 403
+    engine = create_engine(settings.database)
+    with Session(engine) as session:
+        swept = sweep_table_locations(
+            session,
+            StorageResolver(session),
+            now=datetime.fromisoformat(deleted.json()["purge_after"]),
+            grace_hours=24,
+        )
+    engine.dispose()
+    assert swept.environments_purged == 1
     create_environment(client, "prod")
 
     response = client.get("/api/v1/environments/prod", headers=bob_headers)

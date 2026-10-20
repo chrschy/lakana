@@ -26,9 +26,9 @@ from __future__ import annotations
 
 import enum
 import uuid
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Any, TypeVar
 
 from sqlalchemy import select
@@ -42,7 +42,10 @@ from lakana_core.identifiers import NamespacePath, TableRef
 from lakana_core.models import (
     AuditEventType,
     ColumnDescription,
+    ColumnMask,
+    Grant,
     Principal,
+    RowFilter,
     Table,
     TableColumn,
     TableLocation,
@@ -400,7 +403,7 @@ def drop_row(
     purge_after
         From when on the sweep may delete its files.
     reason
-        Why: ``user``, ``purge`` or ``retention``.
+        Why: ``user``, ``purge``, ``retention`` or ``environment_deleted``.
     detail
         More facts for the audit event.
 
@@ -671,22 +674,96 @@ def restore_policies(
     list of dict
         ``{"kind", "id"}`` of each row restored.
     """
-    restored = []
-    for entry in record.revoked_policy_ids:
-        model = POLICY_MODELS.get(entry.get("kind"))
-        if model is None:
-            continue
-        policy = session.get(model, uuid.UUID(entry["id"]), populate_existing=True)
-        if policy is None or policy.revoked_at is None or policy.revoked_at != record.dropped_at:
-            continue
-        policy.revoked_at = None
-        policy.revoked_by = None
+    assert record.dropped_at is not None  # nosec B101 -- a tombstone always has its drop time
+
+    def rebind(policy: Grant | RowFilter | ColumnMask) -> None:
+        """Point a restored policy at the restored table.
+
+        Parameters
+        ----------
+        policy
+            The grant, row filter or column mask.
+        """
         policy.table_id = table_id
         policy.namespace = namespace
         policy.table = name
+
+    return unrevoke(session, record.revoked_policy_ids, revoked_at=record.dropped_at, rebind=rebind)
+
+
+def unrevoke(
+    session: Session,
+    entries: Iterable[Mapping[str, str]],
+    *,
+    revoked_at: datetime,
+    rebind: Callable[[Grant | RowFilter | ColumnMask], None] | None = None,
+) -> list[dict[str, str]]:
+    """Un-revoke listed grants, row filters and column masks still as one revocation left them.
+
+    Uncommitted. A row comes back only if it is still revoked at exactly `revoked_at`; one
+    deleted since, or revoked again since, stays as it is, and an entry of an unknown kind is
+    ignored.
+
+    Parameters
+    ----------
+    session
+        Database session; the restore's transaction.
+    entries
+        ``{"kind", "id"}`` objects (`RevokedPolicy.as_json`).
+    revoked_at
+        The time the revocation stamped.
+    rebind
+        Called with each restored row before it is flushed, to point it somewhere new.
+
+    Returns
+    -------
+    list of dict
+        ``{"kind", "id"}`` of each row restored.
+    """
+    restored = []
+    for entry in entries:
+        model = POLICY_MODELS.get(entry.get("kind", ""))
+        if model is None:
+            continue
+        policy = session.get(model, uuid.UUID(entry["id"]), populate_existing=True)
+        if policy is None or policy.revoked_at is None or policy.revoked_at != revoked_at:
+            continue
+        policy.revoked_at = None
+        policy.revoked_by = None
+        if rebind is not None:
+            rebind(policy)
         restored.append({"kind": entry["kind"], "id": entry["id"]})
     session.flush()
     return restored
+
+
+def refresh_restored(row: Table, actor: uuid.UUID, now: datetime) -> bool:
+    """Mark a restored table as changed now, and clear a fixed expiry day that has passed.
+
+    Without the second, a table whose ``--on`` day passed while it was dropped would expire
+    again at the next sweep.
+
+    Parameters
+    ----------
+    row
+        The restored row.
+    actor
+        Who restores it, recorded as who set its retention when it is cleared.
+    now
+        The restore's time.
+
+    Returns
+    -------
+    bool
+        Whether the expiry day was cleared.
+    """
+    cleared = row.retention_on is not None and row.retention_on <= now.date()
+    if cleared:
+        row.retention_on = None
+        row.retention_set_by = actor
+        row.retention_set_at = now
+    row.updated_at = datetime.now(UTC)
+    return cleared
 
 
 def revive(record: TableLocation) -> None:
