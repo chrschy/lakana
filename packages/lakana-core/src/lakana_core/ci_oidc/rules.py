@@ -717,7 +717,7 @@ class CiTrustRuleService:
         p
             The acting administrator.
         rule_id
-            The rule.
+            The rule to show.
 
         Returns
         -------
@@ -842,7 +842,7 @@ class CiTrustRuleService:
         p
             The acting administrator.
         rule_id
-            The rule.
+            The rule to enable.
 
         Returns
         -------
@@ -870,7 +870,7 @@ class CiTrustRuleService:
         p
             The acting administrator.
         rule_id
-            The rule.
+            The rule to disable.
 
         Returns
         -------
@@ -895,7 +895,7 @@ class CiTrustRuleService:
         p
             The acting administrator.
         rule_id
-            The rule.
+            The rule to delete.
 
         Raises
         ------

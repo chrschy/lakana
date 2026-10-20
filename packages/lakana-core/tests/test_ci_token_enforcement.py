@@ -583,9 +583,8 @@ _DEPLOY_CHECKS = {
         1,
         "the worker's re-check",
     ),
-    "lakana-core/src/lakana_core/jobs/service.py:JobService.pause": (1, "refused"),
-    "lakana-core/src/lakana_core/jobs/service.py:JobService.resume": (1, "refused"),
-    "lakana-core/src/lakana_core/jobs/service.py:JobService.notify_test": (1, "refused"),
+    # pause, resume and notify_test check through `_deployer_job`.
+    "lakana-core/src/lakana_core/jobs/service.py:JobService._deployer_job": (1, "refused"),
     "lakana-core/src/lakana_core/jobs/service.py:JobService.delivery": (2, "refused"),
     "lakana-core/src/lakana_core/grants/explain.py:<module>": (1, "a list of actions, no check"),
     "lakana-core/src/lakana_core/grants/authorization.py:GrantAuthorization._ci_scope_refusal": (

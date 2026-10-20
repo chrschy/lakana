@@ -72,7 +72,7 @@ tokens issued under the rule before it at once. Enabling a rule again does not b
 
 ```json
 {
-  "id_token": "eyJhbGciOiJSUzI1NiIsImtpZCI6Ii4uLiJ9.eyJpc3MiOiIuLi4ifQ.c2lnbmF0dXJl",
+  "id_token": "<the job's ID token>",
   "environment": "prod",
   "repository": "analytics"
 }
@@ -97,7 +97,7 @@ The answer:
 
 ```json
 {
-  "token": "lakana_ci_3f2a9c1b7d4e8f60_8m1Zr0qWn5x7sK2bVt9yLcD4gH6jA0pE3uF5iO7wQ1s",
+  "token": "lakana_ci_<key id>_<secret>",
   "expires_at": "2026-10-20T13:00:00Z",
   "principal": "ci-prod",
   "environment": "prod",

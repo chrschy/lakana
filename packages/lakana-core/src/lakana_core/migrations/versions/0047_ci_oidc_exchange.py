@@ -18,6 +18,23 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 
+def _binding_columns() -> list[sa.Column]:
+    """Build the columns a rule and a token share: what they bind a CI job to.
+
+    Returns
+    -------
+    list of sqlalchemy.Column
+        ``principal_id``, ``environment_id``, ``repository_id`` and ``kinds``, fresh for each
+        table (a column belongs to one table).
+    """
+    return [
+        sa.Column("principal_id", sa.Uuid(), nullable=False),
+        sa.Column("environment_id", sa.Uuid(), nullable=False),
+        sa.Column("repository_id", sa.Uuid(), nullable=False),
+        sa.Column("kinds", sa.JSON(), nullable=False),
+    ]
+
+
 def upgrade() -> None:
     """Upgrade schema.
 
@@ -29,10 +46,7 @@ def upgrade() -> None:
         "ci_trust_rules",
         sa.Column("id", sa.Uuid(), nullable=False),
         sa.Column("issuer", sa.String(length=255), nullable=False),
-        sa.Column("principal_id", sa.Uuid(), nullable=False),
-        sa.Column("environment_id", sa.Uuid(), nullable=False),
-        sa.Column("repository_id", sa.Uuid(), nullable=False),
-        sa.Column("kinds", sa.JSON(), nullable=False),
+        *_binding_columns(),
         sa.Column("conditions", sa.JSON(), nullable=False),
         sa.Column("enabled", sa.Boolean(), nullable=False),
         sa.Column("revision", sa.Integer(), nullable=False),
@@ -91,10 +105,7 @@ def upgrade() -> None:
         sa.Column("secret_hash", sa.String(length=64), nullable=False),
         sa.Column("rule_id", sa.Uuid(), nullable=True),
         sa.Column("rule_revision", sa.Integer(), nullable=False),
-        sa.Column("principal_id", sa.Uuid(), nullable=False),
-        sa.Column("environment_id", sa.Uuid(), nullable=False),
-        sa.Column("repository_id", sa.Uuid(), nullable=False),
-        sa.Column("kinds", sa.JSON(), nullable=False),
+        *_binding_columns(),
         sa.Column("sha", sa.String(length=40), nullable=True),
         sa.Column("jti_sha256", sa.String(length=64), nullable=False),
         sa.Column("issued_at", sa.DateTime(timezone=True), nullable=False),
