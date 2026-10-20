@@ -257,7 +257,10 @@ class Action(enum.StrEnum):
     function reserved for organization-wide admins, not delegated
     per-environment the way `MANAGE_ENVIRONMENT` is."""
     READ_QUERY_TEXT = "READ_QUERY_TEXT"
-    """See the content of other principals' audit events, such as a query's SQL text.
+    """See query text and column values in other principals' audit events.
+
+    The fields of `lakana_core.audit.content.CONTENT_FIELDS`: a query's SQL text and an
+    incremental write's watermark.
 
     Instance-scoped, like the audit log it applies to, and granted as a single action only:
     no role carries it, `ADMIN` included. Without it a reader of the audit log sees each

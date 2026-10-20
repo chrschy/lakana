@@ -306,13 +306,91 @@ def test_a_value_that_is_not_text_is_hashed_as_json(session: Session) -> None:
     assert fingerprint(json.dumps(["a", 1], sort_keys=True)) in shown
 
 
+def _incremental_write(session: Session, writer: PrincipalRef) -> None:
+    """Record the `TABLE_WRITE` of an incremental append whose key's highest value is an email.
+
+    Parameters
+    ----------
+    session
+        Database session; commits.
+    writer
+        Who wrote.
+    """
+    AuditService(session).record(
+        writer.id,
+        AuditEventType.TABLE_WRITE,
+        securable=Securable.environment_scope("dev"),
+        detail={
+            "mode": "incremental",
+            "target": "gold.customers",
+            "snapshot_id": 7,
+            "rows": 3,
+            "files": 1,
+            "watermark": "alice@example.com",
+            "schema_diff": None,
+            "run_id": None,
+            "principal": writer.name,
+        },
+        commit=True,
+    )
+
+
+def _watermark_seen(session: Session, reader: PrincipalRef) -> object:
+    """Read the `watermark` of the newest `TABLE_WRITE` as `reader` sees it.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    reader
+        Who reads, with grant-backed authorization.
+
+    Returns
+    -------
+    object
+        The field as the answer has it.
+    """
+    page = AuditService(session, GrantAuthorization(session)).query(
+        reader, event_type=AuditEventType.TABLE_WRITE
+    )
+    return page.items[0].detail["watermark"]
+
+
+def test_a_watermark_is_a_column_value_hidden_from_an_auditor_without_the_right(
+    session: Session,
+) -> None:
+    """#239: an auditor with `READ_AUDIT_LOG` alone, and no `READ_TABLE`, must not read it."""
+    auditor, writer = _person(session, "auditor"), _person(session, "writer")
+    _grant(session, auditor, action=Action.READ_AUDIT_LOG)
+    _incremental_write(session, writer)
+    seen = _watermark_seen(session, auditor)
+    assert seen == fingerprint("alice@example.com")
+    assert "alice" not in json.dumps(seen)
+    assert CONTENT_FIELDS[AuditEventType.TABLE_WRITE] == frozenset({"watermark"})
+
+
+def test_the_right_shows_a_watermark_and_the_writer_always_sees_their_own(
+    session: Session,
+) -> None:
+    auditor, writer = _person(session, "auditor"), _person(session, "writer")
+    _grant(session, auditor, action=Action.READ_AUDIT_LOG)
+    _grant(session, writer, action=Action.READ_AUDIT_LOG)
+    _incremental_write(session, writer)
+    assert _watermark_seen(session, writer) == "alice@example.com"
+    _grant(session, auditor, action=Action.READ_QUERY_TEXT)
+    assert _watermark_seen(session, auditor) == "alice@example.com"
+
+
 # --- the classification of every field ------------------------------------------------------
 
 
 def test_every_content_field_is_a_field_no_other_list_shows() -> None:
     for fields in CONTENT_FIELDS.values():
         assert not fields & SHOWN_FIELDS
-    assert CONTENT_FIELDS[AuditEventType.QUERY_COMPLETED] == frozenset({"sql_text"})
+    assert dict(CONTENT_FIELDS) == {
+        AuditEventType.QUERY_COMPLETED: frozenset({"sql_text"}),
+        AuditEventType.TABLE_WRITE: frozenset({"watermark"}),
+    }
 
 
 def test_a_field_nobody_classified_warns_when_written_and_is_hidden_when_read(

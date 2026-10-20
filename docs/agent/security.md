@@ -3080,7 +3080,8 @@ that uses it. User reference: `docs/site/reference/package-indexes.md`; how-to:
   new instance-scoped `Action.READ_AUDIT_LOG` — the log is itself sensitive (a `WHERE`
   clause can contain a customer's name), so it sits behind its own privilege rather than
   being globally readable, exactly as planned.
-- **Other people's query text needs `READ_QUERY_TEXT`, which no role carries (#88).**
+- **Content in other people's audit events (query text and column values) needs `READ_QUERY_TEXT`,
+  which no role carries (#88, #239).**
   `ROLE_ACTIONS[ADMIN]` is `frozenset(Action) - {READ_QUERY_TEXT}`; the right is granted as a single
   action, on the instance only (`GrantService.grant` refuses another kind with the command to use; the
   log it applies to is instance-wide, and an environment-scoped right would have to be checked per
@@ -3093,15 +3094,21 @@ that uses it. User reference: `docs/site/reference/package-indexes.md`; how-to:
   fingerprint of its sorted JSON; `None` and a stored fingerprint, 64 hex digits and an int, pass
   unchanged) unless `permits(p, READ_QUERY_TEXT, instance)`, asked once per page and only when a row
   has something to hide. The reader's own events are always full. **Classification:**
-  `CONTENT_FIELDS` (per event type; today only `QUERY_COMPLETED.sql_text`) and `SHOWN_FIELDS` (field
+  `CONTENT_FIELDS` (per event type: `QUERY_COMPLETED.sql_text`, and `TABLE_WRITE.watermark`, the
+  highest value of an incremental write's key column, which can be any column value, e.g. an email;
+  a reader of the log need not hold `READ_TABLE` on that table, so it is content, #239) and
+  `SHOWN_FIELDS` (field
   names that are never content in any event: names, ids, counts, times, fixed reasons) are the one
   list. A field in neither is hidden like content (fail closed: a new field never leaks), and
   `AuditService.record` warns `UnclassifiedAuditFieldWarning`, which `pyproject.toml` makes an error
   for the whole test suite, so the 100 % coverage of every `record` call turns an unclassified field
   into a failing test. Decided as shown: a break-glass `reason` (written for the reviewer of the log),
-  `problem` of `CODE_INTEGRITY_FAILED`, table and column names, `watermark` (a column value of the
-  target, but `ADMIN` already reads every table) and `schema_diff`. Descriptions are never in an
-  event (only their lengths). The fingerprint is unsalted on purpose (the same query is recognisable
+  `problem` of `CODE_INTEGRITY_FAILED` (fixed sentences), table and column names, and `schema_diff`
+  (column names and types, no defaults or values). No other event carries a column value: a
+  check's `CHECK_FAILED` has the count of failing rows, never the rows; `TABLE_ROLLED_BACK`,
+  `TABLE_KEPT` and maintenance reports hold snapshot ids and check names; row filters and column
+  masks are audited by id and subject, not their expression. Descriptions are never in an event
+  (only their lengths). The fingerprint is unsalted on purpose (the same query is recognisable
   across events): a reader who guesses the exact text can confirm it; short or templated queries are
   guessable. Residual: a legacy field written by an older release and no longer in either list is
   hidden from readers without the right (over-hidden, never leaked). No other route returns another

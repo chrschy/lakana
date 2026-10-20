@@ -1747,7 +1747,7 @@ Usage: `lakana audit list [OPTIONS]`
 
 List audit events, newest first.
 
-`--output json` shows each event's `detail`. The SQL text of someone else's query shows as its SHA-256 and length unless you hold READ_QUERY_TEXT; your own events show in full. A page that shows other people's events, or `--principal-id` of someone else, is itself recorded in the audit log (ACTIVITY_VIEWED).
+`--output json` shows each event's `detail`. Query text and column values in someone else's events (a query's SQL text, an incremental write's watermark) show as their SHA-256 and length unless you hold READ_QUERY_TEXT; your own events show in full. A page that shows other people's events, or `--principal-id` of someone else, is itself recorded in the audit log (ACTIVITY_VIEWED).
 
 | Name | Type | Default | Description |
 |---|---|---|---|

@@ -78,9 +78,10 @@ What the answer takes into account:
   the reason `... needs the ADMIN role on the instance`, and `via` names only the role.
 - **`READ_QUERY_TEXT`** is in no role, `ADMIN` included, so an administrator sees it refused
   until it is granted as a single action on the instance
-  (`lakana grant create --kind INSTANCE --principal NAME --action READ_QUERY_TEXT`). It shows the SQL
-  text of other people's queries in the audit log, which otherwise shows its SHA-256 and length
-  ([Other people's query text](lists.md#other-peoples-query-text-in-the-audit-log)).
+  (`lakana grant create --kind INSTANCE --principal NAME --action READ_QUERY_TEXT`). It covers
+  query text and column values in other people's audit events (the SQL text of a query, the
+  watermark of an incremental write), which otherwise show as their SHA-256 and length
+  ([Other people's query text and column values](lists.md#other-peoples-query-text-and-column-values-in-the-audit-log)).
 - **`MINT_TASK_TOKEN`** is the right to mint a task token for oneself. Minting one for another
   principal needs the `ADMIN` role on the instance too.
 - **Task tokens** may not ask, not even about their own principal: a task's token can do less

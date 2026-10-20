@@ -46,11 +46,12 @@ The audit log is an append-only list of events: who signed in or failed to, what
 and revoked, who created, rotated or deleted a secret, who changed an environment, a filter or a mask,
 who deployed, ran or undid something, and every refusal. A completed query is recorded with its SQL
 text. For that reason reading the log needs its own right, `READ_AUDIT_LOG`, which the `ADMIN` role
-holds, and seeing the SQL text of **other people's** queries needs one more, `READ_QUERY_TEXT`, which
-no role holds: an administrator sees the text's SHA-256 and length instead, until someone grants
-the right to them by name. Your own queries always show in full. An operator can also store less
+holds, and seeing query text and column values in **other people's** events (the SQL text of a
+query, the watermark of an incremental write) needs one more, `READ_QUERY_TEXT`, which no role
+holds: an administrator sees their SHA-256 and length instead, until someone grants the right to
+them by name. Your own events always show in full. An operator can also store less
 text in new events (`LAKANA_AUDIT__QUERY_TEXT`: `full`, `hash` or `off`); see
-[Other people's query text](../reference/lists.md#other-peoples-query-text-in-the-audit-log).
+[Other people's query text and column values](../reference/lists.md#other-peoples-query-text-and-column-values-in-the-audit-log).
 `lakana audit list` filters it by event type, environment, principal and time
 ([the command](../reference/cli.md#lakana-audit-list)). To keep the log bounded, repeated refusals of one
 principal are counted after a number per minute that an operator sets

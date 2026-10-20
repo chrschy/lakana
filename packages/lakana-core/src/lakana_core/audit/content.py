@@ -1,11 +1,11 @@
-"""Which fields of an audit event are a person's own content, and how much query text is stored.
+"""Which fields of an audit event are content, and how much query text is stored.
 
 A field of an event's `detail` is either **shown** to every reader of the audit log (a name, an
-id, a count, a fixed reason) or **content**: text a person wrote that can carry anything, today
-the SQL text of `QUERY_COMPLETED`. `CONTENT_FIELDS` and `SHOWN_FIELDS` are the one list of that
-decision. `AuditService.query` hides the content of another principal's event from a reader who
-does not hold `READ_QUERY_TEXT`, replacing each such value with `fingerprint` of it; a reader's
-own events are always shown in full.
+id, a count, a fixed reason) or **content**: a value that can carry anything, today the SQL text
+of `QUERY_COMPLETED` and the watermark (a column value) of `TABLE_WRITE`. `CONTENT_FIELDS` and
+`SHOWN_FIELDS` are the one list of that decision. `AuditService.query` hides the content of
+another principal's event from a reader who does not hold `READ_QUERY_TEXT`, replacing each such
+value with `fingerprint` of it; a reader's own events are always shown in full.
 
 A field in neither list is hidden like content, so a field added to an event without a decision
 never shows. `AuditService.record` warns (`UnclassifiedAuditFieldWarning`) when it writes such a
@@ -31,12 +31,19 @@ from lakana_core.config import QUERY_TEXT_MODES
 from lakana_core.models import AuditEventType
 
 CONTENT_FIELDS: Mapping[AuditEventType, frozenset[str]] = MappingProxyType(
-    {AuditEventType.QUERY_COMPLETED: frozenset({"sql_text"})}
+    {
+        AuditEventType.QUERY_COMPLETED: frozenset({"sql_text"}),
+        # the highest value of an incremental write's key column: any column value (#239)
+        AuditEventType.TABLE_WRITE: frozenset({"watermark"}),
+    }
 )
-"""The fields of each event type that hold a person's own text, hidden without `READ_QUERY_TEXT`.
+"""The fields of each event type that hold content, hidden without `READ_QUERY_TEXT`.
 
-A break-glass `reason` is not here: it is written for the reviewer of the audit log, which is
-what it is for. A table or column description is never in an event (only its lengths).
+Content is a query's text or a value read from a table's columns: a reader of the audit log
+need not hold `READ_TABLE` on the table it came from. A break-glass `reason` is not here: it is
+written for the reviewer of the audit log, which is what it is for. A table or column
+description is never in an event (only its lengths); a schema diff holds column names and types
+only; a check's failure holds the count of rows, never the rows.
 """
 
 SHOWN_FIELDS: frozenset[str] = frozenset(
@@ -177,7 +184,6 @@ SHOWN_FIELDS: frozenset[str] = frozenset(
         "tags_removed",
         "tasks",
         "versions",
-        "watermark",
         # settings and changes
         "approved_options",
         "changed",

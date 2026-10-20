@@ -22,8 +22,9 @@ What an attacker, or an over-broad grant, could reach:
 - **Credentials and secrets** — session cookies, PATs, task tokens, and the secrets stored
   for connections and tasks.
 - **The audit log** — itself sensitive, since query text and `WHERE` clauses can contain
-  customer data. Reading it needs `READ_AUDIT_LOG`; another principal's query text needs
-  `READ_QUERY_TEXT` too, which no role carries (#88), and every read of other people's events
+  customer data. Reading it needs `READ_AUDIT_LOG`; another principal's query text and
+  column values (an incremental write's watermark) need `READ_QUERY_TEXT` too, which no role
+  carries (#88, #239), and every read of other people's events
   is itself recorded (`ACTIVITY_VIEWED`).
 - **The code in linked git repositories** — the Python and SQL that tasks execute, and the
   history of who reviewed and approved it.
