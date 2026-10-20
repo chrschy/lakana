@@ -33,6 +33,7 @@ from lakana_core.models import (
     AuditEvent,
     AuditEventType,
     Grant,
+    PrincipalType,
     QueryRunStatus,
     Table,
     TableRead,
@@ -237,6 +238,14 @@ def test_a_failed_write_refuses_the_read_with_the_cause(
     message = str(raised.value)
     assert "IntegrityError" in message or "OperationalError" in message
     assert "Try again in a moment" in message
+    assert _views(session) == []
+
+
+def test_a_principal_the_database_does_not_know_refuses_the_read(session: Session) -> None:
+    # SQLite enforces the foreign key of `audit_events.principal_id` here, as Postgres does.
+    stranger = PrincipalRef(id=uuid.uuid4(), name="stranger", type=PrincipalType.USER)
+    with pytest.raises(AuditUnavailableError, match=r"\(IntegrityError\)"):
+        _record(session, stranger)
     assert _views(session) == []
 
 

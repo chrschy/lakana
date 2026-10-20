@@ -27,6 +27,7 @@ from lakana_core.catalog import service as service_module
 from lakana_core.catalog.query_service import QueryService
 from lakana_core.catalog.service import CatalogService, Rollback
 from lakana_core.catalog.writes import WriteResult
+from lakana_core.config import ViewAuditConfig
 from lakana_core.db import db_now, rowcount
 from lakana_core.errors import WriteOutcomeUnknownError
 from lakana_core.grants.authorization import GrantAuthorization
@@ -755,9 +756,12 @@ def test_the_query_list_of_ended_runs_reads_the_finished_at_index(stack: QuerySt
             statements.append((statement, parameters))
 
         manager = PrincipalRef(id=uuid.uuid4(), name="manager", type=PrincipalType.USER)
+        # This test reads the plan of the listing; the view audit (which needs the manager as a
+        # row of `principals`) is pinned by `test_view_audit.py`.
+        quiet = ViewAuditConfig(enabled=False)
         event.listen(stack.db, "before_cursor_execute", capture)
         try:
-            rows = QueryService(session, AllowAllAuthorization()).list_queries(
+            rows = QueryService(session, AllowAllAuthorization(), view_audit=quiet).list_queries(
                 manager, environment, include_ended=True, limit=100
             )
         finally:

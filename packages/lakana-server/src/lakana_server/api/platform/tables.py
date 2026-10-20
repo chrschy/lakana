@@ -1020,6 +1020,9 @@ def get_table_health(
         Mapped to 404.
     lakana_core.errors.PermissionDenied
         Mapped to 403 without READ_TABLE.
+    lakana_core.errors.AuditUnavailableError
+        Mapped to 503 with `Retry-After`, if `readers` names someone other than the caller and
+        its `ACTIVITY_VIEWED` audit row could not be written; nothing is returned.
     """
     reads = request.app.state.settings.table_reads
     if days is None:
