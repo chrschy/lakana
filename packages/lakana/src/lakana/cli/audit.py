@@ -83,6 +83,11 @@ def list_events(
 ) -> None:
     """List audit events, newest first.
 
+    `--output json` shows each event's `detail`. The SQL text of someone else's query shows as
+    its SHA-256 and length unless you hold READ_QUERY_TEXT; your own events show in full. A page
+    that shows other people's events, or `--principal-id` of someone else, is itself recorded in
+    the audit log (ACTIVITY_VIEWED).
+
     Parameters
     ----------
     ctx

@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from lakana_core.artifacts.sweep import DEFAULT_MAX_SECONDS, sweep_artifacts
 from lakana_core.audit.authorization import AuditingAuthorization, flush_suppressed
+from lakana_core.audit.content import install_query_text
 from lakana_core.audit.denial_limiter import DenialAuditLimiter
 from lakana_core.auth import AuthorizationService
 from lakana_core.catalog.columns import backfill_table_columns
@@ -391,6 +392,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, lambda signum, frame: drain.set())
     install_drain(drain, settings.run.drain_grace_seconds)
     install_maintenance_timeout(settings.run.maintenance_timeout)
+    install_query_text(settings.audit.query_text)
     runtime = _python_runtime(settings, python)
     limiter = DenialAuditLimiter(settings.denial_audit.per_principal_per_minute)
     authorization = functools.partial(_authorization, limiter=limiter)

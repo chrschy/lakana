@@ -836,19 +836,69 @@ class ViewAuditConfig(BaseModel):
     ----------
     enabled
         Record an `ACTIVITY_VIEWED` event when someone sees other people's activity: a manager's
-        listing of other people's queries (`lakana query list`) and the readers of a table
-        (`lakana table health`) (default true). If the event cannot be written, the read is
+        listing of other people's queries (`lakana query list`), the readers of a table
+        (`lakana table health`) and a page of the audit log with other people's events
+        (`lakana audit list`) (default true). If the event cannot be written, the read is
         refused with 503. Turn it off only if you do not need to know who looked at whose
         activity.
     window_minutes
         Minutes during which the same view by the same person writes no second event (default
         60; 1 to 1,440). The next page, another status filter and a screen that refreshes itself
-        are the same view; another environment, another table or another `--submitter` is
-        another view.
+        are the same view; another environment, another table, another `--submitter` or another
+        `--principal-id` is another view.
     """
 
     enabled: bool = True
     window_minutes: int = Field(default=60, ge=1, le=1440)
+
+
+QUERY_TEXT_MODES: tuple[str, ...] = ("full", "hash", "off")
+"""The values of `LAKANA_AUDIT__QUERY_TEXT`."""
+
+
+class AuditConfig(BaseModel):
+    """How much of a query's SQL text the audit log stores.
+
+    Read from ``LAKANA_AUDIT__QUERY_TEXT``.
+
+    Parameters
+    ----------
+    query_text
+        What a new `QUERY_COMPLETED` event stores of the query's SQL text: ``full`` (the
+        default) the text; ``hash`` only its SHA-256 and length, so that the same query can still
+        be recognised; ``off`` neither. In any letter case. Set the same value on the server and
+        on every worker, since both record queries. Events already written are not changed. The
+        query's own record keeps its text either way, for its submitter.
+    """
+
+    query_text: str = "full"
+
+    @field_validator("query_text")
+    @classmethod
+    def _query_text_is_one_of_three(cls, value: str) -> str:
+        """Refuse a `query_text` the audit log does not know, and say what to write.
+
+        Parameters
+        ----------
+        value
+            The configured text.
+
+        Returns
+        -------
+        str
+            `value` in lower case, without surrounding blanks.
+
+        Raises
+        ------
+        ValueError
+            If it is not one of `QUERY_TEXT_MODES`.
+        """
+        cleaned = value.strip().lower()
+        if cleaned not in QUERY_TEXT_MODES:
+            raise ValueError(
+                f"LAKANA_AUDIT__QUERY_TEXT must be full, hash or off (got '{shown(value)}')."
+            )
+        return cleaned
 
 
 class TableReadsConfig(BaseModel):
@@ -1351,6 +1401,8 @@ class Settings(BaseSettings):
         the TTL cap for the tokens it mints for Python tasks.
     denial_audit
         Bound on `AUTHORIZATION_DENIED` rows per principal (`LAKANA_DENIAL_AUDIT__*`).
+    audit
+        How much of a query's SQL text the audit log stores (`LAKANA_AUDIT__QUERY_TEXT`).
     artifacts
         Artifact-store bounds (`LAKANA_ARTIFACTS__*`): file size, total size, file
         count and upload lifetime.
@@ -1380,6 +1432,7 @@ class Settings(BaseSettings):
     log: LogConfig = LogConfig()
     task_tokens: TaskTokensConfig = TaskTokensConfig()
     denial_audit: DenialAuditConfig = DenialAuditConfig()
+    audit: AuditConfig = AuditConfig()
     artifacts: ArtifactsConfig = ArtifactsConfig()
     table_reads: TableReadsConfig = TableReadsConfig()
     tables: TablesConfig = TablesConfig()

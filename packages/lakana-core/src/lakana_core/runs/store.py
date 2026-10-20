@@ -107,6 +107,7 @@ from sqlalchemy import ColumnElement, Select, and_, or_, select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from lakana_core.audit.content import stored_query_text
 from lakana_core.audit.service import AuditService
 from lakana_core.auth import Securable
 from lakana_core.db import rowcount
@@ -1238,11 +1239,13 @@ def query_completed_detail(
     Returns
     -------
     dict
-        The detail: `sql_text`, `tables_touched`, `row_count`, `status`, and `check_result_id`
+        The detail: `sql_text` (as `LAKANA_AUDIT__QUERY_TEXT` says: the text, its SHA-256 and
+        length, or `None`; `lakana_core.audit.content.stored_query_text`), `tables_touched`,
+        `row_count`, `status`, and `check_result_id`
         (the id as text) only for a run bound to a check result.
     """
     detail: dict[str, object] = {
-        "sql_text": run.sql_text,
+        "sql_text": stored_query_text(run.sql_text),
         "tables_touched": tables_touched,
         "row_count": row_count,
         "status": status.value,

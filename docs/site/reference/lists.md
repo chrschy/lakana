@@ -62,31 +62,32 @@ queries list, with `422` and a message that names both lists. Start again withou
 | a cursor that was not issued, or came from another list | `422` |
 | an unknown repository | `404` |
 | a caller who may not read the environment | `403` |
-| a manager's list that shows other people's queries and could not be recorded in the audit log (see [Audit](#audit)) | `503` with `Retry-After`; nothing is listed, and the message names the cause |
+| a manager's list that shows other people's queries, or a page of the audit log that shows other people's events, and could not be recorded in the audit log (see [Audit](#audit)) | `503` with `Retry-After`; nothing is listed, and the message names the cause |
 
 ## Audit
 
 A list of runs or deploys is not audited, and neither is a list of your own queries. When a manager's
 query list shows someone else's query, or filters on someone else with `--submitter`, the audit log gets
 one `ACTIVITY_VIEWED` event, and so does seeing the readers of a table
-([table health](table-health.md#audit)):
+([table health](table-health.md#audit)) and reading the audit log itself (`lakana audit list`) when
+the page shows someone else's events or filters on someone else with `--principal-id`:
 
 | Field | Value |
 |---|---|
 | principal | who looked |
-| object | the environment of the query list, or the table whose readers were shown |
-| `detail.view` | `queries` or `table_readers` |
-| `detail.filters` | the filters of the first look: `include_ended`, `status` and `limit` for queries, `days` for readers |
+| object | the environment of the query list, the table whose readers were shown, or the instance for the audit log |
+| `detail.view` | `queries`, `table_readers` or `audit_log` |
+| `detail.filters` | the filters of the first look: `include_ended`, `status` and `limit` for queries, `days` for readers, `event_type`, `environment`, `since`, `until` and `limit` for the audit log |
 | `detail.rows_shown` | how many rows the answer showed |
-| `detail.others_shown` | how many of them were other people's (a deleted principal's included) |
+| `detail.others_shown` | how many of them were other people's (a deleted principal's, and an event of nobody, such as a failed sign-in, included) |
 | `detail.distinct_others` | how many other people those rows belong to |
-| `detail.targeting_key` | `{"submitter": "NAME"}` when the list was filtered on someone else, else `null` |
+| `detail.targeting_key` | `{"submitter": "NAME"}` when the query list was filtered on someone else, `{"principal_id": "ID"}` when the audit log was, else `null` |
 
 The event never holds the names of the people seen, the ids of their queries or any SQL. The same
 person, view, environment or table and targeting key write one event per window: the next page,
-another status, `--all` and a screen that refreshes itself add nothing. Looking only at your own
-queries, filtering on yourself, and a task's token record nothing. An instance administrator is
-recorded like anyone else.
+another status or event type, `--all` and a screen that refreshes itself add nothing. Looking only at
+your own queries or your own events, filtering on yourself, and a task's token record nothing. An
+instance administrator is recorded like anyone else.
 
 If the event cannot be written, for example because the database is full, the list is refused with
 `503` and shows nothing; try again in a moment, and if it keeps failing ask the operator to check the
@@ -101,6 +102,31 @@ lakana audit list --event-type ACTIVITY_VIEWED
 |---|---|---|
 | `LAKANA_VIEW_AUDIT__ENABLED` | `true` | Record the event; `false` turns it off. |
 | `LAKANA_VIEW_AUDIT__WINDOW_MINUTES` | `60` | Minutes during which the same view by the same person writes no second event (1 to 1,440). |
+
+### Other people's query text in the audit log
+
+A `QUERY_COMPLETED` event holds the SQL text of the query in `detail.sql_text`. Reading the audit
+log needs `READ_AUDIT_LOG`; seeing the text of **someone else's** query needs `READ_QUERY_TEXT` as
+well, which no role carries, `ADMIN` included. Without it the field shows the text's SHA-256 and
+its length in characters, so that the same query can still be recognised:
+
+<!-- output -->
+```text
+"sql_text": {"sha256": "9f1c...e2", "length": 57}
+```
+
+Your own events always show in full. The hash is not a secret: someone who guesses the exact text
+can confirm the guess. A field of an event that the server does not know how to classify is shown
+the same way. An administrator gives the right to a person with
+`lakana grant create --kind INSTANCE --principal NAME --action READ_QUERY_TEXT`; the grant and its
+revoke are in the audit log like every grant, and `lakana access explain NAME` lists it. It is given
+on the instance only.
+
+How much text a new event stores is set on the server and every worker:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `LAKANA_AUDIT__QUERY_TEXT` | `full` | `full` stores the text; `hash` only its SHA-256 and length, so the text itself is not kept; `off` neither (`null`). Events already written keep what they stored. A query's own record keeps its text for its submitter either way. |
 
 ## SDK and REST
 

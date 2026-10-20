@@ -121,3 +121,18 @@ def test_the_view_audit_is_on_with_an_hour_and_reads_the_environment(
     monkeypatch.setenv("LAKANA_VIEW_AUDIT__WINDOW_MINUTES", "1441")
     with pytest.raises(pydantic.ValidationError, match="window_minutes"):
         Settings()
+
+
+def test_the_audit_stores_full_query_text_by_default_and_refuses_an_unknown_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from lakana_core.config import AuditConfig
+
+    monkeypatch.setenv("LAKANA_DATABASE__URL", "sqlite://")
+    monkeypatch.delenv("LAKANA_AUDIT__QUERY_TEXT", raising=False)
+    assert Settings().audit == AuditConfig(query_text="full")
+    monkeypatch.setenv("LAKANA_AUDIT__QUERY_TEXT", "OFF")
+    assert Settings().audit.query_text == "off"
+    monkeypatch.setenv("LAKANA_AUDIT__QUERY_TEXT", "none")
+    with pytest.raises(pydantic.ValidationError, match="must be full, hash or off"):
+        Settings()

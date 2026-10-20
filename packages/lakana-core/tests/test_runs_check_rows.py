@@ -992,9 +992,12 @@ def test_nothing_sets_the_binding_on_a_query_run_that_exists() -> None:
     the run it executes on to its source resolution and to the catalog under a keyword of that
     name. The run store also names the key of that name in the detail of a query run's audit
     event (`query_completed_detail`), whose value it reads from the run; the walk exempts that
-    one subscript of ``detail`` and nothing else, so any other string in that file is found.
+    one subscript of ``detail`` and nothing else, so any other string in that file is found. The
+    audit log's list of field names (`lakana_core.audit.content.SHOWN_FIELDS`) names the key as a
+    string too; it sets nothing.
     """
     assert _other_mentions() == {
+        "lakana-core/src/lakana_core/audit/content.py": {"text"},
         "lakana-worker/src/lakana_worker/pipeline.py": {"keyword"},
     }
 

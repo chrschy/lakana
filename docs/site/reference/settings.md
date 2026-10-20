@@ -98,8 +98,14 @@ Compose](../how-to/deploy-with-compose.md).
 
 | Variable | Type | Default | Read by | Description |
 |---|---|---|---|---|
-| `LAKANA_VIEW_AUDIT__ENABLED` | true or false | `true` | server | Record an `ACTIVITY_VIEWED` event when someone sees other people's activity: a manager's listing of other people's queries (`lakana query list`) and the readers of a table (`lakana table health`) (default true). If the event cannot be written, the read is refused with 503. Turn it off only if you do not need to know who looked at whose activity. |
-| `LAKANA_VIEW_AUDIT__WINDOW_MINUTES` | whole number, 1 or more, 1440 or less | `60` | server | Minutes during which the same view by the same person writes no second event (default 60; 1 to 1,440). The next page, another status filter and a screen that refreshes itself are the same view; another environment, another table or another `--submitter` is another view. |
+| `LAKANA_VIEW_AUDIT__ENABLED` | true or false | `true` | server | Record an `ACTIVITY_VIEWED` event when someone sees other people's activity: a manager's listing of other people's queries (`lakana query list`), the readers of a table (`lakana table health`) and a page of the audit log with other people's events (`lakana audit list`) (default true). If the event cannot be written, the read is refused with 503. Turn it off only if you do not need to know who looked at whose activity. |
+| `LAKANA_VIEW_AUDIT__WINDOW_MINUTES` | whole number, 1 or more, 1440 or less | `60` | server | Minutes during which the same view by the same person writes no second event (default 60; 1 to 1,440). The next page, another status filter and a screen that refreshes itself are the same view; another environment, another table, another `--submitter` or another `--principal-id` is another view. |
+
+## `LAKANA_AUDIT__*`
+
+| Variable | Type | Default | Read by | Description |
+|---|---|---|---|---|
+| `LAKANA_AUDIT__QUERY_TEXT` | text | `full` | server, worker | What a new `QUERY_COMPLETED` event stores of the query's SQL text: ``full`` (the default) the text; ``hash`` only its SHA-256 and length, so that the same query can still be recognised; ``off`` neither. In any letter case. Set the same value on the server and on every worker, since both record queries. Events already written are not changed. The query's own record keeps its text either way, for its submitter. |
 
 ## `LAKANA_QUERY_LIMITS__*`
 

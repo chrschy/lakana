@@ -211,7 +211,7 @@ def test_query_filters_by_event_type(session: Session) -> None:
     service.record(admin.id, AuditEventType.AUTHENTICATION_SUCCEEDED, commit=True)
     service.record(admin.id, AuditEventType.GRANT_CREATED, commit=True)
 
-    results = service.query(admin, event_type=AuditEventType.GRANT_CREATED)
+    results = service.query(admin, event_type=AuditEventType.GRANT_CREATED).items
 
     assert [e.event_type for e in results] == [AuditEventType.GRANT_CREATED]
 
@@ -233,7 +233,7 @@ def test_query_filters_by_environment(session: Session) -> None:
         commit=True,
     )
 
-    results = service.query(admin, environment="dev")
+    results = service.query(admin, environment="dev").items
 
     assert [e.securable_environment for e in results] == ["dev"]
 
@@ -246,7 +246,7 @@ def test_query_filters_by_principal_id(session: Session) -> None:
     service.record(admin.id, AuditEventType.AUTHENTICATION_SUCCEEDED, commit=True)
     service.record(alice.id, AuditEventType.AUTHENTICATION_SUCCEEDED, commit=True)
 
-    results = service.query(admin, principal_id=alice.id)
+    results = service.query(admin, principal_id=alice.id).items
 
     assert [e.principal_id for e in results] == [alice.id]
 
@@ -260,7 +260,7 @@ def test_query_filters_by_time_range(session: Session) -> None:
     session.commit()
     recent_event = service.record(admin.id, AuditEventType.AUTHENTICATION_SUCCEEDED, commit=True)
 
-    results = service.query(admin, since=datetime.now(UTC) - timedelta(days=1))
+    results = service.query(admin, since=datetime.now(UTC) - timedelta(days=1)).items
 
     assert [e.id for e in results] == [recent_event.id]
 
@@ -274,7 +274,7 @@ def test_query_filters_by_until(session: Session) -> None:
     session.commit()
     service.record(admin.id, AuditEventType.AUTHENTICATION_SUCCEEDED, commit=True)
 
-    results = service.query(admin, until=datetime.now(UTC) - timedelta(days=1))
+    results = service.query(admin, until=datetime.now(UTC) - timedelta(days=1)).items
 
     assert [e.id for e in results] == [old_event.id]
 
@@ -286,7 +286,7 @@ def test_query_limit_caps_the_returned_rows(session: Session) -> None:
     for _ in range(5):
         service.record(admin.id, AuditEventType.AUTHENTICATION_SUCCEEDED, commit=True)
 
-    results = service.query(admin, limit=3)
+    results = service.query(admin, limit=3).items
 
     assert len(results) == 3
 
@@ -298,7 +298,7 @@ def test_query_default_limit_is_one_hundred(session: Session) -> None:
     for _ in range(101):
         service.record(admin.id, AuditEventType.AUTHENTICATION_SUCCEEDED, commit=True)
 
-    results = service.query(admin)
+    results = service.query(admin).items
 
     assert len(results) == 100
 
@@ -312,7 +312,7 @@ def test_query_orders_most_recent_first(session: Session) -> None:
     session.commit()
     second = service.record(admin.id, AuditEventType.AUTHENTICATION_SUCCEEDED, commit=True)
 
-    results = service.query(admin)
+    results = service.query(admin).items
 
     assert [e.id for e in results] == [second.id, first.id]
 
@@ -334,12 +334,12 @@ def test_query_cursor_resumes_strictly_after_the_given_position(session: Session
     for event in events[:3]:
         event.occurred_at = tied
     session.commit()
-    expected = [e.id for e in service.query(admin)]
+    expected = [e.id for e in service.query(admin).items]
 
     seen: list[uuid.UUID] = []
     cursor: AuditCursor | None = None
     while True:
-        page = service.query(admin, limit=2, cursor=cursor)
+        page = service.query(admin, limit=2, cursor=cursor).items
         if not page:
             break
         seen.extend(e.id for e in page)

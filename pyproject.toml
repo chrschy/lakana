@@ -112,6 +112,11 @@ filterwarnings = [
     # message and category only -- every other `StarletteDeprecationWarning` (e.g. the
     # unrelated httpx/httpx2 one `TestClient` itself emits at import) stays visible.
     "ignore:You should not use the 'timeout' argument with the TestClient\\.:starlette.exceptions.StarletteDeprecationWarning",
+    # An audit event written with a field `lakana_core.audit.content` does not classify (as
+    # content or as shown) fails the test that wrote it: every field gets a decision (#88).
+    # Matched by its message and the base category: naming the class itself would import
+    # lakana_core before coverage starts and hide every module-level line from the report.
+    "error:The audit event \\S+ has fields that are neither content nor shown:UserWarning",
 ]
 
 [tool.coverage.run]

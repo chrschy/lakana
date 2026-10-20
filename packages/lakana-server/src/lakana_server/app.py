@@ -12,6 +12,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from lakana_core.audit.authorization import flush_suppressed
+from lakana_core.audit.content import install_query_text
 from lakana_core.audit.denial_limiter import DenialAuditLimiter
 from lakana_core.bootstrap import bootstrap_if_needed
 from lakana_core.config import warn_about_tokens_in_url_paths
@@ -138,6 +139,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         app.state.engine = engine
         app.state.settings = resolved_settings
+        install_query_text(resolved_settings.audit.query_text)
         app.state.auth_audit_limiter = AuthAuditLimiter(
             resolved_settings.auth_audit.per_ip_per_minute
         )

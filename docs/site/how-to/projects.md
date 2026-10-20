@@ -474,11 +474,11 @@ answers 409, naming the deployed repositories. Undeploy each one first, then del
 ## CI deploys to protected environments
 
 "Only CI deploys to prod" is a grant: give `DEPLOY` on `prod` to a CI service principal and to no
-one else. The `ADMIN` role holds every action, `DEPLOY` included, so the bootstrap admin and any
-principal with `ADMIN` on the instance or on `prod` can still deploy to prod from a laptop; the
-guarantee holds only while no human holds `ADMIN` there. Use **two** principals, because a pull
-request runs the workflow file from its own branch: anyone who can push a branch can edit it, so
-whatever token a PR job sees must be worthless on prod.
+one else. The `ADMIN` role holds `DEPLOY`, like every other action but `READ_QUERY_TEXT`, so the
+bootstrap admin and any principal with `ADMIN` on the instance or on `prod` can still deploy to prod
+from a laptop; the guarantee holds only while no human holds `ADMIN` there. Use **two** principals,
+because a pull request runs the workflow file from its own branch: anyone who can push a branch can
+edit it, so whatever token a PR job sees must be worthless on prod.
 
 <!-- not tested: needs a protected `prod` environment and a CI system, which the one-instance examples do not set up -->
 ```bash

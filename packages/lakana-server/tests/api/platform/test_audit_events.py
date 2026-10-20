@@ -1,10 +1,20 @@
 """Tests for the audit-events resource of the platform API."""
 
+from collections.abc import Iterator
 from datetime import UTC, datetime
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select, text
+from sqlalchemy.orm import Session
 
+from lakana_core.audit.content import fingerprint, install_query_text, stored_query_text
+from lakana_core.audit.service import AuditService
+from lakana_core.auth import Securable
+from lakana_core.config import AuditConfig
+from lakana_core.models import AuditEvent, AuditEventType, Principal
+from lakana_server.app import create_app
+from lakana_server.settings import Settings
 from tests.conftest import AUTH_HEADER
 from tests.server_test_helpers import create_environment, create_namespace
 
@@ -266,3 +276,149 @@ def test_list_audit_events_rejects_a_malformed_cursor(client: TestClient, cursor
 
     assert response.status_code == 422, response.text
     assert "cursor" in response.json()["detail"].lower()
+
+
+# --- who sees other people's query text, and the record of each read (#88) -------------------
+
+_SQL = "SELECT email FROM customers WHERE name = 'Alice Example'"
+
+
+def _bobs_query(client: TestClient) -> None:
+    """Create `bob` and record a `QUERY_COMPLETED` of his with `_SQL`, as a worker does.
+
+    Parameters
+    ----------
+    client
+        The test client.
+    """
+    created = client.post(
+        "/api/v1/principals", headers=AUTH_HEADER, json={"name": "bob", "type": "USER"}
+    )
+    assert created.status_code == 201, created.text
+    with Session(client.app.state.engine) as session:
+        bob = session.scalars(select(Principal.id).where(Principal.name == "bob")).one()
+        AuditService(session).record(
+            bob,
+            AuditEventType.QUERY_COMPLETED,
+            securable=Securable.environment_scope("dev"),
+            detail={"sql_text": stored_query_text(_SQL), "tables_touched": [], "row_count": 1},
+            commit=True,
+        )
+
+
+def _sql_seen(client: TestClient) -> object:
+    """Read the `sql_text` of the newest `QUERY_COMPLETED` as the administrator.
+
+    Parameters
+    ----------
+    client
+        The test client.
+
+    Returns
+    -------
+    object
+        The field as the answer has it.
+    """
+    response = client.get(
+        "/api/v1/audit-events", headers=AUTH_HEADER, params={"event_type": "QUERY_COMPLETED"}
+    )
+    assert response.status_code == 200, response.text
+    return response.json()["items"][0]["detail"]["sql_text"]
+
+
+def test_an_administrator_sees_other_peoples_sql_only_with_the_right(client: TestClient) -> None:
+    _bobs_query(client)
+    assert _sql_seen(client) == fingerprint(_SQL)
+    explained = client.get("/api/v1/principals/admin/permissions", headers=AUTH_HEADER).json()
+    [right] = [p for p in explained["permissions"] if p["action"] == "READ_QUERY_TEXT"]
+    assert right["allowed"] is False
+    granted = client.post(
+        "/api/v1/grants",
+        headers=AUTH_HEADER,
+        json={"principal": "admin", "action": "READ_QUERY_TEXT", "kind": "INSTANCE"},
+    )
+    assert granted.status_code == 201, granted.text
+    assert _sql_seen(client) == _SQL
+    revoked = client.delete(f"/api/v1/grants/{granted.json()['id']}", headers=AUTH_HEADER)
+    assert revoked.status_code == 204, revoked.text
+    assert _sql_seen(client) == fingerprint(_SQL)
+
+
+def test_the_right_on_an_environment_is_refused_with_the_command_to_use(
+    client: TestClient, storage_root: str
+) -> None:
+    client.post(
+        "/api/v1/environments",
+        headers=AUTH_HEADER,
+        json={"name": "dev", "storage": {"scheme": "file", "root": storage_root}},
+    )
+    response = client.post(
+        "/api/v1/grants",
+        headers=AUTH_HEADER,
+        json={
+            "principal": "admin",
+            "action": "READ_QUERY_TEXT",
+            "kind": "ENVIRONMENT",
+            "environment": "dev",
+        },
+    )
+    assert response.status_code == 422, response.text
+    assert "--kind INSTANCE" in response.json()["detail"]
+
+
+def test_a_read_of_other_peoples_events_is_recorded_and_fails_closed(client: TestClient) -> None:
+    _bobs_query(client)
+    assert client.get("/api/v1/audit-events", headers=AUTH_HEADER).status_code == 200
+    with Session(client.app.state.engine) as session:
+        views = session.scalars(
+            select(AuditEvent).where(AuditEvent.event_type == AuditEventType.ACTIVITY_VIEWED)
+        ).all()
+        assert [v.detail["view"] for v in views] == ["audit_log"]
+    with client.app.state.engine.begin() as connection:
+        connection.execute(text("DELETE FROM audit_events WHERE event_type = 'ACTIVITY_VIEWED'"))
+        connection.execute(
+            text(
+                "CREATE TRIGGER refuse_views BEFORE INSERT ON audit_events "
+                "WHEN NEW.event_type = 'ACTIVITY_VIEWED' "
+                "BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END"
+            )
+        )
+    response = client.get("/api/v1/audit-events", headers=AUTH_HEADER)
+    assert response.status_code == 503
+    assert response.headers["Retry-After"] == "5"
+    assert "could not be recorded in the audit log" in response.json()["detail"]
+    assert "sql_text" not in response.text
+
+
+@pytest.fixture
+def hashing_client(settings: Settings) -> Iterator[TestClient]:
+    """Provide a client of a server with `LAKANA_AUDIT__QUERY_TEXT=hash`.
+
+    Parameters
+    ----------
+    settings
+        The default test settings.
+
+    Yields
+    ------
+    TestClient
+        A client for the running app; the process's mode is set back to `full` after it.
+    """
+    hashing = settings.model_copy(update={"audit": AuditConfig(query_text="hash")})
+    try:
+        with TestClient(create_app(hashing)) as c:
+            yield c
+    finally:
+        install_query_text("full")
+
+
+def test_the_server_stores_what_the_setting_says(hashing_client: TestClient) -> None:
+    assert stored_query_text(_SQL) == fingerprint(_SQL)
+    _bobs_query(hashing_client)
+    granted = hashing_client.post(
+        "/api/v1/grants",
+        headers=AUTH_HEADER,
+        json={"principal": "admin", "action": "READ_QUERY_TEXT", "kind": "INSTANCE"},
+    )
+    assert granted.status_code == 201, granted.text
+    assert _sql_seen(hashing_client) == fingerprint(_SQL)

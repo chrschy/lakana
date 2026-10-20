@@ -20,11 +20,11 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Query
 
-from lakana_core.audit.service import AuditCursor, AuditService
+from lakana_core.audit.service import AuditCursor, AuditService, ShownAuditEvent
 from lakana_core.auth import PrincipalRef
 from lakana_core.errors import ValidationError
 from lakana_core.identifiers import NamespacePath
-from lakana_core.models import AuditEvent, AuditEventType
+from lakana_core.models import AuditEventType
 from lakana_server.api.platform.schemas import AuditEventOut, AuditEventPage
 from lakana_server.api.routing import AuthenticateFirstRoute
 from lakana_server.deps import get_audit_service, get_principal
@@ -62,20 +62,20 @@ def _joined_to_dotted(namespace: str | None) -> str | None:
     return ".".join(NamespacePath.parse(namespace).parts)
 
 
-def _encode_cursor(event: AuditEvent) -> str:
-    """Encode an event's position as an opaque, URL-safe cursor.
+def _encode_cursor(position: AuditCursor) -> str:
+    """Encode a position as an opaque, URL-safe cursor.
 
     Parameters
     ----------
-    event
-        The last event of the page being returned.
+    position
+        The position of the last event of the page being returned.
 
     Returns
     -------
     str
         Unpadded base64url of `{"o": occurred_at, "i": id}`.
     """
-    raw = json.dumps({"o": event.occurred_at.isoformat(), "i": str(event.id)}).encode()
+    raw = json.dumps({"o": position.occurred_at.isoformat(), "i": str(position.id)}).encode()
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
 
 
@@ -119,13 +119,13 @@ def _decode_cursor(cursor: str) -> AuditCursor:
     return AuditCursor(occurred_at=occurred_at, id=event_id)
 
 
-def _to_out(event: AuditEvent) -> AuditEventOut:
-    """Build a response body from an AuditEvent row.
+def _to_out(event: ShownAuditEvent) -> AuditEventOut:
+    """Build a response body from an event as its reader sees it.
 
     Parameters
     ----------
     event
-        The row to convert.
+        The event to convert: `AuditService.query` already hid what the reader may not see.
 
     Returns
     -------
@@ -194,18 +194,27 @@ def list_audit_events(
         If `p` may not read the audit log.
     ValidationError
         If `cursor` is malformed; mapped to 422.
+    lakana_core.errors.AuditUnavailableError
+        If the read had to be recorded in the audit log and could not be; mapped to 503 with
+        `Retry-After`, and no event is returned.
+
+    Notes
+    -----
+    The content of another principal's event (a query's SQL text) is shown as its SHA-256 and
+    length unless the caller holds `READ_QUERY_TEXT`; the caller's own events are shown in full.
+    A page that shows or filters on another principal's events is recorded as
+    `ACTIVITY_VIEWED` before it is returned.
     """
     position = None if cursor is None else _decode_cursor(cursor)
-    events = audit.query(
+    page = audit.query(
         p,
         event_type=event_type,
         environment=environment,
         principal_id=principal_id,
         since=since,
         until=until,
-        limit=limit + 1,
+        limit=limit,
         cursor=position,
     )
-    page = events[:limit]
-    next_cursor = _encode_cursor(page[-1]) if len(events) > limit else None
-    return AuditEventPage(items=[_to_out(event) for event in page], next_cursor=next_cursor)
+    next_cursor = None if page.next_cursor is None else _encode_cursor(page.next_cursor)
+    return AuditEventPage(items=[_to_out(event) for event in page.items], next_cursor=next_cursor)
