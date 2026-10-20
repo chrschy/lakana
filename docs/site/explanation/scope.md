@@ -46,7 +46,7 @@ PostgreSQL, so that a small team gets them in one install instead of assembling 
 | Analytics | SQL assets, incremental tables, lineage, governed queries |
 | Data science | Python assets, reproducible environments, exploration through the SDK (including from your own notebook) |
 | ML | Training and batch scoring as assets, versioned model artifacts, experiment tracking, a feature store |
-| Operations | Runs, schedules, retries, audit, secrets, access policies, table and environment retention (M10, #87) |
+| Operations | Runs, schedules, retries, audit, secrets, access policies, table and environment retention (0.17.0, #87) |
 
 How the larger pieces are meant to work:
 
