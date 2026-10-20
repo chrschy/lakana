@@ -243,6 +243,66 @@ def any_internal(addresses: Sequence[str]) -> bool:
     return any(is_internal(ipaddress.ip_address(address.split("%")[0])) for address in addresses)
 
 
+_NEVER_NETWORKS = tuple(
+    ipaddress.ip_network(text)
+    for text in (
+        "0.0.0.0/8",
+        "127.0.0.0/8",
+        "169.254.0.0/16",
+        "224.0.0.0/4",
+        "240.0.0.0/4",
+        # Alibaba Cloud's metadata service, inside the CGNAT range.
+        "100.100.100.200/32",
+        "::/128",
+        "::1/128",
+        "fe80::/10",
+        "ff00::/8",
+        # AWS's IPv6 metadata service, inside the unique-local range.
+        "fd00:ec2::254/128",
+    )
+)
+
+
+def is_never_reachable(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Say whether an address stays refused even for a host an operator allowed.
+
+    Parameters
+    ----------
+    address
+        Any address.
+
+    Returns
+    -------
+    bool
+        `True` for loopback, link-local (the cloud metadata address 169.254.169.254 among them),
+        unspecified, multicast and reserved IPv4 addresses, the known metadata addresses inside
+        private ranges, and any IPv6 address that carries such an IPv4 address.
+    """
+    if any(is_never_reachable(inner) for inner in _embedded_ipv4(address)):
+        return True
+    return any(
+        address in network for network in _NEVER_NETWORKS if network.version == address.version
+    )
+
+
+def any_never_reachable(addresses: Sequence[str]) -> bool:
+    """Say whether any of a name's addresses `is_never_reachable`.
+
+    Parameters
+    ----------
+    addresses
+        Addresses as `resolve` returns them; an IPv6 zone (``%eth0``) is ignored.
+
+    Returns
+    -------
+    bool
+        `True` when at least one of them is never reachable.
+    """
+    return any(
+        is_never_reachable(ipaddress.ip_address(address.split("%")[0])) for address in addresses
+    )
+
+
 def resolve(host: str, port: int) -> list[str]:
     """Resolve a name to its addresses.
 

@@ -143,8 +143,8 @@ class CiOidcConfig(ProxyAndCaBundleChecks):
     """CI OIDC verification settings (`LAKANA_CI_OIDC__*`); read by the server.
 
     With no issuer (the default) the server accepts no CI ID token at all. The server fetches
-    each issuer's discovery document and keys over ``https`` on port 443 from public addresses
-    only, never following a redirect.
+    each issuer's discovery document and keys over ``https`` on port 443, from public addresses
+    unless the host is in `LAKANA_CI_OIDC__ALLOW_HOSTS`, never following a redirect.
 
     Parameters
     ----------
@@ -164,8 +164,13 @@ class CiOidcConfig(ProxyAndCaBundleChecks):
     max_token_age_seconds
         The oldest ID token accepted, counted from its issue time (default 900, 15 minutes).
     allow_hosts
-        Further host names, comma-separated, from which an issuer's keys may be fetched when its
-        discovery document names another host than its own. Exact names only.
+        Host names, comma-separated, exact names only. A listed host may serve an issuer's keys
+        when its discovery document names another host than the issuer's own, and a listed host
+        may resolve to a private address (10.x, 172.16.x to 172.31.x, 192.168.x, fd00::/8);
+        every other host must be public. A self-hosted GitLab on an internal network therefore
+        needs its URL in `LAKANA_CI_OIDC__ISSUERS` and its host name here. Loopback, link-local
+        and cloud metadata addresses are refused even for a listed host. List only names whose
+        DNS you control.
     proxy
         URL of the proxy that the discovery and key requests go through, for example
         `http://user:password@host:3128`. The server checks the destination name, but the proxy

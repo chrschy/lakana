@@ -3828,7 +3828,8 @@ and a fake fetcher; no test reaches the network.
   its result. A failed refresh logs the issuer (an operator setting) and the fixed reason.
 - **The fetcher** (`lakana_core.net.https_json`): `https`, port 443 and an allowed host name only
   (never an IP literal), one lookup under 5 s, refused if **any** address is internal (the same
-  `is_internal` as the webhooks), then a connection to the checked address with the name as TLS
+  `is_internal` as the webhooks), except for a host on `LAKANA_CI_OIDC__ALLOW_HOSTS` (below), then
+  a connection to the checked address with the name as TLS
   server name; `trust_env=False`, no redirect (a 3xx is a refusal), only a 200, `Accept-Encoding:
   identity` and a refusal of any other `Content-Encoding` (no decompression bomb), at most 64 KiB
   counted while reading, 10 s for the whole request. Deep JSON nesting ends as `NOT_JSON`, never as
@@ -3843,9 +3844,21 @@ and a fake fetcher; no test reaches the network.
   expiry; the caller must accept each `jti` once (until its expiry) and match its trust rules
   against the claims. `RefusalCode` is what the rate-limited `OIDC_EXCHANGE_REFUSED` audit row
   records.
-- **Residuals:** a self-hosted GitLab whose name resolves to a private address cannot be an
-  issuer: the fetcher reaches public addresses only, with or without a proxy. The `typ` header is
-  not checked; `aud` and the issuer's own key set keep other tokens of the same issuer out.
+- **An issuer on a private address** (a self-hosted GitLab on an internal network) needs two
+  settings: its URL in `LAKANA_CI_OIDC__ISSUERS` and its host name in
+  `LAKANA_CI_OIDC__ALLOW_HOSTS`. Only a host **exactly** on that list may resolve to a private
+  address (10/8, 172.16/12, 192.168/16, 100.64/10, `fc00::/7`), for the discovery document and
+  the keys alike; the issuers' own hosts are not exempt unless listed, and every other host must
+  be public. Even a listed host is refused when any of its addresses is loopback, link-local
+  (`169.254.0.0/16`, `fe80::/10`, so 169.254.169.254), unspecified, multicast or reserved, a
+  known metadata address inside a private range (`fd00:ec2::254`, `100.100.100.200`), or an
+  IPv6 form that carries such an IPv4 address (`is_never_reachable`). This is stricter than
+  `LAKANA_WEBHOOK__ALLOW_HOSTS`, which exempts a listed host from every address check, the
+  scheme and the port. Pinning, `https` on 443, no redirects, the 64 KiB cap and the deadlines
+  still apply. As with the webhooks, list only names whose DNS you control: whoever controls
+  a listed name's DNS can point it at any private address.
+- **Residuals:** the `typ` header is not checked; `aud` and the issuer's own key set keep other
+  tokens of the same issuer out.
 
 ## Git fetch hardening (M5b)
 

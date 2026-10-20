@@ -308,26 +308,34 @@ def test_a_failed_fetch_is_logged_with_the_issuer_and_the_reason(
 
 
 def test_the_default_fetcher_uses_the_operator_settings(monkeypatch: pytest.MonkeyPatch) -> None:
-    seen: list[tuple[str, Collection[str], object, object]] = []
+    seen: list[tuple[str, Collection[str], Collection[str], object, object]] = []
 
     def fake(
-        url: str, *, allowed_hosts: Collection[str], proxy: object, ca_bundle: object
+        url: str,
+        *,
+        allowed_hosts: Collection[str],
+        private_hosts: Collection[str],
+        proxy: object,
+        ca_bundle: object,
     ) -> object:
-        seen.append((url, allowed_hosts, proxy, ca_bundle))
+        seen.append((url, allowed_hosts, private_hosts, proxy, ca_bundle))
         raise FetchFailed("offline")
 
     monkeypatch.setattr(jwks, "fetch_json", fake)
     settings = CiOidcConfig(
         issuers=[ISSUER],
         audience=AUDIENCE,
+        allow_hosts=["gitlab.corp.example"],
         proxy=SecretStr("http://proxy.corp.test:3128"),
         ca_bundle=Path("/certs/ca.pem"),
     )
     cache = JwksCache(settings)
     with pytest.raises(IdTokenRefused):
         cache.signing_key(ISSUER, "k1")
-    url, allowed, proxy, bundle = seen[0]
+    url, allowed, private, proxy, bundle = seen[0]
     assert (url, set(allowed)) == (DISCOVERY, {ISSUER_HOST})
+    # Only the operator's own list may resolve to private addresses, not the issuers' hosts.
+    assert set(private) == {"gitlab.corp.example"}
     assert proxy == settings.proxy and bundle == settings.ca_bundle
 
 

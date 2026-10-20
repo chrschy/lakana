@@ -5,6 +5,8 @@
 - The discovery document comes from the issuer's own host and must name the issuer exactly; the
   ``jwks_uri`` it names must be ``https`` on the issuer's host or on a host of
   `LAKANA_CI_OIDC__ALLOW_HOSTS`, and the fetcher (`lakana_core.net.https_json`) checks it again.
+  Only a host on `LAKANA_CI_OIDC__ALLOW_HOSTS` may resolve to a private address (never loopback,
+  link-local or a metadata address); every other host must be public.
 - Keys are fresh for `FRESH_SECONDS`. A key id that is not in the set refreshes it, but at most
   once per `REFRESH_INTERVAL_SECONDS` per issuer, whatever the reason, so random key ids cannot
   turn the server into a request generator.
@@ -201,7 +203,7 @@ class JwksCache:
         self._issuers = {url: _Issuer(url) for url in config.issuers}
 
     def _fetch_with_settings(self, url: str, allowed_hosts: Collection[str]) -> object:
-        """Fetch a document with the operator's proxy and CA bundle.
+        """Fetch a document with the operator's proxy, CA bundle and private hosts.
 
         Parameters
         ----------
@@ -215,9 +217,12 @@ class JwksCache:
         object
             The parsed document.
         """
+        # Only the operator's own list may resolve to private addresses: an issuer's host
+        # (or a jwks_uri on it) needs to be listed there too.
         return fetch_json(
             url,
             allowed_hosts=allowed_hosts,
+            private_hosts=frozenset(self._config.allow_hosts),
             proxy=self._config.proxy,
             ca_bundle=self._config.ca_bundle,
         )

@@ -6,7 +6,9 @@ is trusted: the caller names the hosts a request may reach, and everything else 
 
 - `check` requires ``https``, port 443 and an allowed host name (never an IP literal), resolves
   the name **once** under `RESOLVE_TIMEOUT`, and refuses it when **any** of its addresses is
-  internal.
+  internal. A host the operator listed (`private_hosts`) may resolve to a private address, so
+  that an issuer on an internal network can be reached; loopback, link-local and the known
+  metadata addresses stay refused even then (`lakana_core.net.egress.is_never_reachable`).
 - `fetch_target` connects to a checked address, not to the name, with the name as the TLS server
   name, so the certificate is verified against the name and DNS cannot answer differently
   between the check and the connection. An operator's proxy resolves the name itself and is
@@ -46,6 +48,10 @@ HOST_NOT_ALLOWED = "the host is not one this request may reach"
 UNRESOLVED = "the host name does not resolve"
 RESOLVE_TIMED_OUT = "the host name did not resolve in time"
 PRIVATE = "the host is a private or internal address"
+NEVER_REACHABLE = (
+    "the host is a loopback, link-local or metadata address, which is refused even for an "
+    "allowed host"
+)
 REDIRECT = "the server answered with a redirect, which is not followed"
 TOO_LARGE = "the answer is larger than 64 KiB"
 ENCODED = "the answer is compressed or encoded, which is not accepted"
@@ -90,7 +96,9 @@ class Target:
     addresses: tuple[str, ...]
 
 
-def check(url: str, allowed_hosts: Collection[str]) -> Target:
+def check(
+    url: str, allowed_hosts: Collection[str], *, private_hosts: Collection[str] = ()
+) -> Target:
     """Check a URL and resolve its host once.
 
     Parameters
@@ -99,6 +107,8 @@ def check(url: str, allowed_hosts: Collection[str]) -> Target:
         The URL.
     allowed_hosts
         The lower-case host names the request may reach.
+    private_hosts
+        The lower-case host names the operator allowed to resolve to private addresses.
 
     Returns
     -------
@@ -109,7 +119,8 @@ def check(url: str, allowed_hosts: Collection[str]) -> Target:
     ------
     FetchFailed
         If the URL is malformed, not ``https``, not on port 443, not on an allowed host name,
-        does not resolve in time, or any address of its host is internal.
+        does not resolve in time, or any address of its host is internal (for a host in
+        `private_hosts`: loopback, link-local or a metadata address).
     """
     reason = ""
     try:
@@ -136,8 +147,12 @@ def check(url: str, allowed_hosts: Collection[str]) -> Target:
             )
         except egress.EgressRefused as refused:
             reason = refused.reason
-    if not reason and egress.any_internal(addresses):
-        reason = PRIVATE
+    if not reason:
+        if host in private_hosts:
+            if egress.any_never_reachable(addresses):
+                reason = NEVER_REACHABLE
+        elif egress.any_internal(addresses):
+            reason = PRIVATE
     if reason:
         raise FetchFailed(reason)
     return Target(host=host, port=443, target=target, addresses=tuple(addresses))
@@ -337,6 +352,7 @@ def fetch_json(
     url: str,
     *,
     allowed_hosts: Collection[str],
+    private_hosts: Collection[str] = (),
     proxy: SecretStr | None = None,
     ca_bundle: Path | None = None,
 ) -> object:
@@ -348,6 +364,8 @@ def fetch_json(
         An ``https`` URL on port 443.
     allowed_hosts
         The lower-case host names the request may reach.
+    private_hosts
+        The lower-case host names the operator allowed to resolve to private addresses.
     proxy
         The operator's proxy, or `None`.
     ca_bundle
@@ -358,5 +376,5 @@ def fetch_json(
     object
         The parsed JSON value.
     """
-    target = check(url, allowed_hosts)
+    target = check(url, allowed_hosts, private_hosts=private_hosts)
     return fetch_target(target, proxy=proxy, ca_bundle=ca_bundle, timeout=TIMEOUT_SECONDS)

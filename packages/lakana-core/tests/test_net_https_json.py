@@ -209,6 +209,70 @@ def test_a_name_that_resolves_to_an_internal_address_is_refused(
     assert refusal(f"https://{NAME}/x") == https_json.PRIVATE
 
 
+@pytest.mark.parametrize(
+    "address", ["10.1.2.3", "172.16.0.1", "192.168.0.1", "100.64.0.1", "fd12:3456::1"]
+)
+def test_an_operator_listed_host_may_resolve_to_a_private_address(
+    monkeypatch: pytest.MonkeyPatch, address: str
+) -> None:
+    resolves_to(monkeypatch, address, PUBLIC)
+    target = check(f"https://{NAME}/x", (NAME,), private_hosts=(NAME,))
+    assert target.addresses == (address, PUBLIC)
+    assert refusal(f"https://{NAME}/x") == https_json.PRIVATE
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        "127.0.0.1",
+        "::1",
+        "169.254.169.254",
+        "169.254.1.1",
+        "fe80::1%eth0",
+        "fd00:ec2::254",
+        "100.100.100.200",
+        "0.0.0.0",
+        "::",
+        "224.0.0.1",
+        "::ffff:127.0.0.1",
+        "::ffff:169.254.169.254",
+        "64:ff9b::a9fe:a9fe",
+    ],
+)
+def test_loopback_link_local_and_metadata_stay_refused_for_a_listed_host(
+    monkeypatch: pytest.MonkeyPatch, address: str
+) -> None:
+    resolves_to(monkeypatch, "10.1.2.3", address)
+    with pytest.raises(FetchFailed) as info:
+        check(f"https://{NAME}/x", (NAME,), private_hosts=(NAME,))
+    assert info.value.reason == https_json.NEVER_REACHABLE
+
+
+def test_the_private_exemption_is_for_the_listed_host_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolves_to(monkeypatch, PUBLIC, "10.1.2.3")
+    with pytest.raises(FetchFailed) as info:
+        check(f"https://{NAME}/x", (NAME,), private_hosts=("other.example.test",))
+    assert info.value.reason == https_json.PRIVATE
+
+
+def test_a_listed_host_still_needs_https_on_443_and_the_allow_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolves_to(monkeypatch, "10.1.2.3")
+    for url, reason in (
+        (f"http://{NAME}/x", https_json.NOT_HTTPS),
+        (f"https://{NAME}:8443/x", https_json.NOT_443),
+    ):
+        with pytest.raises(FetchFailed) as info:
+            check(url, (NAME,), private_hosts=(NAME,))
+        assert info.value.reason == reason
+    with pytest.raises(FetchFailed) as info:
+        check(f"https://{NAME}/x", (), private_hosts=(NAME,))
+    assert info.value.reason == https_json.HOST_NOT_ALLOWED
+
+
 def test_a_name_that_does_not_resolve_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     resolves_to(monkeypatch)
     assert refusal(f"https://{NAME}/x") == https_json.UNRESOLVED
@@ -380,6 +444,9 @@ def test_fetch_json_checks_then_fetches_the_pinned_target(monkeypatch: pytest.Mo
     assert seen == [
         (Target(NAME, 443, "/doc", (PUBLIC,)), None, bundle, https_json.TIMEOUT_SECONDS)
     ]
+    resolves_to(monkeypatch, "10.1.2.3")
+    assert fetch_json(f"https://{NAME}/doc", allowed_hosts=(NAME,), private_hosts=(NAME,))
+    assert seen[-1][0].addresses == ("10.1.2.3",)
 
 
 def test_fetch_json_never_fetches_a_refused_url(monkeypatch: pytest.MonkeyPatch) -> None:
