@@ -63,12 +63,11 @@ in a unit test without root; `scripts/compose_smoke_test.sh` pins it end to end.
 
 ## Running the unit suite in parallel
 
-CI's `test (3.11)` run uses `-n auto --maxprocesses 4 --dist loadfile` (pytest-xdist). **The
+CI's `test (3.11)` run uses `-n auto --maxprocesses 3 --dist loadfile` (pytest-xdist). **The
 3.14 run, which measures coverage, uses `--maxprocesses 2`**: it needs more memory per process
 (below). `addopts` carries no `-n`, so a plain `uv run pytest` stays serial. The default Python of
 a checkout is 3.14 (`.python-version`; the image runs 3.14 too), so a plain `uv run` is the
-3.14 run. Locally, inside the capped scope, use `-n 2` (on 3.11, `uv run --python 3.11`, `-n 4`
-fits):
+3.14 run. Locally, inside the capped scope, use `-n 2` (on 3.11, `uv run --python 3.11`, `-n 3`):
 
 ```bash
 systemd-run --user --scope -q -p MemoryMax=6G -p MemorySwapMax=0 timeout 900 \
@@ -90,8 +89,9 @@ systemd-run --user --scope -q -p MemoryMax=6G -p MemorySwapMax=0 timeout 900 \
   `LINES=24` in `os.environ` and a serial run does not; rich then sizes a console differently.
   A test that depends on a console's size gives rich both width and height.
 - **Memory, Python 3.11 (and 3.13):** only the controller runs the watchdog (see "Memory
-  limit"); it counts the workers. At `-n 4` the peak is about 4.8 GB, so keep `MemoryMax=6G`
-  and no more than four workers.
+  limit"); it counts the workers. At `-n 4` CI's peak reached 5,956-6,100 MB in October 2026,
+  within 200 MB of the 6 GB limit, and a pull request crossed it; so keep `MemoryMax=6G` and no
+  more than three workers.
 - **Memory, Python 3.14: at most two workers, and `core = "ctrace"` stays.** On 3.14
   coverage.py's default core is `sysmon`, which keeps every code object the suite compiles
   alive. The CLI tests compiled about 1.7 million throwaway snippets (Typer resolves type hints

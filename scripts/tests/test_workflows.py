@@ -500,7 +500,7 @@ def test_the_3_14_run_uploads_its_coverage_report_also_when_the_ratchet_fails() 
 
 
 def test_both_unit_runs_are_parallel_and_3_14_measures_with_the_c_tracer() -> None:
-    """3.11 runs with up to four processes, the 3.14 coverage run with up to two.
+    """3.11 runs with up to three processes, the 3.14 coverage run with up to two.
 
     On Python 3.14 coverage.py would choose its ``sysmon`` core, which keeps every code object
     the suite ever compiles: 4.8 GB serially and out of memory in parallel. ``core = "ctrace"``
@@ -508,7 +508,7 @@ def test_both_unit_runs_are_parallel_and_3_14_measures_with_the_c_tracer() -> No
     together. ``addopts`` must not carry ``-n``.
     """
     steps = _test_steps()
-    assert steps["Unit tests"]["run"] == "uv run pytest -n auto --maxprocesses 4 --dist loadfile"
+    assert steps["Unit tests"]["run"] == "uv run pytest -n auto --maxprocesses 3 --dist loadfile"
     assert steps["Unit tests (with coverage)"]["run"] == (
         "uv run pytest -n auto --maxprocesses 2 --dist loadfile"
         " --cov --cov-report=json --cov-report=term-missing:skip-covered"
