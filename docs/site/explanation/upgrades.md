@@ -114,6 +114,7 @@ Each cell is a summary. The page named in the last column has the detail. The ch
 
 | Release | What it asks | Where |
 |---|---|---|
+| 0.17.0 | Migrations `0042` to `0046`. **Breaking:** a dropped table's files, and those of the tables of a deleted environment, are deleted after `LAKANA_TABLES__UNDO_DAYS` (7 days; restore with `lakana table undrop` or `lakana env restore`), and `DELETE /api/v1/environments/{name}` answers 200 with the environment; the first administrator's token is written to `LAKANA_BOOTSTRAP_TOKEN_FILE`, never to the log; ADMINs no longer see other people's SQL text or column values in the audit log until granted `READ_QUERY_TEXT`. Set `LAKANA_TABLES__UNDO_DAYS` the same on the server and the workers. A new storage root must be written canonically. Nothing expires unless retention is set. Sign-in events are written once per token every 15 minutes. | [Notes for 0.17.0](#notes-for-0170) |
 | 0.16.0 | Migrations `0036` to `0041`. `GET /api/v1/grants` without a filter now returns every grant, in pages of 100 (follow `X-Next-Cursor`), and the principal and group lists come newest first, paged the same way. Filters and masks that exist are not checked again; a new one is type-checked when it is created. Descriptions appear after the next deploy; table readers count from the upgrade on; search finds the columns of existing tables once the sweep has filled them in (1,000 tables take about 20 hours). Upgrade the workers together with the server, so that every task failure gets its code. | [Notes for 0.16.0](#notes-for-0160) |
 | 0.15.0 | Migration `0035` (a database check on a secret's use; it stops and names any inconsistent secret). While an environment has a storage secret, changing its storage options needs `MANAGE_SECRET` there as well as `MANAGE_ENVIRONMENT`; the Compose set-up attaches its storage secret to `dev` only together with the bundle's own options. A commit through the Iceberg REST catalog is refused when one of its manifest files is over 64 MiB. | [Notes for 0.15.0](#notes-for-0150) |
 | 0.14.0 | Migration `0034` (binds each secret to one use). New images are `ghcr.io/lakana-labs/lakana`: change `LAKANA_IMAGE` in a bundle's `.env` before you pull. Replace the bundle's `compose.yaml`: SeaweedFS runs as two containers behind an S3 gateway, and `docker compose down` must come before `up`. A secret has one use (a package index, a repository, or its own environment) and is refused for any other; a secret the migration could not bind is bound by an administrator with `lakana secret bind`. | [Notes for 0.14.0](#notes-for-0140) |
@@ -125,6 +126,10 @@ Each cell is a summary. The page named in the last column has the detail. The ch
 | 0.9.0 | Upgrade every worker before you deploy Python assets; rewrite `asset(deps=...)` as `asset(inputs=...)`; move helper modules out of `assets/`; an older bundle needs three additions. | [Upgrading](../how-to/deploy-with-compose.md#upgrading), [Projects and deploys](../how-to/projects.md) |
 
 ## Notes for the next release
+
+Nothing yet.
+
+## Notes for 0.17.0
 
 ### Fewer sign-in events in the audit log
 
