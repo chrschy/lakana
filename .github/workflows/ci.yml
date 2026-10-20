@@ -164,6 +164,8 @@ jobs:
       # measures coverage and stops at two processes: with coverage's C tracer (`core = "ctrace"`
       # in pyproject.toml) it peaks at 4.2 GB with two, 5.0 GB with three, and is killed under
       # 6 GB with four (measured 2026-10-11). Without that setting it does not fit at all.
+      # The other run stops at three: at four it peaked at 5,956-6,100 MB in October 2026, within
+      # 200 MB of the 6 GB limit of scripts/pytest_memory_limit.py, and a pull request crossed it.
       # Only the 3.14 run measures coverage: the ratchet reads that report and nothing reads
       # the other one, and measuring costs about a third of a run.
       - name: Unit tests (with coverage)
@@ -171,7 +173,7 @@ jobs:
         run: uv run pytest -n auto --maxprocesses 2 --dist loadfile --cov --cov-report=json --cov-report=term-missing:skip-covered
       - name: Unit tests
         if: matrix.python-version != '3.14' && needs.changes.outputs.docs_only != 'true'
-        run: uv run pytest -n auto --maxprocesses 4 --dist loadfile
+        run: uv run pytest -n auto --maxprocesses 3 --dist loadfile
       - name: Unit tests on the oldest supported Polars
         # `lakana[assets]` accepts polars>=1.30 and the lock holds 2.x. The tests that touch
         # Polars run once more on 1.30 (about 30 s); a type that exists only in Polars 2 is
