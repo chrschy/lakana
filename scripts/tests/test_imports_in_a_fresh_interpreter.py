@@ -9,6 +9,7 @@ packages. It only spawns subprocesses and reads files, so import-linter (which f
 not strings) is not involved.
 """
 
+import concurrent.futures
 import contextlib
 import json
 import os
@@ -166,18 +167,55 @@ def test_an_entry_point_imports_alone_in_a_fresh_interpreter(module: str) -> Non
     assert result.returncode == 0, result.stderr[-2000:]
 
 
+def _chunks(modules: list[str], count: int) -> list[list[str]]:
+    """Deal modules into `count` lists, so each child gets a similar mix of packages.
+
+    Parameters
+    ----------
+    modules
+        Dotted module names.
+    count
+        The most lists to return.
+
+    Returns
+    -------
+    list of list of str
+        Non-empty lists; every module is in exactly one.
+    """
+    return [chunk for chunk in (modules[i::count] for i in range(count)) if chunk]
+
+
+def test_the_modules_are_dealt_to_the_children_without_loss() -> None:
+    """Every module reaches exactly one child, whatever the number of children."""
+    modules = [f"m{i}" for i in range(23)]
+    for count in (1, 4, 50):
+        dealt = [name for chunk in _chunks(modules, count) for name in chunk]
+        assert sorted(dealt) == sorted(modules)
+
+
 def test_every_module_imports_alone() -> None:
     """Import each module of the four packages as the first import of its process.
 
-    The next cycle is caught whichever module it is in, not only in a listed entry point.
+    The next cycle is caught whichever module it is in, not only in a listed entry point. The
+    modules are shared among as many interpreters as the machine has CPUs, one after another in
+    each, so every import is still the first of its interpreter.
     """
     modules = _every_module()
     assert len(modules) > 200, "the scan found too few modules; has the layout changed?"
-    result = _run_isolated(
-        [sys.executable, "-c", _EVERY_MODULE_SCRIPT, json.dumps(modules)], timeout=300
-    )
-    assert result.returncode == 0, result.stderr[-2000:]
-    failures = json.loads(result.stdout.strip().splitlines()[-1])
+    chunks = _chunks(modules, max(1, min(len(os.sched_getaffinity(0)), 8)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(chunks)) as pool:
+        results = list(
+            pool.map(
+                lambda chunk: _run_isolated(
+                    [sys.executable, "-c", _EVERY_MODULE_SCRIPT, json.dumps(chunk)], timeout=300
+                ),
+                chunks,
+            )
+        )
+    failures: dict[str, str] = {}
+    for result in results:
+        assert result.returncode == 0, result.stderr[-2000:]
+        failures.update(json.loads(result.stdout.strip().splitlines()[-1]))
     assert not failures, "\n\n".join(f"{name}:\n{trace}" for name, trace in failures.items())
 
 
