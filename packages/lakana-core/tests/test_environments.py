@@ -14,6 +14,7 @@ from sqlalchemy.orm import ORMExecuteState, Session
 from lakana_core.auth import Action, AllowAllAuthorization, PrincipalRef, Securable, SecurableKind
 from lakana_core.catalog import CatalogService
 from lakana_core.catalog.location_sweep import sweep_table_locations
+from lakana_core.config import StorageConfig
 from lakana_core.errors import (
     AlreadyExistsError,
     ConflictError,
@@ -891,3 +892,76 @@ def test_environment_lifecycle_is_audited(
     deleted = _events(AuditEventType.ENVIRONMENT_DELETED)
     assert len(deleted) == 1
     assert deleted[0].securable_environment == "dev"
+
+
+@pytest.mark.parametrize(
+    ("root", "canonical"),
+    [
+        ("file:////data/lake", "file:///data/lake"),
+        ("file:///data//lake", "file:///data/lake"),
+        ("file:///data/./lake", "file:///data/lake"),
+        ("FILE:///data/lake", "file:///data/lake"),
+        ("s3a://bucket/lake", "s3://bucket/lake"),
+        ("s3://bucket//lake/", "s3://bucket/lake"),
+    ],
+)
+def test_a_storage_root_written_another_way_is_refused_with_the_canonical_one(
+    catalog: CatalogService, principal: PrincipalRef, root: str, canonical: str
+) -> None:
+    """Two spellings of one place would hide each other's files from every location check."""
+    with pytest.raises(ValidationError) as refused:
+        catalog.create_environment(
+            principal, name="dev", storage=StorageConfig(scheme="file", root=root, options={})
+        )
+    assert repr(canonical) in str(refused.value)
+    assert catalog.list_environments(principal) == []
+
+
+@pytest.mark.parametrize("root", ["file:///data/../lake", "file:///data/l%61ke", "file:///d[1]"])
+def test_a_storage_root_that_cannot_be_normalised_is_refused(
+    catalog: CatalogService, principal: PrincipalRef, root: str
+) -> None:
+    """A ``..`` segment, a percent escape or a glob character: no spelling is offered."""
+    with pytest.raises(ValidationError, match="cannot be compared"):
+        catalog.create_environment(
+            principal, name="dev", storage=StorageConfig(scheme="file", root=root, options={})
+        )
+
+
+def test_a_storage_root_with_one_trailing_slash_is_accepted(
+    catalog: CatalogService, principal: PrincipalRef, tmp_path: Path
+) -> None:
+    """A trailing slash changes nothing: every location is built without it."""
+    catalog.create_environment(
+        principal,
+        name="dev",
+        storage=StorageConfig(scheme="file", root=f"file://{tmp_path}/", options={}),
+    )
+    assert catalog.get_environment(principal, "dev").name == "dev"
+
+
+@pytest.mark.parametrize(
+    ("root", "fix"),
+    [
+        ("file://data/lake", "an absolute path"),
+        ("file://localhost/data/lake", "'file:///data/lake'"),
+        ("file://server/share", "an absolute path"),
+    ],
+)
+def test_a_file_root_must_be_an_absolute_path_without_a_host(
+    catalog: CatalogService, principal: PrincipalRef, root: str, fix: str
+) -> None:
+    """A relative path is read against a working directory, and a host means nothing to Lakana."""
+    with pytest.raises(ValidationError) as refused:
+        catalog.create_environment(
+            principal, name="dev", storage=StorageConfig(scheme="file", root=root, options={})
+        )
+    assert fix in str(refused.value)
+
+
+def test_the_root_of_the_disk_is_accepted(catalog: CatalogService, principal: PrincipalRef) -> None:
+    """``file:///`` is canonical; it is not refused with itself as the spelling to use."""
+    catalog.create_environment(
+        principal, name="dev", storage=StorageConfig(scheme="file", root="file:///", options={})
+    )
+    assert catalog.get_environment(principal, "dev").storage_root == "file:///"

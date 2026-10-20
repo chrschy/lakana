@@ -41,7 +41,9 @@ class TableLocation(Base):
     when it is no longer `CLAIMED` (the publish fence). The sweep moves a claim to `ABANDONED`
     under the same row lock, and only after its holder run has ended or, without a holder, after
     `LAKANA_TABLES__ABANDONED_GRACE_HOURS`. Files are deleted only from a location that has a
-    record in a purgeable state; a directory without a record is never deleted.
+    record in a purgeable state; a directory without a record is never deleted unattended (the
+    removal of directories older releases left, `lakana_core.catalog.orphaned_locations`, gives
+    one an `ABANDONED` record first, on an administrator's request).
 
     `table_id` has no foreign key, so the record outlives the row of a dropped table and an undo
     can find it again. The record goes with its environment.

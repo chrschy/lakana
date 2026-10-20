@@ -22,7 +22,8 @@ query path sit relative to `lakana-core`/`lakana-server`, see `docs/agent/archit
   runs `publish_location` in the transaction that inserts the row and rolls back when it moves
   nothing). Never write a file under a location without a record, never insert an `ICEBERG` row
   without the fence, and never delete table files outside `lakana_core.catalog.location_sweep` or
-  `_release_location`. See "Table locations" below.
+  `_release_location` (`lakana_core.catalog.orphaned_locations` deletes only through the sweep's
+  purge). See "Table locations" below.
 - **An `EXTERNAL` table claims an exclusive `raw/<dir>` directory**
   (`lakana_core.catalog.external_location`), not an arbitrary glob. Any new code that lists
   or resolves an external table's files must go through `parse_external_location`/
@@ -1245,7 +1246,14 @@ row's metadata lies under the location, else `ABANDONED` with `purge_after = now
 `purge_after` is purged only if its location is canonical, strictly inside `managed/` of its
 environment's root and ends in `-<32 hex>`, and nothing in use is the location or lies inside it in
 **any** environment (`location_in_use`: `LIVE`/`CLAIMED` records and `tables` rows; plus
-`table_root_locations` with `nested_locations_within`; maintenance uses `other_table_locations`). Before **each** delete,
+`table_root_locations` with `nested_locations_within`; maintenance uses `other_table_locations`), and
+`near_other_location` finds nothing, checked after those two (no other environment's root at,
+inside, or from at or inside `managed/` around it, and none holding this root in its
+`UNRECORDED_ZONES` (`raw/`, `artifacts/`, `_artifacts/`, whose files have no record); no `LIVE`/`CLAIMED`/`DROPPED` record other than its
+own, and no table directory, at or inside it under any of the `readings` described in the #229
+section below; an unreadable location on the same scheme fails closed): the spelling comparisons
+above fail open on another spelling of the same place, so the purge counts `purges_blocked` and
+logs `UNJUDGED_MESSAGE` instead. Before **each** delete,
 under the record's lock, the record must still be purgeable and `location_in_use` false again; only
 objects strictly inside the location with sane segments are deleted; the record goes last, with
 `TABLE_PURGED` (`files`, `bytes`, `complete`); a pass that stops part-way records `complete: false`
@@ -1477,8 +1485,9 @@ with `include_deleted`, expires nothing in them, and never makes a claim in one 
 environment's purges, `purge_environment` takes the row's lock (`lock_row`), decides again (still
 deleted, `purge_after <= now`, no `table_locations` row of the environment in any state), revokes
 anything still active, records `ENVIRONMENT_PURGED` and deletes the row; the database cascades
-namespaces, artifact rows, secrets, runs and the rest. A record is created only with a claim, whose
-insert takes the row's key-share lock, so a claim cannot slip in between the check and the delete.
+namespaces, artifact rows, secrets, runs and the rest. A record is created only with a claim or by
+the removal of directories without a record (its `ABANDONED` reservation, below); either insert
+takes the row's key-share lock, so a record cannot slip in between the check and the delete.
 A nested or shared-root location still blocks a purge as before (`location_in_use`,
 `dropped_inside`, in every environment); the row then waits. Pins:
 `test_the_row_stays_until_the_last_record_is_gone`,
@@ -1490,7 +1499,79 @@ restored. A view created through a lookup made before the deletion can land in t
 environment (no files; restored with it or cascaded with the row). Queued runs of a deleted
 environment fail at the worker (the environment is not found). The artifacts' bytes are left in
 storage after the row goes. Environments deleted before this release left no row and no record;
-their directories are only counted (`unrecorded_directories`).
+their directories are only counted (`unrecorded_directories`) and removed on request (next section).
+
+### Directories without a record: listed, deleted on request (#229)
+
+User documentation: `docs/site/how-to/clean-up-files-left-by-older-releases.md`.
+`CatalogService.find_orphaned_locations` and `delete_orphaned_locations`
+(`lakana_core.catalog.orphaned_locations`; REST `GET/POST
+/api/v1/environments/{name}/orphaned-locations[/delete]`; `lakana env orphaned-locations`) are
+the only code that deletes a directory the catalog has no record of, and only when an administrator
+asks.
+
+**Who.** `MANAGE_ENVIRONMENT` on `Securable.instance_scope()`, checked before the environment is
+looked up: the walk sees every environment that shares the root, so an environment-scoped admin
+is refused (and audited as a denial). A deleted environment is accepted by name (its leftovers
+are the point); an unknown name is a 404 after the check.
+
+**What is listed.** Only what the sweep's own walk (`_Run.unrecorded_directories`: id-suffixed
+directories under `managed/` that hold files, never entering a known location or an id-suffixed
+directory) finds, and then only if `_eligible` holds: `_Run._confined` (canonical, strictly inside
+`managed/` of this root, ends in `-<32 hex>`); not `_Run._in_use` (`location_in_use` plus
+`table_root_locations` equal or nested, every environment); no `table_locations` row in **any**
+state at, inside or around it; no table's directory around it (the derived root, or for a metadata
+file outside `metadata/` the file's directory); and `near_other_location` (the sweep's check too)
+finds nothing: no other environment's storage root at, inside, or (from at or inside this
+`managed/`, so also a root that *is* `managed/`) around it, and none that holds this root in its
+`raw/`, `artifacts/` or `_artifacts/` (`UNRECORDED_ZONES`; listed as kept), however spelled, and no record or table location in a non-canonical spelling (doubled
+slash, `.`/`..`, scheme alias such as `s3a`/`FILE`, percent escape) that normalises to one of
+these. Canonical has one definition, `resolver.normalised_path` (empty and `.` segments
+dropped, a leading `//` included, which `posixpath.normpath` keeps; `..` unjudgeable), and a `file`
+location must be absolute with an empty host: `_is_canonical_uri`, `is_within_location` and
+`spelled_canonically` build on it, and `create_environment` refuses a root that is not canonical
+(`check_storage_root`, 422 naming the spelling to use; relative and host `file` roots, percent
+escapes, glob characters and scheme aliases refused too). `near_other_location` compares every
+root, record (`record_states`; never the purge's own) and table directory under all `readings`:
+percent-decoded up to three times, case-folded and NFC, `normpath` and, for `file`, `realpath`
+(symbolic links), object-store keys literal and with `..` resolved, `abfs` reduced to the
+container; a location with no reading (relative or host `file`, no scheme) blocks every deletion on
+its scheme. Roots stored before stay and meet this check. New table and namespace names refuse `%`
+(`refuse_percent_in_new_name`, called only where such a name is created; stored names stay usable). Residual: two paths to one directory
+that only the kernel knows (a bind mount, a network share mounted twice) are not seen; operators
+must not point two roots at one directory that way. A canonical other root makes the directory
+not listed; any other match lists it as kept, with a reason naming the location. Glob characters
+are taken literally (storage names are literal). A directory whose
+newest file is younger than `older_than_days` (1 to 3,650, default 30), or has a file of unknown
+age, is `recent` and never deleted. The listing writes nothing and records no event.
+
+**How it deletes.** Per directory: measure the age again, `_eligible` again, then insert and commit
+an `ABANDONED` record (`purge_after = now`) for the location. `location` is unique, so a create
+that claimed it first wins (the insert fails: kept) and one that tries later is refused. Then
+`_Run.purge` with `audited=False` (no `TABLE_PURGED`), unchanged: the same shape check, in-use and
+`dropped_inside` checks, `purge_started_at`, and per file, under that record's lock,
+`location_in_use` and `dropped_inside` again, only objects strictly inside with sane segments,
+the record last. A purge that does not finish (blocked, waiting, a storage error, an unjudgeable
+path, the deadline) deletes the record again, so the directory is unrecorded once more and the next
+call resumes it. The call has a 20-second deadline (half for the walk). One
+`ORPHANED_LOCATIONS_DELETED` per delete call, with the caller as principal: `environment`,
+`older_than_days`, `count`, `files`, `bytes`, `locations` (the first 100), `more_locations`,
+`kept`, `complete`. Pins: `test_orphaned_locations.py` (each record state, nested and enclosing
+tables and records, other environments' roots, the two claim races, a record appearing inside
+mid-deletion, the deadline, rights).
+
+**Never.** Nothing outside `managed/` of the named environment's root, nothing without the
+canonical id-suffixed name, nothing a record in any state names, holds or surrounds, nothing a table
+of any environment (deleted environments and tombstones included) uses, holds or surrounds, and no
+file newer than `older_than_days`.
+
+**Residuals, accepted.** The sweep's own (a process of an older release still writing into the
+directory; a namespace or an environment root created inside it between the last check and a
+delete; a delete in flight outliving the lock). A crash after the reservation leaves its
+`ABANDONED` record, and the sweep then finishes the deletion the administrator asked for (with its
+own `TABLE_PURGED`); a sweep running during the call can do the same. After a restore of the
+catalog from a backup, a table created after the backup has no record and is listed like a
+leftover: the docs tell the operator to keep `older_than_days` above the backup's age.
 
 ## Checks and the rollback (M5d-a)
 

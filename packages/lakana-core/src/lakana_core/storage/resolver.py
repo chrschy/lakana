@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import posixpath
+import re
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -15,7 +16,11 @@ from sqlalchemy.orm import Session
 
 from lakana_core.config import StorageConfig
 from lakana_core.errors import NotFoundError, ValidationError
-from lakana_core.identifiers import NamespacePath, validate_path_component
+from lakana_core.identifiers import (
+    NamespacePath,
+    refuse_percent_in_new_name,
+    validate_path_component,
+)
 from lakana_core.models import Environment, Secret
 from lakana_core.secrets.crypto import decrypt_secret_row
 from lakana_core.secrets.keys import KeyProvider
@@ -104,6 +109,42 @@ table's data across the whole `managed/` zone once DuckDB opened it.
 """
 
 
+SCHEME_ALIASES = {"s3a": "s3", "s3n": "s3", "abfss": "abfs"}
+"""Schemes that address the same storage as another one, by their usual name."""
+
+PERCENT_ESCAPE = re.compile(r"%[0-9A-Fa-f]{2}")
+"""A percent escape, which a backend may decode: a spelling with one cannot be normalised exactly.
+
+A glob character is taken literally when locations are compared: a storage backend deletes and
+lists by literal names, so it cannot make two spellings name one directory."""
+
+
+def normalised_path(rest: str) -> str | None:
+    """Spell the path of a location, the part after ``scheme://``, the one way it is compared.
+
+    The single definition of a canonical path: empty segments (a doubled slash anywhere, a
+    leading one included, which `posixpath.normpath` keeps) and ``.`` segments are dropped, one
+    leading ``/`` is kept, and no trailing ``/``. A path is canonical when it comes back
+    unchanged.
+
+    Parameters
+    ----------
+    rest
+        The path, such as ``/data/lake`` or ``bucket/lake``.
+
+    Returns
+    -------
+    str or None
+        The path; `None` when it has a ``..`` segment, whose target cannot be told from the
+        spelling alone.
+    """
+    segments = rest.split("/")
+    if ".." in segments:
+        return None
+    kept = "/".join(segment for segment in segments if segment not in {"", "."})
+    return ("/" if rest.startswith("/") else "") + kept
+
+
 def _is_canonical_uri(uri: str) -> bool:
     """Check whether `uri` has a scheme, no glob metacharacters, and a canonical path.
 
@@ -115,17 +156,80 @@ def _is_canonical_uri(uri: str) -> bool:
     Returns
     -------
     bool
-        `True` if `uri` has a ``scheme://`` prefix, its path component
-        contains none of `_GLOB_METACHARACTERS`, and that path component
-        equals its own `posixpath.normpath` (no `.`, `..`, or doubled
-        slashes).
+        `True` if `uri` has a ``scheme://`` prefix, its path component is not empty (and, for
+        ``file``, absolute with an empty host), contains none of `_GLOB_METACHARACTERS`, and
+        comes back unchanged from `normalised_path` (no `.`, `..`, doubled slash, leading
+        doubled slash or trailing slash).
     """
-    _scheme, sep, rest = uri.partition("://")
-    if not sep:
+    scheme, sep, rest = uri.partition("://")
+    if not sep or not rest:
         return False
+    if scheme.lower() == "file" and not rest.startswith("/"):
+        return False  # relative, or with a host: no one reading
     if any(char in rest for char in _GLOB_METACHARACTERS):
         return False
-    return posixpath.normpath(rest) == rest
+    return normalised_path(rest) == rest
+
+
+ROOT_UNJUDGEABLE_MESSAGE = (
+    "The storage root {root!r} cannot be compared with other locations. Write it without .. "
+    "segments, percent escapes (such as %20) and the characters * ? [ ], as a plain "
+    "scheme://path."
+)
+ROOT_RELATIVE_MESSAGE = (
+    "The storage root {root!r} is not an absolute path on this machine: a file root is "
+    "file:// followed by an absolute path and no host, such as 'file:///data/lake'. A relative "
+    "path would be read against each process's working directory."
+)
+ROOT_SPELLING_MESSAGE = (
+    "The storage root {root!r} is written differently from the way Lakana compares locations, "
+    "so the files of one environment could be taken for another's. Use {canonical!r} instead."
+)
+
+
+def check_storage_root(root: str) -> None:
+    """Refuse a storage root that is not written canonically.
+
+    Every table location is built from the root, so a root in another spelling of a place
+    (``file:////data``, ``.../a//b``, ``FILE://``, ``s3a://``) gives every location of the
+    environment a spelling that the location checks cannot compare with the others. One
+    trailing slash is accepted; locations are built without it.
+
+    Parameters
+    ----------
+    root
+        The root, ``scheme://path``.
+
+    Raises
+    ------
+    ValidationError
+        If a ``file`` root is relative or has a host (`ROOT_RELATIVE_MESSAGE`; ``localhost``
+        is named with the spelling to use), it cannot be normalised exactly
+        (`ROOT_UNJUDGEABLE_MESSAGE`), or its canonical spelling differs
+        (`ROOT_SPELLING_MESSAGE`, which names that spelling).
+    """
+    scheme, sep, rest = root.partition("://")
+    lowered = scheme.lower()
+    if lowered == "file" and not rest.startswith("/"):
+        host, slash, tail = rest.partition("/")
+        if host.lower() == "localhost" and slash:
+            raise ValidationError(
+                ROOT_SPELLING_MESSAGE.format(
+                    root=root, canonical=f"file:///{normalised_path(tail) or ''}"
+                )
+            )
+        raise ValidationError(ROOT_RELATIVE_MESSAGE.format(root=root))
+    path = normalised_path(rest)
+    if (
+        not sep
+        or path is None
+        or PERCENT_ESCAPE.search(rest)
+        or any(char in rest for char in _GLOB_METACHARACTERS)
+    ):
+        raise ValidationError(ROOT_UNJUDGEABLE_MESSAGE.format(root=root))
+    canonical = f"{SCHEME_ALIASES.get(lowered, lowered)}://{path}"
+    if root not in {canonical, canonical + "/"}:
+        raise ValidationError(ROOT_SPELLING_MESSAGE.format(root=root, canonical=canonical))
 
 
 def is_within_location(location: str, uri: str) -> bool:
@@ -428,9 +532,11 @@ class ResolvedStorage:
         ------
         ValidationError
             If `table` is empty, whitespace-only, ``.``, ``..``, or contains
-            ``.``, ``/`` or the unit separator.
+            ``.``, ``/`` or the unit separator, or ``%`` (only a new table gets a location:
+            `refuse_percent_in_new_name`).
         """
         validate_path_component(table, what="Table name")
+        refuse_percent_in_new_name(table, what="Table name")
         parts = "/".join(ns.parts)
         return f"{self.config.root.rstrip('/')}/{MANAGED_PREFIX}/{parts}/{table}-{table_id.hex}"
 

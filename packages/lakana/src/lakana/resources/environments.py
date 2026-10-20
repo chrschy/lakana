@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any
 
 from lakana._http import HttpTransport
-from lakana._models import Environment
+from lakana._models import Environment, OrphanedLocation, OrphanedLocations
 from lakana._routes import ROUTES
 
 
@@ -49,6 +49,40 @@ def _moment(value: str | None) -> datetime | None:
         The time.
     """
     return None if value is None else datetime.fromisoformat(value)
+
+
+def _orphaned_from_json(data: dict[str, Any]) -> OrphanedLocations:
+    """Build an `OrphanedLocations` from the platform API's JSON response body.
+
+    Parameters
+    ----------
+    data
+        The decoded `OrphanedLocationsOut` JSON body.
+
+    Returns
+    -------
+    OrphanedLocations
+        The parsed report.
+    """
+    return OrphanedLocations(
+        environment=data["environment"],
+        older_than_days=data["older_than_days"],
+        complete=data["complete"],
+        locations=[
+            OrphanedLocation(
+                location=item["location"],
+                files=item["files"],
+                bytes=item["bytes"],
+                newest_file_at=_moment(item["newest_file_at"]),
+                recent=item["recent"],
+                deleted=item["deleted"],
+                files_deleted=item["files_deleted"],
+                bytes_deleted=item["bytes_deleted"],
+                kept_because=item["kept_because"],
+            )
+            for item in data["locations"]
+        ],
+    )
 
 
 _EnvironmentList = list[Environment]
@@ -293,3 +327,70 @@ class Environments:
             ROUTES["environments.set_retention"], path_params={"name": name}, json={"days": days}
         )
         return _environment_from_json(response.json())
+
+    def orphaned_locations(self, name: str, *, older_than_days: int = 30) -> OrphanedLocations:
+        """List the table directories older releases left without a location record.
+
+        A dry run: nothing is deleted. Needs `MANAGE_ENVIRONMENT` on the instance; a deleted
+        environment is accepted.
+
+        Parameters
+        ----------
+        name
+            The environment's name.
+        older_than_days
+            A directory with a file newer than this many days (1 to 3,650) is listed as recent
+            and is never deleted.
+
+        Returns
+        -------
+        OrphanedLocations
+            The directories; `complete` is false when the server's time limit cut the listing.
+
+        Raises
+        ------
+        lakana.errors.NotFound
+            If no environment of this name exists.
+        lakana.errors.ValidationError
+            If `older_than_days` is out of range.
+        """
+        response = self._transport.request(
+            ROUTES["environments.orphaned_locations"],
+            path_params={"name": name},
+            params={"older_than_days": str(older_than_days)},
+        )
+        return _orphaned_from_json(response.json())
+
+    def delete_orphaned_locations(
+        self, name: str, *, older_than_days: int = 30
+    ) -> OrphanedLocations:
+        """Delete the table directories without a location record whose files are old enough.
+
+        Each directory is checked again first; one that a table, a create or a dropped table
+        now uses is kept, with the reason. Audited. Call again while `complete` is false.
+
+        Parameters
+        ----------
+        name
+            The environment's name.
+        older_than_days
+            Only directories whose newest file is older than this many days are deleted.
+
+        Returns
+        -------
+        OrphanedLocations
+            Each directory, deleted or with the reason it was kept.
+
+        Raises
+        ------
+        lakana.errors.NotFound
+            If no environment of this name exists.
+        lakana.errors.ValidationError
+            If `older_than_days` is out of range.
+        """
+        response = self._transport.request(
+            ROUTES["environments.delete_orphaned_locations"],
+            path_params={"name": name},
+            json={"older_than_days": older_than_days},
+        )
+        return _orphaned_from_json(response.json())

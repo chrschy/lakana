@@ -68,6 +68,12 @@ ROUTES: dict[str, Route] = {
     "environments.update_storage": Route("PATCH", "/api/v1/environments/{name}/storage"),
     "environments.set_protection": Route("PATCH", "/api/v1/environments/{name}"),
     "environments.set_retention": Route("PUT", "/api/v1/environments/{name}/retention"),
+    "environments.orphaned_locations": Route(
+        "GET", "/api/v1/environments/{name}/orphaned-locations"
+    ),
+    "environments.delete_orphaned_locations": Route(
+        "POST", "/api/v1/environments/{name}/orphaned-locations/delete"
+    ),
     "namespaces.create": Route("POST", "/api/v1/environments/{env}/namespaces"),
     "namespaces.get": Route("GET", "/api/v1/environments/{env}/namespaces/{path}"),
     "namespaces.list": Route("GET", "/api/v1/environments/{env}/namespaces"),

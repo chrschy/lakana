@@ -10,7 +10,7 @@ import pytest
 from core_test_helpers import _config
 from pyiceberg.schema import Schema
 from pyiceberg.types import LongType, NestedField, StringType
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from lakana_core.auth import Action, AllowAllAuthorization, PrincipalRef, SecurableKind
@@ -367,7 +367,10 @@ def test_percent_and_underscore_and_backslash_in_the_query_match_only_themselves
     catalog, admin = world.catalog, world.admin
     catalog.create_table(admin, TableRef("dev", _GOLD, "a_b"), schema=_schema("id", "x"))
     catalog.create_table(admin, TableRef("dev", _GOLD, "axb"), schema=_schema("id", "x"))
-    catalog.create_table(admin, TableRef("dev", _GOLD, "100%"), schema=_schema("id", "x"))
+    catalog.create_table(admin, TableRef("dev", _GOLD, "100x"), schema=_schema("id", "x"))
+    # New names may not hold `%`; one stored by an older release still must not widen a search.
+    world.session.execute(update(Table).where(Table.name == "100x").values(name="100%"))
+    world.session.commit()
     catalog.create_table(admin, TableRef("dev", _GOLD, "back\\slash"), schema=_schema("id", "x"))
 
     assert world.names(world.root, "a_b") == ["table:gold.a_b"]

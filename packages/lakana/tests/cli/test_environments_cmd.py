@@ -274,3 +274,241 @@ def test_env_delete_help_says_to_undeploy_first(tmp_path: Path) -> None:
     assert "Refused (409) while any repository is deployed to it" in text
     assert "lakana undeploy REPO --env NAME" in text
     assert "lakana env restore NAME" in text
+
+
+def _orphan(location: str, **fields: object) -> dict[str, object]:
+    """Build one directory of an orphaned-locations response.
+
+    Parameters
+    ----------
+    location
+        Its root-relative path.
+    **fields
+        Fields that differ from an old directory that a listing found.
+
+    Returns
+    -------
+    dict
+        The JSON object.
+    """
+    return {
+        "location": location,
+        "files": 2,
+        "bytes": 2048,
+        "newest_file_at": "2026-09-01T10:00:00+00:00",
+        "recent": False,
+        "deleted": False,
+        "files_deleted": 0,
+        "bytes_deleted": 0,
+        "kept_because": None,
+        **fields,
+    }
+
+
+def _orphans(*locations: dict[str, object], complete: bool = True) -> dict[str, object]:
+    """Build an orphaned-locations response for `dev`.
+
+    Parameters
+    ----------
+    *locations
+        Its directories.
+    complete
+        Whether the server finished.
+
+    Returns
+    -------
+    dict
+        The JSON body.
+    """
+    return {
+        "environment": "dev",
+        "older_than_days": 30,
+        "locations": list(locations),
+        "complete": complete,
+    }
+
+
+_LISTING = "/api/v1/environments/dev/orphaned-locations"
+_OLD = _orphan("managed/gold/orders-0123")
+_RECENT = _orphan("managed/gold/fresh-0123", recent=True, files=1, bytes=10)
+
+
+def test_env_orphaned_locations_is_a_dry_run_that_names_the_delete_command(
+    tmp_path: Path,
+) -> None:
+    """A table of what is there, a total line, and the command that deletes."""
+    api = FakeApi()
+    api.on("GET", _LISTING, json=_orphans(_OLD, _RECENT))
+
+    result = invoke(make_state(tmp_path, api), "env", "orphaned-locations", "dev")
+
+    assert result.exit_code == 0, result.stderr
+    assert "managed/gold/orders-0123" in result.stdout
+    assert "newest_file_at" in result.stdout
+    flat = " ".join(result.stdout.split())
+    assert (
+        "2 directories without a location record (3 files, 2.0 KiB). 1 has a file newer than "
+        "30 days and is kept. Delete the other 1 (2 files, 2.0 KiB) with: lakana env "
+        "orphaned-locations dev --older-than 30d --delete"
+    ) in flat
+    assert [(r.method, str(r.url.params)) for r in api.requests] == [("GET", "older_than_days=30")]
+
+
+def test_env_orphaned_locations_counts_in_words(tmp_path: Path) -> None:
+    """One directory, several recent ones."""
+    api = FakeApi()
+    api.on("GET", _LISTING, json=_orphans(_RECENT, _RECENT))
+    flat = " ".join(
+        invoke(make_state(tmp_path, api), "env", "orphaned-locations", "dev").stdout.split()
+    )
+    assert "2 have a file newer than 30 days and are kept. Nothing is old enough" in flat
+    api.on("GET", _LISTING, json=_orphans(_OLD))
+    flat = " ".join(
+        invoke(make_state(tmp_path, api), "env", "orphaned-locations", "dev").stdout.split()
+    )
+    assert "1 directory without a location record (2 files, 2.0 KiB). Delete them with:" in flat
+
+
+def test_env_orphaned_locations_with_nothing_found_says_so(tmp_path: Path) -> None:
+    """No table, no command to run."""
+    api = FakeApi()
+    api.on("GET", _LISTING, json=_orphans())
+    result = invoke(make_state(tmp_path, api), "env", "orphaned-locations", "dev")
+    assert result.exit_code == 0, result.stderr
+    assert "No table directories without a location record in dev's storage." in result.stdout
+    assert "--delete" not in result.stdout
+
+
+def test_env_orphaned_locations_says_when_the_listing_was_cut(tmp_path: Path) -> None:
+    """The server's time limit: the reader is told to run it again."""
+    api = FakeApi()
+    api.on("GET", _LISTING, json=_orphans(_RECENT, complete=False))
+    result = invoke(make_state(tmp_path, api), "env", "orphaned-locations", "dev")
+    assert result.exit_code == 0, result.stderr
+    assert "Nothing is old enough to delete" in " ".join(result.stdout.split())
+    assert "time limit" in result.stderr
+
+
+def test_env_orphaned_locations_delete_asks_first(tmp_path: Path) -> None:
+    """Without a terminal and without `--yes`, nothing is deleted."""
+    api = FakeApi()
+    api.on("GET", _LISTING, json=_orphans(_OLD))
+    refused = invoke(make_state(tmp_path, api), "env", "orphaned-locations", "dev", "--delete")
+    assert refused.exit_code == 2
+    assert "cannot be undone" in refused.stderr and "--yes" in refused.stderr
+    assert [r.method for r in api.requests] == ["GET"]
+
+
+def test_env_orphaned_locations_delete_with_a_confirmation(tmp_path: Path) -> None:
+    """Answering yes at the prompt deletes; the age goes in the body."""
+    api = FakeApi()
+    api.on("GET", _LISTING, json=_orphans(_OLD))
+    api.on(
+        "POST",
+        f"{_LISTING}/delete",
+        json=_orphans(
+            _orphan("managed/gold/orders-0123", deleted=True, files_deleted=2, bytes_deleted=2048)
+        ),
+    )
+    result = invoke(
+        make_state(tmp_path, api, interactive=True),
+        "env",
+        "orphaned-locations",
+        "dev",
+        "--older-than",
+        "45d",
+        "--delete",
+        input="y\n",
+    )
+    assert result.exit_code == 0, result.stderr
+    assert json.loads(api.requests[-1].content) == {"older_than_days": 45}
+    assert api.requests[0].url.params["older_than_days"] == "45"
+    assert "Deleted 1 directory (2 files, 2.0 KiB)" in " ".join(result.stdout.split())
+
+
+def test_env_orphaned_locations_delete_yes_reports_what_was_kept(tmp_path: Path) -> None:
+    """`--yes` skips the question; a kept directory shows why, and a cut run says to rerun."""
+    api = FakeApi()
+    api.on("GET", _LISTING, json=_orphans(_OLD))
+    api.on(
+        "POST",
+        f"{_LISTING}/delete",
+        json=_orphans(
+            _orphan("managed/gold/orders-0123", kept_because="a create claimed it"),
+            complete=False,
+        ),
+    )
+    result = invoke(
+        make_state(tmp_path, api), "env", "orphaned-locations", "dev", "--delete", "--yes"
+    )
+    assert result.exit_code == 0, result.stderr
+    flat = " ".join(result.stdout.split())
+    assert "a create claimed it" in flat
+    assert "Deleted 0 directories (0 files, 0 B); 1 kept." in flat
+    assert "run the same command again" in result.stderr
+
+
+def test_env_orphaned_locations_delete_with_nothing_old_enough_sends_nothing(
+    tmp_path: Path,
+) -> None:
+    """Only recent directories: no question and no deletion."""
+    api = FakeApi()
+    api.on("GET", _LISTING, json=_orphans(_RECENT))
+    result = invoke(
+        make_state(tmp_path, api), "env", "orphaned-locations", "dev", "--delete", "--yes"
+    )
+    assert result.exit_code == 0, result.stderr
+    assert "Nothing is old enough to delete" in " ".join(result.stdout.split())
+    assert [r.method for r in api.requests] == ["GET"]
+
+
+def test_env_orphaned_locations_json(tmp_path: Path) -> None:
+    """`--output json` prints the report as the server sent it."""
+    api = FakeApi()
+    api.on("GET", _LISTING, json=_orphans(_OLD))
+    result = invoke(
+        make_state(tmp_path, api), "--output", "json", "env", "orphaned-locations", "dev"
+    )
+    assert result.exit_code == 0, result.stderr
+    assert json.loads(result.stdout) == _orphans(_OLD)
+
+
+def test_env_orphaned_locations_refuses_a_bad_age(tmp_path: Path) -> None:
+    """The age is days, written like 30d."""
+    result = invoke(
+        make_state(tmp_path, FakeApi()), "env", "orphaned-locations", "dev", "--older-than", "1w"
+    )
+    assert result.exit_code == 2
+    assert "--older-than takes 1 to 3650 days, written like 30d or 30" in result.stderr
+
+
+def test_env_orphaned_locations_delete_json(tmp_path: Path) -> None:
+    """`--output json --delete --yes` prints only the deletion's report."""
+    api = FakeApi()
+    api.on("GET", _LISTING, json=_orphans(_OLD))
+    gone = _orphans(_orphan("managed/gold/orders-0123", deleted=True))
+    api.on("POST", f"{_LISTING}/delete", json=gone)
+    result = invoke(
+        make_state(tmp_path, api),
+        "--output",
+        "json",
+        "env",
+        "orphaned-locations",
+        "dev",
+        "--delete",
+        "--yes",
+    )
+    assert result.exit_code == 0, result.stderr
+    assert json.loads(result.stdout) == gone
+
+
+def test_env_orphaned_locations_shows_why_a_directory_is_kept(tmp_path: Path) -> None:
+    """A directory the server keeps for a reason is shown with it and not offered for deletion."""
+    api = FakeApi()
+    named = _orphan("managed/gold/odd-0123", kept_because="a location cannot be compared: x//y")
+    api.on("GET", _LISTING, json=_orphans(_OLD, named))
+    result = invoke(make_state(tmp_path, api), "env", "orphaned-locations", "dev")
+    assert result.exit_code == 0, result.stderr
+    flat = " ".join(result.stdout.split())
+    assert "kept_because" in result.stdout and "x//y" in flat
+    assert "1 is kept for the reason shown. Delete the other 1 (2 files, 2.0 KiB)" in flat

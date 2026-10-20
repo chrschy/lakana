@@ -7,8 +7,11 @@ from urllib.parse import urlsplit
 
 import typer
 
+from lakana._models import OrphanedLocation, OrphanedLocations
 from lakana.cli import _output
-from lakana.cli._state import CliError, confirm, parse_key_values, state_of
+from lakana.cli._retention import parse_within
+from lakana.cli._state import CliError, CliState, confirm, parse_key_values, state_of
+from lakana.cli.artifacts import human_size
 
 env_app = typer.Typer(help="Manage environments.", no_args_is_help=True)
 
@@ -35,6 +38,13 @@ def create(
     option: _OPTIONS = None,
 ) -> None:
     """Create environment NAME (with bronze/silver/gold namespaces).
+
+    Write the storage root the one way Lakana compares locations: a lower-case scheme
+    (`s3`, not `s3a`), one slash between path segments and none doubled after `file://`
+    (`file:///data`, not `file:////data`), for `file` an absolute path and no host
+    (not `file://data` or `file://localhost/data`), no `.` or `..` segments, no percent escapes
+    and no `*`, `?`, `[` or `]`. One trailing slash is fine. Another spelling is refused, and the
+    message names the one to use.
 
     Parameters
     ----------
@@ -399,6 +409,227 @@ def _retention_line(name: str, days: int | None, *, now: bool) -> str:
         "last write or read. See what expires soon with: lakana table expiring --env "
         f"{shown}"
     )
+
+
+@env_app.command("orphaned-locations")
+def orphaned_locations(
+    ctx: typer.Context,
+    name: str,
+    older_than: Annotated[
+        str,
+        typer.Option(
+            "--older-than",
+            help="Only directories whose newest file is older than this many days, like 30d.",
+        ),
+    ] = "30d",
+    delete: Annotated[
+        bool,
+        typer.Option("--delete", help="Delete the directories listed as old enough."),
+    ] = False,
+    yes: _YES = False,
+) -> None:
+    """List, or with --delete remove, table directories older releases left without a record.
+
+    Releases before location records could leave table directories under `managed/` that no
+    table and no record names: tables dropped before the upgrade, creates that failed,
+    environments deleted before their tables could be restored. The worker's clean-up only
+    counts them. Without `--delete` this is a dry run: it lists each directory with its files,
+    size and newest file, and deletes nothing. A directory with a file newer than
+    `--older-than` (30 days by default) is never deleted. `--delete` asks first (`--yes`
+    skips the question), checks every directory again, and keeps one that a table, a create
+    or a dropped table now uses. NAME may be a deleted environment. Needs MANAGE_ENVIRONMENT
+    on the whole instance (the ADMIN role), because the storage root may be shared. After
+    restoring the catalog from a backup, keep `--older-than` above the backup's age: a table
+    created after the backup has no record either.
+
+    Parameters
+    ----------
+    ctx
+        The Typer context.
+    name
+        The environment.
+    older_than
+        `--older-than`, in days.
+    delete
+        `--delete`.
+    yes
+        Skip the confirmation prompt of `--delete`.
+    """
+    state = state_of(ctx)
+    days = parse_within(older_than, "--older-than", 30)
+    environments = state.client().environments
+    found = environments.orphaned_locations(name, older_than_days=days)
+    old = [entry for entry in found.locations if not entry.recent and entry.kept_because is None]
+    if not delete:
+        if state.output == "json":
+            _output.emit(state, found)
+            return
+        _show_listing(state, found, old, days)
+        return
+    if not old:
+        _output.done(state, _nothing_old(found, days), found)
+        _cut(state, found)
+        return
+    confirm(
+        state,
+        f"Delete {len(old)} table directories without a location record in {name!r}'s storage "
+        f"({_amount(old)})? This cannot be undone.",
+        yes,
+    )
+    report = environments.delete_orphaned_locations(name, older_than_days=days)
+    deleted = [entry for entry in report.locations if entry.deleted]
+    if state.output != "json":
+        _output.emit(
+            state,
+            report.locations,
+            columns=["location", "files_deleted", "bytes_deleted", "result"],
+            derived={"result": lambda entry: "deleted" if entry.deleted else entry.kept_because},
+            flexible=["result"],
+        )
+    files = sum(entry.files_deleted for entry in report.locations)
+    size = sum(entry.bytes_deleted for entry in report.locations)
+    _output.done(
+        state,
+        f"Deleted {_directories(len(deleted))} ({files} files, {human_size(size)}); "
+        f"{len(report.locations) - len(deleted)} kept.",
+        report,
+    )
+    if not report.complete:
+        _output.next_step(
+            state,
+            "The server stopped at its time limit with work left; run the same command again "
+            "to continue.",
+        )
+
+
+def _directories(count: int) -> str:
+    """Count directories in words.
+
+    Parameters
+    ----------
+    count
+        How many.
+
+    Returns
+    -------
+    str
+        Such as ``1 directory`` or ``2 directories``.
+    """
+    return f"{count} directory" if count == 1 else f"{count} directories"
+
+
+def _amount(entries: list[OrphanedLocation]) -> str:
+    """Say how many files and bytes some directories hold.
+
+    Parameters
+    ----------
+    entries
+        The directories.
+
+    Returns
+    -------
+    str
+        Such as ``3 files, 2.0 KiB``.
+    """
+    files = sum(entry.files for entry in entries)
+    return f"{files} files, {human_size(sum(entry.bytes for entry in entries))}"
+
+
+def _nothing_old(found: OrphanedLocations, days: int) -> str:
+    """Say that a listing found nothing to delete.
+
+    Parameters
+    ----------
+    found
+        The listing.
+    days
+        `--older-than`.
+
+    Returns
+    -------
+    str
+        One sentence.
+    """
+    if not found.locations:
+        return (
+            "No table directories without a location record in "
+            f"{_output.inline(found.environment)}'s storage."
+        )
+    return (
+        f"Nothing is old enough to delete: every directory listed has a file newer than {days} "
+        "days."
+    )
+
+
+def _show_listing(
+    state: CliState, found: OrphanedLocations, old: list[OrphanedLocation], days: int
+) -> None:
+    """Print a dry run: the directories, a total, and the command that deletes.
+
+    Parameters
+    ----------
+    state
+        The CLI state.
+    found
+        The listing.
+    old
+        Its directories that are old enough to delete.
+    days
+        `--older-than`.
+    """
+    if not found.locations:
+        _output.done(state, _nothing_old(found, days))
+        _cut(state, found)
+        return
+    _output.emit(
+        state,
+        found.locations,
+        columns=["location", "files", "bytes", "newest_file_at", "recent"]
+        + (["kept_because"] if any(entry.kept_because for entry in found.locations) else []),
+        flexible=["kept_because"],
+    )
+    total = (
+        f"{_directories(len(found.locations))} without a location record "
+        f"({_amount(found.locations)})."
+    )
+    recent = sum(1 for entry in found.locations if entry.recent and not entry.kept_because)
+    if recent:
+        verb = ("has", "is") if recent == 1 else ("have", "are")
+        total += f" {recent} {verb[0]} a file newer than {days} days and {verb[1]} kept."
+    named = len(found.locations) - len(old) - recent
+    if named:
+        total += f" {named} {'is' if named == 1 else 'are'} kept for the reason shown."
+    if old:
+        shown = _output.inline(found.environment)
+        total += (
+            f" Delete the other {len(old)} ({_amount(old)}) with: lakana env orphaned-locations "
+            f"{shown} --older-than {days}d --delete"
+            if recent or named
+            else f" Delete them with: lakana env orphaned-locations {shown} --older-than "
+            f"{days}d --delete"
+        )
+    else:
+        total += " " + _nothing_old(found, days)
+    _output.done(state, total)
+    _cut(state, found)
+
+
+def _cut(state: CliState, found: OrphanedLocations) -> None:
+    """Tell the reader when the server's time limit cut a listing short.
+
+    Parameters
+    ----------
+    state
+        The CLI state.
+    found
+        The listing.
+    """
+    if not found.complete:
+        _output.next_step(
+            state,
+            "The server stopped at its time limit, so the list may be incomplete; run the "
+            "command again, after a --delete, to see more.",
+        )
 
 
 def register(app: typer.Typer) -> None:

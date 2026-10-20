@@ -295,9 +295,17 @@ run that made the create has ended, or, for a create outside a run, once
 `LAKANA_TABLES__ABANDONED_GRACE_HOURS` (24 by default) have passed, it checks under a lock whether
 the table exists. If it does, everything is kept. If not, the sweep removes the files and then the
 record. It never removes a directory that has no record, nor one that holds or lies around a table
-that exists, in any environment that shares the storage root: it counts such directories and logs
+that exists, in any environment that shares the storage root, nor one that is, holds or lies (at or under
+`managed/`) around another environment's storage root, nor any in an environment whose root lies
+in another environment's `raw/`, `artifacts/` or `_artifacts/` directory, nor one that the same place under another
+name uses (a symbolic link, another case, a doubled slash, a `.` or `..` segment, a percent escape;
+a relative or host `file` location keeps everything on the local disk; it logs `The table location
+sweep left <location> alone: <location>, another environment's storage root or a location written
+another way …`): it counts such directories and logs
 `<n> table directories under managed/ in the storage of environment <env> have no location record;
-they are left alone.` (see "After a restore" below). The audit log records `TABLE_LOCATION_ABANDONED`
+they are left alone.` (see "After a restore" below). Directories that older releases left behind are
+counted the same way; remove them on request with `lakana env orphaned-locations` (see
+[Clean up files left by older releases](clean-up-files-left-by-older-releases.md)). The audit log records `TABLE_LOCATION_ABANDONED`
 when the sweep gives up a create (detail: `location`, `holder_run_id`, `claimed_at`) and
 `TABLE_PURGED` when it removes files (detail: `location`, `state`, `files`, `bytes`, and `complete`,
 which is `false` for a pass that stopped part-way and is continued by the next sweep). Both have no
@@ -752,7 +760,9 @@ not cover steps 1 and 3. Run the commands in the bundle's directory, with the
 profile `bundle init` saved (see [Quickstart](#quickstart)).
 
 1. Create the environment in the bundle's bucket, `lakana`, under its own prefix, with the
-   endpoint the services use inside the Compose network. It has no secret yet.
+   endpoint the services use inside the Compose network. It has no secret yet. Write the root
+   plainly, as below: a root spelled another way (`s3a://`, a doubled slash, a `.` or `..`
+   segment, a percent escape) is refused with the spelling to use instead.
 
 <!-- source: docs/examples/compose-add-environment.sh#create -->
 ```bash
@@ -1094,7 +1104,10 @@ never removes a directory it has no record of:
   `managed/` is left alone and counted in the line `<n> table directories under managed/ in the
   storage of environment <env> have no location record; they are left alone. ...` (logger
   `lakana_core.catalog.location_sweep`). Nothing reads those files. **Keep the directory**; there
-  is no command yet to bring such a table back into the catalog or to remove the directory.
+  is no command yet to bring such a table back into the catalog. `lakana env orphaned-locations`
+  lists such a directory like any leftover of an older release, so after a restore never run it
+  with `--delete` and an `--older-than` shorter than the backup's age (see
+  [Clean up files left by older releases](clean-up-files-left-by-older-releases.md)).
 - A table that was **being created at the moment of the backup** has a record that says the create
   had not finished. The restored catalog shows its run as running, the scheduler ends it about a
   minute after the start, and the next sweep then removes the files. If that table was in fact

@@ -852,6 +852,14 @@ _NOTHING_OF_A_KEPT_TABLE = {
         "only the environment; reading one goes through `load_table`"
     ),
     "list_deleted_environments": _NO_TABLE,
+    "find_orphaned_locations": (
+        "lists directories that no table and no location record names, with file counts and "
+        "sizes; no table's metadata and no file locations of a table"
+    ),
+    "delete_orphaned_locations": (
+        "deletes only directories that no table and no location record names, and returns "
+        "their counts; nothing of a table"
+    ),
     "update_environment_storage": _NO_TABLE,
     "set_environment_protection": _NO_TABLE,
     "create_namespace": _NO_TABLE,

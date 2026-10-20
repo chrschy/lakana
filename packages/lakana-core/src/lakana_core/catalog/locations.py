@@ -3,7 +3,9 @@
 A location is the directory a managed table's files live in (`ResolvedStorage.table_location`,
 suffixed with the table's id). The rule that lets Lakana delete such a directory unattended is
 the artifact store's: **a record exists before the first file, and a directory without a record
-is never deleted.**
+is never deleted unattended.** An administrator's explicit request
+(`lakana_core.catalog.orphaned_locations`) first gives such a directory a record and then deletes
+it as the sweep does.
 
 - A create inserts and commits a `CLAIMED` record (`claim_location`) before it writes the first
   metadata or data file.
@@ -19,22 +21,45 @@ is never deleted.**
 `location_in_use` is the check every deletion makes again right before it deletes: no `LIVE` or
 `CLAIMED` record and no `tables` row, in any environment, may name the location or one inside it.
 `dropped_inside` is the other: no `DROPPED` record (a dropped table within its undo period, or
-due but not purged yet) may lie inside it.
+due but not purged yet) may lie inside it. Both compare spellings; `near_other_location` is the
+third, for what a spelling comparison cannot see: another environment's storage root, and any
+location stored in a spelling that is not canonical.
 """
 
 from __future__ import annotations
 
+import os
+import posixpath
+import unicodedata
 import uuid
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
+from urllib.parse import unquote
 
 from sqlalchemy import delete, exists, literal, or_, select, union_all, update
 from sqlalchemy.orm import Session
 
 from lakana_core.auth import PrincipalRef
 from lakana_core.db import db_now, rowcount
-from lakana_core.models import Namespace, Table, TableLocation, TableLocationState
+from lakana_core.models import Environment, Namespace, Table, TableLocation, TableLocationState
 from lakana_core.models.table_location import IN_USE_STATES, PURGEABLE_STATES
-from lakana_core.storage.resolver import table_root_from_metadata_location
+from lakana_core.storage.resolver import (
+    ARTIFACTS_PREFIX,
+    MANAGED_PREFIX,
+    PERCENT_ESCAPE,
+    RAW_PREFIX,
+    SCHEME_ALIASES,
+    _is_canonical_uri,
+    table_root_from_metadata_location,
+)
+
+UNRECORDED_ZONES = (RAW_PREFIX, ARTIFACTS_PREFIX, "_artifacts")
+"""Directories of a storage root where an environment keeps files that no location record names.
+
+The raw landing zone, artifacts, and deploys' code archives (`lakana_core.projects.code_sweep`'s
+``CODE_PREFIX`` lies in ``_artifacts``). Another environment rooted at or inside one of them
+has its ``managed/`` among those files (`near_other_location`)."""
 
 PROTECTED_STATES = IN_USE_STATES | {TableLocationState.DROPPED}
 """Records whose files maintenance of another table must never take for its orphans."""
@@ -400,6 +425,275 @@ def table_root_locations(session: Session) -> list[str]:
         if metadata_location is not None
         and (location := table_root_from_metadata_location(metadata_location)) is not None
     ]
+
+
+Reading = tuple[str, str]
+"""One way a storage may read a location: its scheme (aliases resolved) and a comparable path."""
+
+
+@dataclass(frozen=True)
+class Nearby:
+    """A location that may be, hold or surround the directory a deletion is about to delete.
+
+    Parameters
+    ----------
+    location
+        The location as stored.
+    environment_root
+        Whether it is another environment's storage root (rather than a record or a table).
+    holds_this_root
+        Whether this environment's own root lies in one of that root's `UNRECORDED_ZONES`,
+        where it keeps files without a record: the directory may be its file or a leftover.
+    """
+
+    location: str
+    environment_root: bool
+    holds_this_root: bool = False
+
+
+def _scheme_of(uri: str) -> str | None:
+    """Name the storage scheme of a location, aliases resolved.
+
+    Parameters
+    ----------
+    uri
+        A stored location.
+
+    Returns
+    -------
+    str or None
+        Such as ``file`` or ``s3``; `None` without ``scheme://``.
+    """
+    scheme, sep, _ = uri.partition("://")
+    if not sep:
+        return None
+    lowered = scheme.lower()
+    return SCHEME_ALIASES.get(lowered, lowered)
+
+
+_MOST_DECODINGS = 3
+"""How many times a location is percent-decoded again, for a storage that decodes twice."""
+
+
+def _folded(path: str) -> str:
+    """Compare a path without case and in one Unicode form, as some disks and stores do.
+
+    Parameters
+    ----------
+    path
+        A path.
+
+    Returns
+    -------
+    str
+        NFC-normalised and case-folded.
+    """
+    return unicodedata.normalize("NFC", path).casefold()
+
+
+def readings(
+    uri: str, realpath: Callable[[str], str] = os.path.realpath
+) -> frozenset[Reading] | None:
+    """List every way a storage may read a location, so two spellings of one place share one.
+
+    Each spelling is read as written and percent-decoded, again up to `_MOST_DECODINGS` times
+    (decoding is exact, and some backends decode). Every path is compared without case and in
+    NFC (`_folded`), as case-insensitive or normalising disks and stores read it. For ``file``,
+    the path must be absolute with an empty host (``file:///...``); it is read lexically
+    (`posixpath.normpath`, which resolves ``.``, ``..`` and doubled slashes) and through
+    `os.path.realpath` (symbolic links). For an object store the key is read both literally
+    (empty and ``.`` segments dropped, as Lakana's own storage drops them) and with ``..``
+    resolved; for ``abfs`` the first segment is reduced to the container, whatever account it
+    names. Reading too many places as one only keeps more files.
+
+    Parameters
+    ----------
+    uri
+        A stored location.
+    realpath
+        Resolves symbolic links in a local path; `os.path.realpath` (a cache in a loop).
+
+    Returns
+    -------
+    frozenset of Reading or None
+        The readings; `None` when a location cannot be read at all: no scheme, or a ``file``
+        path that is relative (read against some process's working directory) or has a host.
+    """
+    scheme = _scheme_of(uri)
+    if scheme is None:
+        return None
+    rest = uri.partition("://")[2]
+    spellings = [rest]
+    while len(spellings) <= _MOST_DECODINGS and unquote(spellings[-1]) != spellings[-1]:
+        spellings.append(unquote(spellings[-1]))
+    found: set[Reading] = set()
+    for text in spellings:
+        if scheme == "file":
+            if not text.startswith("/"):
+                return None
+            absolute = "/" + text.lstrip("/")
+            for path in (posixpath.normpath(absolute), realpath(absolute)):
+                found.add((scheme, _folded(posixpath.normpath("/" + path.lstrip("/")))))
+            continue
+        segments = [segment for segment in text.split("/") if segment not in {"", "."}]
+        if segments and scheme == "abfs":
+            segments[0] = segments[0].split("@", 1)[0]  # the container, whatever the account
+        literal = "/".join(segments)
+        found.add((scheme, _folded(literal)))
+        found.add((scheme, _folded(posixpath.normpath("/" + literal).lstrip("/"))))
+    return frozenset(found)
+
+
+def _inside(outer: frozenset[Reading], inner: frozenset[Reading]) -> bool:
+    """Say whether some reading of one location lies strictly inside some reading of another.
+
+    Parameters
+    ----------
+    outer
+        Readings of the outer location.
+    inner
+        Readings of the inner one.
+
+    Returns
+    -------
+    bool
+        Same scheme, and the inner path continues the outer one at a segment boundary.
+    """
+    return any(
+        o_scheme == i_scheme and i_path.startswith(o_path.rstrip("/") + "/")
+        for o_scheme, o_path in outer
+        for i_scheme, i_path in inner
+    )
+
+
+def spelled_canonically(uri: str) -> bool:
+    """Say whether a location is written canonically: `_is_canonical_uri`, usual scheme spelling.
+
+    Parameters
+    ----------
+    uri
+        A stored location.
+
+    Returns
+    -------
+    bool
+        Canonical (`_is_canonical_uri`), without a percent escape, with the scheme spelled the
+        usual way.
+    """
+    scheme = uri.partition("://")[0]
+    return (
+        _is_canonical_uri(uri)
+        and not PERCENT_ESCAPE.search(uri)
+        and scheme == scheme.lower()
+        and scheme not in SCHEME_ALIASES
+    )
+
+
+def near_other_location(
+    session: Session,
+    location: str,
+    *,
+    root: str,
+    record_states: frozenset[TableLocationState] = PROTECTED_STATES,
+    around: bool = False,
+) -> Nearby | None:
+    """Find a location that may be, hold or surround a directory under any spelling of either.
+
+    The check a deletion makes next to `location_in_use`, which compares spellings. It is about
+    to delete `location`, under ``managed/`` of the storage root `root`. Every location is
+    compared under all its `readings` (case, percent escapes, ``.``/``..``, doubled slashes,
+    symbolic links, scheme aliases), and it answers with:
+
+    - another environment's storage root that is the directory, lies inside it, or surrounds it
+      while lying at or under this root's ``managed/`` (a root that *is* ``managed/`` holds
+      every directory there);
+    - another environment's storage root that holds this root at or inside one of its
+      `UNRECORDED_ZONES` (raw files, artifacts, code archives: no record names them;
+      `Nearby.holds_this_root`). Inside its ``managed/`` its records count below, and
+      elsewhere in it nothing of it lives;
+    - a location record in `record_states`, other than `location` itself (a record never blocks
+      its own purge), or a table's directory (from its metadata file), that is the directory or
+      lies inside it, or, with `around`, surrounds it;
+    - a location that cannot be read at all (`readings` is `None`: a relative or host ``file``
+      path, no scheme) on the same scheme, because then nothing about it is known: the deletion
+      keeps the directory. So does a `location` or `root` that cannot be read.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    location
+        The canonical absolute directory about to be deleted.
+    root
+        The storage root of the environment it belongs to.
+    record_states
+        The records that count: the sweep's protected states (a nested `ABANDONED` record is
+        due anyway), or every state for the removal of directories without a record.
+    around
+        Whether a record or a table around the directory counts too.
+
+    Returns
+    -------
+    Nearby or None
+        The first such location as stored, or `None` when there is none.
+    """
+    cache: dict[str, str] = {}
+
+    def resolved(path: str) -> str:
+        if path not in cache:
+            cache[path] = os.path.realpath(path)
+        return cache[path]
+
+    target = readings(location, resolved)
+    base = root.rstrip("/") or root
+    own_root = readings(base, resolved)
+    own_managed = readings(f"{root.rstrip('/')}/{MANAGED_PREFIX}", resolved)
+    if target is None or own_root is None or own_managed is None:
+        return Nearby(location, environment_root=False)
+    scheme = _scheme_of(location)
+
+    def unreadable(other: str) -> bool:
+        return _scheme_of(other) in {None, scheme}
+
+    for stored in session.scalars(select(Environment.storage_root)):
+        if stored == root:
+            continue
+        other = readings(stored.rstrip("/") or stored, resolved)
+        if other is None:
+            if unreadable(stored):
+                return Nearby(stored, environment_root=True)
+            continue
+        if other & own_root:
+            continue  # another spelling of this root: a shared root, its records count below
+        if (
+            other & target
+            or _inside(target, other)
+            or ((other & own_managed or _inside(own_managed, other)) and _inside(other, target))
+        ):
+            return Nearby(stored, environment_root=True)
+        if _inside(other, own_root):
+            for zone in UNRECORDED_ZONES:
+                files = readings(f"{stored.rstrip('/')}/{zone}", resolved)
+                if files is None or files & own_root or _inside(files, own_root):
+                    return Nearby(stored, environment_root=True, holds_this_root=True)
+    records = select(TableLocation.location.label("path"), literal(False).label("derive")).where(
+        TableLocation.state.in_(record_states), TableLocation.location != location
+    )
+    tables = select(Table.metadata_location.label("path"), literal(True).label("derive")).where(
+        Table.metadata_location.is_not(None)
+    )
+    for path, derive in session.execute(union_all(records, tables)).all():
+        directory = (
+            (table_root_from_metadata_location(path) or path.rsplit("/", 1)[0]) if derive else path
+        )
+        other = readings(directory, resolved)
+        if other is None:
+            if unreadable(directory):
+                return Nearby(directory, environment_root=False)
+            continue
+        if other & target or _inside(target, other) or (around and _inside(other, target)):
+            return Nearby(directory, environment_root=False)
+    return None
 
 
 def abandon_claim(session: Session, record: TableLocation, *, now: datetime) -> None:

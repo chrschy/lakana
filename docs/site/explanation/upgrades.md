@@ -169,7 +169,7 @@ The sweep runs with the others every `LAKANA_RUN__SWEEP_INTERVAL` seconds and ne
 that exists or a directory that has no record: directories that an earlier release left behind
 (from a failed create, or from a drop) are only counted and reported in the worker's log, as
 `<n> table directories under managed/ in the storage of environment <env> have no location record;
-they are left alone.` A later release adds a command to remove them on request. The audit log gains
+they are left alone.` `lakana env orphaned-locations` removes them on request (below). The audit log gains
 `TABLE_LOCATION_ABANDONED` and `TABLE_PURGED`; see [The sweep](../how-to/deploy-with-compose.md#the-sweep).
 Going back to the previous release drops the records and keeps every file.
 
@@ -193,8 +193,8 @@ records the end of its own period. Migration `0043` adds two columns to `table_l
 deletes nothing.
 
 Tables dropped before this release have no undo period and are not deleted: their directories stay
-and are counted in the worker's log as directories without a record. A later release adds a command
-to remove them on request. Going back to the previous release drops the records, as above, and keeps
+and are counted in the worker's log as directories without a record; `lakana env orphaned-locations`
+removes them on request (below). Going back to the previous release drops the records, as above, and keeps
 every file; a table dropped in the meantime can no longer be restored.
 
 ### Tables can expire, and nothing does unless you say so
@@ -241,12 +241,59 @@ See [Delete and restore an environment](../how-to/drop-and-restore-a-table.md#de
   those grants back.
 - **Environments deleted before this release** left no trace in the catalog and kept every file;
   nothing changes for them. Their directories are counted in the worker's log as directories
-  without a record; a later release adds a command to remove them on request.
+  without a record; `lakana env orphaned-locations` removes them on request (below).
 
 Migration `0045` adds five columns to `environments`, empty on every row: no environment is deleted
 by the upgrade. Going back to the previous release drops the columns: an environment deleted
 meanwhile shows up again without its tables, each of which stays a dropped table that `lakana table
 undrop` restores within its undo period, as before.
+
+### A storage root must be written the one way locations are compared
+
+`lakana env create` (REST `POST /api/v1/environments`, SDK `environments.create`) now refuses a
+storage root written in another spelling of a place, with 422 and a message that names the
+spelling to use: an upper-case or alias scheme (`FILE://`, `s3a://`), a doubled slash anywhere
+(`file:////data`, `s3://bucket//lake`), a `.` or `..` segment, a percent escape, or `*`, `?`, `[`,
+`]`. One trailing slash is still accepted. Two spellings of one directory hide each other's files
+from the checks that keep the clean-up from deleting what another environment uses.
+
+Environments that already have such a root keep it. The clean-up never deletes files near one:
+see [Clean up files left by older releases](../how-to/clean-up-files-left-by-older-releases.md).
+**A location that starts with a doubled slash after the scheme (`file:////data/...`) no longer
+counts as canonical**, as other doubled slashes did not already: the tables of an environment whose
+root starts that way can no longer be read or maintained. Create a new environment with the
+canonical root (`file:///data/...`; the same directory on a local disk) and load its tables
+there again.
+
+**A `file` root must be an absolute path with no host**: `file:///data/lake`, not `file://data/lake`
+(read against each process's working directory) or `file://localhost/data/lake` (refused with
+`file:///data/lake` as the spelling to use). Locations of that kind no longer count as canonical
+either, so the tables of an existing environment with such a root can no longer be read; create one
+with an absolute root and load them there again. The clean-up keeps every file on the local disk
+while such an environment exists: delete it.
+
+**A new table or namespace name may not contain `%`** (a storage may read `%41` as `A`, so two
+names would share one directory); every other character is allowed except `.`, `/`, the unit
+separator and a NUL byte. Existing names with `%` stay readable, listable, droppable and renamable
+away, as dotted names do, and a project whose assets or checks name such a table still deploys.
+Other names (jobs, checks, repositories, package indexes, artifacts) may still contain `%`. The clean-up compares their locations both as written and decoded, so
+such a table keeps only the directory it names.
+
+### Remove the table directories older releases left behind
+
+Directories that earlier releases left under `managed/` without a record (tables dropped before
+this release, creates that failed, environments deleted before this release) are kept by the
+upgrade and by the sweep, and only counted in the worker's log. **Nothing is deleted unless you
+ask.** When you want the space back, `lakana env orphaned-locations ENV` lists them for an
+environment's storage root without deleting anything, and `lakana env orphaned-locations ENV
+--delete` removes those whose newest file is older than `--older-than` (30 days by default), each
+checked again under the sweep's lock first. It needs the admin role on the whole instance, accepts
+a deleted environment, and records `ORPHANED_LOCATIONS_DELETED` in the audit log. REST: `GET
+/api/v1/environments/{name}/orphaned-locations` and `POST
+/api/v1/environments/{name}/orphaned-locations/delete`; SDK: `environments.orphaned_locations` and
+`environments.delete_orphaned_locations`. If you restored the catalog from a backup, keep
+`--older-than` above the backup's age: a table created after the backup is listed too. See
+[Clean up files left by older releases](../how-to/clean-up-files-left-by-older-releases.md).
 
 ## Notes for 0.16.0
 

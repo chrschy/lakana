@@ -1039,3 +1039,18 @@ def test_an_unbound_or_environment_bound_storage_secret_is_read(
     resolved = StorageResolver(session, keys).for_environment("dev")
 
     assert resolved.config.options["access_key_id"] == "AKIA-NEVER-SHOWN"
+
+
+def test_a_leading_double_slash_is_not_canonical() -> None:
+    """``posixpath.normpath`` keeps two leading slashes; a location must not."""
+    assert not is_within_location("file:///store", "file:////store/managed/x")
+    assert not is_within_location("file:////store", "file:////store/managed/x")
+    assert is_within_location("file:///store", "file:///store/managed/x")
+    assert is_within_location("s3://bucket", "s3://bucket/x")
+    assert not is_within_location("s3://bucket", "s3://bucket//x")
+
+
+def test_a_relative_or_hosted_file_location_is_not_canonical() -> None:
+    """Without an absolute path and an empty host, a file location has no one reading."""
+    assert not is_within_location("file://store", "file://store/managed/x")
+    assert not is_within_location("file://localhost/data", "file://localhost/data/x")

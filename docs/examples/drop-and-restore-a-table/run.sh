@@ -111,3 +111,37 @@ case "$message" in
   *"undo period ended"*) ;;
   *) echo "unexpected refusal: $message" >&2; exit 1 ;;
 esac
+
+# Cleaning up a table directory an older release left without a record ("Clean up files left by
+# older releases"). The directory is made by hand here, 40 days old, as an old release left it.
+mkdir -p "$WORK/legacy"
+lakana env create legacy --storage-root "file://$WORK/legacy"
+leftover="$WORK/legacy/managed/gold/orders-0123456789abcdef0123456789abcdef"
+mkdir -p "$leftover/data"
+printf 'old' > "$leftover/data/00000.parquet"
+touch -d '40 days ago' "$leftover/data/00000.parquet"
+fresh="$WORK/legacy/managed/gold/events-fedcba9876543210fedcba9876543210"
+mkdir -p "$fresh/data"
+printf 'new' > "$fresh/data/00000.parquet"
+
+# docs:start orphaned-list
+lakana env orphaned-locations legacy
+# docs:end orphaned-list
+
+out=$(lakana --output json env orphaned-locations legacy)
+python3 -c '
+import json, sys
+found = json.loads(sys.argv[1])
+recent = {entry["location"]: entry["recent"] for entry in found["locations"]}
+assert recent == {
+    "managed/gold/orders-0123456789abcdef0123456789abcdef": False,
+    "managed/gold/events-fedcba9876543210fedcba9876543210": True,
+}, found
+' "$out"
+
+# docs:start orphaned-delete
+lakana env orphaned-locations legacy --older-than 30d --delete --yes
+# docs:end orphaned-delete
+
+test ! -e "$leftover/data/00000.parquet"
+test -e "$fresh/data/00000.parquet"

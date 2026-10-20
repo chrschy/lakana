@@ -200,13 +200,17 @@ def parse_day(text: str) -> date:
         ) from None
 
 
-def parse_within(text: str) -> int:
-    """Read the window of `table expiring --within`: days, with or without a ``d``.
+def parse_within(text: str, flag: str = "--within", example: int = 7) -> int:
+    """Read a number of days, with or without a ``d``: `table expiring --within` and others.
 
     Parameters
     ----------
     text
         ``7d`` or ``7``.
+    flag
+        The option, for the message.
+    example
+        The number the message shows as an example.
 
     Returns
     -------
@@ -221,7 +225,8 @@ def parse_within(text: str) -> int:
     digits = text.removesuffix("d")
     if not digits.isdigit() or not 1 <= int(digits) <= _MOST_DAYS:
         raise CliError(
-            f"--within takes 1 to {_MOST_DAYS} days, written like 7d or 7; got {text!r}."
+            f"{flag} takes 1 to {_MOST_DAYS} days, written like {example}d or {example}; "
+            f"got {text!r}."
         )
     return int(digits)
 

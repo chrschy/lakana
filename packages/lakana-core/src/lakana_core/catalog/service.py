@@ -129,6 +129,14 @@ from lakana_core.catalog.metadata import (
     read_metadata,
     write_metadata,
 )
+from lakana_core.catalog.orphaned_locations import (
+    AUDITED_LOCATIONS,
+    DEFAULT_OLDER_THAN_DAYS,
+    OrphanedLocations,
+    delete_orphaned_locations,
+    find_orphaned_locations,
+    target,
+)
 from lakana_core.catalog.retention import (
     DEFAULT_EXPIRY_WARNING_DAYS,
     NOT_MANAGED_MESSAGE,
@@ -201,6 +209,7 @@ from lakana_core.identifiers import (
     NAMESPACE_SEPARATOR,
     NamespacePath,
     TableRef,
+    refuse_percent_in_new_name,
     shown,
     validate_path_component,
 )
@@ -256,6 +265,7 @@ from lakana_core.storage.base import StoredObject
 from lakana_core.storage.resolver import (
     ResolvedStorage,
     StorageResolver,
+    check_storage_root,
     is_id_suffixed_location,
     is_within_location,
     nested_locations_within,
@@ -1099,6 +1109,9 @@ class CatalogService:
         AlreadyExistsError
             If an environment with that name already exists, also a deleted one whose files
             are kept (`NAME_HELD_MESSAGE` names the restore and the early purge).
+        ValidationError
+            If the storage root is not written canonically (`check_storage_root`; the message
+            names the spelling to use).
         PermissionDenied
             If the principal may not manage environments.
 
@@ -1111,6 +1124,7 @@ class CatalogService:
         root of — an environment nobody meant to delegate to them.
         """
         self._authz.authorize(p, Action.MANAGE_ENVIRONMENT, Securable.instance_scope())
+        check_storage_root(storage.root)
         existing = self._session.execute(
             select(Environment).where(Environment.name == name)
         ).scalar_one_or_none()
@@ -1408,6 +1422,135 @@ class CatalogService:
             )
         ]
 
+    def find_orphaned_locations(
+        self, p: PrincipalRef, name: str, *, older_than_days: int = DEFAULT_OLDER_THAN_DAYS
+    ) -> OrphanedLocations:
+        """List the table directories under an environment's ``managed/`` that no record names.
+
+        Directories older releases left behind (`lakana_core.catalog.orphaned_locations`).
+        Deletes nothing and records no audit event. A deleted environment is accepted: its
+        leftovers are what this is for.
+
+        Parameters
+        ----------
+        p
+            The acting principal; needs ``MANAGE_ENVIRONMENT`` on the instance, because the walk
+            sees the files of every environment that shares the storage root.
+        name
+            Environment name, deleted or not.
+        older_than_days
+            A directory whose newest file is younger is listed as recent.
+
+        Returns
+        -------
+        OrphanedLocations
+            The directories, oldest found first; ``complete`` is false when the time limit
+            stopped the walk.
+
+        Raises
+        ------
+        PermissionDenied
+            If the principal may not manage environments on the instance.
+        ValidationError
+            If `older_than_days` is not 1 to 3650.
+        NotFoundError
+            If no environment has that name.
+        """
+        self._authz.authorize(p, Action.MANAGE_ENVIRONMENT, Securable.instance_scope())
+        return self._orphaned(name, older_than_days, find_orphaned_locations)
+
+    def delete_orphaned_locations(
+        self, p: PrincipalRef, name: str, *, older_than_days: int = DEFAULT_OLDER_THAN_DAYS
+    ) -> OrphanedLocations:
+        """Delete the table directories without a record whose newest file is old enough.
+
+        Each one is checked again, reserved with a record, and purged under that record's lock
+        as the location sweep purges (`lakana_core.catalog.orphaned_locations`). One
+        `ORPHANED_LOCATIONS_DELETED` event records the call, also when nothing was deleted.
+
+        Parameters
+        ----------
+        p
+            The acting principal; needs ``MANAGE_ENVIRONMENT`` on the instance.
+        name
+            Environment name, deleted or not.
+        older_than_days
+            Only directories whose newest file is older are deleted.
+
+        Returns
+        -------
+        OrphanedLocations
+            Each directory, deleted or with the reason it was kept; ``complete`` is false when
+            the time limit stopped the call, and the next call continues.
+
+        Raises
+        ------
+        PermissionDenied
+            If the principal may not manage environments on the instance.
+        ValidationError
+            If `older_than_days` is not 1 to 3650.
+        NotFoundError
+            If no environment has that name.
+        """
+        self._authz.authorize(p, Action.MANAGE_ENVIRONMENT, Securable.instance_scope())
+        report = self._orphaned(name, older_than_days, delete_orphaned_locations)
+        deleted = [entry for entry in report.locations if entry.deleted]
+        AuditService(self._session).record(
+            p.id,
+            AuditEventType.ORPHANED_LOCATIONS_DELETED,
+            securable=Securable.environment_scope(name),
+            detail={
+                "environment": name,
+                "older_than_days": older_than_days,
+                "count": len(deleted),
+                "files": sum(entry.files_deleted for entry in report.locations),
+                "bytes": sum(entry.bytes_deleted for entry in report.locations),
+                "locations": [entry.location for entry in deleted[:AUDITED_LOCATIONS]],
+                "more_locations": max(0, len(deleted) - AUDITED_LOCATIONS),
+                "kept": len(report.locations) - len(deleted),
+                "complete": report.complete,
+            },
+        )
+        self._session.commit()
+        return report
+
+    def _orphaned(
+        self,
+        name: str,
+        older_than_days: int,
+        work: Callable[..., OrphanedLocations],
+    ) -> OrphanedLocations:
+        """Check the age, find the environment, and run a listing or a deletion.
+
+        The caller has authorized the principal first.
+
+        Parameters
+        ----------
+        name
+            Environment name, deleted or not.
+        older_than_days
+            The age asked for.
+        work
+            `find_orphaned_locations` or `delete_orphaned_locations`.
+
+        Returns
+        -------
+        OrphanedLocations
+            What `work` returned.
+        """
+        check_days(older_than_days, "older_than_days")
+        environment = target(self._session, name)
+        resolved = self._storage.for_environment(name, include_deleted=True)
+        now = db_now(self._session)
+        self._session.rollback()
+        return work(
+            self._session,
+            resolved.storage,
+            environment=environment,
+            now=now,
+            older_than_days=older_than_days,
+        )
+
     def _lock_environment_row(self, name: str) -> Environment | None:
         """Lock an environment's row by name, deleted or not, and read it again.
 
@@ -1665,6 +1808,7 @@ class CatalogService:
             parent); every newly named component is checked, at any depth.
         """
         validate_path_component(path.parts[-1], what="Namespace component")
+        refuse_percent_in_new_name(path.parts[-1], what="Namespace component")
         self._authz.authorize(
             p, Action.CREATE_NAMESPACE, Securable.namespace_scope(environment, path)
         )
@@ -1678,6 +1822,7 @@ class CatalogService:
         for depth, part in enumerate(path.parts, start=1):
             if self._lookup_namespace(env, NamespacePath(path.parts[:depth])) is None:
                 validate_path_component(part, what="Namespace component")
+                refuse_percent_in_new_name(part, what="Namespace component")
         if self._lookup_namespace(env, path) is not None:
             raise AlreadyExistsError(f"Namespace {path} already exists in {environment!r}.")
         ns = Namespace(
@@ -2396,6 +2541,7 @@ class CatalogService:
             If the principal may not create tables here.
         """
         validate_path_component(ref.name, what="Table name")
+        refuse_percent_in_new_name(ref.name, what="Table name")
         self._authz.authorize(
             p, Action.CREATE_TABLE, Securable.table_scope(ref.environment, ref.namespace, ref.name)
         )
@@ -5557,6 +5703,7 @@ class CatalogService:
                 )
         if existing is None:
             validate_path_component(ref.name, what="Table name")
+            refuse_percent_in_new_name(ref.name, what="Table name")
         if existing is not None and existing.table_type is TableType.ARTIFACT:
             raise AlreadyExistsError(
                 f"{ref.dotted()} is an artifact; a view can't replace it. Drop it first "
@@ -6673,6 +6820,7 @@ class CatalogService:
         target = ref if new_name is None else replace(ref, name=new_name)
         if new_name is not None:
             validate_path_component(new_name, what="Table name")
+            refuse_percent_in_new_name(new_name, what="Table name")
         self._authz.authorize(
             p, Action.DROP_TABLE, Securable.namespace_scope(ref.environment, ref.namespace)
         )
@@ -6916,6 +7064,7 @@ class CatalogService:
             destination.
         """
         validate_path_component(destination.name, what="Table name")
+        refuse_percent_in_new_name(destination.name, what="Table name")
         self._authz.authorize(
             p,
             Action.DROP_TABLE,

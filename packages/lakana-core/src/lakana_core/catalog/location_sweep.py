@@ -9,7 +9,8 @@ table data unattended, so the rules are the artifact store's:
 - **A directory without a record is never deleted.** Directories under ``managed/`` whose name
   ends in a table id and that hold files but have no record are counted
   (`unrecorded_directories`) and reported once per storage root and run: a restored database
-  may have forgotten them.
+  may have forgotten them. Only an administrator's request removes them
+  (`lakana_core.catalog.orphaned_locations`, which reuses this walk, these checks and this purge).
 
 What it does, per environment:
 
@@ -35,7 +36,12 @@ What it does, per environment:
    `CatalogService.maintain`; `purges_blocked` otherwise), and no `DROPPED` record may lie inside
    it (`dropped_inside`: a dropped table nested there keeps its files for its own undo period;
    the purge waits, `purges_waiting`, and is tried again by every later sweep until that table
-   is restored or purged itself). Then its files are deleted one at a
+   is restored or purged itself). Nor may another environment's storage root be the location,
+   lie inside it, or surround it from at or inside ``managed/``, nor hold this root in its raw,
+   artifact or code directories (`UNRECORDED_ZONES`), nor a record or table location stored
+   in a spelling that is not canonical normalise to one of these (`near_other_location`,
+   `purges_blocked`; one that cannot be normalised exactly blocks every purge on its storage).
+   Then its files are deleted one at a
    time, each under the record's lock, after checking again that the record is still purgeable
    and that nothing in use lies inside, and only objects strictly inside the location. The
    record goes last, with a `TABLE_PURGED` event (``complete``); a pass that stops part-way
@@ -72,7 +78,7 @@ import re
 import time
 import uuid
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, fields
 from datetime import datetime, timedelta
 from typing import TypeVar
@@ -88,10 +94,13 @@ from lakana_core.auth import Securable
 from lakana_core.catalog.append import root_relative_path
 from lakana_core.catalog.environment_deletion import purge_environment
 from lakana_core.catalog.locations import (
+    PROTECTED_STATES,
+    Nearby,
     abandon_claim,
     dropped_inside,
     location_in_use,
     lock_location,
+    near_other_location,
     own_table_id,
     table_root_locations,
 )
@@ -143,6 +152,12 @@ WAITING_MESSAGE = (
 BLOCKED_MESSAGE = (
     "The table location sweep left %s alone: a table, or a create in progress, uses this "
     "location or one inside it. Its record is kept and the next sweep looks again."
+)
+UNJUDGED_MESSAGE = (
+    "The table location sweep left %s alone: %s, another environment's storage root or a "
+    "location written another way (a link, a relative path, another case or escape), may be "
+    "it or lie inside it. Its record is kept; remove what is wrong, and the next sweep looks "
+    "again."
 )
 REFUSED_MESSAGE = (
     "The table location sweep did not purge %s: it is not a table directory under managed/ of "
@@ -277,6 +292,9 @@ class _Run:
         Whether shutdown was asked for.
     deleted
         Whether the environment is deleted: no claim in it is made `LIVE`.
+    audited
+        Whether a purge records a `TABLE_PURGED` event; the removal of directories without a
+        record (`lakana_core.catalog.orphaned_locations`) records its own event instead.
     """
 
     def __init__(
@@ -293,6 +311,7 @@ class _Run:
         should_stop: Callable[[], bool],
         *,
         deleted: bool = False,
+        audited: bool = True,
     ) -> None:
         self.counts: dict[str, int] = dict.fromkeys(_COUNTED, 0)
         self.stopped_early = False
@@ -307,6 +326,7 @@ class _Run:
         self._deadline = deadline
         self._should_stop = should_stop
         self._deleted = deleted
+        self._audited = audited
         self._failures = 0
 
     def _tick(self) -> None:
@@ -539,6 +559,40 @@ class _Run:
         finally:
             self._session.rollback()
 
+    def near_other(
+        self,
+        location: str,
+        *,
+        record_states: frozenset[TableLocationState] = PROTECTED_STATES,
+        around: bool = False,
+    ) -> Nearby | None:
+        """Find another environment's root, or a location under another spelling, near it.
+
+        Parameters
+        ----------
+        location
+            The location about to be purged.
+        record_states
+            The records that count (`near_other_location`).
+        around
+            Whether a record or a table around it counts too.
+
+        Returns
+        -------
+        Nearby or None
+            That location (`near_other_location`), or `None`.
+        """
+        try:
+            return near_other_location(
+                self._session,
+                location,
+                root=self._root,
+                record_states=record_states,
+                around=around,
+            )
+        finally:
+            self._session.rollback()
+
     def purge(self, record_id: uuid.UUID) -> None:
         """Delete a purgeable location's files, then its record.
 
@@ -570,6 +624,11 @@ class _Run:
         if self._waits(location):
             self._waiting(relative)
             return
+        nearby = self.near_other(location)
+        if nearby is not None:
+            self.counts["purges_blocked"] += 1
+            logger.warning(UNJUDGED_MESSAGE, shown(relative), shown(nearby.location))
+            return
         if not self._start(record_id):
             return
         tally = _Tally()
@@ -582,7 +641,7 @@ class _Run:
         except _Waiting:
             self._waiting(relative)
         finally:
-            if tally.files and not finished:
+            if tally.files and not finished and self._audited:
                 self._record_purge(location, state, tally, complete=False)
 
     def _start(self, record_id: uuid.UUID) -> bool:
@@ -785,7 +844,8 @@ class _Run:
             if dropped_inside(self._session, location):
                 raise _Waiting
             self._session.delete(record)
-            self._audit_purge(location, state, tally, complete=True)
+            if self._audited:
+                self._audit_purge(location, state, tally, complete=True)
             self._session.commit()
         finally:
             self._session.rollback()
@@ -851,8 +911,7 @@ class _Run:
     def unrecorded(self, known: set[str]) -> int:
         """Count table directories under ``managed/`` that hold files and have no record.
 
-        Walks one level at a time and never enters a directory whose location is known or
-        that ends in a table id, so a table's own files are never listed. Deletes nothing.
+        Deletes nothing.
 
         Parameters
         ----------
@@ -863,13 +922,30 @@ class _Run:
         -------
         int
             How many such directories were found before the deadline.
+        """
+        return sum(1 for _ in self.unrecorded_directories(known))
+
+    def unrecorded_directories(self, known: set[str]) -> Iterator[str]:
+        """Find the table directories under ``managed/`` that hold files and have no record.
+
+        Walks one level at a time and never enters a directory whose location is known or
+        that ends in a table id, so a table's own files are never listed. Deletes nothing.
+
+        Parameters
+        ----------
+        known
+            Every recorded location and every table's location, in every environment.
+
+        Yields
+        ------
+        str
+            Each directory's path relative to the root, as it is found.
 
         Raises
         ------
         _Spent
             When the deadline passed.
         """
-        count = 0
         pending = [MANAGED_PREFIX]
         while pending:
             directory = pending.pop()
@@ -883,8 +959,7 @@ class _Run:
                 if _TABLE_DIRECTORY.match(name) is None:
                     pending.append(path)
                 elif next(iter(self._storage.list_objects(path)), None) is not None:
-                    count += 1
-        return count
+                    yield path
 
 
 def _rotated(ids: list[_T], rotate: int) -> list[_T]:

@@ -103,8 +103,9 @@ and no later than one sweep after it**. The sweep runs every `LAKANA_RUN__SWEEP_
   is not listed by `--dropped` and cannot be restored. Register it again with
   `lakana table create-external`. A view has no files; a deploy of its project creates it again.
 - **Tables dropped before this release** have no undo period: their files stay, and the worker's log
-  counts their directories as directories without a record. A later release adds a command to remove
-  them.
+  counts their directories as directories without a record. Remove them when you choose with
+  `lakana env orphaned-locations`: see
+  [Clean up files left by older releases](clean-up-files-left-by-older-releases.md).
 
 ## Delete and restore an environment
 
@@ -155,7 +156,8 @@ lakana env delete sandbox --purge --yes
 
 The environment itself is removed by the first sweep after its undo period that finds none of its
 tables' files left. An environment deleted before this release kept every file and left no trace in
-the catalog; nothing changes for it, and a later release adds a command to remove such leftovers.
+the catalog; nothing changes for it. To remove such leftovers, see
+[Clean up files left by older releases](clean-up-files-left-by-older-releases.md).
 
 ## Through the APIs
 

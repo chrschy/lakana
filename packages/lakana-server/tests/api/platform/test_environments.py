@@ -602,3 +602,20 @@ def test_changing_options_of_an_environment_with_a_storage_secret_is_403_and_aud
         ]
     engine.dispose()
     assert "storage_options_move_secret" in reasons
+
+
+def test_a_storage_root_written_another_way_is_422_with_the_spelling_to_use(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """``file:////...`` is refused, and the answer says how to write it."""
+    response = client.post(
+        "/api/v1/environments",
+        headers=AUTH_HEADER,
+        json={
+            "name": "dev",
+            "storage": {"scheme": "file", "root": f"file:///{tmp_path}/dev", "options": {}},
+        },
+    )
+    assert response.status_code == 422, response.text
+    assert f"file://{tmp_path}/dev" in response.json()["detail"]
+    assert client.get("/api/v1/environments/dev", headers=AUTH_HEADER).status_code == 404

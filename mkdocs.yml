@@ -50,6 +50,7 @@ nav:
       - how-to/describe-a-table.md
       - how-to/drop-and-restore-a-table.md
       - how-to/let-tables-expire.md
+      - how-to/clean-up-files-left-by-older-releases.md
       - how-to/find-a-table.md
       - how-to/find-a-run.md
       - how-to/stop-a-query.md

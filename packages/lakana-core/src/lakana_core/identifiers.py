@@ -129,7 +129,8 @@ def validate_path_component(component: str, *, what: str, allow_dots: bool = Fal
     ValidationError
         If the component is empty, whitespace-only, is exactly ``.`` or
         ``..``, or contains ``/``, a NUL byte, or the unit separator, or
-        (unless `allow_dots`) contains ``.``.
+        (unless `allow_dots`) contains ``.``. A ``%`` is refused only in a new name
+        (`refuse_percent_in_new_name`).
     """
     if not component:
         raise ValidationError(f"{what} must not be empty.")
@@ -145,6 +146,35 @@ def validate_path_component(component: str, *, what: str, allow_dots: bool = Fal
         raise ValidationError(f"{what} must not be '.' or '..'.")
     if not allow_dots and "." in component:
         raise ValidationError(f"{what} '{shown(component)}' must not contain a '.'.")
+
+
+def refuse_percent_in_new_name(component: str, *, what: str) -> None:
+    """Refuse a ``%`` in a table or namespace name that is being created.
+
+    A storage may read ``%41`` as ``A``, so two new names would share one directory. Only the
+    places that create a table or namespace name call this (`CatalogService.create_namespace`
+    for each newly named component, `ResolvedStorage.table_location` for a new table, and the
+    view, external-table, rename and undrop targets). Parsing, discovery, matching and looking
+    up a name never do: names stored by an older release may hold a ``%`` and stay usable.
+
+    Parameters
+    ----------
+    component
+        The new name, already checked by `validate_path_component`.
+    what
+        Noun describing the component, as for `validate_path_component`.
+
+    Raises
+    ------
+    ValidationError
+        If the component contains ``%``; the message names every character that is allowed.
+    """
+    if "%" in component:
+        raise ValidationError(
+            f"{what} '{shown(component)}' must not contain '%': a storage may read '%41' as 'A', "
+            "so two names would share one directory. Every other character is allowed except "
+            "'.', '/', the unit separator and a NUL byte."
+        )
 
 
 @dataclass(frozen=True)

@@ -741,6 +741,20 @@ appears in a deleted environment. A restore needs `MANAGE_ENVIRONMENT`, brings b
 and policies that deletion took, and is refused whole once a purge of one of them has started. An
 external table's files are never deleted.
 
+Table directories that older releases left without a location record (#229) are never deleted by
+the sweep. `lakana env orphaned-locations ENV --delete` removes them on request: it needs
+`MANAGE_ENVIRONMENT` on the instance, never an environment's own grant, because the root can be
+shared; it deletes only canonical, id-suffixed directories strictly inside `managed/` that no
+record in any state and no table of any environment names, holds or surrounds, that are not
+another environment's root nor inside one (a root that is this `managed/` included), and none
+while this root lies in another environment's `raw/`, `artifacts/` or `_artifacts/`, compared under every reading a storage may give a location (case,
+Unicode form, percent decoding, `.`/`..`, doubled slashes, scheme aliases, symbolic links; a
+relative or host `file` location keeps everything on the local disk), the same comparison the
+sweep's purge makes, and only when their newest file is older than the age asked for (30
+days by default). Each is reserved by inserting a record for its location (unique, so a create
+that claimed it first wins) and then purged by the sweep's own purge, under that record's lock, with
+the same checks before every file. One audit event records each such call.
+
 ## M3 exit criteria
 
 The M3 epic defines three exit criteria:

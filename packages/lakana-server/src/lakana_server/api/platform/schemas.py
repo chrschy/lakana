@@ -17,6 +17,7 @@ from lakana_core.catalog.maintenance import (
     MAX_ORPHAN_AGE_HOURS,
     MIN_ORPHAN_AGE_HOURS,
 )
+from lakana_core.catalog.orphaned_locations import DEFAULT_OLDER_THAN_DAYS
 from lakana_core.catalog.writes import MAX_SOURCE_NAME, MAX_SOURCE_VERSIONS
 from lakana_core.grants.roles import Role
 from lakana_core.models import AuditEventType
@@ -156,6 +157,83 @@ class EnvironmentRetentionIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     days: int | None
+
+
+class OrphanedLocationsDeleteIn(BaseModel):
+    """Request body that deletes an environment's table directories without a location record.
+
+    Parameters
+    ----------
+    older_than_days
+        Only directories whose newest file is older than this many days (1 to 3,650) are
+        deleted; 30 when left out.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    older_than_days: int = DEFAULT_OLDER_THAN_DAYS
+
+
+class OrphanedLocationOut(BaseModel):
+    """One table directory under ``managed/`` that no location record names.
+
+    Parameters
+    ----------
+    location
+        Its path relative to the environment's storage root.
+    files
+        How many files it held when it was listed.
+    bytes
+        Their total size.
+    newest_file_at
+        When its newest file was last changed; `null` when the storage does not say.
+    recent
+        Whether a file is newer than `older_than_days`, or of unknown age: it is never deleted.
+    deleted
+        Whether the deletion removed it.
+    files_deleted
+        The files the deletion removed from it.
+    bytes_deleted
+        Their total size.
+    kept_because
+        Why the deletion left it; `null` in a listing and for a deleted directory.
+    """
+
+    model_config = {"from_attributes": True}
+
+    location: str
+    files: int
+    bytes: int
+    newest_file_at: datetime | None
+    recent: bool
+    deleted: bool
+    files_deleted: int
+    bytes_deleted: int
+    kept_because: str | None
+
+
+class OrphanedLocationsOut(BaseModel):
+    """What a listing or a deletion of directories without a location record found and did.
+
+    Parameters
+    ----------
+    environment
+        The environment whose storage root was looked at.
+    older_than_days
+        The age asked for.
+    locations
+        The directories.
+    complete
+        `false` when the server's time limit stopped the call with work left; call again to
+        continue.
+    """
+
+    model_config = {"from_attributes": True}
+
+    environment: str
+    older_than_days: int
+    locations: list[OrphanedLocationOut]
+    complete: bool
 
 
 class TableRetentionIn(BaseModel):
