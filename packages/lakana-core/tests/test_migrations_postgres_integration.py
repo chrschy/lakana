@@ -2324,3 +2324,32 @@ def test_0046_on_postgres() -> None:
         names = {i["name"] for i in sqlalchemy.inspect(engine).get_indexes("audit_events")}
         assert name not in names
         engine.dispose()
+
+
+def test_0047_on_postgres() -> None:
+    """0047 creates the CI OIDC tables and `deploy_runs.ci_token_id`, and drops them down."""
+    revision_0046 = "00591a77722d"
+    revision_0047 = "e0d9e6185736"
+    tables = {"ci_trust_rules", "ci_tokens", "ci_oidc_jtis"}
+    with PostgresContainer("postgres:16", driver="pg8000") as pg:
+        url = pg.get_connection_url()
+        migrate.upgrade(url, revision_0046)
+        engine = sqlalchemy.create_engine(url)
+
+        migrate.upgrade(url, revision_0047)
+        assert _alembic_version(engine) == revision_0047
+        inspector = sqlalchemy.inspect(engine)
+        assert tables <= set(inspector.get_table_names())
+        assert "ci_token_id" in {c["name"] for c in inspector.get_columns("deploy_runs")}
+        assert {
+            (tuple(fk["constrained_columns"]), fk["referred_table"], fk["options"].get("ondelete"))
+            for fk in inspector.get_foreign_keys("ci_tokens")
+            if fk["constrained_columns"] == ["rule_id"]
+        } == {(("rule_id",), "ci_trust_rules", "SET NULL")}
+
+        migrate.downgrade(url, revision_0046)
+        assert _alembic_version(engine) == revision_0046
+        inspector = sqlalchemy.inspect(engine)
+        assert not tables & set(inspector.get_table_names())
+        assert "ci_token_id" not in {c["name"] for c in inspector.get_columns("deploy_runs")}
+        engine.dispose()

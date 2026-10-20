@@ -27,7 +27,7 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from lakana_core.auth import AuthorizationService, PrincipalRef
+from lakana_core.auth import AuthorizationService, CiScope, PrincipalRef
 from lakana_core.errors import (
     ConflictError,
     LakanaError,
@@ -563,7 +563,7 @@ def run_deploy(
     run.started_at = datetime.now(UTC)
     session.commit()
     try:
-        service.authorize_deploy(principal, environment.name)
+        ci_scope = service.authorize_deploy(principal, environment.name, run)
         if kind is DeployKind.ROLLBACK:
             service.execute_rollback(principal, run, worker_id=worker_id)
             return
@@ -578,6 +578,7 @@ def run_deploy(
             settings,
             clock,
             worker_id,
+            ci_scope,
         )
     except PermissionDenied as exc:
         session.rollback()
@@ -602,6 +603,7 @@ def _deploy(
     settings: DeploySettings,
     clock: Callable[[], float],
     worker_id: str | None,
+    ci_scope: CiScope | None = None,
 ) -> None:
     """Fetch, discover, parse, validate, diff and (unless a dry run) record.
 
@@ -628,6 +630,9 @@ def _deploy(
     worker_id
         The id the run was claimed under; the records are refused if the run is no longer
         `running` under it.
+    ci_scope
+        The scope of the CI token that queued the run (`DeployService.authorize_deploy`), or
+        `None`. A deploy it queued must fetch exactly its signed commit.
 
     Raises
     ------
@@ -635,6 +640,8 @@ def _deploy(
         With every project issue.
     GitError
         If fetching fails or the job runs out of time.
+    PermissionDenied
+        If a CI token's deploy fetched another commit than the token's.
     """
     limits = settings.limits
     deadline = clock() + limits.job_seconds
@@ -667,6 +674,8 @@ def _deploy(
         credential = None
         run.resolved_sha = fetched.sha
         session.commit()
+        if ci_scope is not None:
+            service.check_ci_commit(principal, ci_scope, kind, fetched.sha)
         checkout = discover(fetched.tree, limits=limits)
         config = parse_project_config(checkout.config_text or "", limits=limits).resolved_for(
             environment_name

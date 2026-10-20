@@ -81,7 +81,7 @@ should be read as a roadmap — see "Current posture" below for what has actuall
 | Credential leakage through a deploy | A repository's credential is a secret *name* resolved in the deploy's own environment scope by the worker (`lakana_worker.deploy.resolve_credential`); the value exists only in memory and in 0600 files (askpass 0700) under a 0700 directory removed in `finally`, never in argv, logs, audit details or `error_message`. git's stderr is redacted (token, its basic-auth form, key, URL userinfo); 401/403/404 collapse to one message. git runs with a minimal environment — no `LAKANA_*`, database, storage or KMS variable. Corporate proxies and internal CAs are explicit operator settings (`LAKANA_GIT__HTTPS_PROXY`, `NO_PROXY`, `CA_BUNDLE`), validated by shape (a username-only proxy URL is refused, and the askpass helper answers only the repository's own origin, so the repository token never reaches a proxy), passed to `https` fetches only as `http.proxy`, `no_proxy`, `http.sslCAInfo` and `http.proxySSLCAInfo` (the worker's own proxy variables are still not inherited), with proxy credentials redacted like the token and the URL held as a `SecretStr`; a CA bundle replaces trust and never disables verification, and the operator who sets a proxy trusts it to see which repository host is contacted (TLS is still end to end). | M5b |
 | Malicious repository content | Local repositories are fetched into a fresh bare repository, never used in place; the commit is exported with `git archive`, so no checkout, hook or smudge filter runs. `git-upload-pack` does read the *source's* own config (command-scope settings never reach it), but runs no working-tree, fsmonitor or hook code and git refuses a repo-level `uploadpack.packObjectsHook`; canaries for `core.fsmonitor`, `core.hooksPath`, `uploadpack.packObjectsHook` and `core.alternateRefsCommand` never run. The source is trusted by path only: a private global git config marks exactly the resolved source (and its `.git`) as `safe.directory`, because the Compose `./repos` mount is owned by another uid; `LAKANA_REPO_ROOTS` therefore holds *trusted content* (a gitfile, `alternates` or `commondir` inside a root can point outside it). Symlinks under `assets/` or as `lakana.yaml` are refused by name, never followed; 1 MiB per SQL file, 2000 assets, 200 MiB checkout, 120 s per git command, 600 s per deploy; `RecursionError` in sqlglot is a validation error. YAML is loaded with a `SafeLoader` that refuses anchors and aliases (no alias bombs) within 64 KiB per document. | M5b |
 | Discovering tables through a deploy | An external input the deployer cannot read reports "not found", exactly like a missing one; manifests withhold an asset's SQL, references and lineage unless the reader can read every referenced table (`hidden_references`), and drop unreadable external inputs. | M5b |
-| Deploying to a protected environment from a laptop | `DEPLOY` is a per-environment grant; "only CI deploys to prod" means only the CI service principal holds it there — and since the `ADMIN` role holds every action but `READ_QUERY_TEXT`, it also means no human holds `ADMIN` on the instance or on `prod` (the bootstrap admin holds it on the instance). It is re-checked when the worker claims the run. **Scope:** per environment, not per repository — a principal with `DEPLOY` on `prod` can deploy any registered repository there. CI authenticates with a stored PAT; OIDC token exchange is #15. | M5b |
+| Deploying to a protected environment from a laptop | `DEPLOY` is a per-environment grant; "only CI deploys to prod" means only the CI service principal holds it there — and since the `ADMIN` role holds every action but `READ_QUERY_TEXT`, it also means no human holds `ADMIN` on the instance or on `prod` (the bootstrap admin holds it on the instance). It is re-checked when the worker claims the run. **Scope:** per environment, not per repository — a principal with `DEPLOY` on `prod` can deploy any registered repository there. CI authenticates with a stored PAT, or (#15) exchanges its OIDC ID token for a CI token that the CI trust rule narrows to one repository, one kind and one signed commit; see "CI OIDC exchange (#15)" below. | M5b, #15 |
 | Malicious or compromised task code | A Python task is trusted code from a reviewed repository. `LocalProcessRunner` is **not a sandbox**: the task runs as the worker's operating-system user, can read what the worker can read and can write the shared venv cache; the scrubbed environment and the private attempt directory are hygiene. **One instance is one trust domain**: everyone who may deploy Python code is trusted with everything the worker can read, so run one instance per client. What limits a task is its token: bound to the attempt, `READ_TABLE` on declared inputs only, `CREATE_TABLE`/`WRITE_TABLE` on its own table or artifact only, no drop (and never the deletion of an artifact version), no listing, no administrative action; in a protected environment the lockdown holds it to its own asset. Deploy never executes repository code (`ast` discovery, TOML parsing). Container isolation (`DockerRunner`, M7b, #38) is the planned answer. **Residual, by design until then:** a task can poison the venv cache for other tasks that share its lock, and read the worker's credentials | M5c2a (isolation: M7b) |
 | Supply chain of a task's dependencies | Dependencies are user code and run with the task's token. The venv is built from the committed `uv.lock` (`uv sync --frozen`: hashes pinned by the lock) by a subprocess with a from-scratch environment, a time and size limit and no ambient proxy or credentials; local path and workspace dependencies are refused; its output is redacted. A package built from source runs its build backend as the worker's user with network access, and sees the index and proxy credentials of the build. Registered private indexes and their credentials: see the two M5c2c rows below | M5c2a |
 | A project that sends a package index credential to another host | The worker defines the registered index itself in `UV_INDEX`, with the credential inside the URL, so uv binds it to that index's scheme, host and port: another host, or another port of the same host, never receives it, whatever the project's files say. The build runs `uv sync --frozen --no-config` with a fresh, empty `HOME`. **Read at build time:** the lock, the index definitions in the project's `[[tool.uv.index]]` tables, and the operator's proxy and CA settings (`LAKANA_RUN__HTTPS_PROXY`, `LAKANA_RUN__CA_BUNDLE`). **Not read:** the project's `[tool.uv]` settings, any `uv.toml`, a `.netrc`. Proved by unit tests against the real uv (`packages/lakana-worker/tests/test_index_credentials.py`: another host, a redirect, a reused index name, the proxy setting) and, for deploy and run, by `test_python_assets_integration.py`, whose `test_a_project_that_names_another_host_gives_that_host_no_credential` drives a build of a project that names another host and finds no `Authorization` header there. **Real and shipped.** | M5c2c |
@@ -317,6 +317,60 @@ What a registered index's URL may look like is stated once, in
 user name, query or fragment, a plain host, path segments of letters, digits and `- . _ ~ + @`,
 and none of six hosts of the public index; TestPyPI (`test.pypi.org`) only without a credential.
 A form outside that is not supported and cannot be registered.
+
+## CI OIDC exchange (#15)
+
+A CI job exchanges its provider's OIDC ID token (`POST /api/v1/auth/oidc/token`, no credential)
+for a CI token (`lakana_ci_…`). The details and the code are in `docs/agent/security.md`, "CI
+OIDC exchange and CI tokens (#15)"; the user's view is
+[CI trust rules and CI tokens](../site/reference/ci-trust-rules.md).
+
+### What is defended
+
+- **Forged or borrowed ID tokens.** The verifier (#15, part 1) pins the issuer, the algorithm and
+  the audience; anyone can obtain an ID token of GitHub or GitLab for any audience, so the rule's
+  conditions decide. Every rule pins the numeric repository or project id, which a rename, a
+  transfer or a look-alike name cannot take over, and a ref or environment, and every condition is
+  an exact match of a text (no pattern, no case folding, a number never matches a text).
+- **Replay.** Each `jti` is accepted once, by a primary key, until the ID token expires; it is
+  used up even when the exchange is then refused, so one ID token probes one environment and
+  repository at most.
+- **Ambiguity.** Two enabled matching rules refuse the exchange; an administrator decides with
+  `lakana ci-trust explain`.
+- **Enumeration.** Every refusal after verification gives one answer, so a caller does not learn
+  whether a rule, an environment or a repository exists; the reason goes to a rate-limited audit
+  row (`OIDC_EXCHANGE_REFUSED`, its own per-client bucket), which records text from the request
+  only once the ID token verified.
+- **A stolen CI token.** It lives at most `LAKANA_CI_OIDC__TOKEN_TTL_SECONDS` (one hour, at most six)
+  and may only `DEPLOY` on its environment (the authorizer refuses every other action, whatever the
+  service account's grants), and its service account still needs the `DEPLOY` grant. At the
+  `DEPLOY` checks it may queue one run (a conditional `UPDATE` in the queuing transaction), of its
+  repository, of a kind its rule allows, never a rollback; a deploy only of the signed `sha`, which
+  the worker checks again after the fetch. Afterwards it reads only its own run. Undeploy, job
+  pause, resume and test, and delivery reads refuse it. A test enumerates every `DEPLOY` check.
+- **Revocation.** Disabling, changing or deleting the rule, deactivating the service account or
+  deleting the environment ends the token at its next request (each change raises the rule's
+  revision); the worker re-checks a queued run's token, rule and account at claim time.
+
+### Residuals, stated as such
+
+1. **The rule is the trust decision.** Whoever can push to the pinned ref (or run a workflow in
+   the pinned environment) can deploy. A GitHub `pull_request_target` run gets an ID token for the
+   base branch; a rule that pins only `ref` accepts it (its `sha` is the base branch's commit, so a
+   deploy deploys that commit). Pin `event_name` or an environment with protection rules.
+2. **A dry run is not pinned to the commit** (design decision Q3): a CI token for a rule that
+   allows `dry_run` can dry-run any branch or tag of its repository and read the diff.
+3. **The Lakana repository's URL is not compared with the ID token.** The rule binds the
+   provider's repository id to a registered Lakana repository; a holder of `MANAGE_REPOSITORY` who
+   changes that repository's URL changes what a CI token's commit is fetched from (the commit is
+   still the signed `sha`).
+4. **A deploy queued before the token expired still runs**; the worker refuses it only when the
+   rule or the account changed. A downgrade below this release runs a queued CI deploy as an
+   ordinary deploy of its service account.
+5. **Restoring a deleted environment** brings back its rules, and an unexpired token issued
+   before the deletion works again.
+6. **The audit row's per-client bucket trusts `request.client.host`**, as `AUTHENTICATION_FAILED`
+   does (see "Explicitly not defended"); behind a proxy all clients share one bucket.
 
 ## Explicitly not defended
 

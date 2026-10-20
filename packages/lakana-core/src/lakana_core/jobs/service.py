@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from lakana_core.audit.service import AuditService
 from lakana_core.auth import Action, AuthorizationService, PrincipalRef, Securable
+from lakana_core.ci_oidc.scope import refuse_ci_token
 from lakana_core.db import db_now
 from lakana_core.errors import ConflictError, NotFoundError, ValidationError
 from lakana_core.grants.authorization import GrantAuthorization
@@ -1033,13 +1034,14 @@ class JobService:
         Raises
         ------
         PermissionDenied
-            Without DEPLOY on the environment (checked first; DEPLOY is environment-scoped, so it
-            covers every repository there).
+            For a CI token, always; otherwise without DEPLOY on the environment (checked first;
+            DEPLOY is environment-scoped, so it covers every repository there).
         NotFoundError
             If the environment, repository or job does not exist or is not deployed.
         ConflictError
             If the job has no schedule here, so there is nothing to pause.
         """
+        refuse_ci_token(self._authz, p, environment, "pause a job")
         self._authz.authorize(p, Action.DEPLOY, Securable.environment_scope(environment))
         env, repo = (
             environment_by_name(self._session, environment),
@@ -1091,10 +1093,12 @@ class JobService:
         Raises
         ------
         PermissionDenied
-            Without DEPLOY on the environment (checked first).
+            For a CI token, always; otherwise without DEPLOY on the environment (checked
+            first).
         NotFoundError
             If the environment, repository or job does not exist or is not deployed.
         """
+        refuse_ci_token(self._authz, p, environment, "resume a job")
         self._authz.authorize(p, Action.DEPLOY, Securable.environment_scope(environment))
         env, repo = (
             environment_by_name(self._session, environment),
@@ -1148,13 +1152,15 @@ class JobService:
         Raises
         ------
         PermissionDenied
-            Without DEPLOY on the environment (checked first, like pause and resume).
+            For a CI token, always; otherwise without DEPLOY on the environment (checked first,
+            like pause and resume).
         NotFoundError
             If the environment, repository or job does not exist or is not deployed; the
             message lists the jobs that exist.
         ConflictError
             If the job has no usable `notify:` in the environment (none, or a damaged one).
         """
+        refuse_ci_token(self._authz, p, environment, "send a test message")
         self._authz.authorize(p, Action.DEPLOY, Securable.environment_scope(environment))
         env, repo = (
             environment_by_name(self._session, environment),
@@ -1215,10 +1221,12 @@ class JobService:
         Raises
         ------
         PermissionDenied
-            With none of DEPLOY, RUN and READ_ENVIRONMENT on the environment.
+            For a CI token, always; otherwise with none of DEPLOY, RUN and READ_ENVIRONMENT on
+            the environment.
         NotFoundError
             If the delivery does not exist in this environment.
         """
+        refuse_ci_token(self._authz, p, environment, "read a notification delivery")
         scope = Securable.environment_scope(environment)
         if self._authz.permits(p, Action.DEPLOY, scope):
             self._authz.authorize(p, Action.DEPLOY, scope)

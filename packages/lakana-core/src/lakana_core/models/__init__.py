@@ -32,6 +32,7 @@ from lakana_core.models.deploy import (
     EnvironmentDeployment,
     JobVersion,
 )
+from lakana_core.models.ci_oidc import CiOidcJti, CiToken, CiTrustRule
 from lakana_core.models.check_result import CheckOutcome, CheckResult, RollbackOutcome
 from lakana_core.models.job import JobFire, JobSchedule
 from lakana_core.models.notification import NotificationDelivery, NotificationState
@@ -61,6 +62,9 @@ __all__ = [
     "Base",
     "CheckOutcome",
     "CheckResult",
+    "CiOidcJti",
+    "CiToken",
+    "CiTrustRule",
     "ColumnDescription",
     "ColumnMask",
     "DeployKind",

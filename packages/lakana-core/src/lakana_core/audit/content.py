@@ -80,6 +80,9 @@ SHOWN_FIELDS: frozenset[str] = frozenset(
         "check_result_id",
         "checks",
         "claim",
+        # a CI trust rule's claim conditions: claim names and the texts an administrator set
+        # (a repository id, a ref, an environment name); configuration, never data.
+        "conditions",
         "column",
         "credential_secret",
         "delivery_id",
@@ -94,8 +97,10 @@ SHOWN_FIELDS: frozenset[str] = frozenset(
         "id",
         "issuer",
         "job",
+        "jti_sha256",
         "key_id",
         "kind",
+        "kinds",
         "location",
         "locations",
         "manifest_sha256",
@@ -112,6 +117,8 @@ SHOWN_FIELDS: frozenset[str] = frozenset(
         "requested_by",
         "resumed_from_run_id",
         "role",
+        "rule_id",
+        "rule_ids",
         "run_as",
         "run_id",
         "sha",
@@ -129,6 +136,7 @@ SHOWN_FIELDS: frozenset[str] = frozenset(
         "waits_for_run_id",
         # states, outcomes and fixed reasons
         "already_deleted",
+        "code",
         "complete",
         "conflict",
         "in_run",

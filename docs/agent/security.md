@@ -32,6 +32,10 @@ query path sit relative to `lakana-core`/`lakana-server`, see `docs/agent/archit
   (`lakana_core.grants.authorization`). If you add a new `Action`, decide explicitly whether
   a task token should ever be allowed to invoke it — the default for anything not added to
   that set is refusal, and that default is deliberate.
+- **A CI token may only ever `DEPLOY` on its own environment** (`GrantAuthorization._ci_scope_refusal`),
+  and each `DEPLOY` check decides what that allows (`lakana_core.ci_oidc.scope`). A new `DEPLOY`
+  check must decide it too, and go into `test_ci_token_enforcement.py`'s `_DEPLOY_CHECKS`; see "CI
+  OIDC exchange and CI tokens (#15)".
 - **Environment creation and storage changes are instance-scoped, not environment-scoped.**
   `create_environment` and `update_environment_storage` authorize
   `Action.MANAGE_ENVIRONMENT` at instance scope; do not change either to authorize against
@@ -39,9 +43,9 @@ query path sit relative to `lakana-core`/`lakana-server`, see `docs/agent/archit
   create or re-root it.
 - **Every identity or policy mutation records an audit event, in the same transaction as
   the change.** Adding a new mutation to `GrantService`, `SecretService`,
-  `CatalogService`, `PatService`, `TaskTokenService`, `GroupService`, or
-  `PrincipalService` without an accompanying `AuditService.record` call is a gap, not a
-  style choice — see "Audit log" below for the event types and detail shapes already in
+  `CatalogService`, `PatService`, `TaskTokenService`, `GroupService`,
+  `PrincipalService`, or `CiTrustRuleService` without an accompanying `AuditService.record` call
+  is a gap, not a style choice — see "Audit log" below for the event types and detail shapes already in
   use.
 
 ## Syntax errors name only the reader's own SQL
@@ -2403,7 +2407,7 @@ last *recorded* row, so a poller writes one row per window, not none. The next r
 process, not a database lookup** — a lookup would add a query to every authenticated request (and
 an index on `detail->>'key_id'`), exactly the per-request database cost this exists to remove; the
 price is that each server process records a credential once per window, and a restart records
-again. **Key:** `(kind, key_id)` with `kind` `"pat"` or `"task"` (a PAT and a task token cannot share
+again. **Key:** `(kind, key_id)` with `kind` `"pat"`, `"task"` or `"ci"` (a PAT, a task token and a CI token cannot share
 a window), and the principal kept beside it: the same key id authenticating another principal is
 recorded. Key ids are random and unique per table and a revoked token keeps its own
 (`credential.py`, `unique=True`), so a revoked-and-recreated token is a new credential. **Every rule
@@ -3777,9 +3781,8 @@ pins each line.
 ## CI OIDC verification (#15)
 
 `lakana_core.ci_oidc` verifies the OIDC ID token of a CI job (GitHub Actions, GitLab CI). It is the
-first part of a second authentication path, and nothing calls it yet: the exchange endpoint, the
-trust rules and the single use of each `jti` come with the second part, which gets its own
-adversarial review. `test_ci_oidc_verification.py`, `test_ci_oidc_jwks.py`,
+first part of a second authentication path; the exchange endpoint, the trust rules and the single
+use of each `jti` are the next section. `test_ci_oidc_verification.py`, `test_ci_oidc_jwks.py`,
 `test_ci_oidc_config.py` and `test_net_https_json.py` pin each line, with locally generated RSA keys
 and a fake fetcher; no test reaches the network.
 
@@ -3859,6 +3862,90 @@ and a fake fetcher; no test reaches the network.
   a listed name's DNS can point it at any private address.
 - **Residuals:** the `typ` header is not checked; `aud` and the issuer's own key set keep other
   tokens of the same issuer out.
+
+## CI OIDC exchange and CI tokens (#15)
+
+User documentation: `docs/site/reference/ci-trust-rules.md`. Threat model: "CI OIDC exchange
+(#15)". This section is what a reviewer of code in this area has to know.
+
+- **Trust rules** (`lakana_core.ci_oidc.rules`, table `ci_trust_rules`): issuer (one of
+  `LAKANA_CI_OIDC__ISSUERS`, presets resolved), an active `SERVICE_ACCOUNT`, environment and
+  repository (all by id; issuer, environment and repository never change), kinds (`deploy`,
+  `dry_run`; never rollback or undeploy), exact-match claim conditions. Required: the numeric id
+  claim (`id_claim`: `repository_id` for `GITHUB_ISSUER`, `project_id` for every other issuer,
+  which the settings only accept as GitLab), digits only, and `ref` or `environment`. Reserved
+  claims (`iss`, `aud`, `exp`, `iat`, `nbf`, `jti`), more than 16 conditions, a non-text value,
+  an empty one, one over 255 characters or with a control character are refused.
+  `CiTrustRuleService` has eight call sites of `authorize_admin_only(..., MANAGE_TOKEN)` (a rule
+  lets CI act as an account, which is issuing it a token), each in `test_admin_only_call_sites`'s
+  `_GUARDED`. Every change records `CI_TRUST_RULE_*` in its transaction and raises `revision`
+  (enable and disable too, a repeat changes nothing); a token is valid only under the revision it
+  was issued with.
+- **Matching** is `condition_mismatches`, the one function of the exchange and of `explain`: the
+  claim must be present, a `str`, and equal. No case folding, no strip, no coercion (`123` never
+  matches `"123"`, `["x"]` never matches `"x"`). Only enabled rules of the verified issuer for the
+  requested environment (live) and repository count; two matches refuse as ambiguous.
+- **The exchange** (`CiTokenService.exchange`, `POST /api/v1/auth/oidc/token`; the route reads
+  at most 16 KiB itself, `streams_its_own_body`, and runs the synchronous verifier in the
+  threadpool with a session of its own): verify; record `jti_digest(issuer, jti)` in
+  `ci_oidc_jtis` and **commit before matching**, so a refused exchange still uses the ID token
+  up and one ID token probes one environment and repository at most (a concurrent duplicate fails
+  on the primary key); rows whose ID token expired more than the 60 s skew ago are swept in that
+  transaction. Then rules, an active service account, and for a rule with `deploy` a `sha` claim
+  of 40 lower-case hex digits (`valid_sha`). The `CiToken` (`lakana_ci_<key id>_<secret>`,
+  SHA-256 of the secret, like a PAT) stores rule, revision, principal, environment, repository,
+  kinds, `sha`, `jti_sha256`, TTL `LAKANA_CI_OIDC__TOKEN_TTL_SECONDS` (3600, 60 to 21600), and
+  `OIDC_TOKEN_EXCHANGED` is recorded as the service account in the same transaction.
+- **What a refused caller learns** (decided): a verifier refusal answers 401 with its
+  `RefusalCode` message, a replay 401 with its own; everything after verification (no rule,
+  ambiguous, unknown environment or repository, inactive principal, missing commit) answers one
+  403 text that echoes the requested names only. The server records `OIDC_EXCHANGE_REFUSED`
+  through `app.state.oidc_exchange_audit_limiter` (an `AuthAuditLimiter` of its own,
+  `LAKANA_AUTH_AUDIT__PER_IP_PER_MINUTE`): `code`, the issuer only when it is a configured one
+  (`_claimed_issuer` reads the unverified `iss` of a refused token and keeps it only then), and the
+  requested names, `jti_sha256` and rule ids only after verification. Never the JWT or the token.
+  The 422 for a bad body names fields, never values (`hide_input_in_errors`).
+- **Authentication** (`get_principal`, prefix `lakana_ci`): `CiTokenService.verify` → hash
+  lookup, not expired, then `resolve_ci_scope` (fresh reads, `populate_existing`): rule exists,
+  enabled, same revision, same principal, environment and repository; principal an active
+  `SERVICE_ACCOUNT`; environment live; repository exists. The result is
+  `PrincipalRef.ci_scope` (`CiScope`: token, rule, environment and repository with ids, kinds,
+  `sha`, `used`). Sign-ins are bounded like PATs (`("ci", key_id)`).
+- **The authorizer** (`GrantAuthorization._ci_scope_refusal`, before any grant): a CI-scoped
+  principal may only `DEPLOY` on an `ENVIRONMENT` securable that is its environment. Not
+  `READ_ENVIRONMENT` (narrower than the design's "DEPLOY and READ_ENVIRONMENT": nothing the CI
+  flow needs reads it, since `DeployService.get` takes the `DEPLOY` branch), no table, namespace or
+  instance action. The grants still decide `DEPLOY`. `GrantService.explain` treats a CI token like
+  a task token: never "about oneself".
+- **Every `DEPLOY` check** decides the rest (`lakana_core.ci_oidc.scope`; refusals are audited
+  as `AUTHORIZATION_DENIED` with `reason: ci_token` through the denial limiter):
+  - `DeployService.submit`: `check_ci_request` (its environment and repository by id, a kind in
+    `kinds`, never a rollback, a deploy only with a `sha`, and only of it: no ref means the
+    `sha`, another ref is refused), `deploy_runs.ci_token_id` set, and `use_ci_token` in the same
+    transaction (one conditional `UPDATE` on unused, unexpired, same rule, rule enabled at the
+    same revision). A second submission, of either kind, is refused.
+  - `DeployService.get`: only a run whose `ci_token_id` is the token's; any other is the same 404
+    as a missing one.
+  - `DeployService.authorize_deploy` (the worker, `run_deploy`): `ci_scope_for_run` resolves the
+    run's token again (missing, another principal, or invalid: refused; an expiry since queuing is
+    not), `DEPLOY` is authorized with the scope, `check_ci_request` again, and a deploy's
+    `requested_ref` must be the `sha`. After the fetch, `DeployService.check_ci_commit` refuses
+    another commit. The table checks of the deploy use the account without the scope, as any
+    deploy.
+  - `DeployService.undeploy`, `JobService.pause`, `resume`, `notify_test` and `delivery`:
+    refused (`refuse_ci_token`, before their own check).
+  - `test_ci_token_enforcement.py::test_every_deploy_check_is_covered` lists every function in
+    `packages/*/src` that names `DEPLOY` and fails on a new one; add it there with a test.
+- **No foreign key on `deploy_runs.ci_token_id`** (like `QueryRun.task_token_id`): a missing
+  token row must not make the run look like one no CI token queued; the worker refuses it.
+- **Tests:** `test_ci_trust_rules.py`, `test_ci_oidc_exchange.py`, `test_ci_token_enforcement.py`
+  (core), `test_deploy_ci_token.py` (worker: the signed commit, another fetched commit, a rule
+  disabled after queuing, a tampered ref), `api/platform/test_ci_oidc.py` and
+  `test_ci_trust_rules.py` (server), `sdk/test_sdk_ci_trust.py`. Locally signed keys and a fake
+  fetcher; nothing reaches the network.
+- **Review checklist:** a new `DEPLOY` check decides what a CI token may do there; a new action
+  stays refused for a CI scope unless it is `DEPLOY`; nothing logs or records a JWT or a
+  `lakana_ci_` token; a refusal after verification keeps the one text.
 
 ## Git fetch hardening (M5b)
 

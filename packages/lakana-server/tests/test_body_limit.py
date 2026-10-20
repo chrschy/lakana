@@ -36,6 +36,7 @@ STREAMING_ROUTES = {
         "PUT",
         "/api/v1/environments/{env}/namespaces/{path}/artifacts/{name}/uploads/{upload_id}/blobs/{sha256}",
     ),
+    ("POST", "/api/v1/auth/oidc/token"),
 }
 """Every route that reads its own body as a stream, with a limit of its own."""
 
@@ -203,8 +204,9 @@ def test_the_streaming_routes_are_exactly_the_ones_listed() -> None:
     assert found == STREAMING_ROUTES
 
 
-_OPEN_ROUTES = {"/healthz", "/v1/config"}
-"""The routes that answer without a credential, by design."""
+_OPEN_ROUTES = {"/healthz", "/v1/config", "/api/v1/auth/oidc/token"}
+"""The routes that answer without a credential, by design: the CI token exchange takes an ID
+token, not a credential, and reads at most 16 KiB of body."""
 
 _DOCS_ROUTES = {"/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"}
 """FastAPI's own documentation routes: not `APIRoute`s, no body."""

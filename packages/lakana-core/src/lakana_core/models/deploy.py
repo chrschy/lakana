@@ -107,6 +107,11 @@ class DeployRun(Base):
     """The worker that claimed this run; `None` for a run that is queued or was claimed
     by a release before the column existed. No foreign key: the worker's row goes, the run's
     history stays."""
+    ci_token_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True, index=True)
+    """The CI token (`CiToken`) that submitted this run; `None` for a run submitted with any
+    other credential. No foreign key, like `QueryRun.task_token_id`: a missing token row must
+    not turn the run into one that no CI token submitted, so the worker refuses a run whose
+    token it cannot find."""
 
 
 class EnvironmentDeployment(Base):

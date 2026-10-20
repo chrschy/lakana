@@ -1417,6 +1417,102 @@ Delete package index NAME.
 | `NAME` | text | required |  |
 | `--yes` | flag | off | Don't ask for confirmation. |
 
+## `lakana ci-trust`
+
+Usage: `lakana ci-trust [OPTIONS] COMMAND [ARGS]...`
+
+Let CI jobs (GitHub Actions, GitLab CI) deploy with their OIDC ID token, without a stored token.
+
+### `lakana ci-trust create`
+
+Usage: `lakana ci-trust create [OPTIONS]`
+
+Create a CI trust rule.
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `--issuer` | text | required | github, gitlab or a configured issuer URL. |
+| `--env` | text | required | The environment CI may deploy to. |
+| `--repo` | text | required | The registered repository CI may deploy. |
+| `--principal` | text | required | The service account the CI job acts as; it needs DEPLOY. |
+| `--claim` | text, repeatable | required | NAME=VALUE the ID token's claim must equal exactly (repeatable). Must include repository_id (GitHub) or project_id (GitLab), and ref or environment. |
+| `--kind` | text, repeatable | none | deploy (the default) or dry_run; repeat for both. |
+
+### `lakana ci-trust list`
+
+Usage: `lakana ci-trust list [OPTIONS]`
+
+List every CI trust rule, oldest first.
+
+### `lakana ci-trust show`
+
+Usage: `lakana ci-trust show [OPTIONS] {rule_id}`
+
+Show CI trust rule RULE_ID.
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `RULE_ID` | text | required |  |
+
+### `lakana ci-trust update`
+
+Usage: `lakana ci-trust update [OPTIONS] {rule_id}`
+
+Change CI trust rule RULE_ID; the tokens issued under it stop working at once.
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `RULE_ID` | text | required |  |
+| `--principal` | text | none | A new service account. |
+| `--claim` | text, repeatable | none | NAME=VALUE (repeatable); replaces all of the rule's conditions. |
+| `--kind` | text, repeatable | none | deploy or dry_run (repeatable). |
+
+### `lakana ci-trust enable`
+
+Usage: `lakana ci-trust enable [OPTIONS] {rule_id}`
+
+Enable CI trust rule RULE_ID.
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `RULE_ID` | text | required |  |
+
+### `lakana ci-trust disable`
+
+Usage: `lakana ci-trust disable [OPTIONS] {rule_id}`
+
+Disable CI trust rule RULE_ID; the tokens issued under it stop working at once.
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `RULE_ID` | text | required |  |
+
+### `lakana ci-trust delete`
+
+Usage: `lakana ci-trust delete [OPTIONS] {rule_id}`
+
+Delete CI trust rule RULE_ID; the tokens issued under it stop working at once.
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `RULE_ID` | text | required |  |
+| `--yes` | flag | off | Don't ask for confirmation. |
+
+### `lakana ci-trust explain`
+
+Usage: `lakana ci-trust explain [OPTIONS]`
+
+Say which rule a CI job's claims would match, and why the others do not.
+
+Needs no ID token: give the decoded claims, for example from the job's log.
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `--claims` | text | required | A JSON file with the ID token's decoded claims, or - for standard input. |
+| `--env` | text | required | The environment the job deploys to. |
+| `--repo` | text | required | The repository it deploys. |
+| `--issuer` | text | none | The issuer; the claims' iss by default. |
+
 ## `lakana deploys`
 
 Usage: `lakana deploys [OPTIONS] COMMAND [ARGS]...`

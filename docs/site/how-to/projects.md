@@ -531,8 +531,9 @@ the prod token is a supply-chain hole; bump them by hand or with Dependabot. The
 
 A DEPLOY-only principal can poll its own deploy run, so `lakana deploy` prints
 `Queued deploy <id>` and then the result; it cannot read manifests, deploy history or orphans
-unless it also holds read access to the environment. OIDC token exchange instead of a stored token
-is tracked in #15.
+unless it also holds read access to the environment. Instead of a stored token, a CI job can
+exchange its OIDC ID token for a token that may queue one deploy of the job's own commit: see
+[CI trust rules and CI tokens](../reference/ci-trust-rules.md).
 
 ## Run principals
 

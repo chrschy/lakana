@@ -3285,3 +3285,228 @@ class SearchOut(BaseModel):
     limit: int
     offset: int
     has_more: bool
+
+
+class CiTrustRuleCreate(BaseModel):
+    """Request body for creating a CI trust rule.
+
+    Parameters
+    ----------
+    issuer
+        ``github``, ``gitlab`` or the URL of an issuer in `LAKANA_CI_OIDC__ISSUERS`.
+    principal
+        The active service account the CI job acts as; it needs its own `DEPLOY` grant.
+    environment
+        The environment the CI job may deploy to.
+    repository
+        The registered repository it may deploy.
+    kinds
+        ``deploy`` and/or ``dry_run`` (default ``["deploy"]``).
+    conditions
+        Claim name to the exact text the ID token's claim must have. Must contain the numeric
+        repository id (``repository_id`` on GitHub, ``project_id`` on GitLab) and a ``ref`` or
+        ``environment``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    issuer: str = Field(max_length=255)
+    principal: str = Field(max_length=255)
+    environment: str = Field(max_length=255)
+    repository: str = Field(max_length=255)
+    kinds: list[str] = Field(default_factory=lambda: ["deploy"], max_length=2)
+    conditions: dict[str, str]
+
+
+class CiTrustRuleUpdate(BaseModel):
+    """Request body for changing a CI trust rule; omitted fields stay.
+
+    Every change ends the tokens issued under the rule before it.
+
+    Parameters
+    ----------
+    principal
+        A new service account.
+    kinds
+        New kinds.
+    conditions
+        New conditions, replacing all of the old ones.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    principal: str | None = Field(default=None, max_length=255)
+    kinds: list[str] | None = Field(default=None, max_length=2)
+    conditions: dict[str, str] | None = None
+
+
+class CiTrustRuleOut(BaseModel):
+    """Response body for a CI trust rule.
+
+    Parameters
+    ----------
+    id
+        The rule's id.
+    issuer
+        The issuer URL.
+    principal
+        The service account.
+    environment
+        The environment.
+    repository
+        The repository.
+    kinds
+        ``deploy`` and/or ``dry_run``.
+    conditions
+        Claim name to required text.
+    enabled
+        Whether it accepts ID tokens.
+    created_by
+        Who created it.
+    created_at
+        When.
+    updated_by
+        Who changed it last.
+    updated_at
+        When it last changed.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    issuer: str
+    principal: str
+    environment: str
+    repository: str
+    kinds: list[str]
+    conditions: dict[str, str]
+    enabled: bool
+    created_by: str | None
+    created_at: datetime
+    updated_by: str | None
+    updated_at: datetime
+
+
+class CiTrustExplainIn(BaseModel):
+    """Request body for explaining which rule a set of ID token claims would match.
+
+    Parameters
+    ----------
+    claims
+        The ID token's claims, decoded (no token, no signature).
+    environment
+        The environment the exchange would ask for.
+    repository
+        The repository it would ask for.
+    issuer
+        The issuer; the ``iss`` claim when left out.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    claims: dict[str, Any]
+    environment: str = Field(max_length=255)
+    repository: str = Field(max_length=255)
+    issuer: str | None = Field(default=None, max_length=255)
+
+
+class CiTrustRuleExplanationOut(BaseModel):
+    """Why one rule does or does not accept the claims.
+
+    Parameters
+    ----------
+    rule_id
+        The rule.
+    matches
+        Whether it accepts them.
+    reasons
+        Why not; empty when it matches.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    rule_id: uuid.UUID
+    matches: bool
+    reasons: list[str]
+
+
+class CiTrustExplainOut(BaseModel):
+    """What an exchange with the claims would do.
+
+    Parameters
+    ----------
+    issuer
+        The issuer compared.
+    environment
+        The environment asked for.
+    repository
+        The repository asked for.
+    verdict
+        One sentence: the rule that accepts the claims, or why the exchange is refused.
+    matching
+        The ids of the rules that match.
+    rules
+        Every rule, with its reasons.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    issuer: str
+    environment: str
+    repository: str
+    verdict: str
+    matching: list[uuid.UUID]
+    rules: list[CiTrustRuleExplanationOut]
+
+
+class CiTokenExchangeIn(BaseModel):
+    """Request body of the CI token exchange (at most 16 KiB).
+
+    Parameters
+    ----------
+    id_token
+        The CI job's OIDC ID token, requested for the audience in `LAKANA_CI_OIDC__AUDIENCE`.
+    environment
+        The environment the job deploys to.
+    repository
+        The registered Lakana repository it deploys.
+    """
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+
+    id_token: str
+    environment: str
+    repository: str
+
+
+class CiTokenOut(BaseModel):
+    """Response body of the CI token exchange: the token, shown once.
+
+    Parameters
+    ----------
+    token
+        ``lakana_ci_…``; send it as ``Authorization: Bearer <token>``.
+    expires_at
+        When it stops working.
+    principal
+        The service account it acts as.
+    environment
+        The one environment it may deploy to.
+    repository
+        The one repository it may deploy.
+    kinds
+        What it may queue, once: ``deploy`` and/or ``dry_run``.
+    sha
+        The commit a deploy is pinned to (the ID token's ``sha``), or `None`.
+    rule_id
+        The CI trust rule that accepted the ID token.
+    """
+
+    token: str
+    expires_at: datetime
+    principal: str
+    environment: str
+    repository: str
+    kinds: list[str]
+    sha: str | None
+    rule_id: uuid.UUID

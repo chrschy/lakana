@@ -210,6 +210,7 @@ class HttpTransport:
         headers: Mapping[str, str] | None = None,
         timeout: float | None = None,
         retry: bool = True,
+        authenticated: bool = True,
     ) -> httpx.Response:
         """Send one request for a route and raise on a non-2xx response.
 
@@ -239,6 +240,9 @@ class HttpTransport:
         retry
             Whether a `GET` is retried on a transport error (the default). `False`
             sends it exactly once.
+        authenticated
+            Whether to send the token (the default). `False` sends no `Authorization`
+            header, for the one route that takes no credential (the CI token exchange).
 
         Returns
         -------
@@ -258,7 +262,7 @@ class HttpTransport:
             If the body cannot be decoded (its Content-Encoding does not match its bytes).
         """
         path = _format_path(route.path, path_params)
-        request_headers = {"Authorization": f"Bearer {self._config.token}"}
+        request_headers = {"Authorization": f"Bearer {self._config.token}"} if authenticated else {}
         if headers:
             request_headers.update(headers)
         if route.method == "GET" and retry:

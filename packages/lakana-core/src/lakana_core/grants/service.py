@@ -468,7 +468,7 @@ class GrantService:
         Raises
         ------
         PermissionDenied
-            If `p` asks about another principal, or through a task token, without the `ADMIN`
+            If `p` asks about another principal, or through a task or CI token, without the `ADMIN`
             role on the instance; before anything is looked up, so the refusal says nothing
             about whether the principal exists.
         NotFoundError
@@ -476,7 +476,7 @@ class GrantService:
             does not exist. Asking about oneself, an object that does not exist is answered
             like one no grant names, so the answer never tells whether it exists.
         """
-        own = p.task_scope is None and principal_name == p.name
+        own = p.task_scope is None and p.ci_scope is None and principal_name == p.name
         if not own:
             authorize_admin_only(self._session, self._authz, p, Action.MANAGE_GRANT)
         target = self._get_principal(principal_name)

@@ -3914,3 +3914,65 @@ def test_0046_adds_the_index_of_the_view_audit_lookup(
     assert indexes()[_VIEW_INDEX] == ["event_type", "principal_id", "occurred_at"]
     command.downgrade(config, _REVISION_0045)
     assert _VIEW_INDEX not in indexes()
+
+
+_REVISION_0047 = "e0d9e6185736"
+_CI_TABLES = {"ci_trust_rules", "ci_tokens", "ci_oidc_jtis"}
+
+
+def test_0047_adds_the_ci_oidc_tables_and_an_empty_ci_token_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revision `0047`: three empty tables and `deploy_runs.ci_token_id`, empty on every run.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    """
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, _REVISION_0046)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        assert not _CI_TABLES & set(inspect(engine).get_table_names())
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, _REVISION_0047)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        inspector = inspect(engine)
+        assert set(inspector.get_table_names()) >= _CI_TABLES
+        runs = {c["name"]: c for c in inspector.get_columns("deploy_runs")}
+        assert runs["ci_token_id"]["nullable"] is True
+        assert not [
+            fk
+            for fk in inspector.get_foreign_keys("deploy_runs")
+            if fk["constrained_columns"] == ["ci_token_id"]
+        ]
+        tokens = {
+            tuple(fk["constrained_columns"]): (fk["referred_table"], fk["options"].get("ondelete"))
+            for fk in inspector.get_foreign_keys("ci_tokens")
+        }
+        assert tokens["rule_id",] == ("ci_trust_rules", "SET NULL")
+        assert tokens["principal_id",] == ("principals", "CASCADE")
+        unique = {i["name"]: i["unique"] for i in inspector.get_indexes("ci_tokens")}
+        assert unique["ix_ci_tokens_key_id"]
+        with engine.connect() as connection:
+            for table in _CI_TABLES:
+                assert connection.execute(sa.text(f"SELECT count(*) FROM {table}")).scalar() == 0
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, _REVISION_0046)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        inspector = inspect(engine)
+        assert not _CI_TABLES & set(inspector.get_table_names())
+        assert "ci_token_id" not in {c["name"] for c in inspector.get_columns("deploy_runs")}
+    finally:
+        engine.dispose()
