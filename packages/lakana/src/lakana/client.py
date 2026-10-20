@@ -23,6 +23,7 @@ from lakana.errors import InvalidResponse
 from lakana.resources.artifacts import Artifacts
 from lakana.resources.audit_events import AuditEvents
 from lakana.resources.checks import Checks
+from lakana.resources.ci_trust_rules import CiTrustRules
 from lakana.resources.column_masks import ColumnMasks
 from lakana.resources.deploys import Deployments, Deploys, OrphanTables, ProjectVersions
 from lakana.resources.environments import Environments
@@ -94,6 +95,7 @@ class Client:
         self.secrets = Secrets(self._transport)
         self.repositories = Repositories(self._transport)
         self.package_indexes = PackageIndexes(self._transport)
+        self.ci_trust_rules = CiTrustRules(self._transport)
         self.audit_events = AuditEvents(self._transport)
         self.deploys = Deploys(self._transport)
         self.deployments = Deployments(self._transport)

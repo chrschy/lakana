@@ -43,7 +43,7 @@ The least recently used is dropped to make room; a dropped one is recorded at it
 and its count of suppressed successes is lost."""
 
 Credential = tuple[str, str]
-"""A token's kind (``"pat"`` or ``"task"``) and its key id."""
+"""A token's kind (``"pat"``, ``"task"`` or ``"ci"``) and its key id."""
 
 
 @dataclass

@@ -2531,3 +2531,130 @@ class SearchPage:
 
 
 # jscpd:ignore-end
+
+
+@dataclass(frozen=True)
+class CiTrustRule:
+    """A CI trust rule: which CI jobs may deploy a repository to an environment, as whom.
+
+    Parameters
+    ----------
+    id
+        The rule's id.
+    issuer
+        The issuer URL (GitHub Actions, GitLab).
+    principal
+        The service account the CI job acts as.
+    environment
+        The environment it may deploy to.
+    repository
+        The repository it may deploy.
+    kinds
+        ``deploy`` and/or ``dry_run``.
+    conditions
+        Claim name to the exact text the ID token's claim must have.
+    enabled
+        Whether it accepts ID tokens.
+    created_by
+        Who created it.
+    created_at
+        When.
+    updated_by
+        Who changed it last.
+    updated_at
+        When it last changed.
+    """
+
+    id: str
+    issuer: str
+    principal: str
+    environment: str
+    repository: str
+    kinds: list[str]
+    conditions: dict[str, str]
+    enabled: bool
+    created_by: str | None
+    created_at: datetime
+    updated_by: str | None
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
+class CiTrustRuleExplanation:
+    """Why one rule does or does not accept a set of claims.
+
+    Parameters
+    ----------
+    rule_id
+        The rule.
+    matches
+        Whether it accepts them.
+    reasons
+        Why not; empty when it matches.
+    """
+
+    rule_id: str
+    matches: bool
+    reasons: list[str]
+
+
+@dataclass(frozen=True)
+class CiTrustExplanation:
+    """What an exchange of an ID token with these claims would do.
+
+    Parameters
+    ----------
+    issuer
+        The issuer compared.
+    environment
+        The environment asked for.
+    repository
+        The repository asked for.
+    verdict
+        One sentence: the rule that accepts the claims, or why the exchange is refused.
+    matching
+        The ids of the rules that match.
+    rules
+        Every rule, with its reasons.
+    """
+
+    issuer: str
+    environment: str
+    repository: str
+    verdict: str
+    matching: list[str]
+    rules: list[CiTrustRuleExplanation]
+
+
+@dataclass(frozen=True)
+class CiToken:
+    """A Lakana CI token, received for a CI job's OIDC ID token.
+
+    Parameters
+    ----------
+    token
+        ``lakana_ci_…``; use it as the token of a `Client`. Shown once.
+    expires_at
+        When it stops working.
+    principal
+        The service account it acts as.
+    environment
+        The one environment it may deploy to.
+    repository
+        The one repository it may deploy.
+    kinds
+        What it may queue, once: ``deploy`` and/or ``dry_run``.
+    sha
+        The commit a deploy is pinned to, or `None`.
+    rule_id
+        The CI trust rule that accepted the ID token.
+    """
+
+    token: str = field(repr=False)
+    expires_at: datetime
+    principal: str
+    environment: str
+    repository: str
+    kinds: list[str]
+    sha: str | None
+    rule_id: str

@@ -15,6 +15,7 @@ from lakana_core.audit.authorization import flush_suppressed
 from lakana_core.audit.content import install_query_text
 from lakana_core.audit.denial_limiter import DenialAuditLimiter
 from lakana_core.bootstrap import bootstrap_if_needed
+from lakana_core.ci_oidc.verification import IdTokenVerifier
 from lakana_core.config import warn_about_tokens_in_url_paths
 from lakana_core.db import create_engine
 from lakana_core.grants.admin import ineffective_grants_warning
@@ -24,6 +25,8 @@ from lakana_server.api.platform.artifacts import MANIFEST_DECODE_SLOTS, MAX_CONC
 from lakana_server.api.platform.artifacts import environment_router as artifacts_environment_router
 from lakana_server.api.platform.artifacts import router as artifacts_router
 from lakana_server.api.platform.audit_events import router as audit_events_router
+from lakana_server.api.platform.ci_oidc import router as ci_oidc_router
+from lakana_server.api.platform.ci_trust_rules import router as ci_trust_rules_router
 from lakana_server.api.platform.column_masks import router as column_masks_router
 from lakana_server.api.platform.deploys import router as deploys_router
 from lakana_server.api.platform.environments import router as environments_router
@@ -82,6 +85,8 @@ ROUTERS = (
     jobs_router,
     scheduler_router,
     audit_events_router,
+    ci_trust_rules_router,
+    ci_oidc_router,
     whoami_router,
     info_router,
 )
@@ -144,6 +149,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.auth_audit_limiter = AuthAuditLimiter(
             resolved_settings.auth_audit.per_ip_per_minute
         )
+        # Its own bucket: a flood of refused exchanges must not hide failed sign-ins.
+        app.state.oidc_exchange_audit_limiter = AuthAuditLimiter(
+            resolved_settings.auth_audit.per_ip_per_minute
+        )
+        # One verifier per process: it holds the issuers' key cache.
+        app.state.ci_oidc_verifier = IdTokenVerifier(resolved_settings.ci_oidc)
         app.state.sign_in_audit_limiter = SignInAuditLimiter(
             resolved_settings.audit.sign_in_window_minutes * 60.0
         )

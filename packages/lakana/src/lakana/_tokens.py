@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import re
 
-_TOKEN_PATTERN = re.compile(r"^(lakana_(?:pat|task)_)([^_]+)_")
-"""Matches a `lakana_pat_`/`lakana_task_` token's prefix and key id.
+_TOKEN_PATTERN = re.compile(r"^(lakana_(?:pat|task|ci)_)([^_]+)_")
+"""Matches a `lakana_pat_`/`lakana_task_`/`lakana_ci_` token's prefix and key id.
 
 The key id (`[^_]+`) is defined as everything up to the *first* remaining
 underscore. The secret segment that follows is deliberately never captured
@@ -32,7 +32,7 @@ def mask_token(token: str) -> str:
     Returns
     -------
     str
-        `<prefix><key_id>_***` for a recognised `lakana_pat_`/`lakana_task_`
+        `<prefix><key_id>_***` for a recognised `lakana_pat_`/`lakana_task_`/`lakana_ci_`
         token shape; `"***"` for anything else, including a token that is
         missing its trailing secret segment.
     """

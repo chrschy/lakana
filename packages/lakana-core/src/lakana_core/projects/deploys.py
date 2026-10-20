@@ -25,9 +25,18 @@ from sqlalchemy.orm.exc import ObjectDeletedError, StaleDataError
 from sqlglot import exp
 
 from lakana_core.audit.service import AuditService
-from lakana_core.auth import Action, AuthorizationService, PrincipalRef, Securable
+from lakana_core.auth import Action, AuthorizationService, CiScope, PrincipalRef, Securable
 from lakana_core.catalog.descriptions import sync_project_descriptions
 from lakana_core.catalog.identity import resolve_table_id
+from lakana_core.ci_oidc.exchange import ci_scope_for_run
+from lakana_core.ci_oidc.scope import (
+    ALREADY_USED_MESSAGE,
+    check_ci_commit,
+    check_ci_request,
+    ci_refusal,
+    refuse_ci_token,
+    use_ci_token,
+)
 from lakana_core.db import db_now
 from lakana_core.errors import ConflictError, NotFoundError, ValidationError
 from lakana_core.identifiers import TableRef
@@ -958,7 +967,10 @@ class DeployService:
         Raises
         ------
         PermissionDenied
-            Without `DEPLOY` on the environment.
+            Without `DEPLOY` on the environment; for a CI token (`p.ci_scope`), also for
+            anything but its one submission of its repository, of a kind its rule allows,
+            never a rollback, and for a deploy only of its signed commit
+            (`lakana_core.ci_oidc.scope`).
         NotFoundError
             If the environment or repository does not exist.
         ValidationError
@@ -967,6 +979,19 @@ class DeployService:
         self._authz.authorize(p, Action.DEPLOY, Securable.environment_scope(environment))
         env = self._environment(environment)
         repo = self._repository(repository)
+        ci = p.ci_scope
+        if ci is not None:
+            ref = check_ci_request(
+                self._authz,
+                p,
+                ci,
+                environment=environment,
+                environment_id=env.id,
+                repository=repository,
+                repository_id=repo.id,
+                kind=kind,
+                ref=ref,
+            )
         target: uuid.UUID | None = None
         requested = ref
         if kind is DeployKind.ROLLBACK:
@@ -1010,8 +1035,12 @@ class DeployService:
             requested_ref=requested,
             rollback_to_job_version_id=target,
             status=DeployStatus.QUEUED,
+            ci_token_id=None if ci is None else ci.token_id,
         )
         self._session.add(run)
+        if ci is not None and not use_ci_token(self._session, ci, datetime.now(UTC)):
+            self._session.rollback()
+            ci_refusal(self._authz, p, environment, ALREADY_USED_MESSAGE)
         self._session.commit()
         return self._view(run)
 
@@ -1063,7 +1092,8 @@ class DeployService:
             Without DEPLOY or READ_ENVIRONMENT (a CI principal that may submit a
             run may also poll it).
         NotFoundError
-            If no such run exists in this environment.
+            If no such run exists in this environment, or, for a CI token, if the token did
+            not queue it (one answer, whether or not the run exists).
         """
         scope = Securable.environment_scope(environment)
         if self._authz.permits(p, Action.DEPLOY, scope):
@@ -1074,7 +1104,7 @@ class DeployService:
         run = self._session.execute(
             select(DeployRun).where(DeployRun.id == run_id, DeployRun.environment_id == env.id)
         ).scalar_one_or_none()
-        if run is None:
+        if run is None or (p.ci_scope is not None and run.ci_token_id != p.ci_scope.token_id):
             raise NotFoundError(f"No deploy {run_id} in {environment}.")
         return dataclasses.replace(self._view(run, p), waiting_for=self.waiting_for(run))
 
@@ -1535,12 +1565,14 @@ class DeployService:
         Raises
         ------
         PermissionDenied
-            Without DEPLOY on the environment (checked first).
+            For a CI token, always; otherwise without DEPLOY on the environment (checked
+            first).
         NotFoundError
             If the environment, repository or deployment does not exist.
         ConflictError
             While a run of the repository is queued or running there.
         """
+        refuse_ci_token(self._authz, p, environment, "undeploy a repository")
         self._authz.authorize(p, Action.DEPLOY, Securable.environment_scope(environment))
         env, repo = self._environment(environment), self._repository(repository)
         row = self._deployment_row(env, repo)
@@ -1817,22 +1849,82 @@ class DeployService:
 
     # -- worker side -----------------------------------------------------
 
-    def authorize_deploy(self, p: PrincipalRef, environment: str) -> None:
-        """Re-check `DEPLOY` at claim time.
+    def authorize_deploy(
+        self, p: PrincipalRef, environment: str, run: DeployRun | None = None
+    ) -> CiScope | None:
+        """Re-check `DEPLOY` at claim time, and a CI token's binding when one queued the run.
+
+        Parameters
+        ----------
+        p
+            The run's principal, as read from its row (no scope).
+        environment
+            Environment name.
+        run
+            The run. When a CI token queued it (`DeployRun.ci_token_id`), the token is resolved
+            again (`ci_scope_for_run`), `DEPLOY` is checked with its scope, and the run must
+            still be one the token could queue (`check_ci_request`).
+
+        Returns
+        -------
+        CiScope or None
+            The CI token's scope, for the check after the fetch (`check_ci_commit`); `None`
+            for a run no CI token queued.
+
+        Raises
+        ------
+        PermissionDenied
+            If the grant was revoked since the run was queued, or the CI token is no longer
+            valid or could not have queued this run.
+        """
+        scope = None if run is None else ci_scope_for_run(self._session, run)
+        if scope is not None:
+            p = dataclasses.replace(p, ci_scope=scope)
+        self._authz.authorize(p, Action.DEPLOY, Securable.environment_scope(environment))
+        if scope is not None:
+            assert run is not None  # nosec B101 -- a scope comes only from a run
+            repository = self._session.get(Repository, run.repository_id)
+            check_ci_request(
+                self._authz,
+                p,
+                scope,
+                environment=environment,
+                environment_id=run.environment_id,
+                repository="" if repository is None else repository.name,
+                repository_id=run.repository_id,
+                kind=run.kind,
+                ref=run.requested_ref,
+            )
+            if run.kind is DeployKind.DEPLOY and run.requested_ref != scope.sha:
+                ci_refusal(
+                    self._authz,
+                    p,
+                    environment,
+                    f"This deploy asks for {run.requested_ref}, not the CI token's commit "
+                    f"{scope.sha}.",
+                )
+        return scope
+
+    def check_ci_commit(self, p: PrincipalRef, scope: CiScope, kind: DeployKind, sha: str) -> None:
+        """Check, after the fetch, that a CI token's deploy fetched the token's signed commit.
 
         Parameters
         ----------
         p
             The run's principal.
-        environment
-            Environment name.
+        scope
+            The scope `authorize_deploy` returned.
+        kind
+            The run's kind; a dry run is not pinned.
+        sha
+            The commit the worker fetched.
 
         Raises
         ------
         PermissionDenied
-            If the grant was revoked since the run was queued.
+            If a deploy fetched another commit.
         """
-        self._authz.authorize(p, Action.DEPLOY, Securable.environment_scope(environment))
+        check_ci_commit(self._authz, dataclasses.replace(p, ci_scope=scope), scope, kind, sha)
 
     def validate_against_environment(
         self,

@@ -373,11 +373,14 @@ _GUARDED = {
     "grants/service.py": ("MANAGE_GRANT", 4),
     "identity/groups.py": ("MANAGE_GROUP", 6),
     "identity/pats.py": ("MANAGE_TOKEN", 3),
+    # A CI trust rule lets a CI job act as a service account: issuing it a token, in effect.
+    "ci_oidc/rules.py": ("MANAGE_TOKEN", 8),
 }
 _SERVICES = {
     "grants/service.py": "GrantService",
     "identity/groups.py": "GroupService",
     "identity/pats.py": "PatService",
+    "ci_oidc/rules.py": "CiTrustRuleService",
 }
 _EXEMPT = {
     ("PatService", "verify"): "authenticates a presented token: it reads the token row and "

@@ -23,6 +23,11 @@ table. Without a grant the answer is no, and the refusal is recorded.
   view and a write into another table included, and they follow a person or a group. Create them
   before you give access: [Show some people only some rows](../how-to/filter-rows.md) and
   [Mask a column for some people](../how-to/mask-a-column.md).
+- **CI jobs need no stored token.** A GitHub Actions or GitLab CI job can exchange the OIDC ID
+  token its provider gives it for a Lakana token that may queue one deploy of the job's own commit
+  to one environment, when a CI trust rule an administrator wrote names its repository and branch
+  or environment. The token lasts an hour and still needs the service account's grant
+  ([CI trust rules and CI tokens](../reference/ci-trust-rules.md)).
 - **Protected environments** accept writes only from deployed projects, so a person cannot change a
   production table by hand ([Projects and deploys](../how-to/projects.md#protected-environments-lockdown-and-break-glass)).
 

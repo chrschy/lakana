@@ -18,6 +18,9 @@ from lakana_core.catalog.lineage_graph import LineageService
 from lakana_core.catalog.query_service import QueryService
 from lakana_core.catalog.search import CatalogSearch
 from lakana_core.catalog.service import CatalogService
+from lakana_core.ci_oidc.exchange import TOKEN_PREFIX as CI_TOKEN_PREFIX
+from lakana_core.ci_oidc.exchange import CiTokenService
+from lakana_core.ci_oidc.rules import CiTrustRuleService
 from lakana_core.config import ViewAuditConfig
 from lakana_core.errors import AuthenticationError
 from lakana_core.grants.authorization import GrantAuthorization
@@ -54,9 +57,14 @@ _AUTH_HEADER_PATTERN = re.compile(r"^(?i:Bearer)\s+(\S+)$")
 Case-insensitive on the `Bearer` scheme via the inline `(?i:...)` group — a
 bare `re.IGNORECASE` flag would also loosen the captured token itself,
 which stays case-sensitive since it is not a registered scheme token.
-Which credential kind the captured token actually is (PAT or task token)
-is `parse_token`'s job, not this pattern's.
+Which credential kind the captured token actually is (PAT, task token or CI
+token) is `parse_token`'s job, not this pattern's.
 """
+
+_SHAPES = (
+    "Authorization header must be 'Bearer lakana_pat_<keyid>_<secret>', "
+    "'Bearer lakana_task_<keyid>_<secret>' or 'Bearer lakana_ci_<keyid>_<secret>'."
+)
 
 
 def get_session(request: Request) -> Iterator[Session]:
@@ -160,8 +168,10 @@ def get_principal(
 ) -> PrincipalRef:
     """Resolve the acting principal from the Authorization header.
 
-    Verifies a real credential: a PAT (`lakana_pat_<key_id>_<secret>`) or a
-    task token (`lakana_task_<key_id>_<secret>`), dispatched by prefix. This
+    Verifies a real credential: a PAT (`lakana_pat_<key_id>_<secret>`), a
+    task token (`lakana_task_<key_id>_<secret>`) or a CI token
+    (`lakana_ci_<key_id>_<secret>`, `CiTokenService.verify`, which re-checks its
+    rule and principal every time), dispatched by prefix. This
     replaces M1's shape-only check — a well-formed header with the wrong
     secret is now rejected, not accepted. Records `AUTHENTICATION_SUCCEEDED`
     for a successful attempt when `app.state.sign_in_audit_limiter`
@@ -220,10 +230,7 @@ def get_principal(
     try:
         match = _AUTH_HEADER_PATTERN.match(authorization or "")
         if match is None:
-            raise AuthenticationError(
-                "Authorization header must be 'Bearer lakana_pat_<keyid>_<secret>' "
-                "or 'Bearer lakana_task_<keyid>_<secret>'."
-            )
+            raise AuthenticationError(_SHAPES)
         raw_token = match.group(1)
         if (parsed := parse_token(raw_token, "lakana_pat")) is not None:
             key_id, secret = parsed
@@ -237,10 +244,13 @@ def get_principal(
             scope = task_tokens.verify(key_id, secret)
             _record_sign_in(request, audit, credential, scope.principal.id)
             return scope.principal
-        raise AuthenticationError(
-            "Authorization header must be 'Bearer lakana_pat_<keyid>_<secret>' "
-            "or 'Bearer lakana_task_<keyid>_<secret>'."
-        )
+        if (parsed := parse_token(raw_token, CI_TOKEN_PREFIX)) is not None:
+            key_id, secret = parsed
+            credential = ("ci", key_id)
+            principal = CiTokenService(session).verify(key_id, secret)
+            _record_sign_in(request, audit, credential, principal.id)
+            return principal
+        raise AuthenticationError(_SHAPES)
     except AuthenticationError:
         if credential is not None:
             request.app.state.sign_in_audit_limiter.forget(credential)
@@ -804,6 +814,30 @@ def get_package_index_service(
         A service using real authorization.
     """
     return PackageIndexService(session, authz)
+
+
+def get_ci_trust_rule_service(
+    request: Request,
+    session: Session = Depends(get_session),
+    authz: AuthorizationService = Depends(get_grant_authorization),
+) -> CiTrustRuleService:
+    """Build a CiTrustRuleService for the current request.
+
+    Parameters
+    ----------
+    request
+        The current request, for `LAKANA_CI_OIDC__ISSUERS`.
+    session
+        The current request's database session.
+    authz
+        The real, auditing-wrapped authorization service.
+
+    Returns
+    -------
+    CiTrustRuleService
+        A service that accepts rules for the configured issuers only.
+    """
+    return CiTrustRuleService(session, authz, issuers=request.app.state.settings.ci_oidc.issuers)
 
 
 def get_deploy_service(
