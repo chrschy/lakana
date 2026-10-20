@@ -65,6 +65,12 @@ dependencies = [
     # check and the scheduler agree on every machine and a slim container needs no system
     # database.
     "tzdata>=2026.5",
+    # BSD-3-Clause. The outbound HTTPS client of `lakana_core.net` (the discovery documents and
+    # key sets of CI OIDC issuers) and the shared egress checks the worker's webhooks use.
+    "httpx>=0.28,<1",
+    # MIT. Verifies the signature of a CI provider's OIDC ID token (`lakana_core.ci_oidc`); every
+    # claim is checked by Lakana itself. Its `crypto` extra only adds `cryptography`, listed above.
+    "pyjwt>=2.15.1",
 ]
 
 [tool.hatch.version]

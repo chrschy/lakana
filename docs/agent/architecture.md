@@ -65,6 +65,21 @@ and `lakana` also now contains the CLI built on top of it (details below).
     `package_indexes` table's `PackageIndexService` and `registered_indexes`
     (`package_indexes.py`), the URL rules and `KnownSources` (`package_sources.py`) and the lock
     and `pyproject.toml` checks (`lockfile.py`).
+  - `net/` — outbound HTTPS to addresses someone else named (#15). `egress.py` holds the checks
+    every such client shares: URL shape, the refusal of internal addresses (`is_internal`), the
+    one name lookup under a deadline (`lookup`), connecting to the checked address
+    (`pinned_request`), the operator's TLS and proxy (`tls_and_proxy`, never the environment),
+    trying each address in turn (`each_address`), one deadline (`run_with_deadline`) and the
+    reduction of any failure to a fixed reason (`classify`). The worker's webhook client
+    (`lakana_worker.egress`) is built on it and keeps its own reasons, settings and test hook.
+    `https_json.py` fetches one JSON document of at most 64 KiB from an allowed host name over
+    https on port 443, from public addresses only and without redirects.
+  - `ci_oidc/` — verification of CI providers' OIDC ID tokens (#15): `config.py`
+    (`CiOidcConfig`, `LAKANA_CI_OIDC__*`, a field of the server's settings), `jwks.py`
+    (`JwksCache`: discovery and the issuers' keys), `verification.py` (`IdTokenVerifier`) and
+    `errors.py` (`IdTokenRefused` with a stable `RefusalCode`). Nothing calls it yet: the
+    exchange endpoint, which also makes each `jti` single-use, comes with the second part of
+    #15. See "CI OIDC verification" in `security.md`.
   - Top-level modules: `auth.py` (`AuthorizationService`, `PrincipalRef`, `Securable`,
     `TaskScope`), `bootstrap.py`, `config.py`, `db.py`, `errors.py`, `identifiers.py`
     (`NamespacePath`, path-component validation), `iceberg_json.py`, `lineage.py`, and
@@ -311,7 +326,8 @@ things:
   loop or the scheduler tick. It claims **one** due row per short transaction (`FOR UPDATE SKIP
   LOCKED`, a lease of 60 s from the database's clock), decrypts the webhook secret only for that
   attempt, builds the payload (`lakana_core.notifications.payload`) and sends it through
-  `lakana_worker.egress` (the only code that sends; see "Webhook egress" in `security.md`). A 2xx
+  `lakana_worker.egress` (the only code that sends a webhook, built on `lakana_core.net.egress`;
+  see "Webhook egress" in `security.md`). A 2xx
   answer ends it `delivered`, a permanent 4xx or the fifth attempt `failed` (the audit event
   `NOTIFICATION_FAILED`), anything else is retried after about 30 s, 2 min, 10 min and 30 min.
   Nothing in it writes to the run. `__main__` starts it unless `LAKANA_WORKER__NOTIFICATIONS` is

@@ -152,3 +152,26 @@ def test_a_sign_in_is_recorded_once_per_quarter_hour_and_zero_records_every_one(
         monkeypatch.setenv("LAKANA_AUDIT__SIGN_IN_WINDOW_MINUTES", wrong)
         with pytest.raises(pydantic.ValidationError, match="sign_in_window_minutes"):
             Settings()
+
+
+def test_ci_oidc_is_off_by_default_and_reads_the_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`LAKANA_CI_OIDC__*` is the server's; empty issuers turn it off."""
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{tmp_path}/p.db")
+    assert not Settings().ci_oidc.enabled
+    monkeypatch.setenv("LAKANA_CI_OIDC__ISSUERS", "github,gitlab")
+    monkeypatch.setenv("LAKANA_CI_OIDC__AUDIENCE", "https://lakana.example.com")
+    config = Settings().ci_oidc
+    assert config.issuers == ["https://token.actions.githubusercontent.com", "https://gitlab.com"]
+    assert config.audience == "https://lakana.example.com"
+
+
+def test_the_server_does_not_start_with_issuers_and_no_audience(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The message names the missing setting and what to set it to."""
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{tmp_path}/p.db")
+    monkeypatch.setenv("LAKANA_CI_OIDC__ISSUERS", "github")
+    with pytest.raises(pydantic.ValidationError, match="LAKANA_CI_OIDC__AUDIENCE is required"):
+        Settings()

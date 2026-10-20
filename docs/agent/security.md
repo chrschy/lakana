@@ -3686,7 +3686,11 @@ exit criterion is being re-run after the M3f fixes above — see
 
 ## Webhook egress (M5d-c)
 
-`lakana_worker.egress` is the only code that sends a webhook. A webhook URL is hostile input:
+`lakana_worker.egress` is the only code that sends a webhook. Since #15 its address checks, pinning,
+TLS and proxy set-up, deadline, log silencing and failure reasons live in `lakana_core.net.egress`,
+which the CI OIDC fetcher shares ("CI OIDC verification" below); the webhook reasons, the
+`LAKANA_WEBHOOK__*` allow-list and the test hook stay in the worker, and the worker's tests run
+unchanged against it. A webhook URL is hostile input:
 anyone with the deploy right can name a secret of the environment as one if it is unbound or bound
 to the environment. `test_egress.py`
 pins each line.
@@ -3709,7 +3713,8 @@ pins each line.
   resolves it), so the proxy is trusted. `LAKANA_WEBHOOK__CA_BUNDLE` replaces trust and never
   disables verification. `LAKANA_WEBHOOK__ALLOW_HOSTS` exempts named hosts from the scheme, port
   and address rules, nothing else.
-- **No URL in any text.** Every exception is reduced to a fixed reason (`_reason`); `str(exc)`
+- **No URL in any text.** Every exception is reduced to a fixed reason
+  (`lakana_core.net.egress.classify`); `str(exc)`
   of an `httpx` error embeds the URL and is never read. Refusals are raised outside `except`
   blocks, so no exception is chained to them. `Destination.__repr__` hides everything. One
   deadline covers the whole attempt (`asyncio.wait_for`), so a server that dribbles bytes cannot
@@ -3768,6 +3773,92 @@ pins each line.
   prefix (RFC 6052) cannot be recognised and are accepted; they reach an internal IPv4 only
   through a translator or router the operator runs. A lookup that times out holds its thread
   until the system resolver gives up (16 threads).
+
+## CI OIDC verification (#15)
+
+`lakana_core.ci_oidc` verifies the OIDC ID token of a CI job (GitHub Actions, GitLab CI). It is the
+first part of a second authentication path, and nothing calls it yet: the exchange endpoint, the
+trust rules and the single use of each `jti` come with the second part, which gets its own
+adversarial review. `test_ci_oidc_verification.py`, `test_ci_oidc_jwks.py`,
+`test_ci_oidc_config.py` and `test_net_https_json.py` pin each line, with locally generated RSA keys
+and a fake fetcher; no test reaches the network.
+
+- **The order of the checks** (`IdTokenVerifier.verify_id_token`; each refusal is an
+  `IdTokenRefused` with a stable `RefusalCode` and a fixed message that never quotes the token or a
+  claim):
+  1. at most 16 KiB (`token_too_large`), then three base64url segments whose header and payload are
+     JSON objects with no member twice (`malformed`): parsers disagree on which duplicate wins, so
+     the claims checked must be exactly the ones signed;
+  2. the header's `alg` is in `LAKANA_CI_OIDC__ALGORITHMS` (`algorithm_not_allowed`);
+  3. `jku`, `x5u`, `x5c`, `jwk` and `crit` in the header are refused (`header_not_allowed`): a key
+     the token names for itself proves nothing;
+  4. a `kid` (`missing_key_id`);
+  5. the **unverified** `iss` is exactly one of `LAKANA_CI_OIDC__ISSUERS` (`issuer_not_allowed`), no
+     normalisation, so `https://gitlab.com/` is not `https://gitlab.com`;
+  6. the key by `kid` from that issuer's cache (`unknown_key`, `keys_unavailable`); it must be RSA,
+     not bound by its JWK's `alg` to another algorithm (`key_mismatch`) and at least 2048 bits
+     (`weak_key`);
+  7. the signature, by PyJWT's `PyJWS.decode_complete` with that one algorithm and that one key
+     object (`bad_signature`); the signature binds the `iss` read in step 5;
+  8. `aud` is, or is a list that contains, `LAKANA_CI_OIDC__AUDIENCE` (`audience_mismatch`);
+  9. `exp`, `iat` (required) and `nbf` (optional) are integers (`claim_missing`), with 60 s of skew:
+     expired (`expired`), `nbf` or `iat` in the future (`not_yet_valid`), `iat` older than
+     `LAKANA_CI_OIDC__MAX_TOKEN_AGE_SECONDS`, default 900 (`too_old`), `exp - iat` over a day
+     (`lifetime_too_long`);
+  10. `sub` and `jti` are non-empty texts (`claim_missing`).
+- **Issuer before network.** Steps 1 to 5 use the token alone. Only a token whose `iss` is a
+  configured issuer reaches the key cache, so an attacker's token can make the server fetch
+  nothing but a configured issuer's own discovery document and keys; the cache itself refuses an
+  issuer it was not built with. A random `kid` refreshes an issuer's keys at most once per 60 s,
+  whatever the reason, so unknown key ids cannot turn the server into a request generator.
+- **Algorithm confusion.** `none` and every `HS*` are refused when the settings load, and only the
+  RSA algorithms (`RS256`/`384`/`512`, `PS256`/`384`/`512`) are supported. The verifier also refuses
+  any algorithm outside that set before PyJWT sees it, so even a verifier handed `HS256` by
+  mistake never checks an HMAC keyed with the issuer's public key (a test does exactly that).
+  PyJWT is given the key object, never a PEM text, and one algorithm, never the header's choice
+  among several.
+- **Keys** (`JwksCache`): the discovery document comes from `<issuer>/.well-known/openid-configuration`
+  on the issuer's own host and must name the issuer exactly; its `jwks_uri` must be `https` on the
+  issuer's host or on a host of `LAKANA_CI_OIDC__ALLOW_HOSTS` (exact names, no wildcard, no IP),
+  without userinfo, and the fetcher checks it again. Keys are fresh for 1 h; when a refresh fails
+  the last good keys stay usable for 24 h past their freshness and then every lookup fails closed
+  (`keys_unavailable`). Only public RSA signing keys of at most 8192 bits are kept (`use` absent or
+  `sig`, no private member); two keys with one `kid` make the whole set unusable. Lookups of fresh
+  keys take no lock; one refresh per issuer runs at a time, and the threads that wait for it use
+  its result. A failed refresh logs the issuer (an operator setting) and the fixed reason.
+- **The fetcher** (`lakana_core.net.https_json`): `https`, port 443 and an allowed host name only
+  (never an IP literal), one lookup under 5 s, refused if **any** address is internal (the same
+  `is_internal` as the webhooks), except for a host on `LAKANA_CI_OIDC__ALLOW_HOSTS` (below), then
+  a connection to the checked address with the name as TLS
+  server name; `trust_env=False`, no redirect (a 3xx is a refusal), only a 200, `Accept-Encoding:
+  identity` and a refusal of any other `Content-Encoding` (no decompression bomb), at most 64 KiB
+  counted while reading, 10 s for the whole request. Deep JSON nesting ends as `NOT_JSON`, never as
+  an exception. `LAKANA_CI_OIDC__PROXY` and `LAKANA_CI_OIDC__CA_BUNDLE` work as the webhook ones do:
+  through a proxy the name cannot be pinned, so the proxy must refuse internal destinations.
+- **The settings refuse to start a wrong configuration**, naming the variable and the fix: an issuer
+  that is not `github`, `gitlab` or an `https` URL with a host name and no port, credentials, query
+  or trailing slash; issuers without `LAKANA_CI_OIDC__AUDIENCE` (there is no public-URL setting to
+  derive it from); `none`, `HS*` or an unsupported algorithm; an allowed host that is a pattern or
+  an address. Empty issuers turn the feature off (`disabled`).
+- **Seams for the exchange.** `VerifiedIdToken` carries all claims, the issuer, `sub`, `jti` and the
+  expiry; the caller must accept each `jti` once (until its expiry) and match its trust rules
+  against the claims. `RefusalCode` is what the rate-limited `OIDC_EXCHANGE_REFUSED` audit row
+  records.
+- **An issuer on a private address** (a self-hosted GitLab on an internal network) needs two
+  settings: its URL in `LAKANA_CI_OIDC__ISSUERS` and its host name in
+  `LAKANA_CI_OIDC__ALLOW_HOSTS`. Only a host **exactly** on that list may resolve to a private
+  address (10/8, 172.16/12, 192.168/16, 100.64/10, `fc00::/7`), for the discovery document and
+  the keys alike; the issuers' own hosts are not exempt unless listed, and every other host must
+  be public. Even a listed host is refused when any of its addresses is loopback, link-local
+  (`169.254.0.0/16`, `fe80::/10`, so 169.254.169.254), unspecified, multicast or reserved, a
+  known metadata address inside a private range (`fd00:ec2::254`, `100.100.100.200`), or an
+  IPv6 form that carries such an IPv4 address (`is_never_reachable`). This is stricter than
+  `LAKANA_WEBHOOK__ALLOW_HOSTS`, which exempts a listed host from every address check, the
+  scheme and the port. Pinning, `https` on 443, no redirects, the 64 KiB cap and the deadlines
+  still apply. As with the webhooks, list only names whose DNS you control: whoever controls
+  a listed name's DNS can point it at any private address.
+- **Residuals:** the `typ` header is not checked; `aud` and the issuer's own key set keep other
+  tokens of the same issuer out.
 
 ## Git fetch hardening (M5b)
 

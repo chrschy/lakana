@@ -5,6 +5,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from lakana_core.ci_oidc.config import CiOidcConfig
 from lakana_core.config import (
     ArtifactsConfig,
     AuditConfig,
@@ -172,6 +173,9 @@ class Settings(BaseSettings):
         ``LAKANA_RUN__*``, shared with the worker.
     log
         ``LAKANA_LOG__LEVEL``, shared with the worker: how much the server logs.
+    ci_oidc
+        Which CI providers' OIDC ID tokens the server verifies, for which audience, and how it
+        reaches their keys (`LAKANA_CI_OIDC__*`). Off by default.
     host
         Address the server listens on. `127.0.0.1` (the default) accepts connections from this
         machine only; the Compose bundle publishes the port through `LAKANA_BIND`.
@@ -205,6 +209,7 @@ class Settings(BaseSettings):
     query_limits: QueryLimitsConfig = QueryLimitsConfig()
     run: RunConfig = RunConfig()
     log: LogConfig = LogConfig()
+    ci_oidc: CiOidcConfig = CiOidcConfig()
     host: str = "127.0.0.1"
     port: int = 8000
     repo_roots: list[str] = []
