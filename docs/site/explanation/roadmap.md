@@ -63,6 +63,21 @@ sends only to a public `https` address unless an operator allows a host, tries u
 and never changes the run. See [Get told when a job fails](../how-to/get-told-when-a-job-fails.md)
 and the [upgrade notes](upgrades.md#notifications-for-jobs). The next element is the move to DuckDB 2 (item 2 below).
 
+Housekeeping for data that is no longer wanted shipped in 0.17.0. A table, or every table of an
+environment, can be given a retention and then expires (#87, PR #227), so that development tables
+do not stay for ever; nothing expires unless a retention is set. A dropped table
+keeps its files for an undo period (7 days by default) and then the worker deletes them; a
+deleted environment's tables follow the same rule (#94, #213), and `lakana table undrop` and
+`lakana env restore` bring them back until then. Every table's location is recorded before
+anything is written, so files that never landed can be found and removed (#90), and
+`lakana env orphaned-locations` lists and removes the directories left without a record (#229).
+The audit log records when a manager views other people's queries or a table's readers, and
+query text in other people's events needs `READ_QUERY_TEXT` (#88); a successful sign-in is written at most once per
+credential and window (#217). Deploying from CI without a stored secret, through OIDC token
+exchange (#15), is built in three parts that do not wait for the web interface: 0.17.0 verifies
+a CI provider's ID token (#244); the exchange, trust rules and enforcement, and then the client,
+how-tos and templates follow.
+
 ## To v1.0.0
 
 The public beta comes before the web interface. The beta's purpose is that
@@ -113,8 +128,7 @@ ingestion helpers and named connections.
    provider. It shows the catalog, lineage, runs with logs and check results and deploys, and has
    a one-query SQL editor, administration of users, groups, grants, tokens and connections,
    loading a file, and a first-run tour. No file browser, dashboards or notebooks. The Compose
-   bundle can set up a TLS proxy, because passkeys need HTTPS. CI can deploy without a stored
-   secret, through OIDC token exchange. Done when a new user can sign in and answer a question
+   bundle can set up a TLS proxy, because passkeys need HTTPS. Done when a new user can sign in and answer a question
    without the CLI. A second security review is due when the interface and sign-in arrive.
 7. **M8, ML.** Experiment tracking, the model registry, and the offline feature store, all
     queryable and tied to commits. The registry is the artifact store of M5c2b. It adds named
@@ -131,8 +145,7 @@ ingestion helpers and named connections.
 10. **M9, performance and multi-host workers.** Measured query performance, and workers that
     run on more than one host. Done when adding a host increases throughput as documented.
 11. **M10, hardening and v1.0.0.** Security review, upgrade paths, documentation pass and the
-    API freeze. A table or a whole environment can expire (#87), so that development tables do
-    not stay for ever. Done when the release criteria are met and v1.0.0 is tagged.
+    API freeze. Done when the release criteria are met and v1.0.0 is tagged.
 
 ## After v1.0.0
 
