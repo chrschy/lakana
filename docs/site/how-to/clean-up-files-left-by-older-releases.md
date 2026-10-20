@@ -37,7 +37,7 @@ A directory is listed only when nothing in the catalog uses it:
 
 **A location that cannot be compared keeps it.** An environment's storage root, a table or a
 location record can be stored in a spelling that names the same place differently, such as a
-doubled slash (`.../gold//orders-...`), a `.` or `..` segment, `FILE://` or `s3a://`, or a percent
+doubled slash (`.../gold//orders-...`, or `file:////data` at the start), a `.` or `..` segment, `FILE://` or `s3a://`, or a percent
 escape. When such a location may be the directory, lie inside it or around it, the directory is
 listed with a `kept_because` that names that location, and it is never deleted. A `..` segment or
 a percent escape cannot be resolved for certain, so one of those keeps every directory on the same

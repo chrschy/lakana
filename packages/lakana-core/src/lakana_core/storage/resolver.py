@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import posixpath
+import re
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -104,6 +105,42 @@ table's data across the whole `managed/` zone once DuckDB opened it.
 """
 
 
+SCHEME_ALIASES = {"s3a": "s3", "s3n": "s3", "abfss": "abfs"}
+"""Schemes that address the same storage as another one, by their usual name."""
+
+PERCENT_ESCAPE = re.compile(r"%[0-9A-Fa-f]{2}")
+"""A percent escape, which a backend may decode: a spelling with one cannot be normalised exactly.
+
+A glob character is taken literally when locations are compared: a storage backend deletes and
+lists by literal names, so it cannot make two spellings name one directory."""
+
+
+def normalised_path(rest: str) -> str | None:
+    """Spell the path of a location, the part after ``scheme://``, the one way it is compared.
+
+    The single definition of a canonical path: empty segments (a doubled slash anywhere, a
+    leading one included, which `posixpath.normpath` keeps) and ``.`` segments are dropped, one
+    leading ``/`` is kept, and no trailing ``/``. A path is canonical when it comes back
+    unchanged.
+
+    Parameters
+    ----------
+    rest
+        The path, such as ``/data/lake`` or ``bucket/lake``.
+
+    Returns
+    -------
+    str or None
+        The path; `None` when it has a ``..`` segment, whose target cannot be told from the
+        spelling alone.
+    """
+    segments = rest.split("/")
+    if ".." in segments:
+        return None
+    kept = "/".join(segment for segment in segments if segment not in {"", "."})
+    return ("/" if rest.startswith("/") else "") + kept
+
+
 def _is_canonical_uri(uri: str) -> bool:
     """Check whether `uri` has a scheme, no glob metacharacters, and a canonical path.
 
@@ -115,17 +152,61 @@ def _is_canonical_uri(uri: str) -> bool:
     Returns
     -------
     bool
-        `True` if `uri` has a ``scheme://`` prefix, its path component
-        contains none of `_GLOB_METACHARACTERS`, and that path component
-        equals its own `posixpath.normpath` (no `.`, `..`, or doubled
-        slashes).
+        `True` if `uri` has a ``scheme://`` prefix, its path component is not empty, contains
+        none of `_GLOB_METACHARACTERS`, and comes back unchanged from `normalised_path` (no
+        `.`, `..`, doubled slash, leading doubled slash or trailing slash).
     """
     _scheme, sep, rest = uri.partition("://")
-    if not sep:
+    if not sep or not rest:
         return False
     if any(char in rest for char in _GLOB_METACHARACTERS):
         return False
-    return posixpath.normpath(rest) == rest
+    return normalised_path(rest) == rest
+
+
+ROOT_UNJUDGEABLE_MESSAGE = (
+    "The storage root {root!r} cannot be compared with other locations. Write it without .. "
+    "segments, percent escapes (such as %20) and the characters * ? [ ], as a plain "
+    "scheme://path."
+)
+ROOT_SPELLING_MESSAGE = (
+    "The storage root {root!r} is written differently from the way Lakana compares locations, "
+    "so the files of one environment could be taken for another's. Use {canonical!r} instead."
+)
+
+
+def check_storage_root(root: str) -> None:
+    """Refuse a storage root that is not written canonically.
+
+    Every table location is built from the root, so a root in another spelling of a place
+    (``file:////data``, ``.../a//b``, ``FILE://``, ``s3a://``) gives every location of the
+    environment a spelling that the location checks cannot compare with the others. One
+    trailing slash is accepted; locations are built without it.
+
+    Parameters
+    ----------
+    root
+        The root, ``scheme://path``.
+
+    Raises
+    ------
+    ValidationError
+        If it cannot be normalised exactly (`ROOT_UNJUDGEABLE_MESSAGE`), or its canonical
+        spelling differs (`ROOT_SPELLING_MESSAGE`, which names that spelling).
+    """
+    scheme, sep, rest = root.partition("://")
+    path = normalised_path(rest)
+    if (
+        not sep
+        or path is None
+        or PERCENT_ESCAPE.search(rest)
+        or any(char in rest for char in _GLOB_METACHARACTERS)
+    ):
+        raise ValidationError(ROOT_UNJUDGEABLE_MESSAGE.format(root=root))
+    lowered = scheme.lower()
+    canonical = f"{SCHEME_ALIASES.get(lowered, lowered)}://{path}"
+    if root.removesuffix("/") != canonical:
+        raise ValidationError(ROOT_SPELLING_MESSAGE.format(root=root, canonical=canonical))
 
 
 def is_within_location(location: str, uri: str) -> bool:

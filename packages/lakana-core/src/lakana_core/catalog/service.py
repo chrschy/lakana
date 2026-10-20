@@ -264,6 +264,7 @@ from lakana_core.storage.base import StoredObject
 from lakana_core.storage.resolver import (
     ResolvedStorage,
     StorageResolver,
+    check_storage_root,
     is_id_suffixed_location,
     is_within_location,
     nested_locations_within,
@@ -1107,6 +1108,9 @@ class CatalogService:
         AlreadyExistsError
             If an environment with that name already exists, also a deleted one whose files
             are kept (`NAME_HELD_MESSAGE` names the restore and the early purge).
+        ValidationError
+            If the storage root is not written canonically (`check_storage_root`; the message
+            names the spelling to use).
         PermissionDenied
             If the principal may not manage environments.
 
@@ -1119,6 +1123,7 @@ class CatalogService:
         root of — an environment nobody meant to delegate to them.
         """
         self._authz.authorize(p, Action.MANAGE_ENVIRONMENT, Securable.instance_scope())
+        check_storage_root(storage.root)
         existing = self._session.execute(
             select(Environment).where(Environment.name == name)
         ).scalar_one_or_none()

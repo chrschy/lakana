@@ -1523,7 +1523,13 @@ file outside `metadata/` the file's directory); and `near_other_location` (the s
 finds nothing: no other environment's storage root at, inside, or (from inside this `managed/`)
 around it, however spelled, and no record or table location in a non-canonical spelling (doubled
 slash, `.`/`..`, scheme alias such as `s3a`/`FILE`, percent escape) that normalises to one of
-these. A `..` segment or a percent escape cannot be normalised exactly: such a location fails
+these. Canonical has one definition, `resolver.normalised_path` (empty and `.` segments
+dropped, a leading `//` included, which `posixpath.normpath` keeps; `..` unjudgeable):
+`_is_canonical_uri`, `is_within_location`, `spelled_canonically` and `near_other_location` all
+build on it, and `create_environment` refuses a root that is not canonical
+(`check_storage_root`, 422 naming the spelling to use; percent escapes, glob characters and
+scheme aliases refused too). Roots stored before stay and meet the fail-closed check. A `..`
+segment or a percent escape cannot be normalised exactly: such a location fails
 closed for every directory on the same scheme and bucket (the whole local disk for `file`). A
 canonical other root makes the directory not listed; a non-canonical spelling lists it as kept,
 with a reason naming the location. Glob characters are taken literally (storage names are

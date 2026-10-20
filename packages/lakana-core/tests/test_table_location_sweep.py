@@ -1576,6 +1576,25 @@ def test_a_table_dropped_inside_before_the_record_is_forgotten_keeps_it(
     assert _record(session, location) is not None
 
 
+def _existing_environment(session: Session, name: str, root: str) -> None:
+    """Insert an environment as an older release accepted it, root spelled as given.
+
+    Creating one with such a root is refused now (`check_storage_root`); the location checks
+    still meet the ones that exist.
+
+    Parameters
+    ----------
+    session
+        Database session; commits.
+    name
+        Its name.
+    root
+        Its storage root.
+    """
+    session.add(Environment(id=uuid.uuid4(), name=name, storage_root=root, storage_options={}))
+    session.commit()
+
+
 # --- other environments and locations spelled differently -----------------------------------
 
 
@@ -1591,11 +1610,7 @@ def test_another_environment_root_spelled_with_a_doubled_slash_blocks_a_purge(
     _put(location, "data/a.parquet")
     _claim(session, location, state=TableLocationState.ABANDONED, purge_after=_NOW)
     head, name = location.rsplit("/", 1)
-    catalog.create_environment(
-        principal,
-        name="other",
-        storage=StorageConfig(scheme="file", root=f"{head}//{name}", options={}),
-    )
+    _existing_environment(session, "other", f"{head}//{name}")
     caplog.set_level(logging.WARNING)
 
     report = _sweep(session)
@@ -1688,11 +1703,7 @@ def test_another_environment_root_with_a_dotdot_segment_blocks_a_purge(
     location = _location(store)
     _put(location, "data/a.parquet")
     _claim(session, location, state=TableLocationState.ABANDONED, purge_after=_NOW)
-    catalog.create_environment(
-        principal,
-        name="other",
-        storage=StorageConfig(scheme="file", root=f"file://{store}/x/../y", options={}),
-    )
+    _existing_environment(session, "other", f"file://{store}/x/../y")
 
     assert _sweep(session).purges_blocked == 1
 
@@ -1702,9 +1713,7 @@ def test_a_purge_under_a_root_that_cannot_be_normalised_is_blocked(
 ) -> None:
     """The environment's own root has a percent escape: its locations are not judged."""
     root = f"file://{store}/r%41"
-    catalog.create_environment(
-        principal, name="escaped", storage=StorageConfig(scheme="file", root=root, options={})
-    )
+    _existing_environment(session, "escaped", root)
     location = f"{root}/managed/gold/t-{uuid.uuid4().hex}"
     _put(location, "data/a.parquet")
     _claim(
@@ -1718,4 +1727,18 @@ def test_a_purge_under_a_root_that_cannot_be_normalised_is_blocked(
     report = _sweep(session)
 
     assert report.files_deleted == 0
+    assert _files(location) == ["data/a.parquet"]
+
+
+def test_a_live_record_with_a_leading_double_slash_inside_blocks_a_purge(
+    session: Session, catalog: CatalogService, store: Path
+) -> None:
+    """``file:////...`` names the same place on a local disk."""
+    location = _location(store)
+    _put(location, "data/a.parquet")
+    _claim(session, location, state=TableLocationState.ABANDONED, purge_after=_NOW)
+    inside = location.replace("file://", "file:///", 1) + f"/n-{uuid.uuid4().hex}"
+    _claim(session, inside, state=TableLocationState.LIVE)
+
+    assert _sweep(session).purges_blocked == 1
     assert _files(location) == ["data/a.parquet"]

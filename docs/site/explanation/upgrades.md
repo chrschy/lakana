@@ -248,6 +248,23 @@ by the upgrade. Going back to the previous release drops the columns: an environ
 meanwhile shows up again without its tables, each of which stays a dropped table that `lakana table
 undrop` restores within its undo period, as before.
 
+### A storage root must be written the one way locations are compared
+
+`lakana env create` (REST `POST /api/v1/environments`, SDK `environments.create`) now refuses a
+storage root written in another spelling of a place, with 422 and a message that names the
+spelling to use: an upper-case or alias scheme (`FILE://`, `s3a://`), a doubled slash anywhere
+(`file:////data`, `s3://bucket//lake`), a `.` or `..` segment, a percent escape, or `*`, `?`, `[`,
+`]`. One trailing slash is still accepted. Two spellings of one directory hide each other's files
+from the checks that keep the clean-up from deleting what another environment uses.
+
+Environments that already have such a root keep it. The clean-up never deletes files near one:
+see [Clean up files left by older releases](../how-to/clean-up-files-left-by-older-releases.md).
+**A location that starts with a doubled slash after the scheme (`file:////data/...`) no longer
+counts as canonical**, as other doubled slashes did not already: the tables of an environment whose
+root starts that way can no longer be read or maintained. Create a new environment with the
+canonical root (`file:///data/...`; the same directory on a local disk) and load its tables
+there again.
+
 ### Remove the table directories older releases left behind
 
 Directories that earlier releases left under `managed/` without a record (tables dropped before

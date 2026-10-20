@@ -28,7 +28,6 @@ location stored in a spelling that is not canonical.
 
 from __future__ import annotations
 
-import re
 import uuid
 from datetime import datetime
 
@@ -41,7 +40,10 @@ from lakana_core.models import Environment, Namespace, Table, TableLocation, Tab
 from lakana_core.models.table_location import IN_USE_STATES, PURGEABLE_STATES
 from lakana_core.storage.resolver import (
     MANAGED_PREFIX,
+    PERCENT_ESCAPE,
+    SCHEME_ALIASES,
     _is_canonical_uri,
+    normalised_path,
     table_root_from_metadata_location,
 )
 
@@ -411,16 +413,6 @@ def table_root_locations(session: Session) -> list[str]:
     ]
 
 
-_SCHEME_ALIASES = {"s3a": "s3", "s3n": "s3", "abfss": "abfs"}
-"""Schemes that address the same storage as another one, by their usual name."""
-
-_PERCENT_ESCAPE = re.compile(r"%[0-9A-Fa-f]{2}")
-"""A percent escape, which a backend may decode: a spelling with one cannot be normalised exactly.
-
-A glob character is taken literally here: a storage backend deletes and lists by literal names, so
-it cannot make two spellings name one directory."""
-
-
 def _normalised(uri: str) -> tuple[str, str] | None:
     """Spell a location the one way its storage reads it, when that can be done exactly.
 
@@ -437,14 +429,11 @@ def _normalised(uri: str) -> tuple[str, str] | None:
         scheme.
     """
     scheme, sep, rest = uri.partition("://")
-    if not sep or _PERCENT_ESCAPE.search(rest):
+    path = normalised_path(rest)
+    if not sep or path is None or PERCENT_ESCAPE.search(rest):
         return None
-    segments = rest.split("/")
-    if ".." in segments:
-        return None
-    path = "/".join(segment for segment in segments if segment not in {"", "."})
     lowered = scheme.lower()
-    return _SCHEME_ALIASES.get(lowered, lowered), ("/" if rest.startswith("/") else "") + path
+    return SCHEME_ALIASES.get(lowered, lowered), path
 
 
 def _storage_of(uri: str) -> tuple[str, str]:
@@ -464,7 +453,7 @@ def _storage_of(uri: str) -> tuple[str, str]:
     scheme, _, rest = uri.partition("://")
     lowered = scheme.lower()
     bucket = "" if rest.startswith("/") else rest.split("/", 1)[0]
-    return _SCHEME_ALIASES.get(lowered, lowered), bucket
+    return SCHEME_ALIASES.get(lowered, lowered), bucket
 
 
 def _within(outer: tuple[str, str], inner: tuple[str, str]) -> bool:
@@ -502,9 +491,9 @@ def spelled_canonically(uri: str) -> bool:
     scheme = uri.partition("://")[0]
     return (
         _is_canonical_uri(uri)
-        and not _PERCENT_ESCAPE.search(uri)
+        and not PERCENT_ESCAPE.search(uri)
         and scheme == scheme.lower()
-        and scheme not in _SCHEME_ALIASES
+        and scheme not in SCHEME_ALIASES
     )
 
 

@@ -913,11 +913,15 @@ def test_another_environment_root_spelled_with_a_doubled_slash_keeps_the_directo
 ) -> None:
     """``gold//t-<hex>`` is the same directory as ``gold/t-<hex>``: it is kept and named."""
     name = f"t-{uuid.uuid4().hex}"
-    catalog.create_environment(
-        principal,
-        name="other",
-        storage=StorageConfig(scheme="file", root=_store_location(store, f"//{name}"), options={}),
+    session.add(
+        Environment(
+            id=uuid.uuid4(),
+            name="other",
+            storage_root=_store_location(store, f"//{name}"),
+            storage_options={},
+        )
     )
+    session.commit()
     location = _store_location(store, f"/{name}")
     _leftover(location)
 
@@ -1010,3 +1014,86 @@ def test_a_scheme_alias_counts_as_another_spelling(
 
     (entry,) = catalog.find_orphaned_locations(principal, "dev", older_than_days=1).locations
     assert entry.kept_because is not None
+
+
+# --- a doubled slash at the start of the path -----------------------------------------------
+
+
+def _odd_environment(session: Session, store: Path) -> str:
+    """Insert an environment whose root names the store with four slashes, as before the check.
+
+    Parameters
+    ----------
+    session
+        Database session; commits.
+    store
+        The storage root of `dev`.
+
+    Returns
+    -------
+    str
+        The odd spelling of the root, ``file:////...``.
+    """
+    root = f"file:///{store}"
+    session.add(Environment(id=uuid.uuid4(), name="odd", storage_root=root, storage_options={}))
+    session.commit()
+    return root
+
+
+def test_another_environment_on_the_same_root_with_a_leading_double_slash_keeps_its_table(
+    session: Session, catalog: CatalogService, store: Path, principal: PrincipalRef
+) -> None:
+    """``file:////store`` is ``file:///store`` on a local disk: that environment's table stays."""
+    odd = _odd_environment(session, store)
+    name = f"orders-{uuid.uuid4().hex}"
+    _claim(session, f"{odd}/managed/gold/{name}", state=TableLocationState.LIVE, environment="odd")
+    namespace = session.scalars(select(Namespace.id)).first()
+    session.add(
+        Table(
+            id=uuid.uuid4(),
+            namespace_id=namespace,
+            name="orders",
+            table_type=TableType.ICEBERG,
+            metadata_location=f"{odd}/managed/gold/{name}/metadata/00000-a.metadata.json",
+        )
+    )
+    session.commit()
+    location = _store_location(store, f"/{name}")
+    _leftover(location)
+    metadata = _put(location, "metadata/00000-a.metadata.json", b"{}")
+    moment = (datetime.now(UTC) - _OLD).timestamp()
+    os.utime(metadata, (moment, moment))
+
+    catalog.delete_orphaned_locations(principal, "dev", older_than_days=1)
+
+    assert metadata.exists()
+    assert len(_files(location)) == 3
+
+
+@pytest.mark.parametrize("kind", ["record", "table"])
+def test_a_location_with_a_leading_double_slash_keeps_the_directory(
+    session: Session, catalog: CatalogService, store: Path, principal: PrincipalRef, kind: str
+) -> None:
+    """A live record, or a table's metadata file, spelled ``file:////...``."""
+    name = f"t-{uuid.uuid4().hex}"
+    odd = f"file:///{store}/managed/gold/{name}"
+    if kind == "record":
+        _claim(session, odd, state=TableLocationState.LIVE)
+    else:
+        namespace = session.scalars(select(Namespace.id)).first()
+        session.add(
+            Table(
+                id=uuid.uuid4(),
+                namespace_id=namespace,
+                name="odd",
+                table_type=TableType.ICEBERG,
+                metadata_location=f"{odd}/metadata/00000-a.metadata.json",
+            )
+        )
+        session.commit()
+    location = _store_location(store, f"/{name}")
+    _leftover(location)
+
+    (entry,) = catalog.delete_orphaned_locations(principal, "dev", older_than_days=1).locations
+    assert not entry.deleted and entry.kept_because is not None
+    assert len(_files(location)) == 2

@@ -39,6 +39,12 @@ def create(
 ) -> None:
     """Create environment NAME (with bronze/silver/gold namespaces).
 
+    Write the storage root the one way Lakana compares locations: a lower-case scheme
+    (`s3`, not `s3a`), one slash between path segments and none doubled after `file://`
+    (`file:///data`, not `file:////data`), no `.` or `..` segments, no percent escapes and no
+    `*`, `?`, `[` or `]`. One trailing slash is fine. Another spelling is refused, and the
+    message names the one to use.
+
     Parameters
     ----------
     ctx
