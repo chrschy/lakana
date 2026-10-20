@@ -167,6 +167,10 @@ def test_an_entry_point_imports_alone_in_a_fresh_interpreter(module: str) -> Non
     assert result.returncode == 0, result.stderr[-2000:]
 
 
+_INTERPRETERS = 4
+"""The most interpreters `test_every_module_imports_alone` runs at once (bounded by memory)."""
+
+
 def _chunks(modules: list[str], count: int) -> list[list[str]]:
     """Deal modules into `count` lists, so each child gets a similar mix of packages.
 
@@ -197,12 +201,14 @@ def test_every_module_imports_alone() -> None:
     """Import each module of the four packages as the first import of its process.
 
     The next cycle is caught whichever module it is in, not only in a listed entry point. The
-    modules are shared among as many interpreters as the machine has CPUs, one after another in
-    each, so every import is still the first of its interpreter.
+    modules are shared among up to four interpreters (fewer on a machine with fewer CPUs), one
+    after another in each, so every import is still the first of its interpreter. Four, not one
+    per CPU: under coverage each interpreter holds about 250 MB, and eight of them pushed a full
+    run on two workers over its 6 GB memory cap.
     """
     modules = _every_module()
     assert len(modules) > 200, "the scan found too few modules; has the layout changed?"
-    chunks = _chunks(modules, max(1, min(len(os.sched_getaffinity(0)), 8)))
+    chunks = _chunks(modules, max(1, min(len(os.sched_getaffinity(0)), _INTERPRETERS)))
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(chunks)) as pool:
         results = list(
             pool.map(
