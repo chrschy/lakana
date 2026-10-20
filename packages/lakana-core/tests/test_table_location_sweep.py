@@ -482,8 +482,10 @@ def test_an_in_doubt_create_that_landed_late_is_made_live_and_keeps_its_files(
     record = session.scalars(select(TableLocation)).one()
     table_id = record.table_id
     session.execute(
-        update(TableLocation).values(state=TableLocationState.CLAIMED, table_id=None)
-    )  # as a create in doubt leaves it
+        update(TableLocation).values(
+            state=TableLocationState.CLAIMED, table_id=None, claimed_at=_NOW
+        )
+    )  # as a create in doubt leaves it; claimed on the test's clock, not the wall clock
     session.commit()
     files = _files(record.location)
 
