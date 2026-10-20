@@ -3090,16 +3090,21 @@ that uses it. User reference: `docs/site/reference/package-indexes.md`; how-to:
   in core: every row it returns is a `ShownAuditEvent` copy (deep-copied `detail`, never the ORM row,
   so nothing a caller does is flushed back), and for a row whose `principal_id` is not the reader's
   (a `NULL` principal included) each field of `lakana_core.audit.content.hidden_fields` is replaced
-  by `fingerprint` (`{"sha256": hex of UTF-8, "length": characters}`; a non-string value by the
-  fingerprint of its sorted JSON; `None` and a stored fingerprint, 64 hex digits and an int, pass
-  unchanged) unless `permits(p, READ_QUERY_TEXT, instance)`, asked once per page and only when a row
-  has something to hide. The reader's own events are always full. **Classification:**
-  `CONTENT_FIELDS` (per event type: `QUERY_COMPLETED.sql_text`, and `TABLE_WRITE.watermark`, the
-  highest value of an incremental write's key column, which can be any column value, e.g. an email;
-  a reader of the log need not hold `READ_TABLE` on that table, so it is content, #239) and
-  `SHOWN_FIELDS` (field
-  names that are never content in any event: names, ids, counts, times, fixed reasons) are the one
-  list. A field in neither is hidden like content (fail closed: a new field never leaks), and
+  as its `Hiding` says, unless `permits(p, READ_QUERY_TEXT, instance)`, asked once per page and only
+  when a row has something to hide. `Hiding.FINGERPRINT` (query text only) gives `fingerprint`
+  (`{"sha256": hex of UTF-8, "length": characters}`; a non-string value by the fingerprint of its
+  sorted JSON; `None` and a stored fingerprint, 64 hex digits and an int, pass unchanged).
+  `Hiding.WITHHELD` gives `WITHHELD` (`{"hidden": true}`): no value, no digest, no length, whatever
+  was stored (only `None` stays `None`). It is for a value from a small set, which an unsalted digest
+  plus a length would give back: a watermark (#239) is the highest value of an incremental key,
+  which is an int, long, decimal, date or timestamp (`catalog/watermark.py`), stored typed
+  (`date:2026-10-20`, `long:7340219`); the re-review recovered such values from their digests in
+  seconds by trying candidates. The reader's own events are always full. **Classification:**
+  `CONTENT_FIELDS` (per event type, each field with its `Hiding`: `QUERY_COMPLETED.sql_text`
+  fingerprinted, and `TABLE_WRITE.watermark` withheld, a value of the table's key column that a
+  reader of the log need not hold `READ_TABLE` for, #239) and `SHOWN_FIELDS` (field names that are
+  never content in any event: names, ids, counts, times, fixed reasons) are the one list. A field in
+  neither is withheld (fail closed: a new field never leaks, not even as a digest), and
   `AuditService.record` warns `UnclassifiedAuditFieldWarning`, which `pyproject.toml` makes an error
   for the whole test suite, so the 100 % coverage of every `record` call turns an unclassified field
   into a failing test. Decided as shown: a break-glass `reason` (written for the reviewer of the log),

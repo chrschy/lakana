@@ -264,9 +264,10 @@ class Action(enum.StrEnum):
 
     Instance-scoped, like the audit log it applies to, and granted as a single action only:
     no role carries it, `ADMIN` included. Without it a reader of the audit log sees each
-    content field of another principal's event as its SHA-256 and length
-    (`lakana_core.audit.content`); a reader's own events are always shown in full. It opens
-    nothing by itself: reading the log still needs `READ_AUDIT_LOG`. Not a task-token action.
+    content field of another principal's event hidden (query text as its SHA-256 and length,
+    a watermark with nothing derived from it; `lakana_core.audit.content`); a reader's own
+    events are always shown in full. It opens nothing by itself: reading the log still needs
+    `READ_AUDIT_LOG`. Not a task-token action.
     """
     DEPLOY = "DEPLOY"
     """Deploy, dry-run or roll back a repository in an environment.

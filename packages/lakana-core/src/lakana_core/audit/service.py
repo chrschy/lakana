@@ -69,8 +69,8 @@ class ShownAuditEvent:
     securable_table
         The object's table, or `None`.
     detail
-        Its detail, with another principal's content replaced by its SHA-256 and length unless
-        the reader holds `READ_QUERY_TEXT`.
+        Its detail, with another principal's content hidden unless the reader holds
+        `READ_QUERY_TEXT` (`lakana_core.audit.content.shown_detail`).
     """
 
     id: uuid.UUID
@@ -214,8 +214,9 @@ class AuditService:
         `LAKANA_VIEW_AUDIT__WINDOW_MINUTES` (`lakana_core.audit.views.record_view`); a page of
         only the reader's own events, or a filter on the reader, records nothing. The content of
         another principal's event (`lakana_core.audit.content.CONTENT_FIELDS`, and any field not
-        classified) is shown as its SHA-256 and length unless `p` holds `READ_QUERY_TEXT` on the
-        instance; the reader's own events are shown in full.
+        classified) is hidden unless `p` holds `READ_QUERY_TEXT` on the instance: query text as
+        its SHA-256 and length, any other value as a marker with nothing derived from it; the
+        reader's own events are shown in full.
 
         Parameters
         ----------
@@ -374,12 +375,12 @@ def _shown(
     sees_text: bool | None = None
     items = []
     for row in rows:
-        hidden = [] if row.principal_id == p.id else hidden_fields(row.event_type, row.detail)
+        hidden = {} if row.principal_id == p.id else hidden_fields(row.event_type, row.detail)
         if hidden:
             if sees_text is None:
                 sees_text = authz.permits(p, Action.READ_QUERY_TEXT, Securable.instance_scope())
             if sees_text:
-                hidden = []
+                hidden = {}
         items.append(
             ShownAuditEvent(
                 id=row.id,

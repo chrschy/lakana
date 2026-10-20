@@ -110,23 +110,27 @@ Two fields of an event can hold content, which may be anything a table holds:
 | Event | Field | What it holds |
 |---|---|---|
 | `QUERY_COMPLETED` | `detail.sql_text` | the SQL text of the query |
-| `TABLE_WRITE` | `detail.watermark` | the highest value of an incremental write's key column: a value from the table, such as an email address |
+| `TABLE_WRITE` | `detail.watermark` | the highest value of an incremental write's key column, a value from the table, such as `date:2026-10-20` or `long:7340219` |
 
 Reading the audit log needs `READ_AUDIT_LOG`; seeing these fields in **someone else's** events
 needs `READ_QUERY_TEXT` as well, which no role carries, `ADMIN` included. `READ_QUERY_TEXT` covers
-query text and column values in audit events, nothing else. Without it each field shows the
-value's SHA-256 and its length in characters, so that the same query or value can still be
-recognised:
+query text and column values in audit events, nothing else. Without it:
+
+- **Query text** shows its SHA-256 and its length in characters, so that the same query can still
+  be recognised across events. The hash is not a secret: someone who guesses the exact text can
+  confirm the guess, which is easy for a short or common query.
+- **A watermark** shows only `{"hidden": true}`: no hash and no length. Its values are numbers,
+  dates and times, few enough to try them all against a hash, so a hash would give the value away.
 
 <!-- output -->
 ```text
 "sql_text": {"sha256": "9f1c...e2", "length": 57}
+"watermark": {"hidden": true}
 ```
 
-Your own events always show in full. The hash is not a secret: someone who guesses the exact text
-or value can confirm the guess. Holding `READ_TABLE` on the table does not show a watermark either:
-the right is about the audit log. A field of an event that the server does not know how to classify is shown
-the same way. An administrator gives the right to a person with
+Your own events always show in full. Holding `READ_TABLE` on the table does not show a watermark
+either: the right is about the audit log. A field of an event that the server does not know how to
+classify shows `{"hidden": true}` too. An administrator gives the right to a person with
 `lakana grant create --kind INSTANCE --principal NAME --action READ_QUERY_TEXT`; the grant and its
 revoke are in the audit log like every grant, and `lakana access explain NAME` lists it. It is given
 on the instance only.

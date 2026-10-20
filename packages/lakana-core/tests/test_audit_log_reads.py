@@ -26,6 +26,8 @@ from lakana_core.audit.authorization import AuditingAuthorization
 from lakana_core.audit.content import (
     CONTENT_FIELDS,
     SHOWN_FIELDS,
+    WITHHELD,
+    Hiding,
     UnclassifiedAuditFieldWarning,
     fingerprint,
     install_query_text,
@@ -51,6 +53,7 @@ from lakana_core.models import (
 from lakana_core.runs.store import query_completed_detail
 
 _SQL = "SELECT email FROM customers WHERE name = 'Alice Example'"
+_WATERMARK = "date:2026-10-20"
 _HASHED = {"sha256": hashlib.sha256(_SQL.encode("utf-8")).hexdigest(), "length": len(_SQL)}
 
 
@@ -326,7 +329,7 @@ def _incremental_write(session: Session, writer: PrincipalRef) -> None:
             "snapshot_id": 7,
             "rows": 3,
             "files": 1,
-            "watermark": "alice@example.com",
+            "watermark": _WATERMARK,
             "schema_diff": None,
             "run_id": None,
             "principal": writer.name,
@@ -356,17 +359,33 @@ def _watermark_seen(session: Session, reader: PrincipalRef) -> object:
     return page.items[0].detail["watermark"]
 
 
-def test_a_watermark_is_a_column_value_hidden_from_an_auditor_without_the_right(
-    session: Session,
-) -> None:
-    """#239: an auditor with `READ_AUDIT_LOG` alone, and no `READ_TABLE`, must not read it."""
+def test_a_watermark_is_withheld_without_anything_derived_from_it(session: Session) -> None:
+    """#239: a watermark's values are few enough to guess, so not even a digest or length shows.
+
+    An administrator without `READ_QUERY_TEXT` sees the marker only.
+    """
+    admin, writer = _person(session, "root"), _person(session, "writer")
+    _grant(session, admin, role=Role.ADMIN)
+    _incremental_write(session, writer)
+    page = AuditService(session, GrantAuthorization(session)).query(
+        admin, event_type=AuditEventType.TABLE_WRITE
+    )
+    detail = page.items[0].detail
+    assert detail["watermark"] == WITHHELD
+    answer = json.dumps([item.detail for item in page.items])
+    digest = hashlib.sha256(_WATERMARK.encode("utf-8")).hexdigest()
+    assert _WATERMARK not in answer
+    assert "2026-10-20" not in answer
+    assert digest not in answer
+    assert str(len(_WATERMARK)) not in json.dumps(detail["watermark"])
+    assert "sha256" not in json.dumps(detail["watermark"])
+
+
+def test_an_auditor_without_read_table_sees_only_the_marker(session: Session) -> None:
     auditor, writer = _person(session, "auditor"), _person(session, "writer")
     _grant(session, auditor, action=Action.READ_AUDIT_LOG)
     _incremental_write(session, writer)
-    seen = _watermark_seen(session, auditor)
-    assert seen == fingerprint("alice@example.com")
-    assert "alice" not in json.dumps(seen)
-    assert CONTENT_FIELDS[AuditEventType.TABLE_WRITE] == frozenset({"watermark"})
+    assert _watermark_seen(session, auditor) == WITHHELD
 
 
 def test_the_right_shows_a_watermark_and_the_writer_always_sees_their_own(
@@ -376,9 +395,25 @@ def test_the_right_shows_a_watermark_and_the_writer_always_sees_their_own(
     _grant(session, auditor, action=Action.READ_AUDIT_LOG)
     _grant(session, writer, action=Action.READ_AUDIT_LOG)
     _incremental_write(session, writer)
-    assert _watermark_seen(session, writer) == "alice@example.com"
+    assert _watermark_seen(session, writer) == _WATERMARK
     _grant(session, auditor, action=Action.READ_QUERY_TEXT)
-    assert _watermark_seen(session, auditor) == "alice@example.com"
+    assert _watermark_seen(session, auditor) == _WATERMARK
+
+
+def test_a_stored_value_never_passes_a_withheld_field(session: Session) -> None:
+    admin, writer = _person(session, "root"), _person(session, "writer")
+    _grant(session, admin, role=Role.ADMIN)
+    for value in (fingerprint(_WATERMARK), {"hidden": _WATERMARK}, WITHHELD, ["long:7"]):
+        AuditService(session).record(
+            writer.id, AuditEventType.TABLE_WRITE, detail={"watermark": value}, commit=True
+        )
+    AuditService(session).record(
+        writer.id, AuditEventType.TABLE_WRITE, detail={"watermark": None}, commit=True
+    )
+    page = AuditService(session, GrantAuthorization(session)).query(admin)
+    shown = [item.detail["watermark"] for item in page.items]
+    assert shown.count(WITHHELD) == 4
+    assert shown.count(None) == 1
 
 
 # --- the classification of every field ------------------------------------------------------
@@ -386,10 +421,10 @@ def test_the_right_shows_a_watermark_and_the_writer_always_sees_their_own(
 
 def test_every_content_field_is_a_field_no_other_list_shows() -> None:
     for fields in CONTENT_FIELDS.values():
-        assert not fields & SHOWN_FIELDS
-    assert dict(CONTENT_FIELDS) == {
-        AuditEventType.QUERY_COMPLETED: frozenset({"sql_text"}),
-        AuditEventType.TABLE_WRITE: frozenset({"watermark"}),
+        assert not set(fields) & SHOWN_FIELDS
+    assert {event: dict(fields) for event, fields in CONTENT_FIELDS.items()} == {
+        AuditEventType.QUERY_COMPLETED: {"sql_text": Hiding.FINGERPRINT},
+        AuditEventType.TABLE_WRITE: {"watermark": Hiding.WITHHELD},
     }
 
 
@@ -407,7 +442,8 @@ def test_a_field_nobody_classified_warns_when_written_and_is_hidden_when_read(
             commit=True,
         )
     page = AuditService(session, GrantAuthorization(session)).query(admin)
-    assert page.items[0].detail == {"grant_id": "x", "free_text": fingerprint("secret")}
+    # a field nobody judged may hold a value easy to guess: no digest either
+    assert page.items[0].detail == {"grant_id": "x", "free_text": WITHHELD}
 
 
 def test_only_a_true_fingerprint_passes_unchanged(session: Session) -> None:

@@ -80,7 +80,8 @@ What the answer takes into account:
   until it is granted as a single action on the instance
   (`lakana grant create --kind INSTANCE --principal NAME --action READ_QUERY_TEXT`). It covers
   query text and column values in other people's audit events (the SQL text of a query, the
-  watermark of an incremental write), which otherwise show as their SHA-256 and length
+  watermark of an incremental write), which otherwise show as a SHA-256 and length (query
+  text) or as `{"hidden": true}` (a watermark)
   ([Other people's query text and column values](lists.md#other-peoples-query-text-and-column-values-in-the-audit-log)).
 - **`MINT_TASK_TOKEN`** is the right to mint a task token for oneself. Minting one for another
   principal needs the `ADMIN` role on the instance too.

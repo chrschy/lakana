@@ -4,11 +4,14 @@ A field of an event's `detail` is either **shown** to every reader of the audit 
 id, a count, a fixed reason) or **content**: a value that can carry anything, today the SQL text
 of `QUERY_COMPLETED` and the watermark (a column value) of `TABLE_WRITE`. `CONTENT_FIELDS` and
 `SHOWN_FIELDS` are the one list of that decision. `AuditService.query` hides the content of
-another principal's event from a reader who does not hold `READ_QUERY_TEXT`, replacing each such
-value with `fingerprint` of it; a reader's own events are always shown in full.
+another principal's event from a reader who does not hold `READ_QUERY_TEXT`; a reader's own
+events are always shown in full. Each content field says how it is hidden (`Hiding`): query text
+by its `fingerprint`, so that the same query can be recognised; a value from a small set (a
+watermark: a number, a date or a time) by `WITHHELD`, with no digest and no length, since trying
+every candidate against a digest would give the value back.
 
-A field in neither list is hidden like content, so a field added to an event without a decision
-never shows. `AuditService.record` warns (`UnclassifiedAuditFieldWarning`) when it writes such a
+A field in neither list is withheld, so a field added to an event without a decision never
+shows. `AuditService.record` warns (`UnclassifiedAuditFieldWarning`) when it writes such a
 field; the test suite turns that warning into an error (`pyproject.toml`), so a new field fails
 the tests of the code that writes it until it is classified here.
 
@@ -20,6 +23,7 @@ already written keep what they stored.
 from __future__ import annotations
 
 import copy
+import enum
 import hashlib
 import json
 import re
@@ -30,14 +34,32 @@ from types import MappingProxyType
 from lakana_core.config import QUERY_TEXT_MODES
 from lakana_core.models import AuditEventType
 
-CONTENT_FIELDS: Mapping[AuditEventType, frozenset[str]] = MappingProxyType(
+
+class Hiding(enum.Enum):
+    """How a content field of another principal's event is shown to a reader without the right."""
+
+    FINGERPRINT = "fingerprint"
+    """As its SHA-256 and length (`fingerprint`): for text long and varied enough that guessing
+    it is hard, so that a reader can still tell two events of the same query apart from others.
+    Short or templated query text can still be guessed and confirmed."""
+    WITHHELD = "withheld"
+    """As `WITHHELD`, with nothing derived from the value: for a value from a small set, which a
+    digest would give back to anyone who tries the candidates."""
+
+
+WITHHELD: dict[str, bool] = {"hidden": True}
+"""What a withheld field shows instead of its value: no value, no digest, no length."""
+
+CONTENT_FIELDS: Mapping[AuditEventType, Mapping[str, Hiding]] = MappingProxyType(
     {
-        AuditEventType.QUERY_COMPLETED: frozenset({"sql_text"}),
-        # the highest value of an incremental write's key column: any column value (#239)
-        AuditEventType.TABLE_WRITE: frozenset({"watermark"}),
+        AuditEventType.QUERY_COMPLETED: MappingProxyType({"sql_text": Hiding.FINGERPRINT}),
+        # The highest value of an incremental write's key column (#239). A key is an int, long,
+        # decimal, date or timestamp (`catalog.watermark`), stored typed (`date:2026-10-20`): few
+        # enough values to try them all against a digest, so it is withheld.
+        AuditEventType.TABLE_WRITE: MappingProxyType({"watermark": Hiding.WITHHELD}),
     }
 )
-"""The fields of each event type that hold content, hidden without `READ_QUERY_TEXT`.
+"""The fields of each event type that hold content, and how each is hidden without the right.
 
 Content is a query's text or a value read from a table's columns: a reader of the audit log
 need not hold `READ_TABLE` on the table it came from. A break-glass `reason` is not here: it is
@@ -317,7 +339,7 @@ def unclassified_fields(event_type: AuditEventType, detail: Mapping[str, object]
     list of str
         The field names in neither `CONTENT_FIELDS[event_type]` nor `SHOWN_FIELDS`, sorted.
     """
-    content = CONTENT_FIELDS.get(event_type, frozenset())
+    content = CONTENT_FIELDS.get(event_type, {})
     return sorted(key for key in detail if key not in content and key not in SHOWN_FIELDS)
 
 
@@ -336,15 +358,15 @@ def warn_unclassified(event_type: AuditEventType, detail: Mapping[str, object]) 
         warnings.warn(
             f"The audit event {event_type.value} has fields that are neither content nor shown: "
             f"{unknown}. Add each to CONTENT_FIELDS or SHOWN_FIELDS in "
-            "lakana_core.audit.content; until then a reader without READ_QUERY_TEXT sees only "
-            "their SHA-256 and length.",
+            "lakana_core.audit.content; until then a reader without READ_QUERY_TEXT sees none of "
+            "their values.",
             UnclassifiedAuditFieldWarning,
             stacklevel=3,
         )
 
 
-def hidden_fields(event_type: AuditEventType, detail: Mapping[str, object]) -> list[str]:
-    """Name the fields of another principal's event that a reader without the right must not see.
+def hidden_fields(event_type: AuditEventType, detail: Mapping[str, object]) -> dict[str, Hiding]:
+    """Say which fields of another principal's event a reader without the right must not see.
 
     Parameters
     ----------
@@ -355,27 +377,33 @@ def hidden_fields(event_type: AuditEventType, detail: Mapping[str, object]) -> l
 
     Returns
     -------
-    list of str
-        Its content fields that it has, and every field that is not classified.
+    dict
+        Each content field the detail has, with its `Hiding`, and every field that is not
+        classified, as `Hiding.WITHHELD`.
     """
-    content = CONTENT_FIELDS.get(event_type, frozenset())
-    return sorted(key for key in detail if key in content or key not in SHOWN_FIELDS)
+    content = CONTENT_FIELDS.get(event_type, {})
+    return {
+        key: content.get(key, Hiding.WITHHELD)
+        for key in sorted(detail)
+        if key in content or key not in SHOWN_FIELDS
+    }
 
 
-def shown_detail(detail: Mapping[str, object], hidden: list[str]) -> dict[str, object]:
-    """Copy a detail for a reader, with each hidden field replaced by its fingerprint.
+def shown_detail(detail: Mapping[str, object], hidden: Mapping[str, Hiding]) -> dict[str, object]:
+    """Copy a detail for a reader, with each hidden field replaced as its `Hiding` says.
 
     The copy is deep, so changing the answer never changes the stored row. A hidden value that
-    is `None` (nothing was stored) or already a fingerprint (stored with
-    ``LAKANA_AUDIT__QUERY_TEXT=hash``) stays as it is; one that is not text is fingerprinted as
-    its JSON.
+    is `None` (nothing was stored) stays `None`. A `Hiding.FINGERPRINT` value that is already a
+    fingerprint (stored with ``LAKANA_AUDIT__QUERY_TEXT=hash``) stays as it is; any other is
+    fingerprinted, as its JSON when it is not text. A `Hiding.WITHHELD` value always becomes
+    `WITHHELD`, whatever was stored.
 
     Parameters
     ----------
     detail
         The stored detail.
     hidden
-        The fields to hide (`hidden_fields`), or none.
+        The fields to hide and how (`hidden_fields`), or none.
 
     Returns
     -------
@@ -383,10 +411,15 @@ def shown_detail(detail: Mapping[str, object], hidden: list[str]) -> dict[str, o
         The detail to show.
     """
     shown = copy.deepcopy(dict(detail))
-    for key in hidden:
+    for key, hiding in hidden.items():
         value = shown[key]
-        if value is None or _is_fingerprint(value):
+        if value is None:
             continue
-        text = value if isinstance(value, str) else json.dumps(value, sort_keys=True, default=str)
-        shown[key] = fingerprint(text)
+        if hiding is Hiding.WITHHELD:
+            shown[key] = dict(WITHHELD)
+        elif not _is_fingerprint(value):
+            text = (
+                value if isinstance(value, str) else json.dumps(value, sort_keys=True, default=str)
+            )
+            shown[key] = fingerprint(text)
     return shown
