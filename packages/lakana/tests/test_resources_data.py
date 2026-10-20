@@ -2527,3 +2527,67 @@ def test_a_run_task_without_a_failure_and_a_run_of_an_older_server_default() -> 
 def test_a_failure_that_cannot_be_read_never_fails_the_command(bad: object) -> None:
     """The failure only helps the reader, so a malformed one is no failure at all."""
     assert failure_from_json(bad) is None
+
+
+_ORPHANED = {
+    "environment": "dev",
+    "older_than_days": 30,
+    "complete": True,
+    "locations": [
+        {
+            "location": "managed/gold/orders-0123",
+            "files": 2,
+            "bytes": 10,
+            "newest_file_at": "2026-09-01T10:00:00Z",
+            "recent": False,
+            "deleted": True,
+            "files_deleted": 2,
+            "bytes_deleted": 10,
+            "kept_because": None,
+        },
+        {
+            "location": "managed/gold/fresh-0123",
+            "files": 1,
+            "bytes": 5,
+            "newest_file_at": None,
+            "recent": True,
+            "deleted": False,
+            "files_deleted": 0,
+            "bytes_deleted": 0,
+            "kept_because": "recent",
+        },
+    ],
+}
+
+
+def test_environments_orphaned_locations_lists_and_deletes() -> None:
+    """The listing GETs with `older_than_days`; the deletion POSTs it in the body."""
+    seen: list[tuple[str, str, str, bytes]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path, str(request.url.params), request.content))
+        return httpx.Response(200, json=_ORPHANED)
+
+    environments = Environments(_transport(handler))
+    listed = environments.orphaned_locations("dev", older_than_days=7)
+    deleted = environments.delete_orphaned_locations("dev")
+
+    assert seen == [
+        ("GET", "/api/v1/environments/dev/orphaned-locations", "older_than_days=7", b""),
+        (
+            "POST",
+            "/api/v1/environments/dev/orphaned-locations/delete",
+            "",
+            b'{"older_than_days":30}',
+        ),
+    ]
+    assert listed.environment == "dev" and listed.complete
+    first, second = deleted.locations
+    assert (first.location, first.files, first.bytes, first.deleted) == (
+        "managed/gold/orders-0123",
+        2,
+        10,
+        True,
+    )
+    assert first.newest_file_at == datetime(2026, 9, 1, 10, tzinfo=UTC)
+    assert (second.newest_file_at, second.recent, second.kept_because) == (None, True, "recent")

@@ -323,6 +323,21 @@ The retention applies to every managed table in the environment that sets none o
 | `--off` | flag | off | Turn the environment's retention off. |
 | `--yes` | flag | off | Don't ask for confirmation. |
 
+### `lakana env orphaned-locations`
+
+Usage: `lakana env orphaned-locations [OPTIONS] {name}`
+
+List, or with --delete remove, table directories older releases left without a record.
+
+Releases before location records could leave table directories under `managed/` that no table and no record names: tables dropped before the upgrade, creates that failed, environments deleted before their tables could be restored. The worker's clean-up only counts them. Without `--delete` this is a dry run: it lists each directory with its files, size and newest file, and deletes nothing. A directory with a file newer than `--older-than` (30 days by default) is never deleted. `--delete` asks first (`--yes` skips the question), checks every directory again, and keeps one that a table, a create or a dropped table now uses. NAME may be a deleted environment. Needs MANAGE_ENVIRONMENT on the whole instance (the ADMIN role), because the storage root may be shared. After restoring the catalog from a backup, keep `--older-than` above the backup's age: a table created after the backup has no record either.
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `NAME` | text | required |  |
+| `--older-than` | text | `30d` | Only directories whose newest file is older than this many days, like 30d. |
+| `--delete` | flag | off | Delete the directories listed as old enough. |
+| `--yes` | flag | off | Don't ask for confirmation. |
+
 ## `lakana ns`
 
 Usage: `lakana ns [OPTIONS] COMMAND [ARGS]...`

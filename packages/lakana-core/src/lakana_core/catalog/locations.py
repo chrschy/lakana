@@ -3,7 +3,9 @@
 A location is the directory a managed table's files live in (`ResolvedStorage.table_location`,
 suffixed with the table's id). The rule that lets Lakana delete such a directory unattended is
 the artifact store's: **a record exists before the first file, and a directory without a record
-is never deleted.**
+is never deleted unattended.** An administrator's explicit request
+(`lakana_core.catalog.orphaned_locations`) first gives such a directory a record and then deletes
+it as the sweep does.
 
 - A create inserts and commits a `CLAIMED` record (`claim_location`) before it writes the first
   metadata or data file.

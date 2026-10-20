@@ -51,6 +51,68 @@ class Environment:
 
 
 @dataclass(frozen=True)
+class OrphanedLocation:
+    """A table directory under ``managed/`` that no location record names.
+
+    Left by a release before location records (`Environments.orphaned_locations`).
+
+    Parameters
+    ----------
+    location
+        Its path relative to the environment's storage root.
+    files
+        How many files it held when it was listed.
+    bytes
+        Their total size.
+    newest_file_at
+        When its newest file was last changed; `None` when the storage does not say.
+    recent
+        Whether a file is newer than the age asked for, or of unknown age: never deleted.
+    deleted
+        Whether `Environments.delete_orphaned_locations` removed it.
+    files_deleted
+        The files the deletion removed from it.
+    bytes_deleted
+        Their total size.
+    kept_because
+        Why the deletion left it; `None` in a listing and for a deleted directory.
+    """
+
+    location: str
+    files: int
+    bytes: int
+    newest_file_at: datetime | None
+    recent: bool
+    deleted: bool = False
+    files_deleted: int = 0
+    bytes_deleted: int = 0
+    kept_because: str | None = None
+
+
+@dataclass(frozen=True)
+class OrphanedLocations:
+    """What a listing or a deletion of directories without a location record found and did.
+
+    Parameters
+    ----------
+    environment
+        The environment whose storage root was looked at.
+    older_than_days
+        The age asked for.
+    locations
+        The directories.
+    complete
+        `False` when the server's time limit stopped the call with work left; call again to
+        continue.
+    """
+
+    environment: str
+    older_than_days: int
+    locations: list[OrphanedLocation]
+    complete: bool
+
+
+@dataclass(frozen=True)
 class Namespace:
     """A namespace within an environment.
 

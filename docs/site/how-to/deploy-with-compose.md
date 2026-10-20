@@ -297,7 +297,9 @@ the table exists. If it does, everything is kept. If not, the sweep removes the 
 record. It never removes a directory that has no record, nor one that holds or lies around a table
 that exists, in any environment that shares the storage root: it counts such directories and logs
 `<n> table directories under managed/ in the storage of environment <env> have no location record;
-they are left alone.` (see "After a restore" below). The audit log records `TABLE_LOCATION_ABANDONED`
+they are left alone.` (see "After a restore" below). Directories that older releases left behind are
+counted the same way; remove them on request with `lakana env orphaned-locations` (see
+[Clean up files left by older releases](clean-up-files-left-by-older-releases.md)). The audit log records `TABLE_LOCATION_ABANDONED`
 when the sweep gives up a create (detail: `location`, `holder_run_id`, `claimed_at`) and
 `TABLE_PURGED` when it removes files (detail: `location`, `state`, `files`, `bytes`, and `complete`,
 which is `false` for a pass that stopped part-way and is continued by the next sweep). Both have no
@@ -1094,7 +1096,10 @@ never removes a directory it has no record of:
   `managed/` is left alone and counted in the line `<n> table directories under managed/ in the
   storage of environment <env> have no location record; they are left alone. ...` (logger
   `lakana_core.catalog.location_sweep`). Nothing reads those files. **Keep the directory**; there
-  is no command yet to bring such a table back into the catalog or to remove the directory.
+  is no command yet to bring such a table back into the catalog. `lakana env orphaned-locations`
+  lists such a directory like any leftover of an older release, so after a restore never run it
+  with `--delete` and an `--older-than` shorter than the backup's age (see
+  [Clean up files left by older releases](clean-up-files-left-by-older-releases.md)).
 - A table that was **being created at the moment of the backup** has a record that says the create
   had not finished. The restored catalog shows its run as running, the scheduler ends it about a
   minute after the start, and the next sweep then removes the files. If that table was in fact

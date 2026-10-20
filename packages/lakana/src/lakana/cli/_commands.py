@@ -21,6 +21,10 @@ COMMANDS: dict[str, tuple[str, ...]] = {
     "env protect": ("environments.set_protection",),
     "env unprotect": ("environments.set_protection",),
     "env retention": ("environments.get", "environments.set_retention"),
+    "env orphaned-locations": (
+        "environments.orphaned_locations",
+        "environments.delete_orphaned_locations",
+    ),
     "ns create": ("namespaces.create",),
     "ns list": ("namespaces.list",),
     "ns get": ("namespaces.get",),

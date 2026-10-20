@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 
 from lakana_core.auth import PrincipalRef
+from lakana_core.catalog.orphaned_locations import DEFAULT_OLDER_THAN_DAYS
 from lakana_core.catalog.service import CatalogService
 from lakana_core.config import StorageConfig
 from lakana_server.api.platform.schemas import (
@@ -13,6 +14,8 @@ from lakana_server.api.platform.schemas import (
     EnvironmentPatch,
     EnvironmentRetentionIn,
     EnvironmentStorageUpdate,
+    OrphanedLocationsDeleteIn,
+    OrphanedLocationsOut,
 )
 from lakana_server.api.routing import AuthenticateFirstRoute
 from lakana_server.deps import get_catalog, get_principal
@@ -302,3 +305,78 @@ def restore_environment(
         files; mapped to 409.
     """
     return EnvironmentOut.model_validate(catalog.restore_environment(principal, name))
+
+
+@router.get("/{name}/orphaned-locations", response_model=OrphanedLocationsOut)
+def list_orphaned_locations(
+    name: str,
+    older_than_days: int = DEFAULT_OLDER_THAN_DAYS,
+    principal: PrincipalRef = Depends(get_principal),
+    catalog: CatalogService = Depends(get_catalog),
+) -> OrphanedLocationsOut:
+    """List the table directories older releases left without a location record; delete nothing.
+
+    Parameters
+    ----------
+    name
+        Environment name; a deleted environment is accepted.
+    older_than_days
+        A directory with a file newer than this many days (1 to 3,650) is listed as recent.
+    principal
+        The authenticated caller; needs `MANAGE_ENVIRONMENT` on the instance.
+    catalog
+        The catalog service for this request.
+
+    Returns
+    -------
+    OrphanedLocationsOut
+        The directories found within the time limit.
+
+    Raises
+    ------
+    lakana_core.errors.NotFoundError
+        No environment of that name; mapped to 404.
+    lakana_core.errors.ValidationError
+        `older_than_days` out of range; mapped to 422.
+    """
+    found = catalog.find_orphaned_locations(principal, name, older_than_days=older_than_days)
+    return OrphanedLocationsOut.model_validate(found)
+
+
+@router.post("/{name}/orphaned-locations/delete", response_model=OrphanedLocationsOut)
+def delete_orphaned_locations(
+    name: str,
+    body: OrphanedLocationsDeleteIn,
+    principal: PrincipalRef = Depends(get_principal),
+    catalog: CatalogService = Depends(get_catalog),
+) -> OrphanedLocationsOut:
+    """Delete the table directories without a location record whose files are old enough.
+
+    Parameters
+    ----------
+    name
+        Environment name; a deleted environment is accepted.
+    body
+        How old the newest file of a directory must be.
+    principal
+        The authenticated caller; needs `MANAGE_ENVIRONMENT` on the instance.
+    catalog
+        The catalog service for this request.
+
+    Returns
+    -------
+    OrphanedLocationsOut
+        Each directory, deleted or with the reason it was kept; `complete` is false when the
+        time limit stopped the call, and the next call continues.
+
+    Raises
+    ------
+    lakana_core.errors.NotFoundError
+        No environment of that name; mapped to 404.
+    lakana_core.errors.ValidationError
+        `older_than_days` out of range; mapped to 422.
+    """
+    report = catalog.delete_orphaned_locations(
+        principal, name, older_than_days=body.older_than_days
+    )
+    return OrphanedLocationsOut.model_validate(report)
