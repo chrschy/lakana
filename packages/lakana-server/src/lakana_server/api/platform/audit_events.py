@@ -200,8 +200,9 @@ def list_audit_events(
 
     Notes
     -----
-    The content of another principal's event (a query's SQL text) is shown as its SHA-256 and
-    length unless the caller holds `READ_QUERY_TEXT`; the caller's own events are shown in full.
+    Without `READ_QUERY_TEXT`, the content of another principal's event is hidden: a query's SQL
+    text is shown as its SHA-256 and length, and a write's watermark as `{"hidden": true}`. The
+    caller's own events are shown in full.
     A page that shows or filters on another principal's events is recorded as
     `ACTIVITY_VIEWED` before it is returned.
     """
