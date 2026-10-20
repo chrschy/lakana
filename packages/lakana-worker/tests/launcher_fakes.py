@@ -141,6 +141,16 @@ class FakeEngine:
     _released: dict[str, threading.Event] = field(default_factory=dict)
     _count: int = 0
 
+    def release(self, cid: str) -> None:
+        """Let a held container's output and wait go on, as if the task ended by itself.
+
+        Parameters
+        ----------
+        cid
+            The container id.
+        """
+        self._released[cid].set()
+
     def created(self, kind: str) -> list[dict[str, Any]]:
         """List the specs of every container of one kind created so far.
 

@@ -1074,10 +1074,25 @@ def test_a_stop_and_a_kill_that_docker_cannot_carry_out_are_not_errors(tmp_path:
     """`stop` still says it found the task; the timeout still ends the run."""
     engine = FakeEngine(hold=True)
     launcher = _started(engine, tmp_path)
-    _intercept(engine, lambda m, p, b: p.endswith("/stop"), EngineError("gone"))
+    stops: list[str] = []
+    real = engine.request
+
+    def request(
+        method: str, path: str, body: Any = None, *, query: Any = None, timeout: Any = 60.0
+    ) -> tuple[int, Any]:
+        if path.endswith("/stop"):
+            stops.append(path)
+            # The stop fails, so the held task is not ended by it; it ends a moment later by
+            # itself, which a real container does, instead of the fake holding it for 10 s.
+            engine.release(path.split("/")[-2])
+            raise EngineError("gone")
+        return real(method, path, body, query=query, timeout=timeout)
+
+    engine.request = request  # ty: ignore[invalid-assignment]
 
     result = launcher.run(_run(timeout=1), lambda line: None)
 
+    assert stops, "the timeout never asked Docker to stop the container"
     assert result["timed_out"] is True
 
 

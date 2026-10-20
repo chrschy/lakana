@@ -189,10 +189,16 @@ def test_the_runner_prints_them_before_it_stops_the_instance() -> None:
     )
 
 
-_START_STUB = """#!/usr/bin/env bash
-# A stand-in for `lakana server start`: says it is up, then waits to be stopped.
-echo "Lakana is running"
-exec sleep 60
+_START_STUB = """#!/usr/bin/env python3
+# A stand-in for `lakana server start`: says it is up, then waits to be stopped. Like the real
+# server it answers ^C (SIGINT) by exiting; a background job of a shell starts with SIGINT ignored,
+# so the handler is installed explicitly, and the runner's polite stop ends it at once.
+import signal
+import time
+
+signal.signal(signal.SIGINT, signal.default_int_handler)
+print("Lakana is running", flush=True)
+time.sleep(60)
 """
 
 

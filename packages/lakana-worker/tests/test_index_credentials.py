@@ -101,6 +101,7 @@ def _sync(
     *,
     no_config: bool = True,
     binaries: dict[str, bytes] | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> tuple[int, str, Path]:
     """Run `uv sync` as `lakana_worker.venvs._build` does.
 
@@ -116,6 +117,8 @@ def _sync(
         Pass `--no-config`, as the worker does; `False` only to show that a test can fail.
     binaries
         More files of the project, by relative path (a `wheelhouse` folder).
+    extra_env
+        More variables for uv, on top of the worker's.
 
     Returns
     -------
@@ -132,6 +135,7 @@ def _sync(
         (project / name).write_bytes(data)
     settings = VenvSettings(uv=_uv(), cache=root / "venvs", uv_cache=root / "uv-cache")
     env = build_environment(settings, home, root / "venv")
+    env.update(extra_env or {})
     value = uv_index_value(None, accesses)
     if value is not None:
         env["UV_INDEX"] = value
@@ -287,7 +291,9 @@ def test_a_project_s_uv_settings_cannot_route_the_credential_to_a_proxy(tmp_path
         access = _access(
             indexes.registered, url=f"http://registered.invalid:{indexes.registered.port}/simple"
         )
-        code, output, root = _sync(tmp_path, files, [access])
+        # No retries: uv cannot resolve `registered.invalid` and would back off for 10 s, which
+        # shows nothing more than the first failure does.
+        code, output, root = _sync(tmp_path, files, [access], extra_env={"UV_HTTP_RETRIES": "0"})
         assert indexes.other.server.seen == []
         assert indexes.other.credentials_received == []
         assert indexes.registered.server.seen == []
