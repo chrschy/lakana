@@ -16,8 +16,11 @@ A directory is listed when the sweep's own walk (`_Run.unrecorded_directories`) 
   environments' tables and tombstones' records included);
 - no record in any state is it, lies inside it or contains it, and no table's directory contains
   it (its derived root, or for a metadata file outside ``metadata/`` the file's directory);
-- it is not another environment's storage root, does not contain one, and does not lie inside
-  one that lies under this ``managed/``.
+- no other environment's storage root is it, lies inside it, or surrounds it from inside this
+  ``managed/``, and no record or table location stored in a spelling that is not canonical
+  normalises to one of these (`near_other_location`, the sweep's check too). Such a directory is
+  listed with the reason, naming that location, and never deleted; a location that cannot be
+  normalised exactly keeps every directory on its storage.
 
 Its newest file must be older than ``older_than_days`` (30 by default); a directory with a
 newer file, or with a file whose age the storage does not report, is listed as recent and never
@@ -59,13 +62,13 @@ from lakana_core.catalog.location_sweep import (
     _Run,
     _Spent,
 )
+from lakana_core.catalog.locations import spelled_canonically
 from lakana_core.catalog.tombstones import DEFAULT_UNDO_DAYS
 from lakana_core.errors import NotFoundError
 from lakana_core.identifiers import shown
 from lakana_core.models import Environment, Table, TableLocation, TableLocationState
 from lakana_core.storage.base import Storage
 from lakana_core.storage.resolver import (
-    MANAGED_PREFIX,
     is_within_location,
     table_root_from_metadata_location,
 )
@@ -295,8 +298,17 @@ def _table_directories(session: Session) -> list[str]:
     ]
 
 
-def _eligible(session: Session, run: _Run, location: str, environment: Target) -> bool:
-    """Say whether a directory may be listed and deleted: nothing names, holds or contains it.
+_NOT_ORPHANED = ""
+"""What `_ineligible` says of a directory that is not a leftover at all: it is not listed."""
+
+UNJUDGED_PREFIX = (
+    "another environment's storage root, or a location stored in a spelling that cannot be "
+    "compared, may be it, lie inside it or around it; correct or remove that location first: "
+)
+
+
+def _ineligible(session: Session, run: _Run, location: str, environment: Target) -> str | None:
+    """Say why a directory may not be deleted, or `None` when nothing names, holds or contains it.
 
     Parameters
     ----------
@@ -307,15 +319,23 @@ def _eligible(session: Session, run: _Run, location: str, environment: Target) -
     location
         The directory's absolute location.
     environment
-        The environment whose root is walked.
+        The environment whose root is walked (the sweep's state carries the same root).
 
     Returns
     -------
-    bool
-        `True` if it has the canonical shape and nothing in any environment uses it.
+    str or None
+        `None` if it has the canonical shape and nothing in any environment uses it;
+        `_NOT_ORPHANED` when something does (it is not listed); or, when another environment's
+        root or a location that cannot be compared as spelled may overlap it, a reason that
+        names that location (it is listed and kept).
     """
     if run._confined(location) is None or run._in_use(location):
-        return False
+        return _NOT_ORPHANED
+    nearby = run.near_other(location)
+    if nearby is not None:
+        if spelled_canonically(nearby.rstrip("/")):
+            return _NOT_ORPHANED  # another environment's root: its files, not a leftover
+        return UNJUDGED_PREFIX + shown(nearby)
     try:
         around = _ancestors(location)
         recorded = session.scalar(
@@ -331,19 +351,8 @@ def _eligible(session: Session, run: _Run, location: str, environment: Target) -
         if recorded or any(
             is_within_location(root, location) for root in _table_directories(session)
         ):
-            return False
-        managed = f"{environment.root}/{MANAGED_PREFIX}"
-        for root in session.scalars(select(Environment.storage_root)):
-            other = root.rstrip("/")
-            if other == environment.root:
-                continue
-            if (
-                other == location
-                or is_within_location(location, other)
-                or (is_within_location(managed, other) and is_within_location(other, location))
-            ):
-                return False
-        return True
+            return _NOT_ORPHANED
+        return None
     finally:
         session.rollback()
 
@@ -425,11 +434,12 @@ def _walk(
     known = _known_locations(session)
     try:
         for relative in run.unrecorded_directories(known):
-            if not _eligible(session, run, f"{environment.root}/{relative}", environment):
+            reason = _ineligible(session, run, f"{environment.root}/{relative}", environment)
+            if reason == _NOT_ORPHANED:
                 continue
             entry = _measure(run, storage, relative, cutoff)
             if entry is not None:
-                found.append(entry)
+                found.append(replace(entry, kept_because=reason))
     except _Spent:
         return found, False
     return found, True
@@ -525,7 +535,9 @@ def delete_orphaned_locations(
     results: list[OrphanedLocation] = []
     halted: str | None = None
     for entry in found:
-        if entry.recent:
+        if entry.kept_because is not None:
+            results.append(entry)
+        elif entry.recent:
             results.append(replace(entry, kept_because=KEPT_RECENT))
         elif halted is not None:
             results.append(replace(entry, kept_because=halted))
@@ -588,7 +600,7 @@ def _delete(
     if again.recent:
         return replace(again, kept_because=KEPT_RECENT), None
     try:
-        eligible = _eligible(session, run, location, environment)
+        reason = _ineligible(session, run, location, environment)
     except Exception as exc:
         logger.warning(
             "Could not check %s again before deleting it (%s).",
@@ -596,8 +608,8 @@ def _delete(
             type(exc).__name__,
         )
         return replace(again, kept_because=KEPT_FAILED), None
-    if not eligible:
-        return replace(again, kept_because=KEPT_BUSY), None
+    if reason is not None:
+        return replace(again, kept_because=reason or KEPT_BUSY), None
     record_id = uuid.uuid4()
     try:
         session.add(

@@ -21,11 +21,14 @@ it as the sweep does.
 `location_in_use` is the check every deletion makes again right before it deletes: no `LIVE` or
 `CLAIMED` record and no `tables` row, in any environment, may name the location or one inside it.
 `dropped_inside` is the other: no `DROPPED` record (a dropped table within its undo period, or
-due but not purged yet) may lie inside it.
+due but not purged yet) may lie inside it. Both compare spellings; `near_other_location` is the
+third, for what a spelling comparison cannot see: another environment's storage root, and any
+location stored in a spelling that is not canonical.
 """
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import datetime
 
@@ -34,9 +37,13 @@ from sqlalchemy.orm import Session
 
 from lakana_core.auth import PrincipalRef
 from lakana_core.db import db_now, rowcount
-from lakana_core.models import Namespace, Table, TableLocation, TableLocationState
+from lakana_core.models import Environment, Namespace, Table, TableLocation, TableLocationState
 from lakana_core.models.table_location import IN_USE_STATES, PURGEABLE_STATES
-from lakana_core.storage.resolver import table_root_from_metadata_location
+from lakana_core.storage.resolver import (
+    MANAGED_PREFIX,
+    _is_canonical_uri,
+    table_root_from_metadata_location,
+)
 
 PROTECTED_STATES = IN_USE_STATES | {TableLocationState.DROPPED}
 """Records whose files maintenance of another table must never take for its orphans."""
@@ -402,6 +409,176 @@ def table_root_locations(session: Session) -> list[str]:
         if metadata_location is not None
         and (location := table_root_from_metadata_location(metadata_location)) is not None
     ]
+
+
+_SCHEME_ALIASES = {"s3a": "s3", "s3n": "s3", "abfss": "abfs"}
+"""Schemes that address the same storage as another one, by their usual name."""
+
+_PERCENT_ESCAPE = re.compile(r"%[0-9A-Fa-f]{2}")
+"""A percent escape, which a backend may decode: a spelling with one cannot be normalised exactly.
+
+A glob character is taken literally here: a storage backend deletes and lists by literal names, so
+it cannot make two spellings name one directory."""
+
+
+def _normalised(uri: str) -> tuple[str, str] | None:
+    """Spell a location the one way its storage reads it, when that can be done exactly.
+
+    Parameters
+    ----------
+    uri
+        An absolute location, ``scheme://...``.
+
+    Returns
+    -------
+    tuple of (str, str) or None
+        The scheme (lower case, aliases resolved) and the path without empty and ``.``
+        segments; `None` when the path has a ``..`` segment or a percent escape, or there is no
+        scheme.
+    """
+    scheme, sep, rest = uri.partition("://")
+    if not sep or _PERCENT_ESCAPE.search(rest):
+        return None
+    segments = rest.split("/")
+    if ".." in segments:
+        return None
+    path = "/".join(segment for segment in segments if segment not in {"", "."})
+    lowered = scheme.lower()
+    return _SCHEME_ALIASES.get(lowered, lowered), ("/" if rest.startswith("/") else "") + path
+
+
+def _storage_of(uri: str) -> tuple[str, str]:
+    """Name the storage a location is on: its scheme and, for an object store, its bucket.
+
+    Parameters
+    ----------
+    uri
+        An absolute location.
+
+    Returns
+    -------
+    tuple of (str, str)
+        The scheme (lower case, aliases resolved) and the first path segment, or ``""`` for a
+        path that starts with ``/`` (a local disk).
+    """
+    scheme, _, rest = uri.partition("://")
+    lowered = scheme.lower()
+    bucket = "" if rest.startswith("/") else rest.split("/", 1)[0]
+    return _SCHEME_ALIASES.get(lowered, lowered), bucket
+
+
+def _within(outer: tuple[str, str], inner: tuple[str, str]) -> bool:
+    """Say whether one normalised location lies strictly inside another.
+
+    Parameters
+    ----------
+    outer
+        A normalised location.
+    inner
+        Another one.
+
+    Returns
+    -------
+    bool
+        Same scheme, and `inner`'s path continues `outer`'s at a segment boundary.
+    """
+    return outer[0] == inner[0] and inner[1].startswith(outer[1].rstrip("/") + "/")
+
+
+def spelled_canonically(uri: str) -> bool:
+    """Say whether the plain comparisons can be trusted with a location's spelling.
+
+    Parameters
+    ----------
+    uri
+        A stored location.
+
+    Returns
+    -------
+    bool
+        Canonical (`_is_canonical_uri`), without a percent escape, with the scheme spelled the
+        usual way.
+    """
+    scheme = uri.partition("://")[0]
+    return (
+        _is_canonical_uri(uri)
+        and not _PERCENT_ESCAPE.search(uri)
+        and scheme == scheme.lower()
+        and scheme not in _SCHEME_ALIASES
+    )
+
+
+def near_other_location(session: Session, location: str, *, root: str) -> str | None:
+    """Find a location that may be, hold or surround a directory but that spelling hides.
+
+    The check a deletion makes next to `location_in_use`, which compares spellings. It is about
+    to delete `location`, under ``managed/`` of the storage root `root`. It answers with:
+
+    - another environment's storage root, however spelled, that is the directory, lies inside it,
+      or surrounds it while lying under this root's ``managed/``;
+    - a location record (any state) or a table's directory (from its metadata file), stored in
+      a spelling that is not canonical, that is the directory, lies inside it or surrounds it once
+      both are normalised;
+    - any such location, or such a root, that cannot be normalised exactly (a ``..`` segment, a
+      percent escape) on the same storage (scheme and bucket), because then
+      nothing about it is known: the deletion keeps the directory.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    location
+        The canonical absolute directory about to be deleted.
+    root
+        The storage root of the environment it belongs to.
+
+    Returns
+    -------
+    str or None
+        The first such location as stored, or `None` when there is none.
+    """
+    target = _normalised(location)
+    own_root = _normalised(root.rstrip("/"))
+    own_managed = _normalised(f"{root.rstrip('/')}/{MANAGED_PREFIX}")
+    if target is None or own_root is None or own_managed is None:
+        return location
+    storage = _storage_of(location)
+
+    def unknown(other: str) -> bool:
+        return _storage_of(other) == storage
+
+    for stored in session.scalars(select(Environment.storage_root)):
+        other = _normalised(stored.rstrip("/"))
+        if other is None:
+            if unknown(stored):
+                return stored
+            continue
+        if other == own_root:
+            continue
+        if (
+            other == target
+            or _within(target, other)
+            or (_within(own_managed, other) and _within(other, target))
+        ):
+            return stored
+    records = select(TableLocation.location.label("path"), literal(False).label("derive"))
+    tables = select(Table.metadata_location.label("path"), literal(True).label("derive")).where(
+        Table.metadata_location.is_not(None)
+    )
+    for path, derive in session.execute(union_all(records, tables)).all():
+        directory = (
+            (table_root_from_metadata_location(path) or path.rsplit("/", 1)[0]) if derive else path
+        )
+        if spelled_canonically(directory):
+            continue  # the spelling comparisons see it
+        other = _normalised(directory)
+        if other is None:
+            if unknown(directory):
+                return directory
+            continue
+        if other == target or _within(target, other) or _within(other, target):
+            return directory
+    return None
 
 
 def abandon_claim(session: Session, record: TableLocation, *, now: datetime) -> None:

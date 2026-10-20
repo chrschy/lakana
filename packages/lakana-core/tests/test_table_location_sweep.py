@@ -1574,3 +1574,148 @@ def test_a_table_dropped_inside_before_the_record_is_forgotten_keeps_it(
 
     assert (report.locations_purged, report.purges_waiting) == (0, 1)
     assert _record(session, location) is not None
+
+
+# --- other environments and locations spelled differently -----------------------------------
+
+
+def test_another_environment_root_spelled_with_a_doubled_slash_blocks_a_purge(
+    session: Session,
+    catalog: CatalogService,
+    store: Path,
+    principal: PrincipalRef,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``gold//t-<hex>`` is the purged directory in another spelling: nothing is deleted."""
+    location = _location(store)
+    _put(location, "data/a.parquet")
+    _claim(session, location, state=TableLocationState.ABANDONED, purge_after=_NOW)
+    head, name = location.rsplit("/", 1)
+    catalog.create_environment(
+        principal,
+        name="other",
+        storage=StorageConfig(scheme="file", root=f"{head}//{name}", options={}),
+    )
+    caplog.set_level(logging.WARNING)
+
+    report = _sweep(session)
+
+    assert (report.purges_blocked, report.files_deleted) == (1, 0)
+    assert _files(location) == ["data/a.parquet"]
+    assert "cannot be compared" in caplog.text
+
+
+def test_another_environment_root_inside_a_location_blocks_a_purge(
+    session: Session, catalog: CatalogService, store: Path, principal: PrincipalRef
+) -> None:
+    """An environment rooted inside the directory owns what is there, record or not."""
+    location = _location(store)
+    _put(location, "inner/raw/a.csv")
+    _claim(session, location, state=TableLocationState.ABANDONED, purge_after=_NOW)
+    catalog.create_environment(
+        principal,
+        name="inner",
+        storage=StorageConfig(scheme="file", root=f"{location}/inner", options={}),
+    )
+
+    assert _sweep(session).purges_blocked == 1
+    assert _files(location) == ["inner/raw/a.csv"]
+
+
+@pytest.mark.parametrize("spelling", ["{head}//{name}/n-{hex}", "{head}/x/../{name}/n-{hex}"])
+def test_a_live_record_spelled_differently_inside_blocks_a_purge(
+    session: Session, catalog: CatalogService, store: Path, spelling: str
+) -> None:
+    """A live table whose record names a place inside the directory in another spelling."""
+    location = _location(store)
+    _put(location, "data/a.parquet")
+    _claim(session, location, state=TableLocationState.ABANDONED, purge_after=_NOW)
+    head, name = location.rsplit("/", 1)
+    _claim(
+        session,
+        spelling.format(head=head, name=name, hex=uuid.uuid4().hex),
+        state=TableLocationState.LIVE,
+    )
+
+    assert _sweep(session).purges_blocked == 1
+    assert _files(location) == ["data/a.parquet"]
+
+
+def test_a_glob_character_in_a_name_elsewhere_does_not_block_a_purge(
+    session: Session, catalog: CatalogService, store: Path, principal: PrincipalRef
+) -> None:
+    """A storage names files literally: ``[`` in another table's name aliases nothing.
+
+    Nor does a root that cannot be normalised on another bucket.
+    """
+    location = _location(store)
+    _put(location, "data/a.parquet")
+    _claim(session, location, state=TableLocationState.ABANDONED, purge_after=_NOW)
+    session.add(
+        Environment(
+            id=uuid.uuid4(),
+            name="far",
+            storage_root="s3://elsewhere/x/../y",
+            storage_options={},
+            is_protected=False,
+            properties={},
+        )
+    )
+    session.commit()
+    _claim(session, _location(store, "odd[1]"), state=TableLocationState.LIVE)
+
+    assert _sweep(session).locations_purged == 1
+
+
+def test_a_percent_escape_on_the_same_storage_blocks_a_purge(
+    session: Session, catalog: CatalogService, store: Path
+) -> None:
+    """A backend may decode it, so nothing on that storage is judged safe."""
+    location = _location(store)
+    _put(location, "data/a.parquet")
+    _claim(session, location, state=TableLocationState.ABANDONED, purge_after=_NOW)
+    _claim(
+        session, f"file://{store}/managed/x%2Dy-{uuid.uuid4().hex}", state=TableLocationState.LIVE
+    )
+
+    assert _sweep(session).purges_blocked == 1
+
+
+def test_another_environment_root_with_a_dotdot_segment_blocks_a_purge(
+    session: Session, catalog: CatalogService, store: Path, principal: PrincipalRef
+) -> None:
+    """Where ``x/../y`` ends up is not judged; everything on that storage is kept."""
+    location = _location(store)
+    _put(location, "data/a.parquet")
+    _claim(session, location, state=TableLocationState.ABANDONED, purge_after=_NOW)
+    catalog.create_environment(
+        principal,
+        name="other",
+        storage=StorageConfig(scheme="file", root=f"file://{store}/x/../y", options={}),
+    )
+
+    assert _sweep(session).purges_blocked == 1
+
+
+def test_a_purge_under_a_root_that_cannot_be_normalised_is_blocked(
+    session: Session, catalog: CatalogService, store: Path, principal: PrincipalRef
+) -> None:
+    """The environment's own root has a percent escape: its locations are not judged."""
+    root = f"file://{store}/r%41"
+    catalog.create_environment(
+        principal, name="escaped", storage=StorageConfig(scheme="file", root=root, options={})
+    )
+    location = f"{root}/managed/gold/t-{uuid.uuid4().hex}"
+    _put(location, "data/a.parquet")
+    _claim(
+        session,
+        location,
+        state=TableLocationState.ABANDONED,
+        purge_after=_NOW,
+        environment="escaped",
+    )
+
+    report = _sweep(session)
+
+    assert report.files_deleted == 0
+    assert _files(location) == ["data/a.parquet"]

@@ -452,7 +452,7 @@ def orphaned_locations(
     days = parse_within(older_than, "--older-than", 30)
     environments = state.client().environments
     found = environments.orphaned_locations(name, older_than_days=days)
-    old = [entry for entry in found.locations if not entry.recent]
+    old = [entry for entry in found.locations if not entry.recent and entry.kept_because is None]
     if not delete:
         if state.output == "json":
             _output.emit(state, found)
@@ -577,22 +577,27 @@ def _show_listing(
     _output.emit(
         state,
         found.locations,
-        columns=["location", "files", "bytes", "newest_file_at", "recent"],
+        columns=["location", "files", "bytes", "newest_file_at", "recent"]
+        + (["kept_because"] if any(entry.kept_because for entry in found.locations) else []),
+        flexible=["kept_because"],
     )
     total = (
         f"{_directories(len(found.locations))} without a location record "
         f"({_amount(found.locations)})."
     )
-    recent = len(found.locations) - len(old)
+    recent = sum(1 for entry in found.locations if entry.recent and not entry.kept_because)
     if recent:
         verb = ("has", "is") if recent == 1 else ("have", "are")
         total += f" {recent} {verb[0]} a file newer than {days} days and {verb[1]} kept."
+    named = len(found.locations) - len(old) - recent
+    if named:
+        total += f" {named} {'is' if named == 1 else 'are'} kept for the reason shown."
     if old:
         shown = _output.inline(found.environment)
         total += (
             f" Delete the other {len(old)} ({_amount(old)}) with: lakana env orphaned-locations "
             f"{shown} --older-than {days}d --delete"
-            if recent
+            if recent or named
             else f" Delete them with: lakana env orphaned-locations {shown} --older-than "
             f"{days}d --delete"
         )

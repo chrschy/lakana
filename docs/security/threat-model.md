@@ -746,7 +746,8 @@ the sweep. `lakana env orphaned-locations ENV --delete` removes them on request:
 `MANAGE_ENVIRONMENT` on the instance, never an environment's own grant, because the root can be
 shared; it deletes only canonical, id-suffixed directories strictly inside `managed/` that no
 record in any state and no table of any environment names, holds or surrounds, and that are not
-another environment's root, and only when their newest file is older than the age asked for (30
+another environment's root (a location stored in a non-canonical spelling that may overlap keeps
+the directory, as it blocks the sweep's purge), and only when their newest file is older than the age asked for (30
 days by default). Each is reserved by inserting a record for its location (unique, so a create
 that claimed it first wins) and then purged by the sweep's own purge, under that record's lock, with
 the same checks before every file. One audit event records each such call.

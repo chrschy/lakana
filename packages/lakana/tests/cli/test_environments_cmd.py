@@ -500,3 +500,15 @@ def test_env_orphaned_locations_delete_json(tmp_path: Path) -> None:
     )
     assert result.exit_code == 0, result.stderr
     assert json.loads(result.stdout) == gone
+
+
+def test_env_orphaned_locations_shows_why_a_directory_is_kept(tmp_path: Path) -> None:
+    """A directory the server keeps for a reason is shown with it and not offered for deletion."""
+    api = FakeApi()
+    named = _orphan("managed/gold/odd-0123", kept_because="a location cannot be compared: x//y")
+    api.on("GET", _LISTING, json=_orphans(_OLD, named))
+    result = invoke(make_state(tmp_path, api), "env", "orphaned-locations", "dev")
+    assert result.exit_code == 0, result.stderr
+    flat = " ".join(result.stdout.split())
+    assert "kept_because" in result.stdout and "x//y" in flat
+    assert "1 is kept for the reason shown. Delete the other 1 (2 files, 2.0 KiB)" in flat

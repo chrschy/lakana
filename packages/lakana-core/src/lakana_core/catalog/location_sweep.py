@@ -36,7 +36,11 @@ What it does, per environment:
    `CatalogService.maintain`; `purges_blocked` otherwise), and no `DROPPED` record may lie inside
    it (`dropped_inside`: a dropped table nested there keeps its files for its own undo period;
    the purge waits, `purges_waiting`, and is tried again by every later sweep until that table
-   is restored or purged itself). Then its files are deleted one at a
+   is restored or purged itself). Nor may another environment's storage root be the location,
+   lie inside it, or surround it from inside ``managed/``, nor a record or table location stored
+   in a spelling that is not canonical normalise to one of these (`near_other_location`,
+   `purges_blocked`; one that cannot be normalised exactly blocks every purge on its storage).
+   Then its files are deleted one at a
    time, each under the record's lock, after checking again that the record is still purgeable
    and that nothing in use lies inside, and only objects strictly inside the location. The
    record goes last, with a `TABLE_PURGED` event (``complete``); a pass that stops part-way
@@ -93,6 +97,7 @@ from lakana_core.catalog.locations import (
     dropped_inside,
     location_in_use,
     lock_location,
+    near_other_location,
     own_table_id,
     table_root_locations,
 )
@@ -144,6 +149,12 @@ WAITING_MESSAGE = (
 BLOCKED_MESSAGE = (
     "The table location sweep left %s alone: a table, or a create in progress, uses this "
     "location or one inside it. Its record is kept and the next sweep looks again."
+)
+UNJUDGED_MESSAGE = (
+    "The table location sweep left %s alone: %s, another environment's storage root or a "
+    "location stored in a spelling that cannot be compared, may be it, lie inside it or around "
+    "it. Its record is kept; correct that spelling or remove what is wrong, and the next sweep "
+    "looks again."
 )
 REFUSED_MESSAGE = (
     "The table location sweep did not purge %s: it is not a table directory under managed/ of "
@@ -545,6 +556,24 @@ class _Run:
         finally:
             self._session.rollback()
 
+    def near_other(self, location: str) -> str | None:
+        """Find another environment's root, or an oddly spelled location, at, in or around it.
+
+        Parameters
+        ----------
+        location
+            The location about to be purged.
+
+        Returns
+        -------
+        str or None
+            That location as stored (`near_other_location`), or `None`.
+        """
+        try:
+            return near_other_location(self._session, location, root=self._root)
+        finally:
+            self._session.rollback()
+
     def purge(self, record_id: uuid.UUID) -> None:
         """Delete a purgeable location's files, then its record.
 
@@ -569,6 +598,11 @@ class _Run:
         if relative is None:
             self.counts["locations_refused"] += 1
             logger.warning(REFUSED_MESSAGE, shown(self._relative(location)))
+            return
+        nearby = self.near_other(location)
+        if nearby is not None:
+            self.counts["purges_blocked"] += 1
+            logger.warning(UNJUDGED_MESSAGE, shown(relative), shown(nearby))
             return
         if self._in_use(location):
             self._blocked(relative)

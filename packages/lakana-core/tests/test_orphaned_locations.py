@@ -513,16 +513,16 @@ def test_a_database_error_in_the_check_before_a_delete_keeps_it(
     """The second check fails: no record is taken, nothing is deleted, the call goes on."""
     location = _location(store, "unchecked")
     _leftover(location)
-    real = orphaned_module._eligible
+    real = orphaned_module._ineligible
     calls: list[str] = []
 
-    def second_fails(*args: object) -> bool:
+    def second_fails(*args: object) -> str | None:
         calls.append("checked")
         if len(calls) == 2:
             raise OSError("down")
         return real(*args)  # ty: ignore[invalid-argument-type]
 
-    with mock.patch.object(orphaned_module, "_eligible", second_fails):
+    with mock.patch.object(orphaned_module, "_ineligible", second_fails):
         (entry,) = catalog.delete_orphaned_locations(principal, "dev").locations
     assert entry.kept_because == KEPT_FAILED
     assert len(_files(location)) == 2
@@ -618,16 +618,16 @@ def test_a_claim_taken_after_the_listing_wins(
     """A record for the location that appears before the delete's own record keeps it."""
     location = _location(store, "raced")
     _leftover(location)
-    real = orphaned_module._eligible
+    real = orphaned_module._ineligible
     calls: list[str] = []
 
-    def claim_then_check(*args: object, **kwargs: object) -> bool:
+    def claim_then_check(*args: object, **kwargs: object) -> str | None:
         if len(calls) == 1:
             _claim(session, location)
         calls.append("checked")
         return real(*args, **kwargs)  # ty: ignore[invalid-argument-type]
 
-    with mock.patch.object(orphaned_module, "_eligible", claim_then_check):
+    with mock.patch.object(orphaned_module, "_ineligible", claim_then_check):
         (entry,) = catalog.delete_orphaned_locations(principal, "dev").locations
 
     assert (entry.deleted, entry.kept_because) == (False, KEPT_BUSY)
@@ -642,17 +642,17 @@ def test_a_claim_that_beats_the_record_insert_wins(
     """The location is unique: the second record for it is refused, and that is the delete's."""
     location = _location(store, "raced")
     _leftover(location)
-    real = orphaned_module._eligible
+    real = orphaned_module._ineligible
     calls: list[str] = []
 
-    def check_then_claim(*args: object, **kwargs: object) -> bool:
+    def check_then_claim(*args: object, **kwargs: object) -> str | None:
         answer = real(*args, **kwargs)  # ty: ignore[invalid-argument-type]
         calls.append("checked")
         if len(calls) == 2:
             _claim(session, location)
         return answer
 
-    with mock.patch.object(orphaned_module, "_eligible", check_then_claim):
+    with mock.patch.object(orphaned_module, "_ineligible", check_then_claim):
         (entry,) = catalog.delete_orphaned_locations(principal, "dev").locations
 
     assert entry.kept_because == KEPT_CLAIMED
@@ -885,3 +885,128 @@ def test_no_transaction_is_left_open(
     assert not session.in_transaction()
     catalog.delete_orphaned_locations(principal, "dev")
     assert not session.in_transaction()
+
+
+# --- locations that cannot be compared as spelled -------------------------------------------
+
+
+def _store_location(store: Path, suffix: str) -> str:
+    """Spell a location under the store's `managed/gold`, as given.
+
+    Parameters
+    ----------
+    store
+        The storage root.
+    suffix
+        What follows ``managed/gold``, slashes included, exactly as written.
+
+    Returns
+    -------
+    str
+        The absolute location.
+    """
+    return f"file://{store}/managed/gold{suffix}"
+
+
+def test_another_environment_root_spelled_with_a_doubled_slash_keeps_the_directory(
+    session: Session, catalog: CatalogService, store: Path, principal: PrincipalRef
+) -> None:
+    """``gold//t-<hex>`` is the same directory as ``gold/t-<hex>``: it is kept and named."""
+    name = f"t-{uuid.uuid4().hex}"
+    catalog.create_environment(
+        principal,
+        name="other",
+        storage=StorageConfig(scheme="file", root=_store_location(store, f"//{name}"), options={}),
+    )
+    location = _store_location(store, f"/{name}")
+    _leftover(location)
+
+    (entry,) = catalog.find_orphaned_locations(principal, "dev", older_than_days=1).locations
+    assert entry.kept_because is not None and f"//{name}" in entry.kept_because
+    (kept,) = catalog.delete_orphaned_locations(principal, "dev", older_than_days=1).locations
+    assert (kept.deleted, kept.kept_because) == (False, entry.kept_because)
+    assert len(_files(location)) == 2
+    assert _record(session, location) is None
+
+
+@pytest.mark.parametrize(
+    "spelling", ["//{name}", "/x/../{name}", "/./{name}"], ids=["doubled", "dotdot", "dot"]
+)
+def test_a_record_spelled_so_that_it_cannot_be_compared_keeps_the_directory(
+    session: Session, catalog: CatalogService, store: Path, principal: PrincipalRef, spelling: str
+) -> None:
+    """A record whose location names the directory in another spelling, in any state."""
+    name = f"t-{uuid.uuid4().hex}"
+    location = _store_location(store, f"/{name}")
+    _leftover(location)
+    _claim(
+        session, _store_location(store, spelling.format(name=name)), state=TableLocationState.LIVE
+    )
+
+    (entry,) = catalog.find_orphaned_locations(principal, "dev", older_than_days=1).locations
+    assert entry.kept_because is not None
+    catalog.delete_orphaned_locations(principal, "dev", older_than_days=1)
+    assert len(_files(location)) == 2
+
+
+def test_a_table_whose_metadata_is_spelled_with_a_doubled_slash_keeps_the_directory(
+    session: Session, catalog: CatalogService, store: Path, principal: PrincipalRef
+) -> None:
+    """The table's files are in the directory although its metadata location says ``//``."""
+    name = f"t-{uuid.uuid4().hex}"
+    location = _store_location(store, f"/{name}")
+    _leftover(location)
+    namespace = session.scalars(select(Namespace.id)).first()
+    session.add(
+        Table(
+            id=uuid.uuid4(),
+            namespace_id=namespace,
+            name="doubled",
+            table_type=TableType.ICEBERG,
+            metadata_location=_store_location(store, f"//{name}/metadata/00000-a.metadata.json"),
+        )
+    )
+    session.commit()
+
+    (entry,) = catalog.find_orphaned_locations(principal, "dev", older_than_days=1).locations
+    assert entry.kept_because is not None
+    catalog.delete_orphaned_locations(principal, "dev", older_than_days=1)
+    assert len(_files(location)) == 2
+
+
+def test_a_location_that_cannot_be_normalised_keeps_every_directory_on_its_storage(
+    session: Session, catalog: CatalogService, store: Path, principal: PrincipalRef
+) -> None:
+    """A percent escape: nothing on the same storage is judged safe."""
+    location = _store_location(store, f"/t-{uuid.uuid4().hex}")
+    _leftover(location)
+    _claim(session, f"file://{store}/managed/gold/t%2D{uuid.uuid4().hex}")
+
+    (entry,) = catalog.find_orphaned_locations(principal, "dev", older_than_days=1).locations
+    assert entry.kept_because is not None
+
+
+def test_an_odd_spelling_on_other_storage_does_not_keep_anything(
+    session: Session, catalog: CatalogService, store: Path, principal: PrincipalRef
+) -> None:
+    """A record on another bucket, however spelled, is far from this directory."""
+    location = _store_location(store, f"/t-{uuid.uuid4().hex}")
+    _leftover(location)
+    _claim(session, f"s3://elsewhere//t-{uuid.uuid4().hex}", state=TableLocationState.LIVE)
+    _claim(session, f"s3://elsewhere/x/../t%2D{uuid.uuid4().hex}", state=TableLocationState.LIVE)
+
+    (entry,) = catalog.delete_orphaned_locations(principal, "dev", older_than_days=1).locations
+    assert entry.deleted
+
+
+def test_a_scheme_alias_counts_as_another_spelling(
+    session: Session, catalog: CatalogService, store: Path, principal: PrincipalRef
+) -> None:
+    """``FILE://`` names the same storage as ``file://``."""
+    name = f"t-{uuid.uuid4().hex}"
+    location = _store_location(store, f"/{name}")
+    _leftover(location)
+    _claim(session, f"FILE://{store}/managed/gold/{name}", state=TableLocationState.LIVE)
+
+    (entry,) = catalog.find_orphaned_locations(principal, "dev", older_than_days=1).locations
+    assert entry.kept_because is not None

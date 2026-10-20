@@ -35,6 +35,17 @@ A directory is listed only when nothing in the catalog uses it:
 - its name ends in a table id (a hyphen and 32 hexadecimal digits), as every table directory's
   does; and it is not another environment's storage root, nor inside one.
 
+**A location that cannot be compared keeps it.** An environment's storage root, a table or a
+location record can be stored in a spelling that names the same place differently, such as a
+doubled slash (`.../gold//orders-...`), a `.` or `..` segment, `FILE://` or `s3a://`, or a percent
+escape. When such a location may be the directory, lie inside it or around it, the directory is
+listed with a `kept_because` that names that location, and it is never deleted. A `..` segment or
+a percent escape cannot be resolved for certain, so one of those keeps every directory on the same
+storage (the same bucket, or the local disk). Correct the environment's storage root, or drop the
+table, and run the command again. The worker's sweep keeps a dropped table's files for the same
+reason, and logs `The table location sweep left <location> alone: <location>, another
+environment's storage root or a location stored in a spelling that cannot be compared, …`.
+
 **Recent directories are kept.** A directory with a file newer than `--older-than` (30 days by
 default) is listed with `recent` set and is never deleted. Use a longer period if you are not sure,
 for example `--older-than 90d`.

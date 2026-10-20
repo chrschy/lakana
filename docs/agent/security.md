@@ -1246,7 +1246,12 @@ row's metadata lies under the location, else `ABANDONED` with `purge_after = now
 `purge_after` is purged only if its location is canonical, strictly inside `managed/` of its
 environment's root and ends in `-<32 hex>`, and nothing in use is the location or lies inside it in
 **any** environment (`location_in_use`: `LIVE`/`CLAIMED` records and `tables` rows; plus
-`table_root_locations` with `nested_locations_within`; maintenance uses `other_table_locations`). Before **each** delete,
+`table_root_locations` with `nested_locations_within`; maintenance uses `other_table_locations`), and
+`near_other_location` finds nothing (no other environment's root at, inside, or from inside
+`managed/` around it; no non-canonical record or table location that normalises near it; a `..` or
+percent escape on the same storage fails closed): these spelling comparisons fail open on a
+non-canonical spelling, which nothing normalises at creation, so the purge counts
+`purges_blocked` and logs `UNJUDGED_MESSAGE` instead. Before **each** delete,
 under the record's lock, the record must still be purgeable and `location_in_use` false again; only
 objects strictly inside the location with sane segments are deleted; the record goes last, with
 `TABLE_PURGED` (`files`, `bytes`, `complete`); a pass that stops part-way records `complete: false`
@@ -1514,8 +1519,15 @@ directory) finds, and then only if `_eligible` holds: `_Run._confined` (canonica
 `managed/` of this root, ends in `-<32 hex>`); not `_Run._in_use` (`location_in_use` plus
 `table_root_locations` equal or nested, every environment); no `table_locations` row in **any**
 state at, inside or around it; no table's directory around it (the derived root, or for a metadata
-file outside `metadata/` the file's directory); and it is not another environment's storage root,
-does not contain one, and is not inside one that lies under this `managed/`. A directory whose
+file outside `metadata/` the file's directory); and `near_other_location` (the sweep's check too)
+finds nothing: no other environment's storage root at, inside, or (from inside this `managed/`)
+around it, however spelled, and no record or table location in a non-canonical spelling (doubled
+slash, `.`/`..`, scheme alias such as `s3a`/`FILE`, percent escape) that normalises to one of
+these. A `..` segment or a percent escape cannot be normalised exactly: such a location fails
+closed for every directory on the same scheme and bucket (the whole local disk for `file`). A
+canonical other root makes the directory not listed; a non-canonical spelling lists it as kept,
+with a reason naming the location. Glob characters are taken literally (storage names are
+literal). A directory whose
 newest file is younger than `older_than_days` (1 to 3,650, default 30), or has a file of unknown
 age, is `recent` and never deleted. The listing writes nothing and records no event.
 

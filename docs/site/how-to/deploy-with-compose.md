@@ -295,7 +295,11 @@ run that made the create has ended, or, for a create outside a run, once
 `LAKANA_TABLES__ABANDONED_GRACE_HOURS` (24 by default) have passed, it checks under a lock whether
 the table exists. If it does, everything is kept. If not, the sweep removes the files and then the
 record. It never removes a directory that has no record, nor one that holds or lies around a table
-that exists, in any environment that shares the storage root: it counts such directories and logs
+that exists, in any environment that shares the storage root, nor one that is, holds or lies (under
+`managed/`) around another environment's storage root, nor one near a location stored in a
+spelling that cannot be compared (a doubled slash, a `.` or `..` segment, a percent escape; it logs
+`The table location sweep left <location> alone: <location>, another environment's storage root or
+a location stored in a spelling that cannot be compared, …`): it counts such directories and logs
 `<n> table directories under managed/ in the storage of environment <env> have no location record;
 they are left alone.` (see "After a restore" below). Directories that older releases left behind are
 counted the same way; remove them on request with `lakana env orphaned-locations` (see
