@@ -253,7 +253,7 @@ def _note_of(world: World, dotted: str) -> tuple[uuid.UUID | None, uuid.UUID | N
         return row[0], row[1], row[2]
 
 
-_STATEMENTS = {False: 61, True: 126}
+_STATEMENTS = {False: 62, True: 127}
 """Statements of a task's own thread, by whether it has checks (measured before the note).
 
 Two of them look for the project's descriptions of the table the task creates. With checks, each
@@ -261,7 +261,8 @@ of the two check queries that name the table also counts a read of it (a lookup 
 an upsert), which is the four more. Two more look for the table's stored columns, one when the
 table is created and one at the commit that gives it data. Five come with the claim of the new
 table's location (#90): the database's time and the insert of the claim, the reload of the
-namespace and the environment that its commit expired, and the publish fence's update."""
+namespace and the environment that its commit expired, and the publish fence's update. One more
+is the share lock on the environment row that the publish takes before the fence (#213)."""
 
 
 def _statements_of(world: World, claimed: ClaimedTask) -> int:
