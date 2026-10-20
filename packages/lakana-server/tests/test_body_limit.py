@@ -16,6 +16,7 @@ from lakana_server.api.routing import AuthenticateFirstRoute, depends_on_get_pri
 from lakana_server.app import ROUTERS, create_app
 from lakana_server.body_limit import BodyLimitMiddleware, _replay
 from lakana_server.settings import RequestBodyConfig, Settings
+from lakana_server.sign_in_audit import SignInAuditLimiter
 from tests.conftest import _TEST_MASTER_KEY, AUTH_HEADER
 
 LIMIT = 2048
@@ -154,7 +155,11 @@ def test_a_malformed_body_with_a_valid_token_is_still_422(client: TestClient) ->
 
 
 def test_authenticating_first_records_one_success_not_two(client: TestClient) -> None:
-    """Pre-authentication hands its result on: a request is one audit event, not two."""
+    """Pre-authentication hands its result on: a request is one audit event, not two.
+
+    The sign-in window is set to 0 here, so that every request would write its event.
+    """
+    client.app.state.sign_in_audit_limiter = SignInAuditLimiter(0)
     client.post(JSON_ROUTE, headers=AUTH_HEADER, json={"name": "alice"})
     events = client.get("/api/v1/audit-events", headers=AUTH_HEADER).json()["items"]
     succeeded = [e for e in events if e["event_type"] == "AUTHENTICATION_SUCCEEDED"]

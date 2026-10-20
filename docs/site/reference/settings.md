@@ -106,6 +106,7 @@ Compose](../how-to/deploy-with-compose.md).
 | Variable | Type | Default | Read by | Description |
 |---|---|---|---|---|
 | `LAKANA_AUDIT__QUERY_TEXT` | text | `full` | server, worker | What a new `QUERY_COMPLETED` event stores of the query's SQL text: ``full`` (the default) the text; ``hash`` only its SHA-256 and length, so that the same query can still be recognised; ``off`` neither. In any letter case. Set the same value on the server and on every worker, since both record queries. Events already written are not changed. The query's own record keeps its text either way, for its submitter. |
+| `LAKANA_AUDIT__SIGN_IN_WINDOW_MINUTES` | whole number, 0 or more, 1440 or less | `15` | server | Minutes during which a token that signed in successfully writes no second sign-in event (default 15; 0 to 1,440). The next event of that token says how many sign-ins were left out. Each token counts on its own, and its first use always writes an event, as does its first use after it was refused. 0 writes an event for every request. Each server process counts on its own. Failed sign-ins are not affected (`LAKANA_AUTH_AUDIT__PER_IP_PER_MINUTE`). |
 
 ## `LAKANA_QUERY_LIMITS__*`
 

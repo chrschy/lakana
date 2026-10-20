@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import re
+import uuid
 from collections.abc import Iterator
 
 from fastapi import Depends, Header, Query, Request
@@ -39,6 +40,7 @@ from lakana_core.secrets.keys import EnvKeyProvider, KeyProvider
 from lakana_core.secrets.service import SecretService
 from lakana_core.statement_limit import check_statement_length
 from lakana_core.storage.resolver import StorageResolver
+from lakana_server.sign_in_audit import Credential
 
 PRINCIPAL_STATE_KEY = "_lakana_authenticated_principal"
 """The private name on `request.state` under which `authenticate_before_body` keeps the principal.
@@ -162,7 +164,13 @@ def get_principal(
     task token (`lakana_task_<key_id>_<secret>`), dispatched by prefix. This
     replaces M1's shape-only check — a well-formed header with the wrong
     secret is now rejected, not accepted. Records `AUTHENTICATION_SUCCEEDED`
-    for every successful attempt.
+    for a successful attempt when `app.state.sign_in_audit_limiter`
+    (`lakana_server.sign_in_audit.SignInAuditLimiter`) admits it: once per
+    credential per `LAKANA_AUDIT__SIGN_IN_WINDOW_MINUTES`, with the count of
+    successes left out since the previous row as `detail.suppressed` when it
+    is nonzero. A success it does not admit writes nothing and commits
+    nothing. A failed attempt that names a credential makes that
+    credential's next success recorded.
 
     A failed attempt is recorded as `AUTHENTICATION_FAILED` only if
     `app.state.auth_audit_limiter` (`lakana_server.auth_rate_limit.
@@ -179,8 +187,8 @@ def get_principal(
     Parameters
     ----------
     request
-        The current request, used to reach `app.state.auth_audit_limiter`
-        and the requesting client's address.
+        The current request, used to reach `app.state.auth_audit_limiter`,
+        `app.state.sign_in_audit_limiter` and the requesting client's address.
     authorization
         The raw `Authorization` header value, or `None` if absent.
     session
@@ -208,6 +216,7 @@ def get_principal(
         return already
     audit = AuditService(session)
     key_id: str | None = None
+    credential: Credential | None = None
     try:
         match = _AUTH_HEADER_PATTERN.match(authorization or "")
         if match is None:
@@ -218,29 +227,23 @@ def get_principal(
         raw_token = match.group(1)
         if (parsed := parse_token(raw_token, "lakana_pat")) is not None:
             key_id, secret = parsed
+            credential = ("pat", key_id)
             principal = pats.verify(key_id, secret)
-            audit.record(
-                principal.id,
-                AuditEventType.AUTHENTICATION_SUCCEEDED,
-                detail={"key_id": key_id},
-                commit=True,
-            )
+            _record_sign_in(request, audit, credential, principal.id)
             return principal
         if (parsed := parse_token(raw_token, "lakana_task")) is not None:
             key_id, secret = parsed
+            credential = ("task", key_id)
             scope = task_tokens.verify(key_id, secret)
-            audit.record(
-                scope.principal.id,
-                AuditEventType.AUTHENTICATION_SUCCEEDED,
-                detail={"key_id": key_id},
-                commit=True,
-            )
+            _record_sign_in(request, audit, credential, scope.principal.id)
             return scope.principal
         raise AuthenticationError(
             "Authorization header must be 'Bearer lakana_pat_<keyid>_<secret>' "
             "or 'Bearer lakana_task_<keyid>_<secret>'."
         )
     except AuthenticationError:
+        if credential is not None:
+            request.app.state.sign_in_audit_limiter.forget(credential)
         client = request.client.host if request.client else "unknown"
         admitted, suppressed = request.app.state.auth_audit_limiter.admit(client)
         if admitted:
@@ -248,6 +251,44 @@ def get_principal(
             if suppressed > 0:
                 detail["suppressed"] = suppressed
             audit.record(None, AuditEventType.AUTHENTICATION_FAILED, detail=detail, commit=True)
+        raise
+
+
+def _record_sign_in(
+    request: Request, audit: AuditService, credential: Credential, principal_id: uuid.UUID
+) -> None:
+    """Record a successful authentication, if the sign-in window admits it.
+
+    Parameters
+    ----------
+    request
+        The current request, used to reach `app.state.sign_in_audit_limiter`.
+    audit
+        Writes the row, with its own commit.
+    credential
+        The verified token's kind and key id.
+    principal_id
+        The principal the token authenticated.
+
+    Raises
+    ------
+    Exception
+        Whatever writing the row raised; the limiter is told first, so that the next success of
+        the credential is recorded and counts this one.
+    """
+    limiter = request.app.state.sign_in_audit_limiter
+    admitted, suppressed = limiter.admit(credential, principal_id)
+    if not admitted:
+        return
+    detail: dict[str, str | int] = {"key_id": credential[1]}
+    if suppressed > 0:
+        detail["suppressed"] = suppressed
+    try:
+        audit.record(
+            principal_id, AuditEventType.AUTHENTICATION_SUCCEEDED, detail=detail, commit=True
+        )
+    except BaseException:
+        limiter.not_recorded(credential, suppressed)
         raise
 
 

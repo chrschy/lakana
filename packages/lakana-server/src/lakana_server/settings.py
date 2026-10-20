@@ -65,6 +65,25 @@ class AuthAuditConfig(BaseModel):
     per_ip_per_minute: int = Field(default=10, gt=0)
 
 
+class ServerAuditConfig(AuditConfig):
+    """The audit settings of the server: those it shares with the workers, and its own.
+
+    Read from ``LAKANA_AUDIT__*``. The shared ones are documented on `AuditConfig`.
+
+    Parameters
+    ----------
+    sign_in_window_minutes
+        Minutes during which a token that signed in successfully writes no second sign-in event
+        (default 15; 0 to 1,440). The next event of that token says how many sign-ins were left
+        out. Each token counts on its own, and its first use always writes an event, as does
+        its first use after it was refused. 0 writes an event for every request. Each server
+        process counts on its own. Failed sign-ins are not affected
+        (`LAKANA_AUTH_AUDIT__PER_IP_PER_MINUTE`).
+    """
+
+    sign_in_window_minutes: int = Field(default=15, ge=0, le=1440)
+
+
 class RequestBodyConfig(BaseModel):
     """Bound on the body of a JSON request (`LAKANA_REQUEST_BODY__*`).
 
@@ -182,7 +201,7 @@ class Settings(BaseSettings):
     auth_audit: AuthAuditConfig = AuthAuditConfig()
     denial_audit: DenialAuditConfig = DenialAuditConfig()
     view_audit: ViewAuditConfig = ViewAuditConfig()
-    audit: AuditConfig = AuditConfig()
+    audit: ServerAuditConfig = ServerAuditConfig()
     query_limits: QueryLimitsConfig = QueryLimitsConfig()
     run: RunConfig = RunConfig()
     log: LogConfig = LogConfig()
