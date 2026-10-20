@@ -745,8 +745,9 @@ Table directories that older releases left without a location record (#229) are 
 the sweep. `lakana env orphaned-locations ENV --delete` removes them on request: it needs
 `MANAGE_ENVIRONMENT` on the instance, never an environment's own grant, because the root can be
 shared; it deletes only canonical, id-suffixed directories strictly inside `managed/` that no
-record in any state and no table of any environment names, holds or surrounds, and that are not
-another environment's root, compared under every reading a storage may give a location (case,
+record in any state and no table of any environment names, holds or surrounds, that are not
+another environment's root nor inside one (a root that is this `managed/` included), and none
+while this root lies in another environment's `raw/`, `artifacts/` or `_artifacts/`, compared under every reading a storage may give a location (case,
 Unicode form, percent decoding, `.`/`..`, doubled slashes, scheme aliases, symbolic links; a
 relative or host `file` location keeps everything on the local disk), the same comparison the
 sweep's purge makes, and only when their newest file is older than the age asked for (30

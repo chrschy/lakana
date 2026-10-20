@@ -1248,7 +1248,8 @@ environment's root and ends in `-<32 hex>`, and nothing in use is the location o
 **any** environment (`location_in_use`: `LIVE`/`CLAIMED` records and `tables` rows; plus
 `table_root_locations` with `nested_locations_within`; maintenance uses `other_table_locations`), and
 `near_other_location` finds nothing, checked after those two (no other environment's root at,
-inside, or from inside `managed/` around it; no `LIVE`/`CLAIMED`/`DROPPED` record other than its
+inside, or from at or inside `managed/` around it, and none holding this root in its
+`UNRECORDED_ZONES` (`raw/`, `artifacts/`, `_artifacts/`, whose files have no record); no `LIVE`/`CLAIMED`/`DROPPED` record other than its
 own, and no table directory, at or inside it under any of the `readings` described in the #229
 section below; an unreadable location on the same scheme fails closed): the spelling comparisons
 above fail open on another spelling of the same place, so the purge counts `purges_blocked` and
@@ -1521,8 +1522,9 @@ directory) finds, and then only if `_eligible` holds: `_Run._confined` (canonica
 `table_root_locations` equal or nested, every environment); no `table_locations` row in **any**
 state at, inside or around it; no table's directory around it (the derived root, or for a metadata
 file outside `metadata/` the file's directory); and `near_other_location` (the sweep's check too)
-finds nothing: no other environment's storage root at, inside, or (from inside this `managed/`)
-around it, however spelled, and no record or table location in a non-canonical spelling (doubled
+finds nothing: no other environment's storage root at, inside, or (from at or inside this
+`managed/`, so also a root that *is* `managed/`) around it, and none that holds this root in its
+`raw/`, `artifacts/` or `_artifacts/` (`UNRECORDED_ZONES`; listed as kept), however spelled, and no record or table location in a non-canonical spelling (doubled
 slash, `.`/`..`, scheme alias such as `s3a`/`FILE`, percent escape) that normalises to one of
 these. Canonical has one definition, `resolver.normalised_path` (empty and `.` segments
 dropped, a leading `//` included, which `posixpath.normpath` keeps; `..` unjudgeable), and a `file`
@@ -1535,7 +1537,7 @@ percent-decoded up to three times, case-folded and NFC, `normpath` and, for `fil
 (symbolic links), object-store keys literal and with `..` resolved, `abfs` reduced to the
 container; a location with no reading (relative or host `file`, no scheme) blocks every deletion on
 its scheme. Roots stored before stay and meet this check. New table and namespace names refuse `%`
-(`validate_path_component`, unless reading a stored name). Residual: two paths to one directory
+(`refuse_percent_in_new_name`, called only where such a name is created; stored names stay usable). Residual: two paths to one directory
 that only the kernel knows (a bind mount, a network share mounted twice) are not seen; operators
 must not point two roots at one directory that way. A canonical other root makes the directory
 not listed; any other match lists it as kept, with a reason naming the location. Glob characters

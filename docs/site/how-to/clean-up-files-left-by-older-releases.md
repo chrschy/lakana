@@ -33,7 +33,12 @@ A directory is listed only when nothing in the catalog uses it:
   that can still be restored included), lives in it, inside it, or around it;
 - no location record names it, lies inside it or around it;
 - its name ends in a table id (a hyphen and 32 hexadecimal digits), as every table directory's
-  does; and it is not another environment's storage root, nor inside one.
+  does; and it is not another environment's storage root, nor inside one (an environment whose
+  root is this one's `managed/` keeps everything there).
+- the environment's own root does not lie in another environment's `raw/`, `artifacts/` or
+  `_artifacts/` directory, whose files have no record. If it does, each directory is listed with a
+  `kept_because` naming that environment's root, and none is deleted: move the environment to a
+  root of its own.
 
 **The same place under another name keeps it.** Every environment's storage root, every table
 and every location record is compared under each way a storage may read it: without case and in

@@ -311,8 +311,13 @@ or its documentation is not ready to merge.
 ## Names
 
 A namespace component or table name must be non-empty, not whitespace-only, and must not
-contain `.`, `/`, `%`, a NUL byte, or the unit separator (`validate_path_component`; `%` because a
-storage may decode `%41` to `A`, so two names would share a directory). The `.`
+contain `.`, `/`, a NUL byte, or the unit separator (`validate_path_component`). A *new* table or
+namespace name must not contain `%` either (`refuse_percent_in_new_name`: a storage may decode `%41`
+to `A`, so two names would share a directory). That check is called only where a table or namespace
+name is created (`create_namespace` for each new component, `ResolvedStorage.table_location`,
+`create_external_table`, new views, the `rename_table` destination and the `undrop_table` new
+name), never in parsing, discovery, matching or a lookup, and never for job, check, repository,
+package-index or artifact names. The `.`
 rule keeps the dotted display form (`gold.sales`) unambiguous: `["a.b"]` and
 `["a", "b"]` would otherwise render identically.
 

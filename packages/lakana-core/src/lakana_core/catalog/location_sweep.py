@@ -37,7 +37,8 @@ What it does, per environment:
    it (`dropped_inside`: a dropped table nested there keeps its files for its own undo period;
    the purge waits, `purges_waiting`, and is tried again by every later sweep until that table
    is restored or purged itself). Nor may another environment's storage root be the location,
-   lie inside it, or surround it from inside ``managed/``, nor a record or table location stored
+   lie inside it, or surround it from at or inside ``managed/``, nor hold this root in its raw,
+   artifact or code directories (`UNRECORDED_ZONES`), nor a record or table location stored
    in a spelling that is not canonical normalise to one of these (`near_other_location`,
    `purges_blocked`; one that cannot be normalised exactly blocks every purge on its storage).
    Then its files are deleted one at a

@@ -16,11 +16,13 @@ A directory is listed when the sweep's own walk (`_Run.unrecorded_directories`) 
   environments' tables and tombstones' records included);
 - no record in any state is it, lies inside it or contains it, and no table's directory contains
   it (its derived root, or for a metadata file outside ``metadata/`` the file's directory);
-- no other environment's storage root is it, lies inside it, or surrounds it from inside this
-  ``managed/``, and no record or table location stored in a spelling that is not canonical
-  normalises to one of these (`near_other_location`, the sweep's check too). Such a directory is
-  listed with the reason, naming that location, and never deleted; a location that cannot be
-  normalised exactly keeps every directory on its storage.
+- no other environment's storage root is it, lies inside it, or surrounds it from at or inside
+  this ``managed/``; this root does not lie in another environment's raw, artifact or code
+  directories (`UNRECORDED_ZONES`: its files there have no record); and no record or table
+  location stored in a spelling that is not canonical normalises to one of these
+  (`near_other_location`, the sweep's check too). Such a directory is listed with the reason,
+  naming that location, and never deleted; a location that cannot be normalised exactly keeps
+  every directory on its storage.
 
 Its newest file must be older than ``older_than_days`` (30 by default); a directory with a
 newer file, or with a file whose age the storage does not report, is listed as recent and never
@@ -353,7 +355,11 @@ def _ineligible(session: Session, run: _Run, location: str, environment: Target)
     nearby = run.near_other(location, record_states=frozenset(TableLocationState), around=True)
     if nearby is None:
         return None
-    if nearby.environment_root and spelled_canonically(nearby.location.rstrip("/")):
+    if (
+        nearby.environment_root
+        and not nearby.holds_this_root
+        and spelled_canonically(nearby.location.rstrip("/"))
+    ):
         return _NOT_ORPHANED  # another environment's root: its files, not a leftover
     return UNJUDGED_PREFIX + shown(nearby.location)
 

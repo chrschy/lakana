@@ -193,21 +193,3 @@ def test_shown_path_cuts_a_file_name_that_is_itself_too_long_from_its_front() ->
     assert cut.endswith("n.parquet")
     assert shown_path("n" * 400 + ".parquet").endswith(".parquet")
     assert shown_path(7) == "int"
-
-
-@pytest.mark.parametrize("component", ["a%41b", "%", "50%"])
-def test_a_new_name_with_a_percent_sign_is_refused_and_says_what_is_allowed(
-    component: str,
-) -> None:
-    """A storage may read ``%41`` as ``A``: two names would share one directory."""
-    with pytest.raises(ValidationError, match="must not contain '%'") as refused:
-        validate_path_component(component, what="Table name")
-    assert "Every other character" in str(refused.value)
-    with pytest.raises(ValidationError, match="'%'"):
-        NamespacePath.from_parts([component])
-
-
-def test_a_stored_name_with_a_percent_sign_stays_readable() -> None:
-    """Names from before the rule are still looked up, as dotted ones are."""
-    validate_path_component("a%41b", what="Table name", allow_dots=True)
-    assert NamespacePath.from_parts(["a%41b"], allow_dots=True).parts == ("a%41b",)

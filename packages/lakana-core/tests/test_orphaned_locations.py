@@ -36,6 +36,7 @@ from lakana_core.catalog.orphaned_locations import (
     KEPT_RECENT,
     KEPT_UNJUDGED,
     KEPT_WAITING,
+    UNJUDGED_PREFIX,
     OrphanedLocations,
 )
 from lakana_core.catalog.service import CatalogService
@@ -403,6 +404,93 @@ def test_another_environment_whose_root_lies_under_managed_is_never_listed(
     mine = _leftover(_location(store, "mine"))
 
     assert _listed(catalog.find_orphaned_locations(principal, "dev")) == [mine]
+
+
+@pytest.mark.parametrize("slash", ["", "/"])
+def test_another_environment_whose_root_is_managed_itself_is_never_listed(
+    catalog: CatalogService, store: Path, principal: PrincipalRef, slash: str
+) -> None:
+    """Everything in ``managed/`` then lies in that environment's root, its raw zone too."""
+    catalog.create_environment(
+        principal,
+        name="other",
+        storage=StorageConfig(scheme="file", root=f"file://{store}/managed{slash}", options={}),
+    )
+    raw = f"file://{store}/managed/raw/exports/batch-{uuid.uuid4().hex}"
+    mine = _location(store, "mine")
+    for location in (raw, mine):
+        _leftover(location)
+
+    assert catalog.find_orphaned_locations(principal, "dev").locations == []
+    catalog.delete_orphaned_locations(principal, "dev")
+    assert [len(_files(location)) for location in (raw, mine)] == [2, 2]
+
+
+def test_an_environment_rooted_at_another_ones_managed_lists_its_own(
+    catalog: CatalogService, store: Path, principal: PrincipalRef
+) -> None:
+    """From the inner side, the enclosing environment's records still count, and nothing else."""
+    inner = f"file://{store}/managed"
+    catalog.create_environment(
+        principal, name="other", storage=StorageConfig(scheme="file", root=inner, options={})
+    )
+    location = f"{inner}/managed/gold/t-{uuid.uuid4().hex}"
+    _leftover(location)
+
+    (entry,) = catalog.find_orphaned_locations(principal, "other").locations
+    assert (entry.location, entry.kept_because) == (location.removeprefix(f"{inner}/"), None)
+
+
+@pytest.mark.parametrize("zone", ["raw", "artifacts", "_artifacts/code"])
+def test_an_environment_rooted_in_another_ones_unrecorded_files_keeps_everything(
+    session: Session, catalog: CatalogService, store: Path, principal: PrincipalRef, zone: str
+) -> None:
+    """There the enclosing environment keeps files no record names: listed, kept."""
+    inner = f"file://{store}/{zone}/inner"
+    catalog.create_environment(
+        principal, name="inner", storage=StorageConfig(scheme="file", root=inner, options={})
+    )
+    location = f"{inner}/managed/gold/t-{uuid.uuid4().hex}"
+    _leftover(location)
+
+    (entry,) = catalog.find_orphaned_locations(principal, "inner").locations
+    assert entry.kept_because == UNJUDGED_PREFIX + f"file://{store}"
+    (entry,) = catalog.delete_orphaned_locations(principal, "inner").locations
+    assert not entry.deleted
+    assert len(_files(location)) == 2
+
+
+def test_an_environment_rooted_elsewhere_in_another_ones_root_lists_its_own(
+    catalog: CatalogService, store: Path, principal: PrincipalRef
+) -> None:
+    """Beside the enclosing environment's directories nothing of that environment lives."""
+    inner = f"file://{store}/teams/inner"
+    catalog.create_environment(
+        principal, name="inner", storage=StorageConfig(scheme="file", root=inner, options={})
+    )
+    location = f"{inner}/managed/gold/t-{uuid.uuid4().hex}"
+    _leftover(location)
+
+    (entry,) = catalog.delete_orphaned_locations(principal, "inner").locations
+    assert entry.deleted
+    assert _files(location) == []
+
+
+def test_an_environment_rooted_outside_managed_does_not_block_the_leftovers(
+    catalog: CatalogService, store: Path, principal: PrincipalRef
+) -> None:
+    """Its root inside this one's but beside ``managed/`` holds nothing of ``managed/``."""
+    catalog.create_environment(
+        principal,
+        name="beside",
+        storage=StorageConfig(scheme="file", root=f"file://{store}/raw/beside", options={}),
+    )
+    location = _location(store, "mine")
+    _leftover(location)
+
+    (entry,) = catalog.delete_orphaned_locations(principal, "dev").locations
+    assert entry.deleted
+    assert _files(location) == []
 
 
 def test_an_environment_inside_another_ones_managed_lists_its_own(

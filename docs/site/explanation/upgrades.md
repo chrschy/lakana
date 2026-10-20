@@ -275,7 +275,8 @@ while such an environment exists: delete it.
 **A new table or namespace name may not contain `%`** (a storage may read `%41` as `A`, so two
 names would share one directory); every other character is allowed except `.`, `/`, the unit
 separator and a NUL byte. Existing names with `%` stay readable, listable, droppable and renamable
-away, as dotted names do. The clean-up compares their locations both as written and decoded, so
+away, as dotted names do, and a project whose assets or checks name such a table still deploys.
+Other names (jobs, checks, repositories, package indexes, artifacts) may still contain `%`. The clean-up compares their locations both as written and decoded, so
 such a table keeps only the directory it names.
 
 ### Remove the table directories older releases left behind

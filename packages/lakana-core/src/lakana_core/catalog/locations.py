@@ -45,12 +45,21 @@ from lakana_core.db import db_now, rowcount
 from lakana_core.models import Environment, Namespace, Table, TableLocation, TableLocationState
 from lakana_core.models.table_location import IN_USE_STATES, PURGEABLE_STATES
 from lakana_core.storage.resolver import (
+    ARTIFACTS_PREFIX,
     MANAGED_PREFIX,
     PERCENT_ESCAPE,
+    RAW_PREFIX,
     SCHEME_ALIASES,
     _is_canonical_uri,
     table_root_from_metadata_location,
 )
+
+UNRECORDED_ZONES = (RAW_PREFIX, ARTIFACTS_PREFIX, "_artifacts")
+"""Directories of a storage root where an environment keeps files that no location record names.
+
+The raw landing zone, artifacts, and deploys' code archives (`lakana_core.projects.code_sweep`'s
+``CODE_PREFIX`` lies in ``_artifacts``). Another environment rooted at or inside one of them
+has its ``managed/`` among those files (`near_other_location`)."""
 
 PROTECTED_STATES = IN_USE_STATES | {TableLocationState.DROPPED}
 """Records whose files maintenance of another table must never take for its orphans."""
@@ -432,10 +441,14 @@ class Nearby:
         The location as stored.
     environment_root
         Whether it is another environment's storage root (rather than a record or a table).
+    holds_this_root
+        Whether this environment's own root lies in one of that root's `UNRECORDED_ZONES`,
+        where it keeps files without a record: the directory may be its file or a leftover.
     """
 
     location: str
     environment_root: bool
+    holds_this_root: bool = False
 
 
 def _scheme_of(uri: str) -> str | None:
@@ -592,7 +605,12 @@ def near_other_location(
     symbolic links, scheme aliases), and it answers with:
 
     - another environment's storage root that is the directory, lies inside it, or surrounds it
-      while lying under this root's ``managed/``;
+      while lying at or under this root's ``managed/`` (a root that *is* ``managed/`` holds
+      every directory there);
+    - another environment's storage root that holds this root at or inside one of its
+      `UNRECORDED_ZONES` (raw files, artifacts, code archives: no record names them;
+      `Nearby.holds_this_root`). Inside its ``managed/`` its records count below, and
+      elsewhere in it nothing of it lives;
     - a location record in `record_states`, other than `location` itself (a record never blocks
       its own purge), or a table's directory (from its metadata file), that is the directory or
       lies inside it, or, with `around`, surrounds it;
@@ -650,9 +668,14 @@ def near_other_location(
         if (
             other & target
             or _inside(target, other)
-            or (_inside(own_managed, other) and _inside(other, target))
+            or ((other & own_managed or _inside(own_managed, other)) and _inside(other, target))
         ):
             return Nearby(stored, environment_root=True)
+        if _inside(other, own_root):
+            for zone in UNRECORDED_ZONES:
+                files = readings(f"{stored.rstrip('/')}/{zone}", resolved)
+                if files is None or files & own_root or _inside(files, own_root):
+                    return Nearby(stored, environment_root=True, holds_this_root=True)
     records = select(TableLocation.location.label("path"), literal(False).label("derive")).where(
         TableLocation.state.in_(record_states), TableLocation.location != location
     )

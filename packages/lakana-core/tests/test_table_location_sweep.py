@@ -32,7 +32,7 @@ from lakana_core.catalog.location_sweep import (
     LocationSweepReport,
     sweep_table_locations,
 )
-from lakana_core.catalog.locations import publish_location
+from lakana_core.catalog.locations import UNRECORDED_ZONES, publish_location
 from lakana_core.catalog.service import CatalogService
 from lakana_core.config import DatabaseConfig, StorageConfig
 from lakana_core.db import create_engine
@@ -50,6 +50,7 @@ from lakana_core.models import (
     TableType,
     TaskStatus,
 )
+from lakana_core.projects.code_sweep import CODE_PREFIX
 from lakana_core.storage.resolver import StorageResolver
 
 _NOW = datetime(2026, 10, 19, 12, 0, tzinfo=UTC)
@@ -1635,6 +1636,70 @@ def test_another_environment_root_inside_a_location_blocks_a_purge(
 
     assert _sweep(session).purges_blocked == 1
     assert _files(location) == ["inner/raw/a.csv"]
+
+
+@pytest.mark.parametrize("slash", ["", "/"])
+def test_another_environment_rooted_at_managed_blocks_a_purge(
+    session: Session, catalog: CatalogService, store: Path, principal: PrincipalRef, slash: str
+) -> None:
+    """Every directory in ``managed/`` then lies in that environment's root."""
+    location = _location(store)
+    _put(location, "data/a.parquet")
+    _claim(session, location, state=TableLocationState.ABANDONED, purge_after=_NOW)
+    catalog.create_environment(
+        principal,
+        name="other",
+        storage=StorageConfig(scheme="file", root=f"file://{store}/managed{slash}", options={}),
+    )
+
+    assert _sweep(session).purges_blocked == 1
+    assert _files(location) == ["data/a.parquet"]
+
+
+@pytest.mark.parametrize("zone", ["raw", "artifacts", "_artifacts/code"])
+def test_a_root_in_another_environments_unrecorded_files_blocks_a_purge(
+    session: Session, catalog: CatalogService, store: Path, principal: PrincipalRef, zone: str
+) -> None:
+    """The enclosing environment keeps files there that no record names."""
+    inner = f"file://{store}/{zone}/inner"
+    catalog.create_environment(
+        principal, name="inner", storage=StorageConfig(scheme="file", root=inner, options={})
+    )
+    location = f"{inner}/managed/gold/t-{uuid.uuid4().hex}"
+    _put(location, "data/a.parquet")
+    _claim(
+        session,
+        location,
+        state=TableLocationState.ABANDONED,
+        purge_after=_NOW,
+        environment="inner",
+    )
+
+    assert _sweep(session).purges_blocked == 1
+    assert _files(location) == ["data/a.parquet"]
+
+
+def test_the_unrecorded_zones_hold_the_code_archives() -> None:
+    """A new directory without records must be added to the zones: code archives are."""
+    assert CODE_PREFIX.split("/", 1)[0] in UNRECORDED_ZONES
+
+
+@pytest.mark.parametrize("inner", ["managed/gold/nest", "raw/beside"])
+def test_an_environment_rooted_inside_this_one_away_from_the_location_does_not_block(
+    session: Session, catalog: CatalogService, store: Path, principal: PrincipalRef, inner: str
+) -> None:
+    """Inside ``managed/`` beside the location, or beside ``managed/``: nothing of it is there."""
+    location = _location(store)
+    _put(location, "data/a.parquet")
+    _claim(session, location, state=TableLocationState.ABANDONED, purge_after=_NOW)
+    catalog.create_environment(
+        principal,
+        name="inner",
+        storage=StorageConfig(scheme="file", root=f"file://{store}/{inner}", options={}),
+    )
+
+    assert _sweep(session).locations_purged == 1
+    assert _files(location) == []
 
 
 @pytest.mark.parametrize("spelling", ["{head}//{name}/n-{hex}", "{head}/x/../{name}/n-{hex}"])

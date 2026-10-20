@@ -16,7 +16,11 @@ from sqlalchemy.orm import Session
 
 from lakana_core.config import StorageConfig
 from lakana_core.errors import NotFoundError, ValidationError
-from lakana_core.identifiers import NamespacePath, validate_path_component
+from lakana_core.identifiers import (
+    NamespacePath,
+    refuse_percent_in_new_name,
+    validate_path_component,
+)
 from lakana_core.models import Environment, Secret
 from lakana_core.secrets.crypto import decrypt_secret_row
 from lakana_core.secrets.keys import KeyProvider
@@ -528,9 +532,11 @@ class ResolvedStorage:
         ------
         ValidationError
             If `table` is empty, whitespace-only, ``.``, ``..``, or contains
-            ``.``, ``/`` or the unit separator.
+            ``.``, ``/`` or the unit separator, or ``%`` (only a new table gets a location:
+            `refuse_percent_in_new_name`).
         """
         validate_path_component(table, what="Table name")
+        refuse_percent_in_new_name(table, what="Table name")
         parts = "/".join(ns.parts)
         return f"{self.config.root.rstrip('/')}/{MANAGED_PREFIX}/{parts}/{table}-{table_id.hex}"
 
