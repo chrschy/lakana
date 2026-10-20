@@ -334,7 +334,7 @@ else in the log changes.
   events already written are not rewritten. An unknown value stops the start with a message that
   names the setting.
 
-No migration. Going back to the previous release shows the text to every reader of the log again;
+Migration `0046` adds an index to the audit log and changes no rows. Going back to the previous release shows the text to every reader of the log again;
 events written with `hash` or `off` stay without it.
 
 ## Notes for 0.16.0
