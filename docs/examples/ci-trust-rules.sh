@@ -31,9 +31,13 @@ lakana ci-trust create --issuer github --principal ci-prod --env prod --repo ana
 lakana ci-trust create --issuer gitlab --principal ci-dev --env dev --repo analytics \
   --kind dry_run --claim project_id=123456 --claim environment=lakana-dry-run
 lakana ci-trust create --issuer gitlab --principal ci-prod --env prod --repo analytics \
-  --claim project_id=123456 --claim ref=main --claim ref_protected=true \
-  --claim environment=prod
+  --claim project_id=123456 --claim ref=main --claim ref_type=branch \
+  --claim ref_protected=true --claim environment=prod
 # docs:end gitlab
+
+# docs:start both-kinds
+lakana ci-trust update RULE_ID --kind deploy --kind dry_run
+# docs:end both-kinds
 
 # docs:start explain
 lakana ci-trust explain --claims claims.json --env prod --repo analytics

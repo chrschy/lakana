@@ -13,6 +13,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 from scripts.docs_blocks import read_source
 from typer.testing import CliRunner, Result
@@ -194,6 +195,7 @@ def test_the_gitlab_rules_accept_the_pipeline_s_jobs_and_nothing_else(
     main = {
         **base,
         "ref": "main",
+        "ref_type": "branch",
         "ref_protected": "true",
         "pipeline_source": "push",
         "environment": "prod",
@@ -209,6 +211,41 @@ def test_the_gitlab_rules_accept_the_pipeline_s_jobs_and_nothing_else(
     assert _verdict(app, "dev", merge).startswith("accepted")
     assert _verdict(app, "prod", merge).startswith("refused")
     assert _verdict(app, "prod", {**main, "ref_protected": "false"}).startswith("refused")
+    assert _verdict(app, "prod", {**main, "ref_type": "tag"}).startswith("refused")
+
+
+def test_the_gitlab_job_that_dry_runs_then_deploys_is_accepted(
+    app: TestClient, tmp_path: Path
+) -> None:
+    state = _create_the_documented_rules(app, tmp_path, ("accounts", "gitlab"))
+    [job] = yaml.safe_load(
+        (_ROOT / "docs/examples/ci-oidc-gitlab-one-job.yml").read_text()
+    ).values()
+    assert job["rules"] == [{"if": '$CI_COMMIT_BRANCH == "main"'}]
+    assert set(job["id_tokens"]) == {"LAKANA_OIDC_TOKEN", "LAKANA_OIDC_TOKEN_2"}
+    # The claims GitLab gives this job's ID tokens on a push to the protected main branch.
+    claims = {
+        "iss": _GITLAB,
+        "project_id": "123456",
+        "ref": "main",
+        "ref_type": "branch",
+        "ref_protected": "true",
+        "pipeline_source": "push",
+        "environment": job["environment"],
+        "sha": SHA,
+    }
+    assert _verdict(app, "prod", claims).startswith("accepted")
+    [rule] = [
+        r
+        for r in app.get("/api/v1/ci-trust-rules", headers=AUTH_HEADER).json()
+        if r["environment"] == "prod"
+    ]
+    [words] = _region_commands("both-kinds")
+    result = _run(state, *[rule["id"] if word == "RULE_ID" else word for word in words])
+    assert result.exit_code == 0, result.stderr
+    shown = app.get(f"/api/v1/ci-trust-rules/{rule['id']}", headers=AUTH_HEADER).json()
+    assert sorted(shown["kinds"]) == ["deploy", "dry_run"]
+    assert _verdict(app, "prod", claims).startswith("accepted")
 
 
 def test_lakana_deploy_exchanges_the_job_s_id_token_once(app: TestClient, tmp_path: Path) -> None:

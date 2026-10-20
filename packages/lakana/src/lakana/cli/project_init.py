@@ -251,8 +251,8 @@ _GITLAB_OIDC = (
 #   lakana ci-trust create --issuer gitlab --principal ci-dev --env dev --repo {repo} \\
 #     --kind dry_run --claim project_id=123456 --claim environment=lakana-dry-run
 #   lakana ci-trust create --issuer gitlab --principal ci-prod --env prod --repo {repo} \\
-#     --claim project_id=123456 --claim ref=main --claim ref_protected=true \\
-#     --claim environment=prod
+#     --claim project_id=123456 --claim ref=main --claim ref_type=branch \\
+#     --claim ref_protected=true --claim environment=prod
 # Each ID token is exchanged once, so each job submits once.
 # How-to: https://lakana-labs.github.io/lakana/how-to/deploy-from-gitlab-ci/
 stages: [deploy]

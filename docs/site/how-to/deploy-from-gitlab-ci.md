@@ -47,15 +47,16 @@ page, in place of `123456`.
 lakana ci-trust create --issuer gitlab --principal ci-dev --env dev --repo analytics \
   --kind dry_run --claim project_id=123456 --claim environment=lakana-dry-run
 lakana ci-trust create --issuer gitlab --principal ci-prod --env prod --repo analytics \
-  --claim project_id=123456 --claim ref=main --claim ref_protected=true \
-  --claim environment=prod
+  --claim project_id=123456 --claim ref=main --claim ref_type=branch \
+  --claim ref_protected=true --claim environment=prod
 ```
 
 Why each condition is there:
 
 - **`project_id`** pins the project by its number. A path can be taken over: rename or transfer
   the project, and someone else can create one at the old path. The number stays.
-- **`ref=main`** means only the `main` branch deploys to `prod`.
+- **`ref=main`** and **`ref_type=branch`** mean only the `main` branch deploys to `prod`. GitLab
+  writes a tag's name in `ref` too: without `ref_type`, a protected tag named `main` would match.
 - **`ref_protected=true`** pins how the run was started, which the server requires. A `ref`
   condition alone also matches `main` while it is not protected, and pipelines of every source.
   With it, only pipelines of the protected branch match, which only people allowed to merge into
@@ -90,8 +91,8 @@ version in place of `<version>`:
 #   lakana ci-trust create --issuer gitlab --principal ci-dev --env dev --repo analytics \
 #     --kind dry_run --claim project_id=123456 --claim environment=lakana-dry-run
 #   lakana ci-trust create --issuer gitlab --principal ci-prod --env prod --repo analytics \
-#     --claim project_id=123456 --claim ref=main --claim ref_protected=true \
-#     --claim environment=prod
+#     --claim project_id=123456 --claim ref=main --claim ref_type=branch \
+#     --claim ref_protected=true --claim environment=prod
 # Each ID token is exchanged once, so each job submits once.
 # How-to: https://lakana-labs.github.io/lakana/how-to/deploy-from-gitlab-ci/
 stages: [deploy]
@@ -158,10 +159,19 @@ Exchanged the CI job's ID token: acting as ci-prod for one deploy of analytics a
 GitLab gives a job each ID token it declares once, and the server exchanges each ID token once, so
 a job submits once per ID token. A second `lakana deploy` in the same job is refused, with a
 message that says so. To run a dry run and then a deploy in one job, declare a second ID token
-and give it to the second command; or run each in a job of its own, as the file above does:
+and give it to the second command; or run each in a job of its own, as the file above does. The
+job runs on `main` in the environment `prod`, like `lakana-deploy`, so the prod rule matches its
+ID tokens:
 
+<!-- source: docs/examples/ci-oidc-gitlab-one-job.yml -->
 ```yaml
 lakana-dry-run-then-deploy:
+  stage: deploy
+  image: python:3.14-slim
+  environment: prod
+  resource_group: lakana-deploy-prod
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
   id_tokens:
     LAKANA_OIDC_TOKEN:
       aud: $LAKANA_URL
@@ -170,11 +180,18 @@ lakana-dry-run-then-deploy:
   variables:
     LAKANA_OIDC: gitlab
   script:
-    - lakana deploy --env prod --ref "$CI_COMMIT_SHA" --dry-run
-    - LAKANA_OIDC_TOKEN="$LAKANA_OIDC_TOKEN_2" lakana deploy --env prod --ref "$CI_COMMIT_SHA"
+    - pip install --index-url "${LAKANA_INDEX_URL:-https://pypi.org/simple}" "lakana==<version>"
+    - lakana deploy --env prod --ref "$CI_COMMIT_SHA" --dry-run --timeout 1800
+    - LAKANA_OIDC_TOKEN="$LAKANA_OIDC_TOKEN_2" lakana deploy --env prod --ref "$CI_COMMIT_SHA" --timeout 1800
 ```
 
-The rule for this job must allow both kinds (`--kind deploy --kind dry_run`).
+The prod rule must then allow both kinds; give it the dry run as well (`lakana ci-trust list`
+shows its id):
+
+<!-- source: docs/examples/ci-trust-rules.sh#both-kinds -->
+```bash
+lakana ci-trust update RULE_ID --kind deploy --kind dry_run
+```
 
 ## What a stolen CI token can do
 
@@ -214,7 +231,8 @@ reason so that it does not tell what exists.
 `explain` compares an ID token's claims with every rule, without any token. Write the claims of
 the job as a file `claims.json`; every one of them is a predefined CI/CD variable
 (`CI_PROJECT_ID`, `CI_COMMIT_REF_NAME`, `CI_COMMIT_REF_PROTECTED`, `CI_PIPELINE_SOURCE`,
-`CI_ENVIRONMENT_NAME`, `CI_COMMIT_SHA`):
+`CI_ENVIRONMENT_NAME`, `CI_COMMIT_SHA`; `ref_type` is `tag` when `CI_COMMIT_TAG` is set, and
+`branch` otherwise):
 
 <!-- source: docs/examples/ci-trust-claims-gitlab.json -->
 ```json
@@ -222,6 +240,7 @@ the job as a file `claims.json`; every one of them is a predefined CI/CD variabl
   "iss": "https://gitlab.com",
   "project_id": "123456",
   "ref": "main",
+  "ref_type": "branch",
   "ref_protected": "true",
   "pipeline_source": "push",
   "environment": "prod",
