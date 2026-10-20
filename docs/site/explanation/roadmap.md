@@ -63,15 +63,16 @@ sends only to a public `https` address unless an operator allows a host, tries u
 and never changes the run. See [Get told when a job fails](../how-to/get-told-when-a-job-fails.md)
 and the [upgrade notes](upgrades.md#notifications-for-jobs). The next element is the move to DuckDB 2 (item 2 below).
 
-Housekeeping for data that is no longer wanted shipped in 0.17.0. A table (#87, PR #227) or a
-whole environment can expire, so that development tables do not stay for ever. A dropped table
+Housekeeping for data that is no longer wanted shipped in 0.17.0. A table, or every table of an
+environment, can be given a retention and then expires (#87, PR #227), so that development tables
+do not stay for ever; nothing expires unless a retention is set. A dropped table
 keeps its files for an undo period (7 days by default) and then the worker deletes them; a
 deleted environment's tables follow the same rule (#94, #213), and `lakana table undrop` and
 `lakana env restore` bring them back until then. Every table's location is recorded before
 anything is written, so files that never landed can be found and removed (#90), and
 `lakana env orphaned-locations` lists and removes the directories left without a record (#229).
-The audit log records when a manager views other people's queries or a table's readers, and query text in other people's
-events needs `READ_QUERY_TEXT` (#88); a successful sign-in is written at most once per
+The audit log records when a manager views other people's queries or a table's readers, and
+query text in other people's events needs `READ_QUERY_TEXT` (#88); a successful sign-in is written at most once per
 credential and window (#217). Deploying from CI without a stored secret, through OIDC token
 exchange (#15), is built in three parts that do not wait for the web interface: 0.17.0 verifies
 a CI provider's ID token (#244); the exchange, trust rules and enforcement, and then the client,
