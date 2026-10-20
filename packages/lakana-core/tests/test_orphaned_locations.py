@@ -870,7 +870,16 @@ def test_the_time_limit_stops_the_deletion_and_the_next_call_resumes(
     _leftover(second)
     environment = orphaned_module.target(session, "dev")
     resolved = StorageResolver(session).for_environment("dev", include_deleted=True)
-    ticks = iter([0.0] * 12)
+
+    def clock() -> float:
+        """Run out of time once the first file of `big` is gone, whatever the listing order.
+
+        Returns
+        -------
+        float
+            Seconds: 0 while `big` is whole, then past the limit.
+        """
+        return 0.0 if len(_files(location)) == 3 else 1000.0
 
     stopped = orphaned_module.delete_orphaned_locations(
         session,
@@ -879,12 +888,13 @@ def test_the_time_limit_stops_the_deletion_and_the_next_call_resumes(
         now=datetime.now(UTC),
         older_than_days=30,
         max_seconds=10.0,
-        monotonic=lambda: next(ticks, 1000.0),
+        monotonic=clock,
     )
 
     assert not stopped.complete
     kept = [entry.kept_because for entry in stopped.locations]
     assert KEPT_NOT_REACHED in kept
+    assert 0 < len(_files(location)) < 3
     assert session.scalars(select(TableLocation)).all() == []
     session.rollback()
     resumed = orphaned_module.delete_orphaned_locations(
