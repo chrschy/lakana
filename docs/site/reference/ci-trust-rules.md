@@ -45,8 +45,8 @@ the service account deletes the rule.
   - **GitHub:** `event_name` (for example `push`) or `environment`. A `pull_request_target` run,
     which a pull request from a fork starts, gets an ID token whose `ref` is the base branch.
   - **GitLab:** `ref_protected` (`true`), `pipeline_source` (for example `push`) or
-    `environment`. A merge request pipeline of a fork that runs in your project carries the
-    fork's branch name as its `ref`, which can be `main` too; it is not protected.
+    `environment`. A `ref` condition alone also matches the branch while it is not protected,
+    and pipelines of every source: schedules, triggers, the web interface and the API.
 
   An `environment` condition counts for both, since the environment's protection rules on GitHub
   or GitLab decide which runs may use it. A rule without one is refused with a message that

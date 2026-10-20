@@ -356,8 +356,10 @@ OIDC exchange and CI tokens (#15)"; the user's view is
 
 1. **The rule is the trust decision.** Whoever can push to the pinned ref (or run a workflow in
    the pinned environment) can deploy. A ref alone does not say how a run was started (a GitHub
-   `pull_request_target` run gets an ID token for the base branch; a GitLab fork merge request
-   pipeline run in the parent project carries the fork's branch name), so every rule must also pin
+   `pull_request_target` run gets an ID token for the base branch; on GitLab a `ref` pin also
+   matches the branch while it is unprotected and pipelines of every source, such as schedules,
+   triggers, the web and the API; a fork's merge request pipeline carries the fork's
+   `project_id`, which the id pin refuses), so every rule must also pin
    the trigger: `event_name` or `environment` on GitHub, `ref_protected`, `pipeline_source` or
    `environment` on GitLab (decided 2026-10-20). What remains is the choice of those values: a
    rule that pins `event_name=pull_request_target` accepts such runs.

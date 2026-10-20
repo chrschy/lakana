@@ -60,10 +60,12 @@ def trigger_claims(issuer: str) -> tuple[str, ...]:
     """Name the claims of which a rule must pin one, to fix how the CI run was started.
 
     ``ref`` alone does not say that: a GitHub ``pull_request_target`` run, which a fork's pull
-    request starts, gets an ID token with the base branch as its ``ref``; a GitLab pipeline for a
-    fork's merge request, run in the parent project, carries the fork's branch name (``main``
-    too) as its ``ref``, unprotected. An ``environment`` condition counts on both: deploying to
-    it is what its protection rules decide.
+    request starts, gets an ID token with the base branch as its ``ref``. On GitLab a ``ref`` pin
+    alone also matches the branch while it is unprotected, and pipelines of every source
+    (schedules, triggers, the web, the API), so a rule must say which runs it trusts. (A fork's
+    merge request pipeline carries the fork's ``project_id``, which the id pin already refuses.)
+    An ``environment`` condition counts on both: deploying to it is what its protection rules
+    decide.
 
     Parameters
     ----------
@@ -104,8 +106,8 @@ def _trigger_message(issuer: str) -> str:
     return (
         "A GitLab rule must also pin how the pipeline was started: add --claim "
         "ref_protected=true or --claim pipeline_source=push, or pin a protected environment with "
-        "--claim environment=production. A ref alone also matches a fork's merge request "
-        "pipeline whose branch has the same name."
+        "--claim environment=production. A ref alone also matches the branch while it is "
+        "unprotected, and pipelines of every source (schedules, triggers, the web, the API)."
     )
 
 

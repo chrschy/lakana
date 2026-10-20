@@ -3876,8 +3876,9 @@ User documentation: `docs/site/reference/ci-trust-rules.md`. Threat model: "CI O
   which the settings only accept as GitLab), digits only, `ref` or `environment`, and one claim of
   `trigger_claims` (decided 2026-10-20): `event_name` or `environment` for GitHub (a
   `pull_request_target` run has the base branch as `ref`), `ref_protected`, `pipeline_source` or
-  `environment` for GitLab (a fork's merge request pipeline in the parent project carries the
-  fork's branch name, unprotected). `update` and `enable` check the stored conditions again;
+  `environment` for GitLab (a `ref` pin alone also matches the branch while it is unprotected and
+  pipelines of every source: schedules, triggers, web, API; a fork's merge request pipeline
+  carries the fork's `project_id`, which the id pin already refuses). `update` and `enable` check the stored conditions again;
   `rule_problem` makes a stored rule that fails them match no exchange and appear in `explain` as
   not allowed. Reserved
   claims (`iss`, `aud`, `exp`, `iat`, `nbf`, `jti`), more than 16 conditions, a non-text value,

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ast
 import uuid
+from collections import Counter
 from collections.abc import Callable
 from datetime import timedelta
 from pathlib import Path
@@ -572,26 +573,40 @@ def test_the_worker_recheck_still_needs_the_grant(
 # -- the call-site list --------------------------------------------------------------------
 
 _DEPLOY_CHECKS = {
-    "lakana-core/src/lakana_core/projects/deploys.py:submit": "one pinned submission",
-    "lakana-core/src/lakana_core/projects/deploys.py:get": "its own run only",
-    "lakana-core/src/lakana_core/projects/deploys.py:undeploy": "refused",
-    "lakana-core/src/lakana_core/projects/deploys.py:authorize_deploy": "the worker's re-check",
-    "lakana-core/src/lakana_core/jobs/service.py:pause": "refused",
-    "lakana-core/src/lakana_core/jobs/service.py:resume": "refused",
-    "lakana-core/src/lakana_core/jobs/service.py:notify_test": "refused",
-    "lakana-core/src/lakana_core/jobs/service.py:delivery": "refused",
-    "lakana-core/src/lakana_core/grants/explain.py:<module>": "a list of actions, no check",
-    "lakana-core/src/lakana_core/grants/authorization.py:_ci_scope_refusal": "the narrowing",
-    "lakana-core/src/lakana_core/ci_oidc/scope.py:ci_refusal": "audits a refusal, no check",
+    "lakana-core/src/lakana_core/projects/deploys.py:DeployService.submit": (
+        1,
+        "one pinned submission",
+    ),
+    "lakana-core/src/lakana_core/projects/deploys.py:DeployService.get": (2, "its own run only"),
+    "lakana-core/src/lakana_core/projects/deploys.py:DeployService.undeploy": (1, "refused"),
+    "lakana-core/src/lakana_core/projects/deploys.py:DeployService.authorize_deploy": (
+        1,
+        "the worker's re-check",
+    ),
+    "lakana-core/src/lakana_core/jobs/service.py:JobService.pause": (1, "refused"),
+    "lakana-core/src/lakana_core/jobs/service.py:JobService.resume": (1, "refused"),
+    "lakana-core/src/lakana_core/jobs/service.py:JobService.notify_test": (1, "refused"),
+    "lakana-core/src/lakana_core/jobs/service.py:JobService.delivery": (2, "refused"),
+    "lakana-core/src/lakana_core/grants/explain.py:<module>": (1, "a list of actions, no check"),
+    "lakana-core/src/lakana_core/grants/authorization.py:GrantAuthorization._ci_scope_refusal": (
+        1,
+        "the narrowing",
+    ),
+    "lakana-core/src/lakana_core/ci_oidc/scope.py:ci_refusal": (1, "audits a refusal, no check"),
 }
-"""Every function in the source tree that names `Action.DEPLOY`, and what a CI token meets there.
+"""Every function in the source tree that names the `DEPLOY` action, by qualified name, with how
+many times it names it, and what a CI token meets there.
 
 The worker calls `DeployService.authorize_deploy` (`lakana_worker.deploy.run_deploy`); it names
-no `DEPLOY` itself. The server's routes call the services above."""
+no `DEPLOY` itself. The server's routes call the services above. A second check in a listed
+function changes its count, so it fails the test too."""
 
 
-def _deploy_mentions(tree: ast.AST) -> list[str]:
-    """Name the function around each mention of ``DEPLOY`` as an attribute or a string.
+def _deploy_mentions(tree: ast.AST) -> Counter[str]:
+    """Count the mentions of the `DEPLOY` action per enclosing function, by qualified name.
+
+    A mention is an attribute ``.DEPLOY`` of anything but `DeployKind` (whose ``DEPLOY`` is a kind
+    of run, not the action), or the text ``"DEPLOY"``.
 
     Parameters
     ----------
@@ -600,69 +615,80 @@ def _deploy_mentions(tree: ast.AST) -> list[str]:
 
     Returns
     -------
-    list of str
-        The enclosing function's name, or ``<module>``, once per mention.
+    Counter of str
+        ``Class.method`` (or a function's or ``<module>``'s name) to its number of mentions.
     """
-    found: list[str] = []
+    found: Counter[str] = Counter()
 
-    def visit(node: ast.AST, where: str) -> None:
-        """Walk the tree, remembering the enclosing function.
+    def visit(node: ast.AST, where: tuple[str, ...]) -> None:
+        """Walk the tree, remembering the enclosing classes and functions.
 
         Parameters
         ----------
         node
             The node.
         where
-            The enclosing function's name.
+            The names of the enclosing classes and functions, outermost first.
         """
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-            where = node.name
-        if (isinstance(node, ast.Attribute) and node.attr == "DEPLOY") or (
-            isinstance(node, ast.Constant) and node.value == "DEPLOY"
-        ):
-            found.append(where)
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            where = (*where, node.name)
+        action = isinstance(node, ast.Attribute) and node.attr == "DEPLOY"
+        if action and isinstance(node.value, ast.Name) and node.value.id == "DeployKind":
+            action = False
+        if action or (isinstance(node, ast.Constant) and node.value == "DEPLOY"):
+            found[".".join(where) or "<module>"] += 1
         for child in ast.iter_child_nodes(node):
             visit(child, where)
 
-    visit(tree, "<module>")
+    visit(tree, ())
     return found
 
 
-def test_every_deploy_check_is_covered() -> None:
-    packages = Path(__file__).resolve().parents[2]
-    found = set()
+def _deploy_checks(packages: Path) -> dict[str, int]:
+    """Find every function in `packages/*/src` that names the `DEPLOY` action.
+
+    Parameters
+    ----------
+    packages
+        The `packages` directory.
+
+    Returns
+    -------
+    dict of str to int
+        ``path:qualified name`` to its number of mentions.
+    """
+    found: dict[str, int] = {}
     for path in packages.glob("*/src/**/*.py"):
         relative = str(path.relative_to(packages))
         if "/migrations/" in relative or relative.endswith("lakana_core/auth.py"):
             continue
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for where in _deploy_mentions(tree):
-            if "DeployKind" in ast.unparse(tree) and _is_deploy_kind(tree, where):
-                continue
-            found.add(f"{relative}:{where}")
-    assert found == set(_DEPLOY_CHECKS), sorted(found ^ set(_DEPLOY_CHECKS))
+        for where, count in _deploy_mentions(ast.parse(path.read_text(encoding="utf-8"))).items():
+            found[f"{relative}:{where}"] = count
+    return found
 
 
-def _is_deploy_kind(tree: ast.AST, where: str) -> bool:
-    """Say whether every ``DEPLOY`` in a function is `DeployKind.DEPLOY`, not the action.
+def test_every_deploy_check_is_covered() -> None:
+    found = _deploy_checks(Path(__file__).resolve().parents[2])
+    expected = {key: count for key, (count, _) in _DEPLOY_CHECKS.items()}
+    assert found == expected, sorted(set(found.items()) ^ set(expected.items()))
 
-    Parameters
-    ----------
-    tree
-        The parsed module.
-    where
-        The function's name.
 
-    Returns
-    -------
-    bool
-        `True` when the function names no `Action.DEPLOY` and no ``"DEPLOY"`` string.
-    """
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name == where:
-            text = ast.unparse(node)
-            return "Action.DEPLOY" not in text and "'DEPLOY'" not in text
-    return False
+def test_a_new_check_in_a_listed_function_or_a_new_class_is_noticed() -> None:
+    listed = """
+class DeployService:
+    def get(self):
+        if self._authz.permits(p, Action.DEPLOY, scope):
+            self._authz.authorize(p, Action.DEPLOY, scope)
+"""
+    assert _deploy_mentions(ast.parse(listed)) == Counter({"DeployService.get": 2})
+    second = listed + "        self._authz.authorize(p, Action.DEPLOY, other)\n"
+    assert _deploy_mentions(ast.parse(second)) == Counter({"DeployService.get": 3})
+    other_class = listed + "class Other:\n    def get(self):\n        check(Action.DEPLOY)\n"
+    assert _deploy_mentions(ast.parse(other_class)) == Counter(
+        {"DeployService.get": 2, "Other.get": 1}
+    )
+    kind = "def f():\n    return DeployKind.DEPLOY, 'DEPLOY'\n"
+    assert _deploy_mentions(ast.parse(kind)) == Counter({"f": 1})
 
 
 def test_check_ci_request_and_commit_refuse_without_an_auditing_authorizer(

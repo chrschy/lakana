@@ -527,8 +527,10 @@ def test_a_gitlab_rule_must_pin_a_protected_ref_the_pipeline_source_or_an_enviro
             conditions=conditions,
         )
 
-    with pytest.raises(ValidationError, match="--claim ref_protected=true"):
+    with pytest.raises(ValidationError, match="--claim ref_protected=true") as caught:
         create({"project_id": "22", "ref": "main"})
+    assert "schedules, triggers, the web, the API" in str(caught.value)
+    assert "fork" not in str(caught.value)
     create({"project_id": "22", "ref": "main", "ref_protected": "true"})
     create({"project_id": "22", "ref": "main", "pipeline_source": "push"})
     create({"project_id": "22", "environment": "production"})
