@@ -94,6 +94,13 @@ Compose](../how-to/deploy-with-compose.md).
 |---|---|---|---|---|
 | `LAKANA_DENIAL_AUDIT__PER_PRINCIPAL_PER_MINUTE` | whole number, above 0 | `30` | server, worker | Most refusals the audit log records for one principal per minute, in each server and each worker. A refusal past the limit is still refused, but not recorded; the next row recorded for that principal says how many were left out, and each one is written to the process log. The first refusal of each action by a principal is always recorded. Raise it if you need every refusal in the table. |
 
+## `LAKANA_VIEW_AUDIT__*`
+
+| Variable | Type | Default | Read by | Description |
+|---|---|---|---|---|
+| `LAKANA_VIEW_AUDIT__ENABLED` | true or false | `true` | server | Record an `ACTIVITY_VIEWED` event when someone sees other people's activity: a manager's listing of other people's queries (`lakana query list`) and the readers of a table (`lakana table health`) (default true). If the event cannot be written, the read is refused with 503. Turn it off only if you do not need to know who looked at whose activity. |
+| `LAKANA_VIEW_AUDIT__WINDOW_MINUTES` | whole number, 1 or more, 1440 or less | `60` | server | Minutes during which the same view by the same person writes no second event (default 60; 1 to 1,440). The next page, another status filter and a screen that refreshes itself are the same view; another environment, another table or another `--submitter` is another view. |
+
 ## `LAKANA_QUERY_LIMITS__*`
 
 | Variable | Type | Default | Read by | Description |

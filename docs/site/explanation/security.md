@@ -51,6 +51,15 @@ holds. `lakana audit list` filters it by event type, environment, principal and 
 principal are counted after a number per minute that an operator sets
 (`LAKANA_DENIAL_AUDIT__PER_PRINCIPAL_PER_MINUTE`, [settings](../reference/settings.md)).
 
+Seeing other people's activity is recorded too. When a manager lists other people's queries
+(`lakana query list`) or an administrator sees who read a table (`lakana table health`), the log gets
+an `ACTIVITY_VIEWED` event: who looked, at which environment or table, with which filters, and how many
+rows of how many other people the answer showed, never their names or their SQL. It is written once per
+person and view per hour, so paging, other filters and a screen that refreshes itself add nothing; a
+filter on one person (`--submitter`) is its own view. Looking only at your own activity records nothing.
+If the event cannot be written, the read is refused rather than served unrecorded. The events and
+the setting that turns them off are in [the lists reference](../reference/lists.md#audit).
+
 ## How a query is kept inside its limits
 
 Policies are applied by rewriting the SQL a person submits, but Lakana does not rely on the rewrite

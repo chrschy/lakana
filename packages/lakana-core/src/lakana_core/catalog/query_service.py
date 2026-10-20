@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from lakana_core.audit.authorization import AuditingAuthorization
 from lakana_core.audit.service import AuditService
+from lakana_core.audit.views import View, ViewDetail, record_view, sessions_like
 from lakana_core.auth import Action, AuthorizationService, PrincipalRef, Securable
 from lakana_core.catalog.identity import artifact_refusal, namespace_exists, resolve_table_id
 from lakana_core.catalog.maintenance import (
@@ -27,6 +28,7 @@ from lakana_core.catalog.maintenance import (
     DEFAULT_ORPHAN_AGE_HOURS,
     check_orphan_age,
 )
+from lakana_core.config import ViewAuditConfig
 from lakana_core.db import db_now, rowcount
 from lakana_core.errors import AlreadyExistsError, ConflictError, NotFoundError, ValidationError
 from lakana_core.identifiers import TableRef
@@ -205,6 +207,10 @@ class QueryService:
         the wait reasons read it here (they say `user_limit` when a principal is at the limit
         now); the workers enforce it. The server passes the configured value; the default is
         the setting's own.
+    view_audit
+        `LAKANA_VIEW_AUDIT__*`: whether and how often a manager's listing of other people's
+        queries is recorded as `ACTIVITY_VIEWED`. `None` (the default) is the settings'
+        default: on, with a window of 60 minutes.
     """
 
     def __init__(
@@ -214,11 +220,13 @@ class QueryService:
         *,
         lease_seconds: int = 60,
         running_per_principal: int | Literal["auto"] = "auto",
+        view_audit: ViewAuditConfig | None = None,
     ) -> None:
         self._session = session
         self._authz = authz
         self._lease_seconds = lease_seconds
         self._running_per_principal = running_per_principal
+        self._view_audit = view_audit or ViewAuditConfig()
         self._guard = ProtectedWriteGuard(session, authz)
 
     def submit_query(self, p: PrincipalRef, environment: str, sql: str) -> QueryRun:
@@ -599,6 +607,8 @@ class QueryService:
                 _ENDED: last.finished_at,
             }[part]
             next_cursor = encode_cursor("queries", moment, last.id, part)
+        if manager:
+            self._audit_listing(p, environment, rows, include_ended, statuses, submitter, limit)
         reasons = self._reasons_for_listing(rows, now, p.id)
         return [
             QueryListItem(
@@ -615,6 +625,64 @@ class QueryService:
             )
             for row in rows
         ], next_cursor
+
+    def _audit_listing(
+        self,
+        p: PrincipalRef,
+        environment: str,
+        rows: Sequence[Any],
+        include_ended: bool,
+        statuses: Sequence[QueryRunStatus],
+        submitter: str | None,
+        limit: int,
+    ) -> None:
+        """Record a manager's page of the query list that shows or targets someone else.
+
+        A page holding only the manager's own runs, with no filter on another submitter, writes
+        nothing (`record_view`). The cursor is not part of the view, so the next page of the same
+        listing is the same view.
+
+        Parameters
+        ----------
+        p
+            The manager.
+        environment
+            The environment listed.
+        rows
+            The rows of the page, with their `principal_id`.
+        include_ended
+            The `include_ended` filter.
+        statuses
+            The parsed status filter.
+        submitter
+            The submitter filter; the targeting key unless it names the manager.
+        limit
+            The page size.
+
+        Raises
+        ------
+        AuditUnavailableError
+            If the row could not be written; the page is not returned.
+        """
+        others = [row.principal_id for row in rows if row.principal_id != p.id]
+        record_view(
+            sessions_like(self._session),
+            p,
+            View.QUERIES,
+            Securable.environment_scope(environment),
+            None if submitter is None or submitter == p.name else {"submitter": submitter},
+            ViewDetail(
+                filters={
+                    "include_ended": include_ended,
+                    "status": [status.value for status in statuses],
+                    "limit": limit,
+                },
+                rows_shown=len(rows),
+                others_shown=len(others),
+                distinct_others=len(set(others)),
+            ),
+            config=self._view_audit,
+        )
 
     def _reasons_for_listing(
         self, rows: Sequence[Any], now: datetime, caller_id: uuid.UUID

@@ -139,5 +139,14 @@ server that is older than table health.
 
 ## Audit
 
-Reading the health of a table is not audited; a refusal is recorded as `AUTHORIZATION_DENIED`, as
-for any table route.
+Seeing the readers of a table records who looked: when `readers` names anyone other than you, the
+audit log gets an `ACTIVITY_VIEWED` event with `view` `table_readers`, the table, the `days` asked for
+and how many readers were shown, never their names. It is written once per person and table per hour
+(`LAKANA_VIEW_AUDIT__WINDOW_MINUTES`), so asking again or with other `days` adds nothing. Readers that
+are only you, an empty list and `readers: null` record nothing. If the event cannot be written, the
+request is refused with `503` and the message says so; try again in a moment, and if it keeps failing
+ask the operator to check the server's database. The event and its fields:
+[Runs, queries and deploys lists](lists.md#audit).
+
+The rest of the health is not audited; a refusal is recorded as `AUTHORIZATION_DENIED`, as for any
+table route.

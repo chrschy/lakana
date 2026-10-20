@@ -106,3 +106,18 @@ def test_the_undo_period_of_a_drop_is_seven_days_and_reads_the_environment(
     monkeypatch.setenv("LAKANA_TABLES__UNDO_DAYS", "366")
     with pytest.raises(pydantic.ValidationError, match="undo_days"):
         Settings()
+
+
+def test_the_view_audit_is_on_with_an_hour_and_reads_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from lakana_core.config import ViewAuditConfig
+
+    monkeypatch.setenv("LAKANA_DATABASE__URL", "sqlite://")
+    assert Settings().view_audit == ViewAuditConfig(enabled=True, window_minutes=60)
+    monkeypatch.setenv("LAKANA_VIEW_AUDIT__ENABLED", "false")
+    monkeypatch.setenv("LAKANA_VIEW_AUDIT__WINDOW_MINUTES", "1440")
+    assert Settings().view_audit == ViewAuditConfig(enabled=False, window_minutes=1440)
+    monkeypatch.setenv("LAKANA_VIEW_AUDIT__WINDOW_MINUTES", "1441")
+    with pytest.raises(pydantic.ValidationError, match="window_minutes"):
+        Settings()

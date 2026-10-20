@@ -17,6 +17,7 @@ from fastapi.responses import JSONResponse
 
 from lakana_core.errors import (
     AlreadyExistsError,
+    AuditUnavailableError,
     AuthenticationError,
     ConflictError,
     KeptAfterCheckError,
@@ -98,12 +99,14 @@ _STATUS_CODES: dict[type[LakanaError], int] = {
     DownloadConcurrencyLimitError: 503,
     ClientDisconnectedError: 400,
     StorageUnavailableError: 503,
+    AuditUnavailableError: 503,
 }
 
 _RETRY_AFTER_SECONDS: dict[type[LakanaError], str] = {
     AppendConcurrencyLimitError: "1",
     DownloadConcurrencyLimitError: "1",
     StorageUnavailableError: "5",
+    AuditUnavailableError: "5",
 }
 """Extra `Retry-After` header value, by exception type, beyond the plain
 status/body mapping `_STATUS_CODES` covers. Kept as its own small table

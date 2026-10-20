@@ -393,7 +393,9 @@ def _cancel_events(session: Session) -> list[AuditEvent]:
     """
     return list(
         session.scalars(
-            select(AuditEvent).where(AuditEvent.event_type == AuditEventType.QUERY_CANCELLED)
+            select(AuditEvent)
+            .where(AuditEvent.event_type == AuditEventType.QUERY_CANCELLED)
+            .order_by(AuditEvent.occurred_at)
         )
     )
 

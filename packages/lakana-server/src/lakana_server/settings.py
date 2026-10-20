@@ -16,6 +16,7 @@ from lakana_core.config import (
     TableReadsConfig,
     TableUndoConfig,
     TaskTokensConfig,
+    ViewAuditConfig,
     validate_repo_roots,
 )
 
@@ -138,6 +139,9 @@ class Settings(BaseSettings):
     denial_audit
         `AUTHORIZATION_DENIED` audit rate limiting per principal
         (`LAKANA_DENIAL_AUDIT__PER_PRINCIPAL_PER_MINUTE`).
+    view_audit
+        Whether a view of other people's activity is recorded in the audit log, and how often
+        (`LAKANA_VIEW_AUDIT__ENABLED`, `LAKANA_VIEW_AUDIT__WINDOW_MINUTES`).
     query_limits
         Only `timeout_seconds` is used here: the default and cap of a task timeout
         . Set it in the environment shared with the worker.
@@ -173,6 +177,7 @@ class Settings(BaseSettings):
     request_body: RequestBodyConfig = RequestBodyConfig()
     auth_audit: AuthAuditConfig = AuthAuditConfig()
     denial_audit: DenialAuditConfig = DenialAuditConfig()
+    view_audit: ViewAuditConfig = ViewAuditConfig()
     query_limits: QueryLimitsConfig = QueryLimitsConfig()
     run: RunConfig = RunConfig()
     log: LogConfig = LogConfig()
