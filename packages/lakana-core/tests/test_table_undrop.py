@@ -169,7 +169,7 @@ def _catalog(
         session,
         StorageResolver(session),
         authz or AllowAllAuthorization(),  # ty: ignore[invalid-argument-type]
-        **options,
+        **options,  # ty: ignore[invalid-argument-type]
     )
 
 

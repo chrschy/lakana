@@ -227,6 +227,13 @@ lakana --output json audit list --event-type PAT_ISSUED --all
 out=$(lakana --output json audit list --event-type GRANT_CREATED --all)
 python3 -c 'import json,sys; e=json.loads(sys.argv[1]); assert e and all(x["event_type"] == "GRANT_CREATED" and x["principal_id"] for x in e), e' "$out"
 
+# The lists reference shows how to read who looked at other people's queries or a table's readers.
+# docs:start view-audit
+lakana audit list --event-type ACTIVITY_VIEWED
+# docs:end view-audit
+out=$(lakana --output json audit list --event-type ACTIVITY_VIEWED --all)
+python3 -c 'import json,sys; e=json.loads(sys.argv[1]); assert all(x["event_type"] == "ACTIVITY_VIEWED" for x in e), e' "$out"
+
 # The tutorial ends with how to start over: stop the instance, then reset it. The runner's
 # instance is still running here, so the command must refuse and delete nothing.
 capture_start

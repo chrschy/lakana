@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from lakana_core.auth import AllowAllAuthorization, PrincipalRef
 from lakana_core.catalog.service import CatalogService
-from lakana_core.config import StorageConfig
+from lakana_core.config import StorageConfig, ViewAuditConfig
 from lakana_core.grants.authorization import GrantAuthorization
 from lakana_core.models import Principal, PrincipalType
 from lakana_server.deps import get_catalog, get_session
@@ -59,10 +59,12 @@ def test_get_catalog_builds_a_working_catalog_service(session: Session, tmp_path
         authz=cast(GrantAuthorization, AllowAllAuthorization()),
         undo_days=3,
         expiry_warning_days=5,
+        view_audit=ViewAuditConfig(window_minutes=9),
     )
     assert isinstance(catalog, CatalogService)
     assert catalog._undo_days == 3
     assert catalog._expiry_warning_days == 5
+    assert catalog._view_audit == ViewAuditConfig(window_minutes=9)
 
     # Persisted, not a bare `PrincipalRef`:
     # `create_environment` now records an `AuditEvent` whose `principal_id`
@@ -334,7 +336,11 @@ def test_get_query_service_uses_the_configured_lease(session: Session, tmp_path:
     session.commit()
     allow = cast(GrantAuthorization, AllowAllAuthorization())
     get_catalog(
-        session=session, authz=allow, undo_days=7, expiry_warning_days=7
+        session=session,
+        authz=allow,
+        undo_days=7,
+        expiry_warning_days=7,
+        view_audit=ViewAuditConfig(),
     ).create_environment(
         principal, name="dev", storage=StorageConfig(scheme="file", root=f"file://{tmp_path}")
     )
@@ -346,6 +352,7 @@ def test_get_query_service_uses_the_configured_lease(session: Session, tmp_path:
                     settings=SimpleNamespace(
                         run=RunConfig(lease_seconds=7, renew_seconds=2),
                         query_limits=QueryLimitsConfig(),
+                        view_audit=ViewAuditConfig(),
                     )
                 )
             )
@@ -375,6 +382,7 @@ def test_get_query_service_uses_the_configured_cap(session: Session) -> None:
                         settings=SimpleNamespace(
                             run=RunConfig(lease_seconds=7, renew_seconds=2),
                             query_limits=QueryLimitsConfig(running_per_principal=configured),
+                            view_audit=ViewAuditConfig(enabled=False),
                         )
                     )
                 )
@@ -382,6 +390,7 @@ def test_get_query_service_uses_the_configured_cap(session: Session) -> None:
         )
         service = get_query_service(request, session=session, authz=allow)
         assert service._running_per_principal == configured
+        assert service._view_audit == ViewAuditConfig(enabled=False)
 
 
 def test_get_run_service_passes_the_configured_lease(session: Session, tmp_path: Path) -> None:
@@ -441,3 +450,19 @@ def test_the_expiry_warning_comes_from_the_settings() -> None:
         ),
     )
     assert get_expiry_warning_days(request) == 4
+
+
+def test_get_view_audit_reads_the_settings() -> None:
+    """The catalog's view audit is `LAKANA_VIEW_AUDIT__*` of the running server."""
+    from lakana_server.deps import get_view_audit
+
+    configured = ViewAuditConfig(enabled=False, window_minutes=5)
+    request = cast(
+        Request,
+        SimpleNamespace(
+            app=SimpleNamespace(
+                state=SimpleNamespace(settings=SimpleNamespace(view_audit=configured))
+            )
+        ),
+    )
+    assert get_view_audit(request) is configured

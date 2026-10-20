@@ -3870,3 +3870,47 @@ def test_0045_adds_the_deletion_columns_and_deletes_no_environment(
             )
     finally:
         engine.dispose()
+
+
+_REVISION_0046 = "00591a77722d"
+_VIEW_INDEX = "ix_audit_events_event_type_principal_id_occurred_at"
+
+
+def test_0046_adds_the_index_of_the_view_audit_lookup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revision `0046`: the composite index the `ACTIVITY_VIEWED` window lookup reads.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    """
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, _REVISION_0045)
+
+    def indexes() -> dict[str | None, list[str | None]]:
+        """Read the indexes of `audit_events`.
+
+        Returns
+        -------
+        dict of str to list of str
+            Each index's columns, by name.
+        """
+        engine = create_engine(f"sqlite:///{db_path}")
+        try:
+            return {
+                i["name"]: i["column_names"] for i in inspect(engine).get_indexes("audit_events")
+            }
+        finally:
+            engine.dispose()
+
+    assert _VIEW_INDEX not in indexes()
+    command.upgrade(config, _REVISION_0046)
+    assert indexes()[_VIEW_INDEX] == ["event_type", "principal_id", "occurred_at"]
+    command.downgrade(config, _REVISION_0045)
+    assert _VIEW_INDEX not in indexes()

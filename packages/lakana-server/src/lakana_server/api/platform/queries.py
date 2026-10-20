@@ -130,6 +130,9 @@ def list_queries(
         read).
     lakana_core.errors.NotFoundError
         Mapped to 404, if the environment does not exist.
+    lakana_core.errors.AuditUnavailableError
+        Mapped to 503 with `Retry-After`, if a manager's page shows or targets someone else's
+        queries and its `ACTIVITY_VIEWED` audit row could not be written; nothing is listed.
     """
     items, next_cursor = queries.list_queries_page(
         principal,

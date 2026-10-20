@@ -4,7 +4,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import JSON, ForeignKey, String, Uuid
+from sqlalchemy import JSON, ForeignKey, Index, String, Uuid
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -93,6 +93,7 @@ class AuditEventType(enum.StrEnum):
     ENVIRONMENT_RESTORED = "ENVIRONMENT_RESTORED"
     ENVIRONMENT_PURGED = "ENVIRONMENT_PURGED"
     ORPHANED_LOCATIONS_DELETED = "ORPHANED_LOCATIONS_DELETED"
+    ACTIVITY_VIEWED = "ACTIVITY_VIEWED"
 
 
 class AuditEvent(Base):
@@ -127,6 +128,15 @@ class AuditEvent(Base):
     """
 
     __tablename__ = "audit_events"
+    __table_args__ = (
+        # the window lookup of `lakana_core.audit.views.record_view`
+        Index(
+            "ix_audit_events_event_type_principal_id_occurred_at",
+            "event_type",
+            "principal_id",
+            "occurred_at",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
     occurred_at: Mapped[datetime] = mapped_column(UTCDateTime, index=True)

@@ -17,6 +17,7 @@ from lakana_core.catalog.lineage_graph import LineageService
 from lakana_core.catalog.query_service import QueryService
 from lakana_core.catalog.search import CatalogSearch
 from lakana_core.catalog.service import CatalogService
+from lakana_core.config import ViewAuditConfig
 from lakana_core.errors import AuthenticationError
 from lakana_core.grants.authorization import GrantAuthorization
 from lakana_core.grants.service import GrantService
@@ -396,12 +397,29 @@ def get_expiry_warning_days(request: Request) -> int:
     return request.app.state.settings.tables.expiry_warning_days
 
 
+def get_view_audit(request: Request) -> ViewAuditConfig:
+    """Read whether and how often a view of other people's activity is audited.
+
+    Parameters
+    ----------
+    request
+        The current request, used to reach `app.state.settings`.
+
+    Returns
+    -------
+    ViewAuditConfig
+        `LAKANA_VIEW_AUDIT__*`.
+    """
+    return request.app.state.settings.view_audit
+
+
 def get_catalog(
     session: Session = Depends(get_session),
     authz: AuthorizationService = Depends(get_grant_authorization),
     key_provider: KeyProvider = Depends(get_key_provider),
     undo_days: int = Depends(get_undo_days),
     expiry_warning_days: int = Depends(get_expiry_warning_days),
+    view_audit: ViewAuditConfig = Depends(get_view_audit),
 ) -> CatalogService:
     """Build a CatalogService for the current request.
 
@@ -417,6 +435,8 @@ def get_catalog(
         How long a table dropped in this request stays restorable.
     expiry_warning_days
         How many days ahead a table's expiry is described as soon.
+    view_audit
+        Whether and how often seeing the readers of a table is audited.
 
     Returns
     -------
@@ -429,6 +449,7 @@ def get_catalog(
         authz,
         undo_days=undo_days,
         expiry_warning_days=expiry_warning_days,
+        view_audit=view_audit,
     )
 
 
@@ -556,6 +577,7 @@ def get_query_service(
         authz,
         lease_seconds=settings.run.lease_seconds,
         running_per_principal=settings.query_limits.running_per_principal,
+        view_audit=settings.view_audit,
     )
 
 

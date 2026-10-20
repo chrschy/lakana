@@ -62,6 +62,45 @@ queries list, with `422` and a message that names both lists. Start again withou
 | a cursor that was not issued, or came from another list | `422` |
 | an unknown repository | `404` |
 | a caller who may not read the environment | `403` |
+| a manager's list that shows other people's queries and could not be recorded in the audit log (see [Audit](#audit)) | `503` with `Retry-After`; nothing is listed, and the message names the cause |
+
+## Audit
+
+A list of runs or deploys is not audited, and neither is a list of your own queries. When a manager's
+query list shows someone else's query, or filters on someone else with `--submitter`, the audit log gets
+one `ACTIVITY_VIEWED` event, and so does seeing the readers of a table
+([table health](table-health.md#audit)):
+
+| Field | Value |
+|---|---|
+| principal | who looked |
+| object | the environment of the query list, or the table whose readers were shown |
+| `detail.view` | `queries` or `table_readers` |
+| `detail.filters` | the filters of the first look: `include_ended`, `status` and `limit` for queries, `days` for readers |
+| `detail.rows_shown` | how many rows the answer showed |
+| `detail.others_shown` | how many of them were other people's (a deleted principal's included) |
+| `detail.distinct_others` | how many other people those rows belong to |
+| `detail.targeting_key` | `{"submitter": "NAME"}` when the list was filtered on someone else, else `null` |
+
+The event never holds the names of the people seen, the ids of their queries or any SQL. The same
+person, view, environment or table and targeting key write one event per window: the next page,
+another status, `--all` and a screen that refreshes itself add nothing. Looking only at your own
+queries, filtering on yourself, and a task's token record nothing. An instance administrator is
+recorded like anyone else.
+
+If the event cannot be written, for example because the database is full, the list is refused with
+`503` and shows nothing; try again in a moment, and if it keeps failing ask the operator to check the
+server's database. Read the events with:
+
+<!-- source: docs/examples/getting-started/run.sh#view-audit -->
+```bash
+lakana audit list --event-type ACTIVITY_VIEWED
+```
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `LAKANA_VIEW_AUDIT__ENABLED` | `true` | Record the event; `false` turns it off. |
+| `LAKANA_VIEW_AUDIT__WINDOW_MINUTES` | `60` | Minutes during which the same view by the same person writes no second event (1 to 1,440). |
 
 ## SDK and REST
 

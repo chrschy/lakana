@@ -52,6 +52,7 @@ from sqlalchemy.orm import ORMExecuteState, Session, SessionTransaction
 
 from lakana_core.artifacts.store import current_version, version_row
 from lakana_core.audit.service import AuditService
+from lakana_core.audit.views import View, ViewDetail, record_view, sessions_like
 from lakana_core.auth import Action, AuthorizationService, PrincipalRef, Securable
 from lakana_core.catalog.append import (
     AppendResult,
@@ -186,7 +187,7 @@ from lakana_core.catalog.writes import (
     stage_snapshot,
     target_changed_message,
 )
-from lakana_core.config import StorageConfig
+from lakana_core.config import StorageConfig, ViewAuditConfig
 from lakana_core.db import db_now, rowcount
 from lakana_core.errors import (
     AlreadyExistsError,
@@ -1050,6 +1051,10 @@ class CatalogService:
     expiry_warning_days
         `LAKANA_TABLES__EXPIRY_WARNING_DAYS`: a table that expires within this many days is
         described as expiring soon; 0 never describes one so.
+    view_audit
+        `LAKANA_VIEW_AUDIT__*`: whether and how often seeing the readers of a table is recorded
+        as `ACTIVITY_VIEWED`. `None` (the default) is the settings' default: on, with a window
+        of 60 minutes.
     """
 
     def __init__(
@@ -1060,12 +1065,14 @@ class CatalogService:
         *,
         undo_days: int = DEFAULT_UNDO_DAYS,
         expiry_warning_days: int = DEFAULT_EXPIRY_WARNING_DAYS,
+        view_audit: ViewAuditConfig | None = None,
     ) -> None:
         self._session = session
         self._storage = storage
         self._authz = authz
         self._undo_days = undo_days
         self._expiry_warning_days = expiry_warning_days
+        self._view_audit = view_audit or ViewAuditConfig()
         self._guard = ProtectedWriteGuard(session, authz)
         self._commit_sent = False
         self._track_writes()
@@ -3384,18 +3391,36 @@ class CatalogService:
             If the table does not exist.
         PermissionDenied
             If `p` may not read it.
+        AuditUnavailableError
+            If the readers name someone other than `p` and the `ACTIVITY_VIEWED` row could not
+            be written; nothing is returned.
         """
-        self._authz.authorize(
-            p, Action.READ_TABLE, Securable.table_scope(ref.environment, ref.namespace, ref.name)
-        )
+        scope = Securable.table_scope(ref.environment, ref.namespace, ref.name)
+        self._authz.authorize(p, Action.READ_TABLE, scope)
         _, row = self._find_table(ref)
+        shown = None
+        if may_see_grants(self._session, self._authz, p):
+            shown = readers(self._session, row.id, days=days, now=now)
+            others = sum(1 for reader in shown if reader.principal != p.name)
+            record_view(
+                sessions_like(self._session),
+                p,
+                View.TABLE_READERS,
+                scope,
+                None,
+                ViewDetail(
+                    filters={"days": days},
+                    rows_shown=len(shown),
+                    others_shown=others,
+                    distinct_others=others,
+                ),
+                config=self._view_audit,
+            )
         return TableHealth(
             days=days,
             last_maintenance=last_maintenance(self._session, row.id),
             checks=latest_checks(self._session, row.id),
-            readers=readers(self._session, row.id, days=days, now=now)
-            if may_see_grants(self._session, self._authz, p)
-            else None,
+            readers=shown,
         )
 
     def _describe_row(self, p: PrincipalRef, ref: TableRef, row: Table) -> TableDescription:

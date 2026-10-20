@@ -51,6 +51,15 @@ class StorageUnavailableError(LakanaError):
     """
 
 
+class AuditUnavailableError(LakanaError):
+    """A read of other people's activity was refused because its audit row could not be written.
+
+    Raised by `lakana_core.audit.views.record_view` before any of the activity is returned (the
+    view audit fails closed). The text names the cause by its kind only, never the database's own
+    words; the server maps it to 503 with a `Retry-After` header.
+    """
+
+
 class WriteOutcomeUnknownError(LakanaError):
     """A write's commit was not acknowledged and the table could not be asked what became of it.
 

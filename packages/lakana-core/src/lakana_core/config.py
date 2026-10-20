@@ -827,6 +827,30 @@ class DenialAuditConfig(BaseModel):
     per_principal_per_minute: int = Field(default=30, gt=0)
 
 
+class ViewAuditConfig(BaseModel):
+    """Whether, and how often, a view of other people's activity is written to the audit log.
+
+    Read from ``LAKANA_VIEW_AUDIT__ENABLED`` and ``LAKANA_VIEW_AUDIT__WINDOW_MINUTES``.
+
+    Parameters
+    ----------
+    enabled
+        Record an `ACTIVITY_VIEWED` event when someone sees other people's activity: a manager's
+        listing of other people's queries (`lakana query list`) and the readers of a table
+        (`lakana table health`) (default true). If the event cannot be written, the read is
+        refused with 503. Turn it off only if you do not need to know who looked at whose
+        activity.
+    window_minutes
+        Minutes during which the same view by the same person writes no second event (default
+        60; 1 to 1,440). The next page, another status filter and a screen that refreshes itself
+        are the same view; another environment, another table or another `--submitter` is
+        another view.
+    """
+
+    enabled: bool = True
+    window_minutes: int = Field(default=60, ge=1, le=1440)
+
+
 class TableReadsConfig(BaseModel):
     """How long the reads of a table are kept, and how far back its health shows them.
 

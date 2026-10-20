@@ -2299,3 +2299,28 @@ def test_0045_on_postgres() -> None:
                 conn.execute(sqlalchemy.text("SELECT count(*) FROM environments")).scalar_one() == 1
             )
         engine.dispose()
+
+
+def test_0046_on_postgres() -> None:
+    """0046 adds the composite index of the view audit's lookup and drops it down."""
+    revision_0045 = "ca4f68b6e89a"
+    revision_0046 = "00591a77722d"
+    name = "ix_audit_events_event_type_principal_id_occurred_at"
+    with PostgresContainer("postgres:16", driver="pg8000") as pg:
+        url = pg.get_connection_url()
+        migrate.upgrade(url, revision_0045)
+        engine = sqlalchemy.create_engine(url)
+
+        migrate.upgrade(url, revision_0046)
+        assert _alembic_version(engine) == revision_0046
+        indexes = {
+            i["name"]: i["column_names"]
+            for i in sqlalchemy.inspect(engine).get_indexes("audit_events")
+        }
+        assert indexes[name] == ["event_type", "principal_id", "occurred_at"]
+
+        migrate.downgrade(url, revision_0045)
+        assert _alembic_version(engine) == revision_0045
+        names = {i["name"] for i in sqlalchemy.inspect(engine).get_indexes("audit_events")}
+        assert name not in names
+        engine.dispose()
