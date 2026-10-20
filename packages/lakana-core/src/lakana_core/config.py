@@ -695,7 +695,53 @@ _ALLOW_HOST = re.compile(
 )
 
 
-class WebhookConfig(BaseModel):
+class ProxyAndCaBundleChecks(BaseModel):
+    """The checks of an operator's ``PROXY`` and ``CA_BUNDLE`` settings, shared by every client.
+
+    A subclass declares the fields `proxy` (`SecretStr` or `None`) and `ca_bundle` (`Path` or
+    `None`) itself, so that they keep their place among its own fields.
+    """
+
+    @field_validator("proxy", check_fields=False)
+    @classmethod
+    def _proxy_is_an_http_url(cls, value: SecretStr | None) -> SecretStr | None:
+        """Validate the proxy URL with `validate_proxy_url`.
+
+        Parameters
+        ----------
+        value
+            The proxy URL, or `None`.
+
+        Returns
+        -------
+        SecretStr or None
+            `value`, unchanged.
+        """
+        if value is not None:
+            validate_proxy_url(value.get_secret_value())
+        return value
+
+    @field_validator("ca_bundle", check_fields=False)
+    @classmethod
+    def _ca_bundle_is_an_absolute_path(cls, value: Path | None) -> Path | None:
+        """Require an absolute, single-line path (the file itself is checked where it is used).
+
+        Parameters
+        ----------
+        value
+            The path, or `None`.
+
+        Returns
+        -------
+        Path or None
+            `value`, unchanged.
+        """
+        if value is not None:
+            _check_absolute_path(value)
+        return value
+
+
+class WebhookConfig(ProxyAndCaBundleChecks):
     """Operator network settings for the worker's webhooks (`LAKANA_WEBHOOK__*`).
 
     The worker sends a webhook only to a public ``https`` address on port 443. These settings
@@ -771,44 +817,6 @@ class WebhookConfig(BaseModel):
         if self.allow_hosts is None:
             return ()
         return tuple(entry.strip().rstrip(".").lower() for entry in self.allow_hosts.split(","))
-
-    @field_validator("proxy")
-    @classmethod
-    def _proxy_is_an_http_url(cls, value: SecretStr | None) -> SecretStr | None:
-        """Validate the proxy URL with `validate_proxy_url`.
-
-        Parameters
-        ----------
-        value
-            The proxy URL, or `None`.
-
-        Returns
-        -------
-        SecretStr or None
-            `value`, unchanged.
-        """
-        if value is not None:
-            validate_proxy_url(value.get_secret_value())
-        return value
-
-    @field_validator("ca_bundle")
-    @classmethod
-    def _ca_bundle_is_an_absolute_path(cls, value: Path | None) -> Path | None:
-        """Require an absolute, single-line path (the file itself is checked by the worker).
-
-        Parameters
-        ----------
-        value
-            The path, or `None`.
-
-        Returns
-        -------
-        Path or None
-            `value`, unchanged.
-        """
-        if value is not None:
-            _check_absolute_path(value)
-        return value
 
 
 class DenialAuditConfig(BaseModel):

@@ -152,6 +152,18 @@ Compose](../how-to/deploy-with-compose.md).
 | `LAKANA_LOG__LEVEL` | text | `INFO` | server, worker | `DEBUG`, `INFO`, `WARNING` or `ERROR`, in any letter case. Lakana's own log lines and the server's are printed from this level up; other libraries only from `WARNING`. Above `INFO`, refusals past the audit rate leave no line in the log, only the summary row in the audit log. The request log, one line per request, is printed at `INFO` and `DEBUG` only. |
 | `LAKANA_LOG__ACCESS` | true or false | `true` | server, worker | Whether the server logs every request, one line each. On by default; `lakana server start --local` turns it off unless you pass `--log-requests`. Nothing else in the log changes. |
 
+## `LAKANA_CI_OIDC__*`
+
+| Variable | Type | Default | Read by | Description |
+|---|---|---|---|---|
+| `LAKANA_CI_OIDC__ISSUERS` | list | empty | server | The CI providers whose ID tokens the server accepts, as a comma-separated list or a JSON list: `github` (GitHub Actions), `gitlab` (GitLab.com) or the https URL of a self-hosted GitLab, exactly as its tokens name it (no trailing slash). Empty (the default) turns CI OIDC off. |
+| `LAKANA_CI_OIDC__AUDIENCE` | text | not set | server | The audience the CI ID tokens must be issued for, usually this server's public URL, for example `https://lakana.example`; request the token for the same value in CI. Required when `LAKANA_CI_OIDC__ISSUERS` is set. |
+| `LAKANA_CI_OIDC__ALGORITHMS` | list | `['RS256']` | server | The signature algorithms accepted, as a list; `RS256` (the default) is what GitHub and GitLab use. Only `RS256`, `RS384`, `RS512`, `PS256`, `PS384` and `PS512` are supported; `none` and the HMAC algorithms (`HS256` and the like) are refused. |
+| `LAKANA_CI_OIDC__MAX_TOKEN_AGE_SECONDS` | whole number, 60 or more, 3600 or less | `900` | server | The oldest ID token accepted, counted from its issue time (default 900, 15 minutes). |
+| `LAKANA_CI_OIDC__ALLOW_HOSTS` | list | empty | server | Further host names, comma-separated, from which an issuer's keys may be fetched when its discovery document names another host than its own. Exact names only. |
+| `LAKANA_CI_OIDC__PROXY` | secret text | not set | server | URL of the proxy that the discovery and key requests go through, for example `http://user:password@host:3128`. The server checks the destination name, but the proxy looks it up again, so the proxy must refuse internal addresses itself. A password is hidden in logs and error messages. |
+| `LAKANA_CI_OIDC__CA_BUNDLE` | path | not set | server | Absolute path of a PEM file of certificate authorities that the discovery and key requests trust; it replaces the built-in store and never turns verification off. |
+
 ## `LAKANA_GIT__*`
 
 | Variable | Type | Default | Read by | Description |

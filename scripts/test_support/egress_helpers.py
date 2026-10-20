@@ -134,7 +134,21 @@ class Authority:
 
 
 class _Handler(http.server.BaseHTTPRequestHandler):
-    """Record the request and answer with the server's configured status."""
+    """Record the request and answer with the server's configured status (and body, for GET)."""
+
+    def do_GET(self) -> None:
+        """Answer a GET with the server's status, headers and body."""
+        server = cast(Server, self.server)
+        server.requests.append((self.path, dict(self.headers), b""))
+        self.send_response(server.status)
+        if server.location:
+            self.send_header("Location", server.location)
+        for name, value in server.headers.items():
+            self.send_header(name, value)
+        if server.send_length:
+            self.send_header("Content-Length", str(len(server.body)))
+        self.end_headers()
+        self.wfile.write(server.body)
 
     def do_POST(self) -> None:
         """Answer a POST."""
@@ -175,6 +189,11 @@ class Server(http.server.ThreadingHTTPServer):
         super().__init__(("127.0.0.1", 0), _Handler)
         self.status = 200
         self.location: str | None = None
+        # What a GET answers: the body, extra headers, and whether a Content-Length is sent
+        # (without one, the end of the connection ends the body).
+        self.body = b""
+        self.headers: dict[str, str] = {}
+        self.send_length = True
         self.requests: list[tuple[str, dict[str, str], bytes]] = []
         self.sni: list[str | None] = []
         self.context: ssl.SSLContext | None = None
