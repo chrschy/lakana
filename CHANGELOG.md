@@ -1,5 +1,51 @@
 # Changelog
 
+## [0.17.0](https://github.com/lakana-labs/lakana/compare/v0.16.0...v0.17.0) (2026-10-20)
+
+
+### ⚠ BREAKING CHANGES
+
+* **audit:** holders of the ADMIN role (and of READ_AUDIT_LOG) no longer see query text or column values in other people's audit events: `detail.sql_text` of another principal's QUERY_COMPLETED now reads `{"sha256": ..., "length": ...}`, and `detail.watermark` of their TABLE_WRITE reads `{"hidden": true}`. To see them, grant the new right on the instance: `lakana grant create --kind INSTANCE --principal NAME --action READ_QUERY_TEXT`. Reading other people's events in the audit log is now recorded as ACTIVITY_VIEWED and answers 503 if that record cannot be written. New setting LAKANA_AUDIT__QUERY_TEXT (full, hash or off; default full) on the server and every worker.
+* **catalog:** deleting an environment no longer keeps its tables' files for ever. Every managed table becomes a dropped table whose files the worker deletes after LAKANA_TABLES__UNDO_DAYS (7 days by default); until then `lakana env restore ENV` (REST `POST /api/v1/environments/{name}/restore`, SDK `environments.restore`) brings the environment back, and its name cannot be reused. To keep the data, restore within the undo period or raise LAKANA_TABLES__UNDO_DAYS on the server and workers before deleting. `DELETE /api/v1/environments/{name}` now answers 200 with the environment (`deleted_at`, `purge_after`) instead of 204, and `environments.delete` returns it. Environments deleted before the upgrade left no rows and are unaffected.
+* **catalog:** a drop of a managed table now deletes its data after an undo period, where before it kept the files for ever: the worker's sweep deletes them once LAKANA_TABLES__UNDO_DAYS (7 by default) have passed, and `--purge` / `purgeRequested=true` make them due at the next sweep instead of deleting the current metadata file in the request. To keep a dropped table's data, restore it with `lakana table undrop` within the period, or set LAKANA_TABLES__UNDO_DAYS higher (up to 365) on the server before dropping. Tables dropped before this release are not deleted.
+* **server:** a server started outside the Compose bundle and `lakana server start --local`, without `LAKANA_BOOTSTRAP_PAT_KEY_ID`, that has to create the first administrator now stops at start-up unless `LAKANA_BOOTSTRAP_TOKEN_FILE` is set (or the key id and secret are supplied); the token is written to that file, no longer logged. A supplied key id already used by an earlier token stops the start-up: supply a key id never used before (in a Compose bundle, a new `LAKANA_BOOTSTRAP_PAT_KEY_ID` and `LAKANA_BOOTSTRAP_PAT_SECRET` in `.env`), or unset it and set `LAKANA_BOOTSTRAP_TOKEN_FILE`.
+
+### Features
+
+* **audit:** audit reads of the audit log; others' query text needs READ_QUERY_TEXT ([#88](https://github.com/lakana-labs/lakana/issues/88)) ([644d225](https://github.com/lakana-labs/lakana/commit/644d22556871373951ad5b735f158b6ad7be867e))
+* **audit:** record a successful sign-in at most once per credential and window ([#242](https://github.com/lakana-labs/lakana/issues/242)) ([a83a4f1](https://github.com/lakana-labs/lakana/commit/a83a4f17a6f93a250067d6bec020a27bfaa824b9)), closes [#217](https://github.com/lakana-labs/lakana/issues/217)
+* **audit:** record when a manager views other people's queries or table readers ([#233](https://github.com/lakana-labs/lakana/issues/233)) ([bb69d7a](https://github.com/lakana-labs/lakana/commit/bb69d7adbffc57ca47856ada3a0736fca2911bb2))
+* **catalog:** claim a table's location before writing, and clean up what never landed ([#218](https://github.com/lakana-labs/lakana/issues/218)) ([c90b134](https://github.com/lakana-labs/lakana/commit/c90b134b5d916d04bd165e5c9d21252ac012e5e7)), closes [#90](https://github.com/lakana-labs/lakana/issues/90)
+* **catalog:** keep a dropped table's files for an undo period, then delete them; undrop ([27f9d3c](https://github.com/lakana-labs/lakana/commit/27f9d3c38ab7f00dcee3a3233aad05b7d4e8c3a1)), closes [#94](https://github.com/lakana-labs/lakana/issues/94)
+* **catalog:** let a table or an environment's tables expire ([#227](https://github.com/lakana-labs/lakana/issues/227)) ([468f2f4](https://github.com/lakana-labs/lakana/commit/468f2f445d58a9564d52b39e0ef376b6e6723faa)), closes [#87](https://github.com/lakana-labs/lakana/issues/87)
+* **catalog:** list and remove table directories left without a location record ([#230](https://github.com/lakana-labs/lakana/issues/230)) ([e5d227c](https://github.com/lakana-labs/lakana/commit/e5d227c9ca0f5e60049ac1f5dabefc41943ab62e)), closes [#229](https://github.com/lakana-labs/lakana/issues/229)
+* **security:** verify CI OIDC ID tokens and move the egress client to core ([#244](https://github.com/lakana-labs/lakana/issues/244)) ([5867244](https://github.com/lakana-labs/lakana/commit/5867244a2c2aa3bf5f19c9481589b1e4c8a427ff))
+* **server:** a deploy that waits says why ([#212](https://github.com/lakana-labs/lakana/issues/212)) ([8937a86](https://github.com/lakana-labs/lakana/commit/8937a864c9e8327960e715721a79745d6fd34371)), closes [#92](https://github.com/lakana-labs/lakana/issues/92)
+
+
+### Bug Fixes
+
+* **catalog:** delete an environment's table files after the undo period, with restore ([#213](https://github.com/lakana-labs/lakana/issues/213)) ([29db99e](https://github.com/lakana-labs/lakana/commit/29db99ed7e0fb00bf16f616719f8de8a0c7ee621))
+* **query:** accept a query that is only a VALUES list ([#204](https://github.com/lakana-labs/lakana/issues/204)) ([db65791](https://github.com/lakana-labs/lakana/commit/db6579163a2f83dcf4410f7b3451dc296c324a50)), closes [#198](https://github.com/lakana-labs/lakana/issues/198)
+* **query:** refuse malformed queries the guard could not read, and steady a token test ([#219](https://github.com/lakana-labs/lakana/issues/219)) ([8135727](https://github.com/lakana-labs/lakana/commit/8135727e2f0a28df798f0e94763816d129ae7bb8)), closes [#215](https://github.com/lakana-labs/lakana/issues/215) [#216](https://github.com/lakana-labs/lakana/issues/216) [#214](https://github.com/lakana-labs/lakana/issues/214)
+* **server:** write a minted first-administrator token to a private file, not the log ([4c4974e](https://github.com/lakana-labs/lakana/commit/4c4974ea9781035e42d1389e02ed69de11927ad5)), closes [#208](https://github.com/lakana-labs/lakana/issues/208)
+
+
+### Documentation
+
+* a guide for running Lakana for other people ([#202](https://github.com/lakana-labs/lakana/issues/202)) ([dc43eec](https://github.com/lakana-labs/lakana/commit/dc43eecd726278bf700969dc27859ed8e3a03a34)), closes [#57](https://github.com/lakana-labs/lakana/issues/57)
+* a tested restore, and a second environment with the bundle's storage secret ([#210](https://github.com/lakana-labs/lakana/issues/210)) ([4a24794](https://github.com/lakana-labs/lakana/commit/4a24794e8d2c7fd066b297a0f82ad0579e409858)), closes [#200](https://github.com/lakana-labs/lakana/issues/200) [#201](https://github.com/lakana-labs/lakana/issues/201)
+* generate the CLI and settings references, sort the pages by kind, add a security overview ([#197](https://github.com/lakana-labs/lakana/issues/197)) ([048aa78](https://github.com/lakana-labs/lakana/commit/048aa78d0d57fb84482455cff9e0c82191e98e66))
+* how to tell whether an instance is healthy ([#209](https://github.com/lakana-labs/lakana/issues/209)) ([38e8360](https://github.com/lakana-labs/lakana/commit/38e83606361c06cb8953abee45ddb25ed6247f56)), closes [#45](https://github.com/lakana-labs/lakana/issues/45)
+* test or explain every docs block, link the docs site from shipped files, drop milestone names ([#199](https://github.com/lakana-labs/lakana/issues/199)) ([18d8681](https://github.com/lakana-labs/lakana/commit/18d86816463c543e39b76cd3261de2027f5e88d0)), closes [#55](https://github.com/lakana-labs/lakana/issues/55)
+* the upgrade notes name 0.16.0 and explain the paged grants listing ([#195](https://github.com/lakana-labs/lakana/issues/195)) ([496e210](https://github.com/lakana-labs/lakana/commit/496e210abda30f175fc58d68becc70013ab6f501))
+* where Lakana fits, and why Apache Iceberg ([#203](https://github.com/lakana-labs/lakana/issues/203)) ([c86302e](https://github.com/lakana-labs/lakana/commit/c86302ea4ed1c9e92af37eacbaee83bad4f9d339)), closes [#64](https://github.com/lakana-labs/lakana/issues/64)
+
+
+### Dependencies
+
+* bump aiohttp from 3.14.3 to 3.14.5 ([#222](https://github.com/lakana-labs/lakana/issues/222)) ([792c31b](https://github.com/lakana-labs/lakana/commit/792c31be941265945e054cf265484982bf3bf40c))
+
 ## [0.16.0](https://github.com/lakana-labs/lakana/compare/v0.15.0...v0.16.0) (2026-10-19)
 
 
