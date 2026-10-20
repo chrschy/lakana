@@ -11,9 +11,9 @@ def test_every_role_is_mapped() -> None:
     assert set(ROLE_ACTIONS.keys()) == set(Role)
 
 
-def test_admin_has_every_action() -> None:
-    """The admin role is a superset of every Action, not a hand-picked list."""
-    assert ROLE_ACTIONS[Role.ADMIN] == frozenset(Action)
+def test_admin_has_every_action_but_reading_other_peoples_query_text() -> None:
+    """The admin role is every Action but `READ_QUERY_TEXT`, not a hand-picked list."""
+    assert ROLE_ACTIONS[Role.ADMIN] == frozenset(Action) - {Action.READ_QUERY_TEXT}
 
 
 def test_the_role_ladder_is_strictly_increasing() -> None:

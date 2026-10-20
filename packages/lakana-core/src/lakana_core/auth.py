@@ -256,6 +256,19 @@ class Action(enum.StrEnum):
     """Read the audit log. Instance-scoped — a security-review/compliance
     function reserved for organization-wide admins, not delegated
     per-environment the way `MANAGE_ENVIRONMENT` is."""
+    READ_QUERY_TEXT = "READ_QUERY_TEXT"
+    """See query text and column values in other principals' audit events.
+
+    The fields of `lakana_core.audit.content.CONTENT_FIELDS`: a query's SQL text and an
+    incremental write's watermark.
+
+    Instance-scoped, like the audit log it applies to, and granted as a single action only:
+    no role carries it, `ADMIN` included. Without it a reader of the audit log sees each
+    content field of another principal's event hidden (query text as its SHA-256 and length,
+    a watermark with nothing derived from it; `lakana_core.audit.content`); a reader's own
+    events are always shown in full. It opens nothing by itself: reading the log still needs
+    `READ_AUDIT_LOG`. Not a task-token action.
+    """
     DEPLOY = "DEPLOY"
     """Deploy, dry-run or roll back a repository in an environment.
 
@@ -263,7 +276,8 @@ class Action(enum.StrEnum):
     can deploy any registered repository there. Dry runs need it too — they
     fetch with the environment's credential. "Only CI deploys to prod" is
     this grant held only by the CI service principal, and therefore no human
-    holding `ADMIN` (which carries every action) on the instance or on prod.
+    holding `ADMIN` (which carries every action but `READ_QUERY_TEXT`) on the instance or on
+    prod.
     Admin-only by role and not a task-token action.
     """
     MANAGE_REPOSITORY = "MANAGE_REPOSITORY"

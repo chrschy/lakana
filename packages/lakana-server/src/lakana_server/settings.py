@@ -7,6 +7,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from lakana_core.config import (
     ArtifactsConfig,
+    AuditConfig,
     DatabaseConfig,
     DenialAuditConfig,
     LogConfig,
@@ -142,6 +143,9 @@ class Settings(BaseSettings):
     view_audit
         Whether a view of other people's activity is recorded in the audit log, and how often
         (`LAKANA_VIEW_AUDIT__ENABLED`, `LAKANA_VIEW_AUDIT__WINDOW_MINUTES`).
+    audit
+        How much of a query's SQL text the audit log stores (`LAKANA_AUDIT__QUERY_TEXT`), shared
+        with the worker: the server records the queries it cancels.
     query_limits
         Only `timeout_seconds` is used here: the default and cap of a task timeout
         . Set it in the environment shared with the worker.
@@ -178,6 +182,7 @@ class Settings(BaseSettings):
     auth_audit: AuthAuditConfig = AuthAuditConfig()
     denial_audit: DenialAuditConfig = DenialAuditConfig()
     view_audit: ViewAuditConfig = ViewAuditConfig()
+    audit: AuditConfig = AuditConfig()
     query_limits: QueryLimitsConfig = QueryLimitsConfig()
     run: RunConfig = RunConfig()
     log: LogConfig = LogConfig()

@@ -295,9 +295,10 @@ class GrantService:
         ------
         ValidationError
             If subject/grant/securable fields don't satisfy the
-            exactly-one-of rules, or `action` is `MANAGE_GRANT`,
+            exactly-one-of rules, `action` is `MANAGE_GRANT`,
             `MANAGE_GROUP` or `MANAGE_TOKEN`, which come only with the
-            `ADMIN` role.
+            `ADMIN` role, or `action` is `READ_QUERY_TEXT` on anything but
+            the instance.
         NotFoundError
             If `principal`/`group` names a principal or group that doesn't
             exist, or `kind` names an environment, namespace, or table that
@@ -315,6 +316,11 @@ class GrantService:
             raise ValidationError(
                 f"{action.value} comes only with the ADMIN role on the instance; grant that "
                 "role instead, or nothing."
+            )
+        if action is Action.READ_QUERY_TEXT and kind is not SecurableKind.INSTANCE:
+            raise ValidationError(
+                "READ_QUERY_TEXT is granted on the instance only, like the audit log it opens: "
+                "lakana grant create --kind INSTANCE --principal NAME --action READ_QUERY_TEXT"
             )
         _validate_securable_fields(kind, environment, namespace, table)
         principal_id = self._get_principal(principal).id if principal is not None else None

@@ -19,6 +19,7 @@ from unittest import mock
 
 import pytest
 
+from lakana_core.audit.content import install_query_text, stored_query_text
 from lakana_core.config import Settings
 from lakana_core.projects.limits import DeployLimits
 from lakana_worker import deploy_sweep, pipeline
@@ -975,6 +976,26 @@ def test_main_installs_the_maintenance_timeout_from_the_environment(
         scheduler_mock.return_value.start.return_value.is_alive.return_value = False
         main()
     assert pytest.approx(7.0) == pipeline._MAINTENANCE_TIMEOUT
+
+
+def test_main_installs_what_the_audit_stores_of_query_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`LAKANA_AUDIT__QUERY_TEXT` reaches every `QUERY_COMPLETED` the worker writes."""
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{tmp_path}/lakana.db")
+    monkeypatch.setenv("LAKANA_AUDIT__QUERY_TEXT", "off")
+    try:
+        with (
+            mock.patch("lakana_worker.__main__.poll_forever"),
+            mock.patch("lakana_worker.__main__.SchedulerLoop") as scheduler_mock,
+            mock.patch("lakana_worker.__main__.signal.signal"),
+            mock.patch("lakana_worker.__main__.RunEngine"),
+        ):
+            scheduler_mock.return_value.start.return_value.is_alive.return_value = False
+            main()
+        assert stored_query_text("SELECT 1") is None
+    finally:
+        install_query_text("full")
 
 
 _CHILD_TIMEOUT_SECONDS = 120

@@ -677,6 +677,7 @@ def get_secret_service(
 def get_audit_service(
     session: Session = Depends(get_session),
     authz: AuthorizationService = Depends(get_grant_authorization),
+    view_audit: ViewAuditConfig = Depends(get_view_audit),
 ) -> AuditService:
     """Build an AuditService for the current request.
 
@@ -686,6 +687,8 @@ def get_audit_service(
         The current request's database session.
     authz
         The real, auditing-wrapped authorization service.
+    view_audit
+        Whether and how often a read of other people's events is audited.
 
     Returns
     -------
@@ -693,7 +696,7 @@ def get_audit_service(
         A service that can both record and, once authorized, read audit
         events.
     """
-    return AuditService(session, authz)
+    return AuditService(session, authz, view_audit=view_audit)
 
 
 def get_lineage_service(

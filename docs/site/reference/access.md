@@ -41,7 +41,7 @@ cannot differ from what a route decides.
 
 | Object | `--scope` | Parameters | Actions |
 |---|---|---|---|
-| The instance | left out | none | `MANAGE_ENVIRONMENT` (creating one), `MANAGE_PRINCIPAL`, `MANAGE_GROUP`, `MANAGE_TOKEN`, `MINT_TASK_TOKEN`, `MANAGE_GRANT`, `MANAGE_POLICY`, `READ_AUDIT_LOG`, `MANAGE_REPOSITORY`, `MANAGE_PACKAGE_INDEX` |
+| The instance | left out | none | `MANAGE_ENVIRONMENT` (creating one), `MANAGE_PRINCIPAL`, `MANAGE_GROUP`, `MANAGE_TOKEN`, `MINT_TASK_TOKEN`, `MANAGE_GRANT`, `MANAGE_POLICY`, `READ_AUDIT_LOG`, `READ_QUERY_TEXT`, `MANAGE_REPOSITORY`, `MANAGE_PACKAGE_INDEX` |
 | An environment | `dev` | `environment` | `READ_ENVIRONMENT`, `READ_NAMESPACE`, `SUBMIT_QUERY`, `MANAGE_ENVIRONMENT`, `MANAGE_SECRET`, `DEPLOY`, `RUN` |
 | A namespace | `dev/gold.sales` | `environment`, `namespace` | `READ_NAMESPACE`, `CREATE_NAMESPACE`, `MANAGE_NAMESPACE`, `DROP_NAMESPACE`, `CREATE_TABLE` |
 | A table | `dev/gold.sales/orders` | `environment`, `namespace`, `table` | `READ_TABLE`, `WRITE_TABLE`, `CREATE_TABLE`, `DROP_TABLE`, `MAINTAIN_TABLE` |
@@ -76,6 +76,13 @@ What the answer takes into account:
 - **`MANAGE_GRANT`, `MANAGE_GROUP` and `MANAGE_TOKEN`** need the `ADMIN` role on the instance.
   A grant of one of them as a single action has no effect, so the action shows as refused with
   the reason `... needs the ADMIN role on the instance`, and `via` names only the role.
+- **`READ_QUERY_TEXT`** is in no role, `ADMIN` included, so an administrator sees it refused
+  until it is granted as a single action on the instance
+  (`lakana grant create --kind INSTANCE --principal NAME --action READ_QUERY_TEXT`). It covers
+  query text and column values in other people's audit events (the SQL text of a query, the
+  watermark of an incremental write), which otherwise show as a SHA-256 and length (query
+  text) or as `{"hidden": true}` (a watermark)
+  ([Other people's query text and column values](lists.md#other-peoples-query-text-and-column-values-in-the-audit-log)).
 - **`MINT_TASK_TOKEN`** is the right to mint a task token for oneself. Minting one for another
   principal needs the `ADMIN` role on the instance too.
 - **Task tokens** may not ask, not even about their own principal: a task's token can do less
@@ -99,6 +106,7 @@ grants.
 | `principal_name` and `group_name` together | `422`; a grant is made to one or the other |
 | a namespace without its environment, a table without its namespace | `422`; the message names what is missing |
 | an unknown action | `422`; the message lists the actions |
+| `READ_QUERY_TEXT` granted on an environment, a namespace or a table | `422`; it is given on the instance only, and the message shows the command |
 | a `limit` outside 1 to 200, a cursor that was not issued or came from another list | `422` |
 | a caller without the right in "Who may read what" | `403`, audited |
 | an unknown principal, group, environment, namespace or table, for an administrator | `404` |

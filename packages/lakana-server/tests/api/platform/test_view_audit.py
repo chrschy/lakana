@@ -111,7 +111,7 @@ def test_a_managers_list_of_someone_elses_query_is_recorded_once(client: TestCli
         "/api/v1/audit-events", headers=AUTH_HEADER, params={"event_type": "ACTIVITY_VIEWED"}
     )
     assert listed.status_code == 200, listed.text
-    assert len(listed.json()) == 2
+    assert [e["detail"]["view"] for e in listed.json()["items"]] == ["queries", "queries"]
 
 
 def test_a_list_that_cannot_be_audited_is_a_503_without_rows(client: TestClient) -> None:

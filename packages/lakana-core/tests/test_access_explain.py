@@ -392,7 +392,11 @@ def test_a_deactivated_administrator_is_explained_from_its_grants(
     """The three ADMIN-only actions show the ADMIN grant, as every other action does."""
     report = explain_permissions(session, world.principals["dave"], _SCOPES["instance"])
     assert report.active is False
-    assert all(p.allowed for p in report.permissions)
+    # every action but READ_QUERY_TEXT, which no role carries (#88)
+    refused = [p for p in report.permissions if not p.allowed]
+    assert [p.action for p in refused] == [Action.READ_QUERY_TEXT]
+    assert refused[0].via == ()
+    assert "may not READ_QUERY_TEXT" in (refused[0].reason or "")
     for permission in report.permissions:
         if permission.action in ADMIN_ONLY_ACTIONS:
             assert [v.grant_id for v in permission.via] == [world.grants["dave-admin"].id]

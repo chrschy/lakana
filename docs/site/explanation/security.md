@@ -46,13 +46,20 @@ The audit log is an append-only list of events: who signed in or failed to, what
 and revoked, who created, rotated or deleted a secret, who changed an environment, a filter or a mask,
 who deployed, ran or undid something, and every refusal. A completed query is recorded with its SQL
 text. For that reason reading the log needs its own right, `READ_AUDIT_LOG`, which the `ADMIN` role
-holds. `lakana audit list` filters it by event type, environment, principal and time
+holds, and seeing query text and column values in **other people's** events (the SQL text of a
+query, the watermark of an incremental write) needs one more, `READ_QUERY_TEXT`, which no role
+holds: an administrator sees a query's SHA-256 and length instead, and of a watermark only that
+it is hidden, until someone grants the right to them by name. Your own events always show in full. An operator can also store less
+text in new events (`LAKANA_AUDIT__QUERY_TEXT`: `full`, `hash` or `off`); see
+[Other people's query text and column values](../reference/lists.md#other-peoples-query-text-and-column-values-in-the-audit-log).
+`lakana audit list` filters it by event type, environment, principal and time
 ([the command](../reference/cli.md#lakana-audit-list)). To keep the log bounded, repeated refusals of one
 principal are counted after a number per minute that an operator sets
 (`LAKANA_DENIAL_AUDIT__PER_PRINCIPAL_PER_MINUTE`, [settings](../reference/settings.md)).
 
 Seeing other people's activity is recorded too. When a manager lists other people's queries
-(`lakana query list`) or an administrator sees who read a table (`lakana table health`), the log gets
+(`lakana query list`), an administrator sees who read a table (`lakana table health`), or someone
+reads other people's events in the audit log itself (`lakana audit list`), the log gets
 an `ACTIVITY_VIEWED` event: who looked, at which environment or table, with which filters, and how many
 rows of how many other people the answer showed, never their names or their SQL. It is written once per
 person and view per hour, so paging, other filters and a screen that refreshes itself add nothing; a

@@ -295,6 +295,34 @@ a deleted environment, and records `ORPHANED_LOCATIONS_DELETED` in the audit log
 `--older-than` above the backup's age: a table created after the backup is listed too. See
 [Clean up files left by older releases](../how-to/clean-up-files-left-by-older-releases.md).
 
+### Administrators no longer see other people's SQL text or column values in the audit log
+
+**This changes what an administrator sees.** Until now everyone who could read the audit log
+(`READ_AUDIT_LOG`, which the `ADMIN` role holds) saw the SQL text of every completed query in it.
+From this release query text and column values in **someone else's** events need a new right,
+`READ_QUERY_TEXT`, which no role holds, `ADMIN` included: the SQL text of a query
+(`detail.sql_text` of `QUERY_COMPLETED`) and the watermark of an incremental write
+(`detail.watermark` of `TABLE_WRITE`, the highest value of its key column). Without it
+`sql_text` shows `{"sha256": ..., "length": ...}` of the text, and `watermark` shows
+`{"hidden": true}`, with no hash: its values are few enough to guess from one. Your own events still show in full, and nothing
+else in the log changes.
+
+- **To see the text again**, an administrator grants the right by name, on the instance:
+  `lakana grant create --kind INSTANCE --principal NAME --action READ_QUERY_TEXT`. The grant is
+  in the audit log like every grant. A script that reads `sql_text` or `watermark` of other
+  people's events through the SDK or REST needs its principal to hold it.
+- **Reading the audit log is recorded.** A page of `lakana audit list` that shows other people's
+  events, or a filter on someone else (`--principal-id`), writes one `ACTIVITY_VIEWED` event (view
+  `audit_log`) per person and hour, like the query list of a manager. If that event cannot be
+  written, the read is refused with 503. `LAKANA_VIEW_AUDIT__ENABLED=false` turns it off.
+- **New setting `LAKANA_AUDIT__QUERY_TEXT`**, on the server and every worker: `full` (the default,
+  as before), `hash` (only the SHA-256 and length) or `off` (no text). It applies to new events;
+  events already written are not rewritten. An unknown value stops the start with a message that
+  names the setting.
+
+No migration. Going back to the previous release shows the text to every reader of the log again;
+events written with `hash` or `off` stay without it.
+
 ## Notes for 0.16.0
 
 ### Grants, principals and groups are listed in pages

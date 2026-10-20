@@ -36,9 +36,13 @@ ROLE_ACTIONS: dict[Role, frozenset[Action]] = {
     Role.ANALYST: _ANALYST_ACTIONS,
     Role.DATA_SCIENTIST: _DATA_SCIENTIST_ACTIONS,
     Role.DATA_ENGINEER: _DATA_ENGINEER_ACTIONS,
-    Role.ADMIN: frozenset(Action),
+    Role.ADMIN: frozenset(Action) - {Action.READ_QUERY_TEXT},
 }
 """What each role can do.
+
+`admin` holds every action but `READ_QUERY_TEXT`: seeing other people's SQL text in the audit
+log is granted to a person on its own (#88), so that administering the instance does not by
+itself show what everyone queried.
 
 `data_scientist` sits between `analyst` and `data_engineer`: it can persist
 engineered features, model outputs, and predictions into existing
