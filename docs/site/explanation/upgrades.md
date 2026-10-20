@@ -265,6 +265,19 @@ root starts that way can no longer be read or maintained. Create a new environme
 canonical root (`file:///data/...`; the same directory on a local disk) and load its tables
 there again.
 
+**A `file` root must be an absolute path with no host**: `file:///data/lake`, not `file://data/lake`
+(read against each process's working directory) or `file://localhost/data/lake` (refused with
+`file:///data/lake` as the spelling to use). Locations of that kind no longer count as canonical
+either, so the tables of an existing environment with such a root can no longer be read; create one
+with an absolute root and load them there again. The clean-up keeps every file on the local disk
+while such an environment exists: delete it.
+
+**A new table or namespace name may not contain `%`** (a storage may read `%41` as `A`, so two
+names would share one directory); every other character is allowed except `.`, `/`, the unit
+separator and a NUL byte. Existing names with `%` stay readable, listable, droppable and renamable
+away, as dotted names do. The clean-up compares their locations both as written and decoded, so
+such a table keeps only the directory it names.
+
 ### Remove the table directories older releases left behind
 
 Directories that earlier releases left under `managed/` without a record (tables dropped before

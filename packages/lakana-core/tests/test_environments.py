@@ -938,3 +938,30 @@ def test_a_storage_root_with_one_trailing_slash_is_accepted(
         storage=StorageConfig(scheme="file", root=f"file://{tmp_path}/", options={}),
     )
     assert catalog.get_environment(principal, "dev").name == "dev"
+
+
+@pytest.mark.parametrize(
+    ("root", "fix"),
+    [
+        ("file://data/lake", "an absolute path"),
+        ("file://localhost/data/lake", "'file:///data/lake'"),
+        ("file://server/share", "an absolute path"),
+    ],
+)
+def test_a_file_root_must_be_an_absolute_path_without_a_host(
+    catalog: CatalogService, principal: PrincipalRef, root: str, fix: str
+) -> None:
+    """A relative path is read against a working directory, and a host means nothing to Lakana."""
+    with pytest.raises(ValidationError) as refused:
+        catalog.create_environment(
+            principal, name="dev", storage=StorageConfig(scheme="file", root=root, options={})
+        )
+    assert fix in str(refused.value)
+
+
+def test_the_root_of_the_disk_is_accepted(catalog: CatalogService, principal: PrincipalRef) -> None:
+    """``file:///`` is canonical; it is not refused with itself as the spelling to use."""
+    catalog.create_environment(
+        principal, name="dev", storage=StorageConfig(scheme="file", root="file:///", options={})
+    )
+    assert catalog.get_environment(principal, "dev").storage_root == "file:///"

@@ -8,7 +8,7 @@ they give to tables. For the steps that create and deploy a project, see
 
 `assets/<namespace…>/<name>.sql` (a SQL asset) or `.py` (a Python asset, see [Python assets](python-assets.md))
 becomes the table `<namespace…>.<name>`; nested directories are nested namespaces. No path
-component may contain a dot. Each SQL file holds exactly one query (`SELECT`, `WITH … SELECT` or a set operation). A table produced by another
+component may contain a dot or a `%`. Each SQL file holds exactly one query (`SELECT`, `WITH … SELECT` or a set operation). A table produced by another
 asset of the same repository is a DAG edge; anything else is an external input and must exist in
 the environment (readable by whoever deploys) or be produced by another repository's current
 deployment.

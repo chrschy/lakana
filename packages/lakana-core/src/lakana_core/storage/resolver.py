@@ -152,13 +152,16 @@ def _is_canonical_uri(uri: str) -> bool:
     Returns
     -------
     bool
-        `True` if `uri` has a ``scheme://`` prefix, its path component is not empty, contains
-        none of `_GLOB_METACHARACTERS`, and comes back unchanged from `normalised_path` (no
-        `.`, `..`, doubled slash, leading doubled slash or trailing slash).
+        `True` if `uri` has a ``scheme://`` prefix, its path component is not empty (and, for
+        ``file``, absolute with an empty host), contains none of `_GLOB_METACHARACTERS`, and
+        comes back unchanged from `normalised_path` (no `.`, `..`, doubled slash, leading
+        doubled slash or trailing slash).
     """
-    _scheme, sep, rest = uri.partition("://")
+    scheme, sep, rest = uri.partition("://")
     if not sep or not rest:
         return False
+    if scheme.lower() == "file" and not rest.startswith("/"):
+        return False  # relative, or with a host: no one reading
     if any(char in rest for char in _GLOB_METACHARACTERS):
         return False
     return normalised_path(rest) == rest
@@ -168,6 +171,11 @@ ROOT_UNJUDGEABLE_MESSAGE = (
     "The storage root {root!r} cannot be compared with other locations. Write it without .. "
     "segments, percent escapes (such as %20) and the characters * ? [ ], as a plain "
     "scheme://path."
+)
+ROOT_RELATIVE_MESSAGE = (
+    "The storage root {root!r} is not an absolute path on this machine: a file root is "
+    "file:// followed by an absolute path and no host, such as 'file:///data/lake'. A relative "
+    "path would be read against each process's working directory."
 )
 ROOT_SPELLING_MESSAGE = (
     "The storage root {root!r} is written differently from the way Lakana compares locations, "
@@ -191,10 +199,22 @@ def check_storage_root(root: str) -> None:
     Raises
     ------
     ValidationError
-        If it cannot be normalised exactly (`ROOT_UNJUDGEABLE_MESSAGE`), or its canonical
-        spelling differs (`ROOT_SPELLING_MESSAGE`, which names that spelling).
+        If a ``file`` root is relative or has a host (`ROOT_RELATIVE_MESSAGE`; ``localhost``
+        is named with the spelling to use), it cannot be normalised exactly
+        (`ROOT_UNJUDGEABLE_MESSAGE`), or its canonical spelling differs
+        (`ROOT_SPELLING_MESSAGE`, which names that spelling).
     """
     scheme, sep, rest = root.partition("://")
+    lowered = scheme.lower()
+    if lowered == "file" and not rest.startswith("/"):
+        host, slash, tail = rest.partition("/")
+        if host.lower() == "localhost" and slash:
+            raise ValidationError(
+                ROOT_SPELLING_MESSAGE.format(
+                    root=root, canonical=f"file:///{normalised_path(tail) or ''}"
+                )
+            )
+        raise ValidationError(ROOT_RELATIVE_MESSAGE.format(root=root))
     path = normalised_path(rest)
     if (
         not sep
@@ -203,9 +223,8 @@ def check_storage_root(root: str) -> None:
         or any(char in rest for char in _GLOB_METACHARACTERS)
     ):
         raise ValidationError(ROOT_UNJUDGEABLE_MESSAGE.format(root=root))
-    lowered = scheme.lower()
     canonical = f"{SCHEME_ALIASES.get(lowered, lowered)}://{path}"
-    if root.removesuffix("/") != canonical:
+    if root not in {canonical, canonical + "/"}:
         raise ValidationError(ROOT_SPELLING_MESSAGE.format(root=root, canonical=canonical))
 
 

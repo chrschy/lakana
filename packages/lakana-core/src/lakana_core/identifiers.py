@@ -121,15 +121,15 @@ def validate_path_component(component: str, *, what: str, allow_dots: bool = Fal
         Noun describing the component, used to phrase the error message
         (for example ``"Namespace component"`` or ``"Table name"``).
     allow_dots
-        Accept a ``.`` inside the component. Only for reading names that may
-        predate the rule; never for a name being created.
+        Accept a ``.`` or a ``%`` inside the component. Only for reading names that
+        may predate those rules; never for a name being created.
 
     Raises
     ------
     ValidationError
         If the component is empty, whitespace-only, is exactly ``.`` or
         ``..``, or contains ``/``, a NUL byte, or the unit separator, or
-        (unless `allow_dots`) contains ``.``.
+        (unless `allow_dots`) contains ``.`` or ``%``.
     """
     if not component:
         raise ValidationError(f"{what} must not be empty.")
@@ -145,6 +145,12 @@ def validate_path_component(component: str, *, what: str, allow_dots: bool = Fal
         raise ValidationError(f"{what} must not be '.' or '..'.")
     if not allow_dots and "." in component:
         raise ValidationError(f"{what} '{shown(component)}' must not contain a '.'.")
+    if not allow_dots and "%" in component:
+        raise ValidationError(
+            f"{what} '{shown(component)}' must not contain '%': a storage may read '%41' as 'A', "
+            "so two names would share one directory. Every other character is allowed except "
+            "'.', '/', the unit separator and a NUL byte."
+        )
 
 
 @dataclass(frozen=True)

@@ -1247,11 +1247,12 @@ row's metadata lies under the location, else `ABANDONED` with `purge_after = now
 environment's root and ends in `-<32 hex>`, and nothing in use is the location or lies inside it in
 **any** environment (`location_in_use`: `LIVE`/`CLAIMED` records and `tables` rows; plus
 `table_root_locations` with `nested_locations_within`; maintenance uses `other_table_locations`), and
-`near_other_location` finds nothing (no other environment's root at, inside, or from inside
-`managed/` around it; no non-canonical record or table location that normalises near it; a `..` or
-percent escape on the same storage fails closed): these spelling comparisons fail open on a
-non-canonical spelling, which nothing normalises at creation, so the purge counts
-`purges_blocked` and logs `UNJUDGED_MESSAGE` instead. Before **each** delete,
+`near_other_location` finds nothing, checked after those two (no other environment's root at,
+inside, or from inside `managed/` around it; no `LIVE`/`CLAIMED`/`DROPPED` record other than its
+own, and no table directory, at or inside it under any of the `readings` described in the #229
+section below; an unreadable location on the same scheme fails closed): the spelling comparisons
+above fail open on another spelling of the same place, so the purge counts `purges_blocked` and
+logs `UNJUDGED_MESSAGE` instead. Before **each** delete,
 under the record's lock, the record must still be purgeable and `location_in_use` false again; only
 objects strictly inside the location with sane segments are deleted; the record goes last, with
 `TABLE_PURGED` (`files`, `bytes`, `complete`); a pass that stops part-way records `complete: false`
@@ -1524,16 +1525,21 @@ finds nothing: no other environment's storage root at, inside, or (from inside t
 around it, however spelled, and no record or table location in a non-canonical spelling (doubled
 slash, `.`/`..`, scheme alias such as `s3a`/`FILE`, percent escape) that normalises to one of
 these. Canonical has one definition, `resolver.normalised_path` (empty and `.` segments
-dropped, a leading `//` included, which `posixpath.normpath` keeps; `..` unjudgeable):
-`_is_canonical_uri`, `is_within_location`, `spelled_canonically` and `near_other_location` all
-build on it, and `create_environment` refuses a root that is not canonical
-(`check_storage_root`, 422 naming the spelling to use; percent escapes, glob characters and
-scheme aliases refused too). Roots stored before stay and meet the fail-closed check. A `..`
-segment or a percent escape cannot be normalised exactly: such a location fails
-closed for every directory on the same scheme and bucket (the whole local disk for `file`). A
-canonical other root makes the directory not listed; a non-canonical spelling lists it as kept,
-with a reason naming the location. Glob characters are taken literally (storage names are
-literal). A directory whose
+dropped, a leading `//` included, which `posixpath.normpath` keeps; `..` unjudgeable), and a `file`
+location must be absolute with an empty host: `_is_canonical_uri`, `is_within_location` and
+`spelled_canonically` build on it, and `create_environment` refuses a root that is not canonical
+(`check_storage_root`, 422 naming the spelling to use; relative and host `file` roots, percent
+escapes, glob characters and scheme aliases refused too). `near_other_location` compares every
+root, record (`record_states`; never the purge's own) and table directory under all `readings`:
+percent-decoded up to three times, case-folded and NFC, `normpath` and, for `file`, `realpath`
+(symbolic links), object-store keys literal and with `..` resolved, `abfs` reduced to the
+container; a location with no reading (relative or host `file`, no scheme) blocks every deletion on
+its scheme. Roots stored before stay and meet this check. New table and namespace names refuse `%`
+(`validate_path_component`, unless reading a stored name). Residual: two paths to one directory
+that only the kernel knows (a bind mount, a network share mounted twice) are not seen; operators
+must not point two roots at one directory that way. A canonical other root makes the directory
+not listed; any other match lists it as kept, with a reason naming the location. Glob characters
+are taken literally (storage names are literal). A directory whose
 newest file is younger than `older_than_days` (1 to 3,650, default 30), or has a file of unknown
 age, is `recent` and never deleted. The listing writes nothing and records no event.
 

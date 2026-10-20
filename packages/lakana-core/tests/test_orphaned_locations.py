@@ -978,16 +978,26 @@ def test_a_table_whose_metadata_is_spelled_with_a_doubled_slash_keeps_the_direct
     assert len(_files(location)) == 2
 
 
-def test_a_location_that_cannot_be_normalised_keeps_every_directory_on_its_storage(
+def test_a_percent_escape_is_compared_as_written_and_decoded(
     session: Session, catalog: CatalogService, store: Path, principal: PrincipalRef
 ) -> None:
-    """A percent escape: nothing on the same storage is judged safe."""
-    location = _store_location(store, f"/t-{uuid.uuid4().hex}")
-    _leftover(location)
-    _claim(session, f"file://{store}/managed/gold/t%2D{uuid.uuid4().hex}")
+    """``t%2D<hex>`` decodes to ``t-<hex>``: that one is kept, another name is not."""
+    hex_kept = uuid.uuid4().hex
+    kept = _store_location(store, f"/t-{hex_kept}")
+    free = _store_location(store, f"/u-{uuid.uuid4().hex}")
+    _leftover(kept)
+    _leftover(free)
+    _claim(session, f"file://{store}/managed/gold/t%2D{hex_kept}", state=TableLocationState.LIVE)
+    _claim(session, f"file://{store}/managed/gold/a%41b-{uuid.uuid4().hex}")
 
-    (entry,) = catalog.find_orphaned_locations(principal, "dev", older_than_days=1).locations
-    assert entry.kept_because is not None
+    report = catalog.delete_orphaned_locations(principal, "dev", older_than_days=1)
+
+    outcome = {entry.location: entry.deleted for entry in report.locations}
+    assert outcome == {
+        kept.removeprefix(f"file://{store}/"): False,
+        free.removeprefix(f"file://{store}/"): True,
+    }
+    assert len(_files(kept)) == 2
 
 
 def test_an_odd_spelling_on_other_storage_does_not_keep_anything(
@@ -1097,3 +1107,92 @@ def test_a_location_with_a_leading_double_slash_keeps_the_directory(
     (entry,) = catalog.delete_orphaned_locations(principal, "dev", older_than_days=1).locations
     assert not entry.deleted and entry.kept_because is not None
     assert len(_files(location)) == 2
+
+
+# --- the same directory under another name: relative roots, hosts, links, case ------------
+
+
+def test_a_relative_root_of_another_environment_keeps_its_table(
+    session: Session,
+    catalog: CatalogService,
+    store: Path,
+    principal: PrincipalRef,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``file://store`` was read against the working directory: it may be this store."""
+    monkeypatch.chdir(store.parent)
+    session.add(
+        Environment(id=uuid.uuid4(), name="rel", storage_root="file://store", storage_options={})
+    )
+    session.commit()
+    name = f"orders-{uuid.uuid4().hex}"
+    _claim(
+        session,
+        f"file://store/managed/gold/{name}",
+        state=TableLocationState.LIVE,
+        environment="rel",
+    )
+    location = _store_location(store, f"/{name}")
+    _leftover(location)
+
+    (entry,) = catalog.delete_orphaned_locations(principal, "dev", older_than_days=1).locations
+
+    assert not entry.deleted and entry.kept_because is not None
+    assert len(_files(location)) == 2
+
+
+def test_a_location_with_a_host_keeps_every_directory_on_local_disks(
+    session: Session, catalog: CatalogService, store: Path, principal: PrincipalRef
+) -> None:
+    """``file://localhost/...`` has no one reading: nothing on the local disk is judged safe."""
+    location = _store_location(store, f"/t-{uuid.uuid4().hex}")
+    _leftover(location)
+    _claim(
+        session, f"file://localhost/elsewhere/t-{uuid.uuid4().hex}", state=TableLocationState.LIVE
+    )
+
+    (entry,) = catalog.delete_orphaned_locations(principal, "dev", older_than_days=1).locations
+    assert not entry.deleted and "localhost" in (entry.kept_because or "")
+
+
+def test_a_root_reached_through_a_symbolic_link_keeps_its_table(
+    session: Session,
+    catalog: CatalogService,
+    store: Path,
+    principal: PrincipalRef,
+    tmp_path: Path,
+) -> None:
+    """Another environment's root is a link to this store: its live table is this directory."""
+    link = tmp_path / "link"
+    link.symlink_to(store)
+    catalog.create_environment(
+        principal,
+        name="linked",
+        storage=StorageConfig(scheme="file", root=f"file://{link}", options={}),
+    )
+    name = f"orders-{uuid.uuid4().hex}"
+    _claim(
+        session,
+        f"file://{link}/managed/gold/{name}",
+        state=TableLocationState.LIVE,
+        environment="linked",
+    )
+    location = _store_location(store, f"/{name}")
+    _leftover(location)
+
+    (entry,) = catalog.delete_orphaned_locations(principal, "dev", older_than_days=1).locations
+    assert not entry.deleted and entry.kept_because is not None
+    assert len(_files(location)) == 2
+
+
+def test_a_location_in_another_case_keeps_the_directory(
+    session: Session, catalog: CatalogService, store: Path, principal: PrincipalRef
+) -> None:
+    """A disk may ignore case: ``GOLD/T-<hex>`` is compared as ``gold/t-<hex>``."""
+    hex_ = uuid.uuid4().hex
+    location = _store_location(store, f"/t-{hex_}")
+    _leftover(location)
+    _claim(session, f"file://{store}/managed/GOLD/T-{hex_}", state=TableLocationState.LIVE)
+
+    (entry,) = catalog.delete_orphaned_locations(principal, "dev", older_than_days=1).locations
+    assert not entry.deleted and entry.kept_because is not None

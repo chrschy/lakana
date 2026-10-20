@@ -35,16 +35,18 @@ A directory is listed only when nothing in the catalog uses it:
 - its name ends in a table id (a hyphen and 32 hexadecimal digits), as every table directory's
   does; and it is not another environment's storage root, nor inside one.
 
-**A location that cannot be compared keeps it.** An environment's storage root, a table or a
-location record can be stored in a spelling that names the same place differently, such as a
-doubled slash (`.../gold//orders-...`, or `file:////data` at the start), a `.` or `..` segment, `FILE://` or `s3a://`, or a percent
-escape. When such a location may be the directory, lie inside it or around it, the directory is
-listed with a `kept_because` that names that location, and it is never deleted. A `..` segment or
-a percent escape cannot be resolved for certain, so one of those keeps every directory on the same
-storage (the same bucket, or the local disk). Correct the environment's storage root, or drop the
-table, and run the command again. The worker's sweep keeps a dropped table's files for the same
-reason, and logs `The table location sweep left <location> alone: <location>, another
-environment's storage root or a location stored in a spelling that cannot be compared, …`.
+**The same place under another name keeps it.** Every environment's storage root, every table
+and every location record is compared under each way a storage may read it: without case and in
+one Unicode form, with doubled slashes and `.` and `..` segments resolved, percent escapes decoded,
+`FILE://`, `s3a://` and `abfss://` read as `file://`, `s3://` and `abfs://`, and, on a local disk,
+through symbolic links. When one of them may be the directory, lie inside it or around it, the
+directory is listed with a `kept_because` that names that location, and it is never deleted. A
+`file` location that is a relative path or names a host (`file://data/...`,
+`file://localhost/...`) cannot be read one way at all, so one of those keeps every directory on
+the local disk. Drop the table or delete the environment it belongs to, and run the command again.
+The worker's sweep keeps a dropped table's files for the same reasons, and logs `The table location
+sweep left <location> alone: <location>, another environment's storage root or a location written
+another way …`.
 
 **Recent directories are kept.** A directory with a file newer than `--older-than` (30 days by
 default) is listed with `recent` set and is never deleted. Use a longer period if you are not sure,

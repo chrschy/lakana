@@ -41,8 +41,9 @@ def create(
 
     Write the storage root the one way Lakana compares locations: a lower-case scheme
     (`s3`, not `s3a`), one slash between path segments and none doubled after `file://`
-    (`file:///data`, not `file:////data`), no `.` or `..` segments, no percent escapes and no
-    `*`, `?`, `[` or `]`. One trailing slash is fine. Another spelling is refused, and the
+    (`file:///data`, not `file:////data`), for `file` an absolute path and no host
+    (not `file://data` or `file://localhost/data`), no `.` or `..` segments, no percent escapes
+    and no `*`, `?`, `[` or `]`. One trailing slash is fine. Another spelling is refused, and the
     message names the one to use.
 
     Parameters

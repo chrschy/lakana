@@ -302,8 +302,9 @@ _NOT_ORPHANED = ""
 """What `_ineligible` says of a directory that is not a leftover at all: it is not listed."""
 
 UNJUDGED_PREFIX = (
-    "another environment's storage root, or a location stored in a spelling that cannot be "
-    "compared, may be it, lie inside it or around it; correct or remove that location first: "
+    "another environment's storage root, or a location written another way (a link, a relative "
+    "path, a host, another case or escape), may be it, lie inside it or around it; remove that "
+    "location first, or keep the directory: "
 )
 
 
@@ -331,11 +332,6 @@ def _ineligible(session: Session, run: _Run, location: str, environment: Target)
     """
     if run._confined(location) is None or run._in_use(location):
         return _NOT_ORPHANED
-    nearby = run.near_other(location)
-    if nearby is not None:
-        if spelled_canonically(nearby.rstrip("/")):
-            return _NOT_ORPHANED  # another environment's root: its files, not a leftover
-        return UNJUDGED_PREFIX + shown(nearby)
     try:
         around = _ancestors(location)
         recorded = session.scalar(
@@ -352,9 +348,14 @@ def _ineligible(session: Session, run: _Run, location: str, environment: Target)
             is_within_location(root, location) for root in _table_directories(session)
         ):
             return _NOT_ORPHANED
-        return None
     finally:
         session.rollback()
+    nearby = run.near_other(location, record_states=frozenset(TableLocationState), around=True)
+    if nearby is None:
+        return None
+    if nearby.environment_root and spelled_canonically(nearby.location.rstrip("/")):
+        return _NOT_ORPHANED  # another environment's root: its files, not a leftover
+    return UNJUDGED_PREFIX + shown(nearby.location)
 
 
 def _measure(

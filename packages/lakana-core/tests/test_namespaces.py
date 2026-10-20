@@ -19,7 +19,7 @@ from lakana_core.errors import (
     ValidationError,
 )
 from lakana_core.identifiers import NamespacePath, TableRef
-from lakana_core.models import Table, TableType
+from lakana_core.models import Namespace, Table, TableType
 
 
 def test_create_then_load_round_trips(
@@ -270,14 +270,26 @@ def test_a_backslash_in_a_name_does_not_widen_the_listing(
 
 
 def test_a_percent_in_a_name_does_not_widen_the_listing(
-    catalog: CatalogService, principal: PrincipalRef, tmp_path: Path
+    session: Session, catalog: CatalogService, principal: PrincipalRef, tmp_path: Path
 ) -> None:
-    """`%` is the other LIKE wildcard, and is also a legal namespace character."""
-    catalog.create_environment(principal, name="dev", storage=_config(tmp_path))
+    """`%` is the other LIKE wildcard; a name from before `%` was refused may still hold one."""
+    env = catalog.create_environment(principal, name="dev", storage=_config(tmp_path))
     for parts in (["a%"], ["a%", "child"], ["ab"], ["ab", "intruder"]):
-        catalog.create_namespace(principal, "dev", NamespacePath.from_parts(parts))
+        session.add(
+            Namespace(
+                id=uuid.uuid4(),
+                environment_id=env.id,
+                path=NamespacePath.from_parts(parts, allow_dots=True).joined(),
+                properties={},
+            )
+        )
+    session.commit()
+    with pytest.raises(ValidationError, match="'%'"):
+        catalog.create_namespace(principal, "dev", NamespacePath.from_parts(["b%"]))
 
-    listed = catalog.list_namespaces(principal, "dev", NamespacePath.from_parts(["a%"]))
+    listed = catalog.list_namespaces(
+        principal, "dev", NamespacePath.from_parts(["a%"], allow_dots=True)
+    )
 
     assert [p.parts for p in listed] == [("a%", "child")]
 

@@ -1048,3 +1048,9 @@ def test_a_leading_double_slash_is_not_canonical() -> None:
     assert is_within_location("file:///store", "file:///store/managed/x")
     assert is_within_location("s3://bucket", "s3://bucket/x")
     assert not is_within_location("s3://bucket", "s3://bucket//x")
+
+
+def test_a_relative_or_hosted_file_location_is_not_canonical() -> None:
+    """Without an absolute path and an empty host, a file location has no one reading."""
+    assert not is_within_location("file://store", "file://store/managed/x")
+    assert not is_within_location("file://localhost/data", "file://localhost/data/x")

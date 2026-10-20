@@ -93,6 +93,8 @@ from lakana_core.auth import Securable
 from lakana_core.catalog.append import root_relative_path
 from lakana_core.catalog.environment_deletion import purge_environment
 from lakana_core.catalog.locations import (
+    PROTECTED_STATES,
+    Nearby,
     abandon_claim,
     dropped_inside,
     location_in_use,
@@ -152,9 +154,9 @@ BLOCKED_MESSAGE = (
 )
 UNJUDGED_MESSAGE = (
     "The table location sweep left %s alone: %s, another environment's storage root or a "
-    "location stored in a spelling that cannot be compared, may be it, lie inside it or around "
-    "it. Its record is kept; correct that spelling or remove what is wrong, and the next sweep "
-    "looks again."
+    "location written another way (a link, a relative path, another case or escape), may be "
+    "it or lie inside it. Its record is kept; remove what is wrong, and the next sweep looks "
+    "again."
 )
 REFUSED_MESSAGE = (
     "The table location sweep did not purge %s: it is not a table directory under managed/ of "
@@ -556,21 +558,37 @@ class _Run:
         finally:
             self._session.rollback()
 
-    def near_other(self, location: str) -> str | None:
-        """Find another environment's root, or an oddly spelled location, at, in or around it.
+    def near_other(
+        self,
+        location: str,
+        *,
+        record_states: frozenset[TableLocationState] = PROTECTED_STATES,
+        around: bool = False,
+    ) -> Nearby | None:
+        """Find another environment's root, or a location under another spelling, near it.
 
         Parameters
         ----------
         location
             The location about to be purged.
+        record_states
+            The records that count (`near_other_location`).
+        around
+            Whether a record or a table around it counts too.
 
         Returns
         -------
-        str or None
-            That location as stored (`near_other_location`), or `None`.
+        Nearby or None
+            That location (`near_other_location`), or `None`.
         """
         try:
-            return near_other_location(self._session, location, root=self._root)
+            return near_other_location(
+                self._session,
+                location,
+                root=self._root,
+                record_states=record_states,
+                around=around,
+            )
         finally:
             self._session.rollback()
 
@@ -599,16 +617,16 @@ class _Run:
             self.counts["locations_refused"] += 1
             logger.warning(REFUSED_MESSAGE, shown(self._relative(location)))
             return
-        nearby = self.near_other(location)
-        if nearby is not None:
-            self.counts["purges_blocked"] += 1
-            logger.warning(UNJUDGED_MESSAGE, shown(relative), shown(nearby))
-            return
         if self._in_use(location):
             self._blocked(relative)
             return
         if self._waits(location):
             self._waiting(relative)
+            return
+        nearby = self.near_other(location)
+        if nearby is not None:
+            self.counts["purges_blocked"] += 1
+            logger.warning(UNJUDGED_MESSAGE, shown(relative), shown(nearby.location))
             return
         if not self._start(record_id):
             return

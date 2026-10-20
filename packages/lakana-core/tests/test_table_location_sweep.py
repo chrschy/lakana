@@ -1617,7 +1617,7 @@ def test_another_environment_root_spelled_with_a_doubled_slash_blocks_a_purge(
 
     assert (report.purges_blocked, report.files_deleted) == (1, 0)
     assert _files(location) == ["data/a.parquet"]
-    assert "cannot be compared" in caplog.text
+    assert "written another way" in caplog.text
 
 
 def test_another_environment_root_inside_a_location_blocks_a_purge(
@@ -1682,36 +1682,91 @@ def test_a_glob_character_in_a_name_elsewhere_does_not_block_a_purge(
     assert _sweep(session).locations_purged == 1
 
 
-def test_a_percent_escape_on_the_same_storage_blocks_a_purge(
+def test_a_percent_escape_is_compared_as_written_and_decoded(
     session: Session, catalog: CatalogService, store: Path
 ) -> None:
-    """A backend may decode it, so nothing on that storage is judged safe."""
+    """A live record that decodes to a place inside blocks; ``a%41b`` elsewhere blocks nothing.
+
+    Not even its own purge: a record never blocks itself.
+    """
     location = _location(store)
     _put(location, "data/a.parquet")
     _claim(session, location, state=TableLocationState.ABANDONED, purge_after=_NOW)
+    head, name = location.rsplit("/", 1)
     _claim(
-        session, f"file://{store}/managed/x%2Dy-{uuid.uuid4().hex}", state=TableLocationState.LIVE
+        session,
+        f"{head}/{name.replace('-', '%2D')}/n-{uuid.uuid4().hex}",
+        state=TableLocationState.LIVE,
+    )
+    assert _sweep(session).purges_blocked == 1
+
+    session.execute(sa_delete(TableLocation).where(TableLocation.state == TableLocationState.LIVE))
+    session.commit()
+    odd = _location(store, "a%41b")
+    _put(odd, "data/a.parquet")
+    _claim(session, odd, state=TableLocationState.DROPPED, purge_after=_NOW)
+
+    report = _sweep(session)
+
+    assert (report.locations_purged, report.purges_blocked) == (2, 0)
+    assert _files(location) == [] and _files(odd) == []
+
+
+def test_a_relative_root_of_another_environment_blocks_a_purge(
+    session: Session, catalog: CatalogService, store: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``file://store`` resolves against a working directory: it may be the same place."""
+    monkeypatch.chdir(store.parent)
+    location = _location(store)
+    _put(location, "data/a.parquet")
+    _claim(session, location, state=TableLocationState.ABANDONED, purge_after=_NOW)
+    _existing_environment(session, "rel", "file://store")
+    _claim(
+        session,
+        location.replace(f"file://{store}", "file://store") + f"/n-{uuid.uuid4().hex}",
+        state=TableLocationState.LIVE,
+        environment="rel",
     )
 
     assert _sweep(session).purges_blocked == 1
+    assert _files(location) == ["data/a.parquet"]
 
 
-def test_another_environment_root_with_a_dotdot_segment_blocks_a_purge(
-    session: Session, catalog: CatalogService, store: Path, principal: PrincipalRef
+def test_a_root_through_a_symbolic_link_inside_a_location_blocks_a_purge(
+    session: Session, catalog: CatalogService, store: Path, tmp_path: Path
 ) -> None:
-    """Where ``x/../y`` ends up is not judged; everything on that storage is kept."""
+    """A link elsewhere that points into the directory is the directory."""
     location = _location(store)
     _put(location, "data/a.parquet")
     _claim(session, location, state=TableLocationState.ABANDONED, purge_after=_NOW)
-    _existing_environment(session, "other", f"file://{store}/x/../y")
+    link = tmp_path / "link"
+    link.symlink_to(Path(location.removeprefix("file://")))
+    _claim(session, f"file://{link}/n-{uuid.uuid4().hex}", state=TableLocationState.LIVE)
 
     assert _sweep(session).purges_blocked == 1
 
 
-def test_a_purge_under_a_root_that_cannot_be_normalised_is_blocked(
-    session: Session, catalog: CatalogService, store: Path, principal: PrincipalRef
+def test_another_environment_root_with_a_dotdot_segment_is_resolved(
+    session: Session, catalog: CatalogService, store: Path
 ) -> None:
-    """The environment's own root has a percent escape: its locations are not judged."""
+    """On a local disk ``x/../`` resolves exactly: a root into the location blocks, others not."""
+    location = _location(store)
+    _put(location, "data/a.parquet")
+    _claim(session, location, state=TableLocationState.ABANDONED, purge_after=_NOW)
+    _existing_environment(session, "elsewhere", f"file://{store}/x/../y")
+    head, name = location.rsplit("/", 1)
+    _existing_environment(session, "into", f"{head}/x/../{name}/inner")
+
+    assert _sweep(session).purges_blocked == 1
+    session.execute(sa_delete(Environment).where(Environment.name == "into"))
+    session.commit()
+    assert _sweep(session).locations_purged == 1
+
+
+def test_a_purge_under_a_root_with_a_percent_escape_proceeds(
+    session: Session, catalog: CatalogService, store: Path
+) -> None:
+    """The environment's own root has a percent escape: compared under both readings, it is fine."""
     root = f"file://{store}/r%41"
     _existing_environment(session, "escaped", root)
     location = f"{root}/managed/gold/t-{uuid.uuid4().hex}"
@@ -1724,21 +1779,74 @@ def test_a_purge_under_a_root_that_cannot_be_normalised_is_blocked(
         environment="escaped",
     )
 
-    report = _sweep(session)
-
-    assert report.files_deleted == 0
-    assert _files(location) == ["data/a.parquet"]
+    assert _sweep(session).locations_purged == 1
+    assert _files(location) == []
 
 
-def test_a_live_record_with_a_leading_double_slash_inside_blocks_a_purge(
+def test_near_other_location_reads_what_it_can_and_keeps_the_rest(
     session: Session, catalog: CatalogService, store: Path
 ) -> None:
-    """``file:////...`` names the same place on a local disk."""
-    location = _location(store)
-    _put(location, "data/a.parquet")
-    _claim(session, location, state=TableLocationState.ABANDONED, purge_after=_NOW)
-    inside = location.replace("file://", "file:///", 1) + f"/n-{uuid.uuid4().hex}"
-    _claim(session, inside, state=TableLocationState.LIVE)
+    """Unreadable locations block only on their own scheme; an unreadable target blocks itself."""
+    from lakana_core.catalog.locations import Nearby, near_other_location
 
-    assert _sweep(session).purges_blocked == 1
-    assert _files(location) == ["data/a.parquet"]
+    _existing_environment(session, "rel", "file://relative")
+    _claim(session, "file://relative/managed/gold/t", state=TableLocationState.LIVE)
+    _claim(session, "s3://", state=TableLocationState.LIVE)
+    target = f"s3://bucket/managed/gold/t-{uuid.uuid4().hex}"
+
+    assert near_other_location(session, target, root="s3://bucket") is None
+    assert near_other_location(session, target, root="no-scheme") == Nearby(
+        target, environment_root=False
+    )
+    _claim(session, "no-scheme/at/all", state=TableLocationState.LIVE)
+    assert near_other_location(session, target, root="s3://bucket") == Nearby(
+        "no-scheme/at/all", environment_root=False
+    )
+
+
+_HEX = "0123456789abcdef0123456789abcdef"
+
+
+@pytest.mark.parametrize(
+    ("target", "other"),
+    [
+        (f"s3://bucket/managed/gold/t-{_HEX}", f"s3://BUCKET/managed/gold/t-{_HEX}"),
+        (f"s3://bucket/managed/gold/t-{_HEX}", f"s3://bucket/managed/GOLD/T-{_HEX}"),
+        (f"s3://bucket/managed/gold/t-{_HEX}", f"s3://bucket//managed/gold/t-{_HEX}/n"),
+        (f"s3://bucket/managed/gold/t-{_HEX}", f"s3://bucket/managed/x/../gold/t-{_HEX}"),
+        (f"s3://bucket/managed/gold/t-{_HEX}", f"s3a://bucket/managed/gold/t-{_HEX}/"),
+        (f"s3://bucket/managed/gold/t-{_HEX}", f"s3://bucket/managed/gold/t%252D{_HEX}"),
+        (
+            f"abfs://lake/managed/gold/t-{_HEX}",
+            f"abfss://Lake@account.dfs.core.windows.net/managed/gold/t-{_HEX}",
+        ),
+        ("file:///data/managed/caf\u00e9/t", "file:///data/managed/cafe\u0301/t"),
+        ("file:///data/managed/gold/t", "FILE:///data/./managed/gold//t/"),
+    ],
+)
+def test_two_spellings_of_one_place_are_compared_as_one(
+    session: Session, catalog: CatalogService, target: str, other: str
+) -> None:
+    """Case, aliases, doubled slashes, ``..``, double escapes, accounts, Unicode forms."""
+    from lakana_core.catalog.locations import Nearby, near_other_location
+
+    root = target.split("/managed/", 1)[0]
+    _claim(session, other, state=TableLocationState.LIVE)
+
+    assert near_other_location(session, target, root=root) == Nearby(other, environment_root=False)
+
+
+def test_places_that_only_look_alike_are_not_compared_as_one(
+    session: Session, catalog: CatalogService
+) -> None:
+    """Another bucket, another scheme, a sibling sharing a prefix: nothing is kept for them."""
+    from lakana_core.catalog.locations import near_other_location
+
+    target = f"s3://bucket/managed/gold/t-{_HEX}"
+    for other in (
+        f"s3://other/managed/gold/t-{_HEX}",
+        f"gs://bucket/managed/gold/t-{_HEX}",
+        f"s3://bucket/managed/gold/t-{_HEX}2",
+    ):
+        _claim(session, other, state=TableLocationState.LIVE)
+    assert near_other_location(session, target, root="s3://bucket") is None

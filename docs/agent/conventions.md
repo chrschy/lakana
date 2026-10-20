@@ -311,11 +311,12 @@ or its documentation is not ready to merge.
 ## Names
 
 A namespace component or table name must be non-empty, not whitespace-only, and must not
-contain `.`, `/`, a NUL byte, or the unit separator (`validate_path_component`). The `.`
+contain `.`, `/`, `%`, a NUL byte, or the unit separator (`validate_path_component`; `%` because a
+storage may decode `%41` to `A`, so two names would share a directory). The `.`
 rule keeps the dotted display form (`gold.sales`) unambiguous: `["a.b"]` and
 `["a", "b"]` would otherwise render identically.
 
-Names created before that rule may contain a dot. They stay readable, listable, droppable
+Names created before those rules may contain a dot or a `%`. They stay readable, listable, droppable
 and renamable *away*, and are **deprecated**: only creating a name, or renaming *to* one,
 is refused. So `NamespacePath.parse` (stored and URL-encoded names) and
 `from_parts(..., allow_dots=True)` (Iceberg REST create/rename bodies, which may sit under
