@@ -32,6 +32,10 @@ _EXPECTED = {
 }
 
 
+_CI_AUTH = [[], ["--ci-auth", "pat"]]
+"""The CI files `lakana init` writes by default (with OIDC), and the ones with a stored token."""
+
+
 def _files(root: Path) -> set[str]:
     """List every file under `root`, relative and POSIX.
 
@@ -152,9 +156,9 @@ def test_the_sample_files_are_the_ones_the_tutorial_shows() -> None:
 
 
 def test_ci_templates_separate_dev_and_prod_credentials(tmp_path: Path) -> None:
-    """PR dry-runs use a dev-only token; prod deploys run in the `prod` environment."""
+    """With stored tokens, PR dry-runs use a dev-only token; prod deploys run in `prod`."""
     target = tmp_path / "analytics"
-    invoke(make_state(tmp_path, FakeApi()), "init", str(target))
+    invoke(make_state(tmp_path, FakeApi()), "init", str(target), "--ci-auth", "pat")
     workflow = target / ".github" / "workflows" / "lakana-deploy.yml"
     text = workflow.read_text()
     github = yaml.safe_load(text)
@@ -257,8 +261,9 @@ def test_default_directory_is_the_current_one(
     assert (tmp_path / "demo" / "lakana.yaml").is_file()
 
 
+@pytest.mark.parametrize("ci_auth", _CI_AUTH)
 def test_generated_project_pins_the_cli_s_own_version(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ci_auth: list[str]
 ) -> None:
     """Every install pins the CLI's version and names its one index, never a bare install.
 
@@ -268,7 +273,7 @@ def test_generated_project_pins_the_cli_s_own_version(
     """
     monkeypatch.setattr("lakana.cli.project_init.__version__", "1.2.3")
     target = tmp_path / "analytics"
-    invoke(make_state(tmp_path, FakeApi()), "init", str(target))
+    invoke(make_state(tmp_path, FakeApi()), "init", str(target), *ci_auth)
     pyproject = (target / "pyproject.toml").read_text()
     # The template depends on no package: a SQL-only project needs no lock.
     assert "dependencies = []" in pyproject
@@ -325,7 +330,7 @@ def test_the_install_line_uses_pypi_unless_an_index_is_set(tmp_path: Path) -> No
 def test_gitlab_prod_token_has_its_own_variable_name(tmp_path: Path) -> None:
     """A project variable named LAKANA_TOKEN would override the dry-run's job-level mapping."""
     target = tmp_path / "analytics"
-    invoke(make_state(tmp_path, FakeApi()), "init", str(target))
+    invoke(make_state(tmp_path, FakeApi()), "init", str(target), "--ci-auth", "pat")
     text = (target / ".gitlab-ci.yml").read_text()
     gitlab = yaml.safe_load(text)
     assert gitlab["lakana-dry-run"]["variables"] == {"LAKANA_TOKEN": "$LAKANA_TOKEN_DEV"}
@@ -333,10 +338,11 @@ def test_gitlab_prod_token_has_its_own_variable_name(tmp_path: Path) -> None:
     assert "LAKANA_TOKEN_PROD (masked AND protected" in text
 
 
-def test_every_generated_deploy_has_a_timeout(tmp_path: Path) -> None:
+@pytest.mark.parametrize("ci_auth", _CI_AUTH)
+def test_every_generated_deploy_has_a_timeout(tmp_path: Path, ci_auth: list[str]) -> None:
     """A worker crash mid-deploy must not hang the CI job until the runner's own limit."""
     target = tmp_path / "analytics"
-    invoke(make_state(tmp_path, FakeApi()), "init", str(target))
+    invoke(make_state(tmp_path, FakeApi()), "init", str(target), *ci_auth)
     github = yaml.safe_load((target / ".github" / "workflows" / "lakana-deploy.yml").read_text())
     gitlab = yaml.safe_load((target / ".gitlab-ci.yml").read_text())
     deploys = [
@@ -518,13 +524,16 @@ def test_init_is_quiet_for_a_release_build(
     assert "Note:" not in result.output
 
 
-def test_ci_templates_pin_every_action_to_a_full_commit_sha(tmp_path: Path) -> None:
+@pytest.mark.parametrize("ci_auth", _CI_AUTH)
+def test_ci_templates_pin_every_action_to_a_full_commit_sha(
+    tmp_path: Path, ci_auth: list[str]
+) -> None:
     """A mutable `@v4` tag in a job holding the prod token is a supply-chain hole.
 
     Each `uses:` names a 40-hex commit with the release it stands for in a trailing comment.
     """
     target = tmp_path / "analytics"
-    invoke(make_state(tmp_path, FakeApi()), "init", str(target))
+    invoke(make_state(tmp_path, FakeApi()), "init", str(target), *ci_auth)
     text = (target / ".github" / "workflows" / "lakana-deploy.yml").read_text()
     uses = [line.strip() for line in text.splitlines() if "uses:" in line]
     assert uses
@@ -571,12 +580,15 @@ def test_following_the_pyproject_instructions_gives_a_valid_file(tmp_path: Path)
     assert "uv" not in parsed.get("tool", {})
 
 
-def test_ci_templates_run_the_python_of_the_repository_default(tmp_path: Path) -> None:
+@pytest.mark.parametrize("ci_auth", _CI_AUTH)
+def test_ci_templates_run_the_python_of_the_repository_default(
+    tmp_path: Path, ci_auth: list[str]
+) -> None:
     """Both CI files name the Python that `.python-version` names, so the two cannot drift."""
     default = (Path(__file__).parents[4] / ".python-version").read_text().strip()
     assert re.fullmatch(r"3\.\d+", default), default
     target = tmp_path / "analytics"
-    invoke(make_state(tmp_path, FakeApi()), "init", str(target))
+    invoke(make_state(tmp_path, FakeApi()), "init", str(target), *ci_auth)
     github = yaml.safe_load((target / ".github" / "workflows" / "lakana-deploy.yml").read_text())
     versions = [
         step["with"]["python-version"]
@@ -588,3 +600,116 @@ def test_ci_templates_run_the_python_of_the_repository_default(tmp_path: Path) -
     gitlab = yaml.safe_load((target / ".gitlab-ci.yml").read_text())
     for job in ("lakana-dry-run", "lakana-deploy"):
         assert gitlab[job]["image"] == f"python:{default}-slim"
+
+
+def _generate(tmp_path: Path, *args: str) -> tuple[str, str]:
+    """Run `lakana init` for the repository `analytics` and read both CI files.
+
+    Parameters
+    ----------
+    tmp_path
+        Pytest's per-test directory.
+    *args
+        More options.
+
+    Returns
+    -------
+    tuple of str
+        The GitHub workflow and the GitLab file.
+    """
+    target = tmp_path / "analytics"
+    result = invoke(make_state(tmp_path, FakeApi()), "init", str(target), *args)
+    assert result.exit_code == 0, result.output
+    return (
+        (target / ".github" / "workflows" / "lakana-deploy.yml").read_text(),
+        (target / ".gitlab-ci.yml").read_text(),
+    )
+
+
+def test_ci_templates_deploy_with_the_jobs_id_token_by_default(tmp_path: Path) -> None:
+    """No stored token: each job may request an ID token and names its provider."""
+    github_text, gitlab_text = _generate(tmp_path)
+    github = yaml.safe_load(github_text)
+    assert github["permissions"] == {"contents": "read"}
+    dry, deploy = github["jobs"]["dry-run"], github["jobs"]["deploy"]
+    for job in (dry, deploy):
+        assert job["permissions"] == {"contents": "read", "id-token": "write"}
+        assert job["env"]["LAKANA_OIDC"] == "github"
+        assert job["env"]["LAKANA_URL"] == "${{ vars.LAKANA_URL }}"
+        assert "LAKANA_TOKEN" not in job["env"]
+    assert (dry["environment"], deploy["environment"]) == ("lakana-dry-run", "prod")
+    assert "head.repo.full_name == github.repository" in dry["if"]
+    gitlab = yaml.safe_load(gitlab_text)
+    for name, environment in (("lakana-dry-run", "lakana-dry-run"), ("lakana-deploy", "prod")):
+        job = gitlab[name]
+        assert job["id_tokens"] == {"LAKANA_OIDC_TOKEN": {"aud": "$LAKANA_URL"}}
+        assert job["variables"] == {"LAKANA_OIDC": "gitlab"}
+        assert job["environment"] == environment
+    for text in (github_text, gitlab_text):
+        assert "secrets." not in text
+        assert "  LAKANA_TOKEN:" not in text
+        assert "lakana ci-trust create" in text
+
+
+def test_the_pat_files_are_written_only_when_asked_for(tmp_path: Path) -> None:
+    """`--ci-auth pat` writes the files that read a stored token; an unknown value is refused."""
+    github_text, gitlab_text = _generate(tmp_path, "--ci-auth", "pat")
+    assert "LAKANA_OIDC" not in github_text + gitlab_text
+    assert "id-token" not in github_text and "id_tokens" not in gitlab_text
+    result = invoke(make_state(tmp_path, FakeApi()), "init", str(tmp_path / "x"), "--ci-auth", "x")
+    assert result.exit_code == 2
+
+
+def test_init_says_the_ci_files_need_no_stored_token(tmp_path: Path) -> None:
+    """The closing lines point at the comments; the PAT variant says nothing about it."""
+    oidc = invoke(make_state(tmp_path, FakeApi()), "init", str(tmp_path / "a"))
+    assert "deploy without a stored Lakana token" in " ".join(oidc.stdout.split())
+    pat = invoke(make_state(tmp_path, FakeApi()), "init", str(tmp_path / "b"), "--ci-auth", "pat")
+    assert "without a stored Lakana token" not in " ".join(pat.stdout.split())
+
+
+def test_the_how_tos_show_the_files_init_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The how-tos' CI files under docs/examples are what `lakana init` writes for `analytics`."""
+    monkeypatch.setattr("lakana.cli.project_init.__version__", "<version>")
+    github_text, gitlab_text = _generate(tmp_path)
+    examples = Path(__file__).resolve().parents[4] / "docs" / "examples"
+    assert (examples / "ci-oidc-github-actions.yml").read_text() == github_text
+    assert (examples / "ci-oidc-gitlab-ci.yml").read_text() == gitlab_text
+
+
+def _commands(text: str, prefix: str) -> list[str]:
+    """Collect the `lakana ci-trust create` commands of a text, continuations joined.
+
+    Parameters
+    ----------
+    text
+        A CI file or a shell script.
+    prefix
+        What each line of a command starts with (`#` in a comment, nothing in a script).
+
+    Returns
+    -------
+    list of str
+        One line per command, whitespace collapsed.
+    """
+    lines = [line.removeprefix(prefix).strip() for line in text.splitlines()]
+    joined = " ".join(line if line.endswith("\\") else f"{line}\n" for line in lines)
+    return [
+        " ".join(command.replace("\\", " ").split())
+        for command in joined.splitlines()
+        if command.strip().startswith("lakana ci-trust create")
+    ]
+
+
+def test_the_ci_files_name_the_rules_the_how_tos_create(tmp_path: Path) -> None:
+    """The comment of each CI file holds the `ci-trust create` commands of its how-to."""
+    github_text, gitlab_text = _generate(tmp_path)
+    script = (
+        Path(__file__).resolve().parents[4] / "docs" / "examples" / "ci-trust-rules.sh"
+    ).read_text()
+    documented = _commands(script, "")
+    assert len(documented) == 4
+    assert _commands(github_text, "#") == documented[:2]
+    assert _commands(gitlab_text, "#") == documented[2:]

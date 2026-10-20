@@ -10,7 +10,12 @@ def test_whoami_describes_a_pat_caller(client: TestClient) -> None:
     response = client.get("/api/v1/whoami", headers=AUTH_HEADER)
 
     assert response.status_code == 200, response.text
-    assert response.json() == {"name": "admin", "type": "USER", "task_token": None}
+    assert response.json() == {
+        "name": "admin",
+        "type": "USER",
+        "task_token": None,
+        "ci_token": None,
+    }
 
 
 def test_whoami_describes_a_task_token_callers_scope(client: TestClient) -> None:
@@ -36,6 +41,7 @@ def test_whoami_describes_a_task_token_callers_scope(client: TestClient) -> None
         "name": "admin",
         "type": "USER",
         "task_token": {"environment": "dev", "asset_scope": ["gold.sales"]},
+        "ci_token": None,
     }
 
 

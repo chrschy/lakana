@@ -127,7 +127,21 @@ Each cell is a summary. The page named in the last column has the detail. The ch
 
 ## Notes for the next release
 
-Nothing yet.
+### CI deploys without a stored secret
+
+A GitHub Actions or GitLab CI job can now deploy with its OIDC ID token instead of a stored Lakana
+token: `lakana deploy` exchanges it when the job sets `LAKANA_OIDC=github` or `LAKANA_OIDC=gitlab`,
+under a CI trust rule an administrator creates once. `lakana whoami` and `Client.whoami()` show
+what a CI token may do (`ci_token`), and `Client.from_ci_oidc` does the exchange in Python. See
+[Deploy from GitHub Actions without a stored secret](../how-to/deploy-from-github-actions.md) and
+[Deploy from GitLab CI without a stored secret](../how-to/deploy-from-gitlab-ci.md).
+
+- **Existing CI keeps working.** A workflow or pipeline that reads a stored token
+  (`LAKANA_TOKEN`) needs no change.
+- **`lakana init` writes the CI files without a stored token** by default now. For files that read
+  a stored token, as before, pass `--ci-auth pat`.
+- **Setting both is refused.** A job that sets `LAKANA_TOKEN` and `LAKANA_OIDC` (or
+  `LAKANA_OIDC_TOKEN`) stops with exit 3 and a message naming both: remove one.
 
 ## Notes for 0.17.0
 

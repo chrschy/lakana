@@ -10,6 +10,7 @@ import os
 import re
 import shlex
 import subprocess  # nosec B404 -- `git var` with fixed argv
+from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
 
@@ -21,6 +22,14 @@ from lakana.cli._state import CliError, CliState, is_loopback_url, selected_url,
 from lakana.errors import ConfigError
 
 _NAME = re.compile(r"\A[A-Za-z0-9_-]{1,255}\Z")
+
+
+class CiAuth(StrEnum):
+    """How the generated CI files sign in to Lakana."""
+
+    oidc = "oidc"
+    pat = "pat"
+
 
 _LAKANA_YAML = """\
 # Lakana project. Reference: https://lakana-labs.github.io/lakana/how-to/projects/
@@ -70,17 +79,40 @@ dependencies = []
 dev = ["pytest>=8"]
 """
 
-_GITHUB = """\
-# Deploys main to prod; dry-runs pull requests against dev.
+_GITHUB_PIN = """\
 # lakana is pinned to the CLI version that generated this file and installed from PyPI. To use a
 # mirror or a build you host yourself, set the repository variable LAKANA_INDEX_URL to that
 # index (see https://lakana-labs.github.io/lakana/how-to/projects/).
 # Actions are pinned to full commit SHAs; bump them deliberately (Dependabot understands this form).
-# Repository secret: LAKANA_URL, and LAKANA_TOKEN_DEV for a service principal holding DEPLOY on dev
-# only. Environment secret (GitHub environment "prod", restricted to the main branch and/or
-# required reviewers): LAKANA_TOKEN for a principal holding DEPLOY on prod. A pull request runs
-# the workflow file from its own branch, so never give it the prod token. Fork pull requests
-# get no secrets; their dry-run is skipped.
+"""
+
+_GITHUB_STEPS = """\
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: Install lakana
+        run: |
+          pip install --index-url "${{LAKANA_INDEX_URL:-https://pypi.org/simple}}" \
+"lakana=={version}"
+"""
+
+_GITHUB_DEPLOY_JOB = """\
+      - name: Dry run against dev
+        run: lakana deploy --env dev --ref "$REF_SHA" --dry-run --timeout 1800
+  deploy:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: prod
+"""
+
+_GITHUB_DEPLOY_STEP = """\
+      - name: Deploy to prod
+        run: lakana deploy --env prod --ref "$REF_SHA" --timeout 1800
+"""
+
+_GITHUB_ON = """\
 name: lakana deploy
 on:
   push:
@@ -94,6 +126,79 @@ jobs:
       github.event_name == 'pull_request' &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
+"""
+
+_GITHUB_OIDC = (
+    """\
+# Deploys main to prod; dry-runs pull requests against dev. No Lakana token is stored in GitHub:
+# each job asks GitHub for an OIDC ID token (`id-token: write`) and exchanges it with the Lakana
+# server for a CI token that may queue one dry run, or one deploy of the job's own commit.
+"""
+    + _GITHUB_PIN
+    + """\
+# Repository variable (not a secret): LAKANA_URL, the server's URL. The server's
+# LAKANA_CI_OIDC__AUDIENCE must be the same text (or set LAKANA_OIDC_AUDIENCE in both jobs).
+# GitHub environments: "lakana-dry-run" (no protection rules needed) and "prod" (restrict it to
+# the main branch, and add required reviewers if you want them).
+# Run once, as an instance administrator. ci-dev holds DEPLOY on dev and ci-prod on prod; put
+# your repository's id in place of 123456 (`gh api repos/OWNER/REPO --jq .id` prints it):
+#   lakana ci-trust create --issuer github --principal ci-dev --env dev --repo {repo} \\
+#     --kind dry_run --claim repository_id=123456 --claim environment=lakana-dry-run
+#   lakana ci-trust create --issuer github --principal ci-prod --env prod --repo {repo} \\
+#     --claim repository_id=123456 --claim ref=refs/heads/main \\
+#     --claim event_name=push --claim environment=prod
+# Fork pull requests get no ID token; their dry run is skipped.
+# How-to: https://lakana-labs.github.io/lakana/how-to/deploy-from-github-actions/
+"""
+    + _GITHUB_ON
+    + """\
+    environment: lakana-dry-run
+    permissions:
+      contents: read
+      id-token: write
+    concurrency:
+      group: lakana-deploy-${{{{ github.ref }}}}
+      cancel-in-progress: true
+    env:
+      LAKANA_URL: ${{{{ vars.LAKANA_URL }}}}
+      LAKANA_OIDC: github
+      LAKANA_INDEX_URL: ${{{{ vars.LAKANA_INDEX_URL }}}}
+      REF_SHA: ${{{{ github.event.pull_request.head.sha }}}}
+"""
+    + _GITHUB_STEPS
+    + _GITHUB_DEPLOY_JOB
+    + """\
+    permissions:
+      contents: read
+      id-token: write
+    concurrency:
+      group: lakana-deploy-prod
+      cancel-in-progress: false
+    env:
+      LAKANA_URL: ${{{{ vars.LAKANA_URL }}}}
+      LAKANA_OIDC: github
+      LAKANA_INDEX_URL: ${{{{ vars.LAKANA_INDEX_URL }}}}
+      REF_SHA: ${{{{ github.sha }}}}
+"""
+    + _GITHUB_STEPS
+    + _GITHUB_DEPLOY_STEP
+)
+
+_GITHUB_PAT = (
+    """\
+# Deploys main to prod; dry-runs pull requests against dev.
+"""
+    + _GITHUB_PIN
+    + """\
+# Repository secret: LAKANA_URL, and LAKANA_TOKEN_DEV for a service principal holding DEPLOY on dev
+# only. Environment secret (GitHub environment "prod", restricted to the main branch and/or
+# required reviewers): LAKANA_TOKEN for a principal holding DEPLOY on prod. A pull request runs
+# the workflow file from its own branch, so never give it the prod token. Fork pull requests
+# get no secrets; their dry-run is skipped.
+# Without a stored token: https://lakana-labs.github.io/lakana/how-to/deploy-from-github-actions/
+"""
+    + _GITHUB_ON
+    + """\
     concurrency:
       group: lakana-deploy-${{{{ github.ref }}}}
       cancel-in-progress: true
@@ -102,21 +207,10 @@ jobs:
       LAKANA_TOKEN: ${{{{ secrets.LAKANA_TOKEN_DEV }}}}
       LAKANA_INDEX_URL: ${{{{ vars.LAKANA_INDEX_URL }}}}
       REF_SHA: ${{{{ github.event.pull_request.head.sha }}}}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.14"
-      - name: Install lakana
-        run: |
-          pip install --index-url "${{LAKANA_INDEX_URL:-https://pypi.org/simple}}" \
-"lakana=={version}"
-      - name: Dry run against dev
-        run: lakana deploy --env dev --ref "$REF_SHA" --dry-run --timeout 1800
-  deploy:
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    environment: prod
+"""
+    + _GITHUB_STEPS
+    + _GITHUB_DEPLOY_JOB
+    + """\
     concurrency:
       group: lakana-deploy-prod
       cancel-in-progress: false
@@ -125,28 +219,92 @@ jobs:
       LAKANA_TOKEN: ${{{{ secrets.LAKANA_TOKEN }}}}
       LAKANA_INDEX_URL: ${{{{ vars.LAKANA_INDEX_URL }}}}
       REF_SHA: ${{{{ github.sha }}}}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.14"
-      - name: Install lakana
-        run: |
-          pip install --index-url "${{LAKANA_INDEX_URL:-https://pypi.org/simple}}" \
-"lakana=={version}"
-      - name: Deploy to prod
-        run: lakana deploy --env prod --ref "$REF_SHA" --timeout 1800
 """
+    + _GITHUB_STEPS
+    + _GITHUB_DEPLOY_STEP
+)
 
-_GITLAB = """\
-# Deploys main to prod; dry-runs merge requests against dev.
+_GITLAB_PIN = """\
 # lakana is pinned to the CLI version that generated this file and installed from PyPI. To use a
 # mirror or a build you host yourself, set the CI/CD variable LAKANA_INDEX_URL to that index
 # (see https://lakana-labs.github.io/lakana/how-to/projects/).
+"""
+
+_GITLAB_INSTALL = """\
+    - pip install --index-url "${{LAKANA_INDEX_URL:-https://pypi.org/simple}}" "lakana=={version}"
+"""
+
+_GITLAB_OIDC = (
+    """\
+# Deploys main to prod; dry-runs merge requests against dev. No Lakana token is stored in GitLab:
+# each job declares an OIDC ID token (`id_tokens:`) and exchanges it with the Lakana server for a
+# CI token that may queue one dry run, or one deploy of the job's own commit.
+"""
+    + _GITLAB_PIN
+    + """\
+# CI/CD variable (not a secret): LAKANA_URL, the server's URL. The server's
+# LAKANA_CI_OIDC__AUDIENCE must be the same text (the `aud:` lines below use it).
+# Protect main under Settings > Repository. Never add a variable named LAKANA_TOKEN: next to the
+# ID token, lakana refuses to guess which credential you meant.
+# Run once, as an instance administrator. ci-dev holds DEPLOY on dev and ci-prod on prod; put
+# your project's id in place of 123456 (the number on the project's overview page):
+#   lakana ci-trust create --issuer gitlab --principal ci-dev --env dev --repo {repo} \\
+#     --kind dry_run --claim project_id=123456 --claim environment=lakana-dry-run
+#   lakana ci-trust create --issuer gitlab --principal ci-prod --env prod --repo {repo} \\
+#     --claim project_id=123456 --claim ref=main --claim ref_protected=true \\
+#     --claim environment=prod
+# Each ID token is exchanged once, so each job submits once.
+# How-to: https://lakana-labs.github.io/lakana/how-to/deploy-from-gitlab-ci/
+stages: [deploy]
+
+lakana-dry-run:
+  stage: deploy
+  image: python:3.14-slim
+  environment: lakana-dry-run
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  id_tokens:
+    LAKANA_OIDC_TOKEN:
+      aud: $LAKANA_URL
+  variables:
+    LAKANA_OIDC: gitlab
+  script:
+"""
+    + _GITLAB_INSTALL
+    + """\
+    - lakana deploy --env dev --ref "$CI_COMMIT_SHA" --dry-run --timeout 1800
+
+lakana-deploy:
+  stage: deploy
+  image: python:3.14-slim
+  environment: prod
+  resource_group: lakana-deploy-prod
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+  id_tokens:
+    LAKANA_OIDC_TOKEN:
+      aud: $LAKANA_URL
+  variables:
+    LAKANA_OIDC: gitlab
+  script:
+"""
+    + _GITLAB_INSTALL
+    + """\
+    - lakana deploy --env prod --ref "$CI_COMMIT_SHA" --timeout 1800
+"""
+)
+
+_GITLAB_PAT = (
+    """\
+# Deploys main to prod; dry-runs merge requests against dev.
+"""
+    + _GITLAB_PIN
+    + """\
 # CI/CD variables: LAKANA_URL; LAKANA_TOKEN_DEV (masked) for a service principal holding DEPLOY on
 # dev only; LAKANA_TOKEN_PROD (masked AND protected, so only pipelines on protected branches see
 # it) for a principal holding DEPLOY on prod. Protect only main under Settings > Repository.
 # Never add a project variable named LAKANA_TOKEN: it would override the job mappings below.
+# Without a stored token: https://lakana-labs.github.io/lakana/how-to/deploy-from-gitlab-ci/
 stages: [deploy]
 
 lakana-dry-run:
@@ -157,7 +315,9 @@ lakana-dry-run:
   variables:
     LAKANA_TOKEN: $LAKANA_TOKEN_DEV
   script:
-    - pip install --index-url "${{LAKANA_INDEX_URL:-https://pypi.org/simple}}" "lakana=={version}"
+"""
+    + _GITLAB_INSTALL
+    + """\
     - lakana deploy --env dev --ref "$CI_COMMIT_SHA" --dry-run --timeout 1800
 
 lakana-deploy:
@@ -169,20 +329,31 @@ lakana-deploy:
   variables:
     LAKANA_TOKEN: $LAKANA_TOKEN_PROD
   script:
-    - pip install --index-url "${{LAKANA_INDEX_URL:-https://pypi.org/simple}}" "lakana=={version}"
+"""
+    + _GITLAB_INSTALL
+    + """\
     - lakana deploy --env prod --ref "$CI_COMMIT_SHA" --timeout 1800
 """
+)
+
+_GITHUB_PATH = ".github/workflows/lakana-deploy.yml"
+_GITLAB_PATH = ".gitlab-ci.yml"
 
 TEMPLATES: dict[str, str] = {
     "lakana.yaml": _LAKANA_YAML,
     "tests/test_example.py": _TEST,
     "pyproject.toml": _PYPROJECT,
-    ".github/workflows/lakana-deploy.yml": _GITHUB,
-    ".gitlab-ci.yml": _GITLAB,
+    _GITHUB_PATH: _GITHUB_OIDC,
+    _GITLAB_PATH: _GITLAB_OIDC,
 }
 """Relative path → template; `{repo}` and `{version}` are substituted with `str.format`.
 
-The sample project is separate (`lakana.cli._sample.SAMPLE`) and written verbatim."""
+The CI files deploy with the job's OIDC ID token; `PAT_CI_TEMPLATES` replaces them with ones that
+read a stored token. The sample project is separate (`lakana.cli._sample.SAMPLE`) and written
+verbatim."""
+
+PAT_CI_TEMPLATES: dict[str, str] = {_GITHUB_PATH: _GITHUB_PAT, _GITLAB_PATH: _GITLAB_PAT}
+"""The CI files `lakana init --ci-auth pat` writes instead: they read a stored Lakana token."""
 
 
 def _is_dev_build(version: str) -> bool:
@@ -234,7 +405,9 @@ def _git_lacks_identity(directory: Path) -> bool:
     return False
 
 
-def write_project(directory: Path, repo: str, *, sample: bool = True) -> list[Path]:
+def write_project(
+    directory: Path, repo: str, *, sample: bool = True, ci_auth: str = "oidc"
+) -> list[Path]:
     """Write every template into `directory`, refusing to overwrite anything.
 
     Parameters
@@ -245,6 +418,8 @@ def write_project(directory: Path, repo: str, *, sample: bool = True) -> list[Pa
         The repository name for `lakana.yaml` and `pyproject.toml`.
     sample
         Whether to write the sample assets and check as well.
+    ci_auth
+        ``oidc``: the CI files exchange the job's ID token; ``pat``: they read a stored token.
 
     Returns
     -------
@@ -258,9 +433,10 @@ def write_project(directory: Path, repo: str, *, sample: bool = True) -> list[Pa
         not a directory (nothing is written); exit 3 on a filesystem error
         (files already written are removed).
     """
+    templates = TEMPLATES | (PAT_CI_TEMPLATES if ci_auth == "pat" else {})
     texts = {
         relative: text.format(repo=repo, version=__version__)
-        for relative, text in TEMPLATES.items()
+        for relative, text in templates.items()
     }
     if sample:
         texts.update(SAMPLE)
@@ -324,6 +500,14 @@ def init(
             help="Write a small sample to build and query (default: yes for a local instance).",
         ),
     ] = None,
+    ci_auth: Annotated[
+        CiAuth,
+        typer.Option(
+            "--ci-auth",
+            help="How the CI files sign in: oidc exchanges the CI job's ID token, so nothing "
+            "secret is stored in CI; pat reads a stored Lakana token.",
+        ),
+    ] = CiAuth.oidc,
 ) -> None:
     """Create a Lakana project that deploys unchanged.
 
@@ -338,6 +522,8 @@ def init(
     sample
         `--sample` or `--no-sample`. Left out, the sample is written unless your default
         profile points at an instance on another machine.
+    ci_auth
+        `--ci-auth`: ``oidc`` (the default) or ``pat``.
 
     Raises
     ------
@@ -352,7 +538,7 @@ def init(
         )
     skipped = sample is None and _points_off_this_machine(state_of(ctx))
     with_sample = sample if sample is not None else not skipped
-    write_project(target, name, sample=with_sample)
+    write_project(target, name, sample=with_sample, ci_auth=ci_auth.value)
     setup = [
         f"  cd {shlex.quote(str(target))}",
         "  git init && git add -A && git commit -m 'Initial project'",
@@ -387,6 +573,11 @@ def init(
         "Local repositories must lie under LAKANA_REPO_ROOTS "
         "(local mode allows your home directory)."
     )
+    if ci_auth is CiAuth.oidc:
+        lines.append(
+            "The CI files deploy without a stored Lakana token: the comment at the top of each "
+            "says what to set up once (--ci-auth pat writes files that use a stored token)."
+        )
     if _git_lacks_identity(target):
         lines.append(
             "If 'git commit' says it does not know who you are, set a name and email first: "

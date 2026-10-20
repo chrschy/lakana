@@ -80,6 +80,8 @@ Usage: `lakana deploy [OPTIONS] [repo]`
 
 Deploy REPO to an environment; exit 1 if the deploy fails.
 
+In a CI job, LAKANA_OIDC=github or LAKANA_OIDC=gitlab (or LAKANA_OIDC_TOKEN) exchanges the job's OIDC ID token for a one-deploy CI token instead of reading a stored token.
+
 | Name | Type | Default | Description |
 |---|---|---|---|
 | `REPO` | text | none | Repository name (default: lakana.yaml's repo:). |
@@ -168,6 +170,7 @@ Create a Lakana project that deploys unchanged.
 | `DIRECTORY` | path | `.` | Project directory (default: here). |
 | `--repo` | text | none | Repository name (default: the directory name). |
 | `--sample` / `--no-sample` | flag | none | Write a small sample to build and query (default: yes for a local instance). |
+| `--ci-auth` | one of `oidc`, `pat` | `oidc` | How the CI files sign in: oidc exchanges the CI job's ID token, so nothing secret is stored in CI; pat reads a stored Lakana token. |
 
 ## `lakana profile`
 

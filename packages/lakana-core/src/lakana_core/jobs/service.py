@@ -1127,7 +1127,8 @@ class JobService:
         Raises
         ------
         PermissionDenied
-            Without DEPLOY on the environment (checked first), and always for a CI token.
+            A CI token is always refused, before anything else; any other caller without
+            DEPLOY on the environment (checked first, like pause).
         NotFoundError
             If the environment, repository or job does not exist or is not deployed.
         """

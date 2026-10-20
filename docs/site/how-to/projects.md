@@ -480,6 +480,17 @@ from a laptop; the guarantee holds only while no human holds `ADMIN` there. Use 
 because a pull request runs the workflow file from its own branch: anyone who can push a branch can
 edit it, so whatever token a PR job sees must be worthless on prod.
 
+The CI files `lakana init` writes store no Lakana token at all: each job exchanges its OIDC ID
+token for a CI token that may queue one deploy of the job's own commit, or one dry run, under a
+trust rule an administrator creates once. The set-up is in [Deploy from GitHub Actions without a
+stored secret](deploy-from-github-actions.md) and [Deploy from GitLab CI without a stored
+secret](deploy-from-gitlab-ci.md). The rest of this section holds for both kinds of CI file.
+
+### With a stored token
+
+`lakana init --ci-auth pat` writes CI files that read a stored Lakana token instead, and CI that
+already uses one keeps working. Create the two principals and their tokens:
+
 <!-- not tested: needs a protected `prod` environment and a CI system, which the one-instance examples do not set up -->
 ```bash
 lakana principal create ci-dev  --type service-account
@@ -497,23 +508,8 @@ The deploying principal must be able to read every external input, hence the VIE
 `DEPLOY` is per environment, not per repository: a principal holding it on `prod` can deploy any
 registered repository there.
 
-The generated CI files dry-run pull/merge requests against `dev` with `LAKANA_TOKEN_DEV` and deploy
-`main` to `prod` with the prod token; both read `LAKANA_URL` from CI secrets. Every `lakana deploy`
-in them passes `--timeout 1800`, so a deploy that has not ended after 30 minutes fails the job (exit 1)
-instead of holding it until the runner's own limit.
-
-The job that holds the prod token installs `lakana` from one index, not from whichever index pip
-happens to know. Both CI files install with
-`pip install --index-url "${LAKANA_INDEX_URL:-https://pypi.org/simple}" "lakana==<version>"`:
-from PyPI when the variable `LAKANA_INDEX_URL` is unset or empty. To use a mirror, or a build that
-is not published, set `LAKANA_INDEX_URL` to an index you control that hosts that version of
-`lakana` and mirrors its dependencies. Never switch to `--extra-index-url` next to PyPI: pip
-takes the name from whichever index offers it.
-
-The GitHub workflow pins each action (`actions/checkout`, `actions/setup-python`) to a full commit
-SHA with the release in a trailing `# vX.Y.Z` comment, since a mutable tag in the job that holds
-the prod token is a supply-chain hole; bump them by hand or with Dependabot. The pinned actions run on node24 and need runner
-2.327.1 or newer; older self-hosted and GitHub Enterprise Server runners fail on them.
+These CI files dry-run pull/merge requests against `dev` with `LAKANA_TOKEN_DEV` and deploy
+`main` to `prod` with the prod token; both read `LAKANA_URL` from CI secrets.
 
 - **GitHub:** put `LAKANA_URL` and `LAKANA_TOKEN_DEV` in repository secrets. Only for a mirror, put
   `LAKANA_INDEX_URL` in repository variables (if the URL carries credentials, make it a secret and
@@ -529,11 +525,29 @@ the prod token is a supply-chain hole; bump them by hand or with Dependabot. The
   `LAKANA_TOKEN`, because project variables override a job's `variables:`. The prod job uses a
   `resource_group` so deploys do not race.
 
+### What both kinds of CI file do
+
+Every `lakana deploy` in them passes `--timeout 1800`, so a deploy that has not ended after 30
+minutes fails the job (exit 1) instead of holding it until the runner's own limit.
+
+The job that deploys to prod installs `lakana` from one index, not from whichever index pip
+happens to know. Both CI files install with
+`pip install --index-url "${LAKANA_INDEX_URL:-https://pypi.org/simple}" "lakana==<version>"`:
+from PyPI when the variable `LAKANA_INDEX_URL` is unset or empty. To use a mirror, or a build that
+is not published, set `LAKANA_INDEX_URL` to an index you control that hosts that version of
+`lakana` and mirrors its dependencies. Never switch to `--extra-index-url` next to PyPI: pip
+takes the name from whichever index offers it.
+
+The GitHub workflow pins each action (`actions/checkout`, `actions/setup-python`) to a full commit
+SHA with the release in a trailing `# vX.Y.Z` comment, since a mutable tag in the job that deploys
+to prod is a supply-chain hole; bump them by hand or with Dependabot. The pinned actions run on node24 and need runner
+2.327.1 or newer; older self-hosted and GitHub Enterprise Server runners fail on them.
+
 A DEPLOY-only principal can poll its own deploy run, so `lakana deploy` prints
 `Queued deploy <id>` and then the result; it cannot read manifests, deploy history or orphans
-unless it also holds read access to the environment. Instead of a stored token, a CI job can
-exchange its OIDC ID token for a token that may queue one deploy of the job's own commit: see
-[CI trust rules and CI tokens](../reference/ci-trust-rules.md).
+unless it also holds read access to the environment. A CI token (the files without a stored
+token) may only queue its one run and follow it: see [CI trust rules and CI
+tokens](../reference/ci-trust-rules.md).
 
 ## Run principals
 

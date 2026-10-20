@@ -9,7 +9,9 @@ run, to one environment, and then follow that run. Nothing secret is stored in C
 
 This page lists the exact rules. The operator turns the exchange on with the `LAKANA_CI_OIDC__*`
 settings ([Settings](settings.md)); an administrator manages the rules with `lakana ci-trust`
-([Command line](cli.md)).
+([Command line](cli.md)). The how-tos [Deploy from GitHub Actions without a stored
+secret](../how-to/deploy-from-github-actions.md) and [Deploy from GitLab CI without a stored
+secret](../how-to/deploy-from-gitlab-ci.md) set it up from start to end.
 
 ## The rule
 
@@ -135,7 +137,7 @@ explain` compares a CI job's claims with every rule without any token.
 | Read a deploy run | Only the one it queued. Any other run answers 404, as one that does not exist. |
 | Roll back, undeploy, pause, resume or test a job, read a notification delivery | Refused. |
 | Anything else: read the environment, its deploy history, tables, runs or queries; manage anything | Refused, whatever the service account's own grants allow. |
-| `GET /api/v1/whoami` | Answers with the service account. |
+| `GET /api/v1/whoami` | Answers with the service account, and in `ci_token` what the token may do: `rule_id`, `environment`, `repository`, `kinds`, `sha`, `expires_at` and `used` (whether it has queued its run). Never the token. |
 
 A CI token never widens what its service account may do: the account needs `DEPLOY` on the
 environment, and the deploy itself checks the tables with the account's grants, as any deploy
@@ -161,7 +163,7 @@ within its lifetime, and nothing else.
 | `lakana ci-trust disable` | `client.ci_trust_rules.disable` | `POST /api/v1/ci-trust-rules/{rule_id}/disable` |
 | `lakana ci-trust delete` | `client.ci_trust_rules.delete` | `DELETE /api/v1/ci-trust-rules/{rule_id}` |
 | `lakana ci-trust explain` | `client.ci_trust_rules.explain` | `POST /api/v1/ci-trust-rules/explain` |
-| (none) | `lakana.resources.ci_trust_rules.exchange_id_token` | `POST /api/v1/auth/oidc/token` |
+| `lakana deploy` with `LAKANA_OIDC` or `LAKANA_OIDC_TOKEN` (below) | `lakana.Client.from_ci_oidc`, or `lakana.resources.ci_trust_rules.exchange_id_token` | `POST /api/v1/auth/oidc/token` |
 
 Every rule route needs the `ADMIN` role on the instance: a rule lets a CI job act as a service
 account, which is the same as issuing that account a token. `explain` takes the decoded claims of
@@ -183,6 +185,33 @@ the repository:
 
 It answers with a verdict (`accepted by rule …` or `refused: …`), the ids of the matching rules,
 and for every rule the reasons it does not match. It records nothing and issues nothing.
+
+## In the CI job
+
+`lakana deploy` (with or without `--dry-run`) exchanges the job's ID token instead of reading a
+stored token when one of these is set:
+
+| Variable | Meaning |
+|---|---|
+| `LAKANA_OIDC` | `github`: ask the GitHub Actions runner for a new ID token (the job needs `permissions: id-token: write`). `gitlab`: read it from `LAKANA_OIDC_TOKEN`, which the job's `id_tokens:` entry of that name sets. Any other value is refused. |
+| `LAKANA_OIDC_TOKEN` | The ID token itself. Without `LAKANA_OIDC`, it is exchanged as it is. |
+| `LAKANA_OIDC_AUDIENCE` | The audience to ask GitHub for; `LAKANA_URL` by default. It must equal `LAKANA_CI_OIDC__AUDIENCE`. |
+| `LAKANA_URL` | The server, as always. It is required: there is no profile in a CI job. |
+
+- `LAKANA_TOKEN` set as well is refused (exit 3): which credential is meant is not guessed.
+- Any other command refuses to run with `LAKANA_OIDC` set, since a CI token may do nothing else.
+- Each `lakana deploy` makes one exchange, so a dry run followed by a deploy makes two. On GitHub
+  each gets a new ID token from the runner. On GitLab a job gets each ID token it declares once:
+  declare a second one for a second submission, or use a second job.
+- Before it submits, `lakana deploy` prints on standard error the account, the kinds, the
+  repository, the commit, the environment and the expiry of the CI token, never the token.
+- The ID token and the CI token stay in the process's memory: they are never written to a file,
+  a log, an error message or a `repr`.
+
+`Client.from_ci_oidc(url, *, environment, repository, provider=None, id_token=None,
+audience=None)` does the same in Python and returns a client holding the CI token; `id_token`
+wins over `provider`, and `provider=None` reads `LAKANA_OIDC`. Its `ci_token` attribute describes
+the token without showing it.
 
 ## Audit events
 

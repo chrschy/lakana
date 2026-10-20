@@ -1,0 +1,80 @@
+# Deploys main to prod; dry-runs pull requests against dev. No Lakana token is stored in GitHub:
+# each job asks GitHub for an OIDC ID token (`id-token: write`) and exchanges it with the Lakana
+# server for a CI token that may queue one dry run, or one deploy of the job's own commit.
+# lakana is pinned to the CLI version that generated this file and installed from PyPI. To use a
+# mirror or a build you host yourself, set the repository variable LAKANA_INDEX_URL to that
+# index (see https://lakana-labs.github.io/lakana/how-to/projects/).
+# Actions are pinned to full commit SHAs; bump them deliberately (Dependabot understands this form).
+# Repository variable (not a secret): LAKANA_URL, the server's URL. The server's
+# LAKANA_CI_OIDC__AUDIENCE must be the same text (or set LAKANA_OIDC_AUDIENCE in both jobs).
+# GitHub environments: "lakana-dry-run" (no protection rules needed) and "prod" (restrict it to
+# the main branch, and add required reviewers if you want them).
+# Run once, as an instance administrator. ci-dev holds DEPLOY on dev and ci-prod on prod; put
+# your repository's id in place of 123456 (`gh api repos/OWNER/REPO --jq .id` prints it):
+#   lakana ci-trust create --issuer github --principal ci-dev --env dev --repo analytics \
+#     --kind dry_run --claim repository_id=123456 --claim environment=lakana-dry-run
+#   lakana ci-trust create --issuer github --principal ci-prod --env prod --repo analytics \
+#     --claim repository_id=123456 --claim ref=refs/heads/main \
+#     --claim event_name=push --claim environment=prod
+# Fork pull requests get no ID token; their dry run is skipped.
+# How-to: https://lakana-labs.github.io/lakana/how-to/deploy-from-github-actions/
+name: lakana deploy
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  dry-run:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    environment: lakana-dry-run
+    permissions:
+      contents: read
+      id-token: write
+    concurrency:
+      group: lakana-deploy-${{ github.ref }}
+      cancel-in-progress: true
+    env:
+      LAKANA_URL: ${{ vars.LAKANA_URL }}
+      LAKANA_OIDC: github
+      LAKANA_INDEX_URL: ${{ vars.LAKANA_INDEX_URL }}
+      REF_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: Install lakana
+        run: |
+          pip install --index-url "${LAKANA_INDEX_URL:-https://pypi.org/simple}" "lakana==<version>"
+      - name: Dry run against dev
+        run: lakana deploy --env dev --ref "$REF_SHA" --dry-run --timeout 1800
+  deploy:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: prod
+    permissions:
+      contents: read
+      id-token: write
+    concurrency:
+      group: lakana-deploy-prod
+      cancel-in-progress: false
+    env:
+      LAKANA_URL: ${{ vars.LAKANA_URL }}
+      LAKANA_OIDC: github
+      LAKANA_INDEX_URL: ${{ vars.LAKANA_INDEX_URL }}
+      REF_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: Install lakana
+        run: |
+          pip install --index-url "${LAKANA_INDEX_URL:-https://pypi.org/simple}" "lakana==<version>"
+      - name: Deploy to prod
+        run: lakana deploy --env prod --ref "$REF_SHA" --timeout 1800

@@ -207,6 +207,14 @@ never merged, so a source that sets one of `url`/`token` must set both:
 
 If none of these resolves a URL and token, `Client(...)` raises `lakana.ConfigError`.
 
+In a GitHub Actions or GitLab CI job, `Client.from_ci_oidc(url, *, environment, repository,
+provider=None, id_token=None)` needs no stored token: it exchanges the job's OIDC ID token for a
+CI token that may queue one deploy of the job's commit, or one dry run. `provider="github"` asks
+the runner for a new ID token, `"gitlab"` reads `LAKANA_OIDC_TOKEN`, and `None` reads
+`LAKANA_OIDC`; build one client per submission. See
+<https://lakana-labs.github.io/lakana/how-to/deploy-from-github-actions/> and
+<https://lakana-labs.github.io/lakana/how-to/deploy-from-gitlab-ci/>.
+
 `http_client` accepts any `httpx.Client`-compatible object in place of one the SDK builds
 itself — useful for tests (see `lakana-server`'s own SDK end-to-end tests, which pass a
 Starlette `TestClient` this way).
@@ -293,8 +301,11 @@ lakana search orders --kind column --limit 10 [--offset N]  # tables, columns, d
 - Concurrent `lakana login` / `lakana profile` runs are safe: each update of the profile file
   holds an exclusive lock (`config.toml.lock`, next to it) for its whole read-modify-write, and
   gives up after 10 s if another process holds it. Reads never wait.
-- There is no `--token` option. For CI, use `LAKANA_URL`/`LAKANA_TOKEN`, or
-  `lakana login --url URL --token-stdin`.
+- There is no `--token` option. For CI, set `LAKANA_URL` and `LAKANA_OIDC=github` or
+  `LAKANA_OIDC=gitlab`: `lakana deploy` then exchanges the job's ID token, and no token is
+  stored. With a stored token, use `LAKANA_URL`/`LAKANA_TOKEN`, or
+  `lakana login --url URL --token-stdin`; setting `LAKANA_TOKEN` and `LAKANA_OIDC` together is
+  refused.
 - Destructive commands ask first; `--yes` skips the prompt, and without a terminal they
   refuse unless `--yes` is given.
 

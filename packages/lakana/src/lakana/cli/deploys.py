@@ -259,6 +259,9 @@ def deploy(
 ) -> None:
     """Deploy REPO to an environment; exit 1 if the deploy fails.
 
+    In a CI job, LAKANA_OIDC=github or LAKANA_OIDC=gitlab (or LAKANA_OIDC_TOKEN) exchanges the
+    job's OIDC ID token for a one-deploy CI token instead of reading a stored token.
+
     Parameters
     ----------
     ctx
@@ -288,6 +291,7 @@ def deploy(
     repository = resolve_repository(repo)
     try:
         environment = resolve_environment(state, env)
+        state.use_ci_oidc(environment, repository)
         _warn_if_dirty(state, repository)
         client = state.client()
         accepted = client.deploys.create(

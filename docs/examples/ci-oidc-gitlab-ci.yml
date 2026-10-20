@@ -1,0 +1,51 @@
+# Deploys main to prod; dry-runs merge requests against dev. No Lakana token is stored in GitLab:
+# each job declares an OIDC ID token (`id_tokens:`) and exchanges it with the Lakana server for a
+# CI token that may queue one dry run, or one deploy of the job's own commit.
+# lakana is pinned to the CLI version that generated this file and installed from PyPI. To use a
+# mirror or a build you host yourself, set the CI/CD variable LAKANA_INDEX_URL to that index
+# (see https://lakana-labs.github.io/lakana/how-to/projects/).
+# CI/CD variable (not a secret): LAKANA_URL, the server's URL. The server's
+# LAKANA_CI_OIDC__AUDIENCE must be the same text (the `aud:` lines below use it).
+# Protect main under Settings > Repository. Never add a variable named LAKANA_TOKEN: next to the
+# ID token, lakana refuses to guess which credential you meant.
+# Run once, as an instance administrator. ci-dev holds DEPLOY on dev and ci-prod on prod; put
+# your project's id in place of 123456 (the number on the project's overview page):
+#   lakana ci-trust create --issuer gitlab --principal ci-dev --env dev --repo analytics \
+#     --kind dry_run --claim project_id=123456 --claim environment=lakana-dry-run
+#   lakana ci-trust create --issuer gitlab --principal ci-prod --env prod --repo analytics \
+#     --claim project_id=123456 --claim ref=main --claim ref_protected=true \
+#     --claim environment=prod
+# Each ID token is exchanged once, so each job submits once.
+# How-to: https://lakana-labs.github.io/lakana/how-to/deploy-from-gitlab-ci/
+stages: [deploy]
+
+lakana-dry-run:
+  stage: deploy
+  image: python:3.14-slim
+  environment: lakana-dry-run
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  id_tokens:
+    LAKANA_OIDC_TOKEN:
+      aud: $LAKANA_URL
+  variables:
+    LAKANA_OIDC: gitlab
+  script:
+    - pip install --index-url "${LAKANA_INDEX_URL:-https://pypi.org/simple}" "lakana==<version>"
+    - lakana deploy --env dev --ref "$CI_COMMIT_SHA" --dry-run --timeout 1800
+
+lakana-deploy:
+  stage: deploy
+  image: python:3.14-slim
+  environment: prod
+  resource_group: lakana-deploy-prod
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+  id_tokens:
+    LAKANA_OIDC_TOKEN:
+      aud: $LAKANA_URL
+  variables:
+    LAKANA_OIDC: gitlab
+  script:
+    - pip install --index-url "${LAKANA_INDEX_URL:-https://pypi.org/simple}" "lakana==<version>"
+    - lakana deploy --env prod --ref "$CI_COMMIT_SHA" --timeout 1800
