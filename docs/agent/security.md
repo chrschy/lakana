@@ -3873,7 +3873,13 @@ User documentation: `docs/site/reference/ci-trust-rules.md`. Threat model: "CI O
   repository (all by id; issuer, environment and repository never change), kinds (`deploy`,
   `dry_run`; never rollback or undeploy), exact-match claim conditions. Required: the numeric id
   claim (`id_claim`: `repository_id` for `GITHUB_ISSUER`, `project_id` for every other issuer,
-  which the settings only accept as GitLab), digits only, and `ref` or `environment`. Reserved
+  which the settings only accept as GitLab), digits only, `ref` or `environment`, and one claim of
+  `trigger_claims` (decided 2026-10-20): `event_name` or `environment` for GitHub (a
+  `pull_request_target` run has the base branch as `ref`), `ref_protected`, `pipeline_source` or
+  `environment` for GitLab (a fork's merge request pipeline in the parent project carries the
+  fork's branch name, unprotected). `update` and `enable` check the stored conditions again;
+  `rule_problem` makes a stored rule that fails them match no exchange and appear in `explain` as
+  not allowed. Reserved
   claims (`iss`, `aud`, `exp`, `iat`, `nbf`, `jti`), more than 16 conditions, a non-text value,
   an empty one, one over 255 characters or with a control character are refused.
   `CiTrustRuleService` has eight call sites of `authorize_admin_only(..., MANAGE_TOKEN)` (a rule

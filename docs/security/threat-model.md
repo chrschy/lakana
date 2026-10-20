@@ -355,9 +355,12 @@ OIDC exchange and CI tokens (#15)"; the user's view is
 ### Residuals, stated as such
 
 1. **The rule is the trust decision.** Whoever can push to the pinned ref (or run a workflow in
-   the pinned environment) can deploy. A GitHub `pull_request_target` run gets an ID token for the
-   base branch; a rule that pins only `ref` accepts it (its `sha` is the base branch's commit, so a
-   deploy deploys that commit). Pin `event_name` or an environment with protection rules.
+   the pinned environment) can deploy. A ref alone does not say how a run was started (a GitHub
+   `pull_request_target` run gets an ID token for the base branch; a GitLab fork merge request
+   pipeline run in the parent project carries the fork's branch name), so every rule must also pin
+   the trigger: `event_name` or `environment` on GitHub, `ref_protected`, `pipeline_source` or
+   `environment` on GitLab (decided 2026-10-20). What remains is the choice of those values: a
+   rule that pins `event_name=pull_request_target` accepts such runs.
 2. **A dry run is not pinned to the commit** (design decision Q3): a CI token for a rule that
    allows `dry_run` can dry-run any branch or tag of its repository and read the diff.
 3. **The Lakana repository's URL is not compared with the ID token.** The rule binds the

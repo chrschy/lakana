@@ -130,7 +130,7 @@ def ci(session: Session, tmp_path: Path) -> Ci:
         environment_id=env.id,
         repository_id=repo.id,
         kinds=["deploy", "dry_run"],
-        conditions={"repository_id": "1", "ref": "refs/heads/main"},
+        conditions={"repository_id": "1", "ref": "refs/heads/main", "event_name": "push"},
         enabled=True,
         revision=1,
         created_at=now,

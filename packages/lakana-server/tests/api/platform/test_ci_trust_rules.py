@@ -21,7 +21,7 @@ _RULE = {
     "principal": "deployer",
     "environment": "prod",
     "repository": "analytics",
-    "conditions": {"repository_id": "123456", "ref": "refs/heads/main"},
+    "conditions": {"repository_id": "123456", "ref": "refs/heads/main", "event_name": "push"},
 }
 
 
@@ -82,9 +82,10 @@ def test_create_list_show_update_enable_disable_delete(rules_client: TestClient)
 
 def test_a_rule_without_the_numeric_id_or_a_ref_is_a_422(rules_client: TestClient) -> None:
     for conditions, needle in (
-        ({"ref": "refs/heads/main"}, "repository_id"),
+        ({"ref": "refs/heads/main", "event_name": "push"}, "repository_id"),
         ({"repository_id": "1"}, "ref or environment"),
-        ({"repository_id": 1, "ref": "refs/heads/main"}, "string"),
+        ({"repository_id": "1", "ref": "refs/heads/main"}, "--claim event_name=push"),
+        ({"repository_id": 1, "ref": "refs/heads/main", "event_name": "push"}, "string"),
     ):
         response = rules_client.post(
             _RULES, headers=AUTH_HEADER, json={**_RULE, "conditions": conditions}
@@ -122,6 +123,7 @@ def test_explain_answers_without_a_token(rules_client: TestClient) -> None:
         "iss": GITHUB_ISSUER,
         "repository_id": "123456",
         "ref": "refs/heads/feature",
+        "event_name": "push",
         "sha": "0" * 40,
     }
     report = rules_client.post(

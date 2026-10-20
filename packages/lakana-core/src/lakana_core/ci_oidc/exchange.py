@@ -46,7 +46,7 @@ from sqlalchemy.orm import Session
 from lakana_core.audit.service import AuditService
 from lakana_core.auth import CiScope, PrincipalRef, Securable
 from lakana_core.ci_oidc.errors import IdTokenRefused
-from lakana_core.ci_oidc.rules import condition_mismatches, valid_sha
+from lakana_core.ci_oidc.rules import condition_mismatches, rule_problem, valid_sha
 from lakana_core.ci_oidc.verification import (
     CLOCK_SKEW_SECONDS,
     MAX_TOKEN_BYTES,
@@ -563,8 +563,12 @@ class CiTokenService:
             )
             .order_by(CiTrustRule.created_at, CiTrustRule.id)
         ).scalars()
+        # A rule the current requirements refuse (one written by an earlier build) never matches.
         matching = [
-            rule for rule in candidates if not condition_mismatches(rule.conditions, claims)
+            rule
+            for rule in candidates
+            if rule_problem(rule.issuer, rule.conditions) is None
+            and not condition_mismatches(rule.conditions, claims)
         ]
         if not matching:
             raise self._refused(ExchangeRefusal.NO_RULE, **refusal, jti_sha256=digest)

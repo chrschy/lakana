@@ -84,7 +84,7 @@ def test_rule_lifecycle_explain_and_exchange(admin: lakana.Client, ci_server: Te
         principal="deployer",
         environment="prod",
         repository="analytics",
-        conditions={"repository_id": "123456", "ref": "refs/heads/main"},
+        conditions={"repository_id": "123456", "ref": "refs/heads/main", "event_name": "push"},
     )
     assert (rule.issuer, rule.kinds, rule.enabled) == (GITHUB_ISSUER, ["deploy"], True)
     assert [r.id for r in admin.ci_trust_rules.list()] == [rule.id]
@@ -127,7 +127,7 @@ def test_refusals_map_to_sdk_errors(admin: lakana.Client, ci_server: TestClient)
             principal="deployer",
             environment="prod",
             repository="analytics",
-            conditions={"ref": "refs/heads/main"},
+            conditions={"ref": "refs/heads/main", "event_name": "push"},
         )
     with pytest.raises(PermissionDenied, match="ci-trust explain"):
         exchange_id_token(

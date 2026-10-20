@@ -1435,7 +1435,7 @@ Create a CI trust rule.
 | `--env` | text | required | The environment CI may deploy to. |
 | `--repo` | text | required | The registered repository CI may deploy. |
 | `--principal` | text | required | The service account the CI job acts as; it needs DEPLOY. |
-| `--claim` | text, repeatable | required | NAME=VALUE the ID token's claim must equal exactly (repeatable). Must include repository_id (GitHub) or project_id (GitLab), and ref or environment. |
+| `--claim` | text, repeatable | required | NAME=VALUE the ID token's claim must equal exactly (repeatable). Must include repository_id (GitHub) or project_id (GitLab), ref or environment, and how the run was started: event_name or environment (GitHub); ref_protected, pipeline_source or environment (GitLab). |
 | `--kind` | text, repeatable | none | deploy (the default) or dry_run; repeat for both. |
 
 ### `lakana ci-trust list`

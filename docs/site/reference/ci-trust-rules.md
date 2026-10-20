@@ -40,13 +40,25 @@ the service account deletes the rule.
 - A rule must also pin `ref` or `environment`, so that not every branch may deploy. On GitHub
   `ref` is `refs/heads/main`; on GitLab it is `main`. `environment` is the CI environment the job
   runs in (a GitHub environment, a GitLab environment).
+- A rule must also pin **how the run was started**, because a ref alone does not say who started
+  it:
+  - **GitHub:** `event_name` (for example `push`) or `environment`. A `pull_request_target` run,
+    which a pull request from a fork starts, gets an ID token whose `ref` is the base branch.
+  - **GitLab:** `ref_protected` (`true`), `pipeline_source` (for example `push`) or
+    `environment`. A merge request pipeline of a fork that runs in your project carries the
+    fork's branch name as its `ref`, which can be `main` too; it is not protected.
+
+  An `environment` condition counts for both, since the environment's protection rules on GitHub
+  or GitLab decide which runs may use it. A rule without one is refused with a message that
+  names the condition to add, such as `--claim event_name=push` or
+  `--claim environment=production`.
 - At most 16 conditions. A claim name is lower-case letters, digits and underscores, starting with
   a letter, at most 64 characters. A value is 1 to 255 characters without a control character.
 - `iss`, `aud`, `exp`, `iat`, `nbf` and `jti` cannot be conditions: the server checks them for every
   ID token, or they differ for each one.
 
-A condition on the trigger narrows a rule further, for example `event_name` `push` on GitHub (a
-`pull_request_target` run gets an ID token for the base branch) or `ref_protected` `true` on GitLab.
+A rule stored before this requirement (only an unreleased build could write one) matches no ID
+token, cannot be enabled or changed until its conditions are fixed, and `explain` says so.
 
 ### Changing a rule
 

@@ -92,6 +92,7 @@ def _claims(**changes: object) -> dict[str, object]:
         "exp": now + 290,
         "repository_id": "123456",
         "ref": "refs/heads/main",
+        "event_name": "push",
         "sha": SHA,
     }
     base.update(changes)
@@ -206,7 +207,11 @@ def _setup(client: TestClient) -> str:
             "environment": "prod",
             "repository": "analytics",
             "kinds": ["deploy", "dry_run"],
-            "conditions": {"repository_id": "123456", "ref": "refs/heads/main"},
+            "conditions": {
+                "repository_id": "123456",
+                "ref": "refs/heads/main",
+                "event_name": "push",
+            },
         },
     )
     assert created.status_code == 201, created.text

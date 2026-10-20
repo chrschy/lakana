@@ -12,7 +12,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from lakana_core.ci_oidc.config import GITLAB_ISSUER
-from lakana_core.ci_oidc.rules import CiTrustRuleService, condition_mismatches, id_claim
+from lakana_core.ci_oidc.rules import (
+    CiTrustRuleService,
+    CiTrustRuleView,
+    condition_mismatches,
+    id_claim,
+)
 from lakana_core.errors import NotFoundError, PermissionDenied, ValidationError
 from lakana_core.grants.authorization import GrantAuthorization
 from lakana_core.models import AuditEvent, AuditEventType, CiTrustRule, Principal, PrincipalType
@@ -69,7 +74,7 @@ def test_an_administrator_creates_a_rule_bound_to_ids_and_it_is_audited(
         environment="prod",
         repository="analytics",
         kinds=["dry_run", "deploy", "deploy"],
-        conditions={"repository_id": "123456", "ref": "refs/heads/main"},
+        conditions={"repository_id": "123456", "ref": "refs/heads/main", "event_name": "push"},
     )
     assert (view.issuer, view.principal, view.environment, view.repository) == (
         ISSUER,
@@ -84,7 +89,11 @@ def test_an_administrator_creates_a_rule_bound_to_ids_and_it_is_audited(
     (event,) = _events(session, AuditEventType.CI_TRUST_RULE_CREATED)
     assert event.principal_id == world.admin.id
     assert event.detail["rule_id"] == str(view.id)
-    assert event.detail["conditions"] == {"repository_id": "123456", "ref": "refs/heads/main"}
+    assert event.detail["conditions"] == {
+        "repository_id": "123456",
+        "ref": "refs/heads/main",
+        "event_name": "push",
+    }
     assert event.securable_environment == "prod"
 
 
@@ -100,7 +109,7 @@ def test_only_an_instance_administrator_manages_rules(session: Session, world: C
             environment="prod",
             repository="analytics",
             kinds=["deploy"],
-            conditions={"repository_id": "1", "ref": "refs/heads/main"},
+            conditions={"repository_id": "1", "ref": "refs/heads/main", "event_name": "push"},
         ),
         lambda: service.list(stranger),
         lambda: service.get(stranger, rule_id),
@@ -123,10 +132,10 @@ def test_only_an_instance_administrator_manages_rules(session: Session, world: C
 @pytest.mark.parametrize(
     ("conditions", "needle"),
     [
-        ({"ref": "refs/heads/main"}, "repository_id"),
+        ({"ref": "refs/heads/main", "event_name": "push"}, "repository_id"),
         ({"repository_id": "123456"}, "ref or environment"),
-        ({"repository_id": "org/repo", "ref": "refs/heads/main"}, "digits"),
-        ({"repository_id": "", "ref": "refs/heads/main"}, "empty"),
+        ({"repository_id": "org/repo", "ref": "refs/heads/main", "event_name": "push"}, "digits"),
+        ({"repository_id": "", "ref": "refs/heads/main", "event_name": "push"}, "empty"),
         ({"repository_id": "123", "ref": ""}, "empty"),
         ({"repository_id": "123", "ref": 5}, "text"),
         ({"repository_id": "123", "ref": True}, "text"),
@@ -183,7 +192,7 @@ def test_a_rule_allows_only_deploys_and_dry_runs(
             environment="prod",
             repository="analytics",
             kinds=kinds,
-            conditions={"repository_id": "1", "ref": "refs/heads/main"},
+            conditions={"repository_id": "1", "ref": "refs/heads/main", "event_name": "push"},
         )
 
 
@@ -197,7 +206,7 @@ def test_the_issuer_must_be_configured(session: Session, world: CiWorld) -> None
                 environment="prod",
                 repository="analytics",
                 kinds=["deploy"],
-                conditions={"repository_id": "1", "ref": "refs/heads/main"},
+                conditions={"repository_id": "1", "ref": "refs/heads/main", "event_name": "push"},
             )
     off = CiTrustRuleService(session, GrantAuthorization(session), issuers=[])
     with pytest.raises(ValidationError, match="CI OIDC is off"):
@@ -208,7 +217,7 @@ def test_the_issuer_must_be_configured(session: Session, world: CiWorld) -> None
             environment="prod",
             repository="analytics",
             kinds=["deploy"],
-            conditions={"repository_id": "1", "ref": "refs/heads/main"},
+            conditions={"repository_id": "1", "ref": "refs/heads/main", "event_name": "push"},
         )
 
 
@@ -235,7 +244,7 @@ def test_the_principal_must_be_an_active_service_account(session: Session, world
             environment="prod",
             repository="analytics",
             kinds=["deploy"],
-            conditions={"repository_id": "1", "ref": "refs/heads/main"},
+            conditions={"repository_id": "1", "ref": "refs/heads/main", "event_name": "push"},
         )
 
     with pytest.raises(ValidationError, match="service account"):
@@ -257,7 +266,7 @@ def test_unknown_environment_or_repository_is_named(session: Session, world: CiW
                 environment=environment,
                 repository=repository,
                 kinds=["deploy"],
-                conditions={"repository_id": "1", "ref": "refs/heads/main"},
+                conditions={"repository_id": "1", "ref": "refs/heads/main", "event_name": "push"},
             )
 
 
@@ -305,7 +314,9 @@ def test_an_update_is_validated_like_a_creation(session: Session, world: CiWorld
     rule_id = add_rule(session, world)
     service = rules(session)
     with pytest.raises(ValidationError, match="repository_id"):
-        service.update(world.admin, rule_id, conditions={"ref": "refs/heads/main"})
+        service.update(
+            world.admin, rule_id, conditions={"ref": "refs/heads/main", "event_name": "push"}
+        )
     with pytest.raises(ValidationError, match="rollback"):
         service.update(world.admin, rule_id, kinds=["rollback"])
     principal(session, "bob", PrincipalType.USER)
@@ -328,7 +339,7 @@ def test_list_and_get(session: Session, world: CiWorld) -> None:
 
 
 def test_condition_mismatches_are_exact_and_typed() -> None:
-    conditions = {"repository_id": "123456", "ref": "refs/heads/main"}
+    conditions = {"repository_id": "123456", "ref": "refs/heads/main", "event_name": "push"}
     assert condition_mismatches(conditions, claims()) == []
     assert condition_mismatches(conditions, claims(repository_id=123456)) == [
         ("repository_id", "not_text")
@@ -347,7 +358,9 @@ def test_explain_says_which_rule_matches_and_why_the_others_do_not(
     matching = add_rule(session, world)
     on_dev = add_rule(session, world, environment="dev")
     other_ref = add_rule(
-        session, world, conditions={"repository_id": "123456", "ref": "refs/heads/release"}
+        session,
+        world,
+        conditions={"repository_id": "123456", "ref": "refs/heads/release", "event_name": "push"},
     )
     disabled = add_rule(session, world)
     rules(session).disable(world.admin, disabled)
@@ -443,3 +456,106 @@ def test_explain_names_a_missing_claim_and_one_of_the_wrong_type(
         "claim ref is missing; the rule needs 'refs/heads/main'",
         "claim repository_id is not a text; the rule needs the text '123456'",
     ]
+
+
+def _create(
+    session: Session, world: CiWorld, conditions: dict[str, str], issuer: str = "github"
+) -> CiTrustRuleView:
+    """Create a rule with these conditions.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    world
+        The world.
+    conditions
+        The claim conditions.
+    issuer
+        The issuer.
+
+    Returns
+    -------
+    CiTrustRuleView
+        The rule.
+    """
+    return rules(session).create(
+        world.admin,
+        issuer=issuer,
+        principal="deployer",
+        environment="prod",
+        repository="analytics",
+        kinds=["deploy"],
+        conditions=conditions,
+    )
+
+
+def test_a_github_rule_must_pin_how_the_run_was_triggered(session: Session, world: CiWorld) -> None:
+    with pytest.raises(ValidationError) as caught:
+        _create(session, world, {"repository_id": "123456", "ref": "refs/heads/main"})
+    message = str(caught.value)
+    assert "--claim event_name=push" in message
+    assert "--claim environment=production" in message
+    assert "pull_request_target" in message
+    assert session.execute(select(CiTrustRule)).first() is None
+    _create(session, world, {"repository_id": "1", "ref": "refs/heads/main", "event_name": "push"})
+    _create(session, world, {"repository_id": "1", "environment": "production"})
+
+
+def test_a_gitlab_rule_must_pin_a_protected_ref_the_pipeline_source_or_an_environment(
+    session: Session, world: CiWorld
+) -> None:
+    service = CiTrustRuleService(
+        session, GrantAuthorization(session), issuers=[ISSUER, "https://gitlab.com"]
+    )
+
+    def create(conditions: dict[str, str]) -> None:
+        """Create a GitLab rule.
+
+        Parameters
+        ----------
+        conditions
+            Its conditions.
+        """
+        service.create(
+            world.admin,
+            issuer="gitlab",
+            principal="deployer",
+            environment="prod",
+            repository="analytics",
+            kinds=["deploy"],
+            conditions=conditions,
+        )
+
+    with pytest.raises(ValidationError, match="--claim ref_protected=true"):
+        create({"project_id": "22", "ref": "main"})
+    create({"project_id": "22", "ref": "main", "ref_protected": "true"})
+    create({"project_id": "22", "ref": "main", "pipeline_source": "push"})
+    create({"project_id": "22", "environment": "production"})
+
+
+def test_update_and_enable_check_the_trigger_again(session: Session, world: CiWorld) -> None:
+    from sqlalchemy import update
+
+    rule_id = add_rule(session, world)
+    service = rules(session)
+    with pytest.raises(ValidationError, match="event_name"):
+        service.update(
+            world.admin, rule_id, conditions={"repository_id": "123456", "ref": "refs/heads/main"}
+        )
+    # A rule written before the trigger was required (no release has one) cannot be used again.
+    service.disable(world.admin, rule_id)
+    session.execute(
+        update(CiTrustRule).values(conditions={"repository_id": "123456", "ref": "refs/heads/main"})
+    )
+    session.commit()
+    with pytest.raises(ValidationError, match="event_name"):
+        service.enable(world.admin, rule_id)
+    with pytest.raises(ValidationError, match="event_name"):
+        service.update(world.admin, rule_id, kinds=["dry_run"])
+    report = service.explain(
+        world.admin, claims=claims(), environment="prod", repository="analytics"
+    )
+    (item,) = report.rules
+    assert not item.matches
+    assert any("not allowed" in reason and "event_name" in reason for reason in item.reasons)

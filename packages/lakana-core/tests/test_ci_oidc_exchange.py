@@ -466,3 +466,12 @@ def test_a_key_id_collision_is_retried_once(
     monkeypatch.setattr(module, "generate_token", lambda prefix: taken)
     with pytest.raises(ConflictError, match="duplicate key id"):
         exchange(session)
+
+
+def test_a_rule_without_a_trigger_condition_never_matches(session: Session, world: CiWorld) -> None:
+    add_rule(session, world)
+    session.execute(
+        update(CiTrustRule).values(conditions={"repository_id": "123456", "ref": "refs/heads/main"})
+    )
+    session.commit()
+    assert _refusal(session).code == ExchangeRefusal.NO_RULE

@@ -56,6 +56,59 @@ _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 _REF_CONDITIONS = ("ref", "environment")
 
 
+def trigger_claims(issuer: str) -> tuple[str, ...]:
+    """Name the claims of which a rule must pin one, to fix how the CI run was started.
+
+    ``ref`` alone does not say that: a GitHub ``pull_request_target`` run, which a fork's pull
+    request starts, gets an ID token with the base branch as its ``ref``; a GitLab pipeline for a
+    fork's merge request, run in the parent project, carries the fork's branch name (``main``
+    too) as its ``ref``, unprotected. An ``environment`` condition counts on both: deploying to
+    it is what its protection rules decide.
+
+    Parameters
+    ----------
+    issuer
+        A configured issuer URL.
+
+    Returns
+    -------
+    tuple of str
+        ``event_name`` or ``environment`` for GitHub Actions; ``ref_protected``,
+        ``pipeline_source`` or ``environment`` for GitLab.
+    """
+    if issuer == GITHUB_ISSUER:
+        return ("event_name", "environment")
+    return ("ref_protected", "pipeline_source", "environment")
+
+
+def _trigger_message(issuer: str) -> str:
+    """Say which trigger condition a rule needs, with the option that adds it.
+
+    Parameters
+    ----------
+    issuer
+        A configured issuer URL.
+
+    Returns
+    -------
+    str
+        The sentence.
+    """
+    if issuer == GITHUB_ISSUER:
+        return (
+            "A GitHub rule must also pin how the run was started: add --claim event_name=push "
+            "(or the event that deploys), or pin a protected GitHub environment with --claim "
+            "environment=production. A ref alone also matches a pull_request_target run that "
+            "a fork's pull request starts."
+        )
+    return (
+        "A GitLab rule must also pin how the pipeline was started: add --claim "
+        "ref_protected=true or --claim pipeline_source=push, or pin a protected environment with "
+        "--claim environment=production. A ref alone also matches a fork's merge request "
+        "pipeline whose branch has the same name."
+    )
+
+
 def id_claim(issuer: str) -> str:
     """Name the claim that carries an issuer's numeric repository or project id.
 
@@ -191,7 +244,7 @@ def _validate_conditions(issuer: str, conditions: Mapping[str, object]) -> dict[
     ValidationError
         If a claim name or value is malformed or reserved, there are more than
         `MAX_CONDITIONS`, the numeric id claim is missing or not digits, or neither ``ref`` nor
-        ``environment`` is pinned.
+        ``environment`` is pinned, or no claim of `trigger_claims` is.
     """
     if not isinstance(conditions, Mapping):
         raise ValidationError("The conditions must be an object of claim names to texts.")
@@ -234,7 +287,31 @@ def _validate_conditions(issuer: str, conditions: Mapping[str, object]) -> dict[
             "ref=refs/heads/main on GitHub, ref=main on GitLab, or environment=prod), so that "
             "not every branch of the repository may deploy."
         )
+    if not any(name in conditions for name in trigger_claims(issuer)):
+        raise ValidationError(_trigger_message(issuer))
     return dict(conditions)  # ty: ignore[invalid-return-type]
+
+
+def rule_problem(issuer: str, conditions: Mapping[str, object]) -> str | None:
+    """Say why a stored rule's conditions would not be accepted today, if they would not.
+
+    Parameters
+    ----------
+    issuer
+        The rule's issuer.
+    conditions
+        Its conditions.
+
+    Returns
+    -------
+    str or None
+        The refusal `create` would give; `None` for a rule that is allowed.
+    """
+    try:
+        _validate_conditions(issuer, conditions)
+    except ValidationError as exc:
+        return str(exc)
+    return None
 
 
 @dataclass(frozen=True)
@@ -701,8 +778,9 @@ class CiTrustRuleService:
             raise ValidationError("Nothing to change: give a principal, kinds or conditions.")
         if kinds is not None:
             row.kinds = _validate_kinds(kinds)
-        if conditions is not None:
-            row.conditions = _validate_conditions(row.issuer, conditions)
+        row.conditions = _validate_conditions(
+            row.issuer, row.conditions if conditions is None else conditions
+        )
         if principal is not None:
             row.principal_id = self._service_account(principal).id
         row.revision += 1
@@ -737,6 +815,8 @@ class CiTrustRuleService:
             If there is no such rule.
         """
         row = self._rule(rule_id)
+        if enabled:
+            _validate_conditions(row.issuer, row.conditions)
         if row.enabled is not enabled:
             row.enabled = enabled
             row.revision += 1
@@ -773,6 +853,9 @@ class CiTrustRuleService:
             Without the `ADMIN` role on the instance (checked first).
         NotFoundError
             If there is no such rule.
+        ValidationError
+            If its conditions do not meet the requirements of `create` (a rule written by an
+            earlier build).
         """
         authorize_admin_only(self._session, self._authz, p, Action.MANAGE_TOKEN)
         return self._set_enabled(p, rule_id, True)
@@ -892,6 +975,9 @@ class CiTrustRuleService:
                 )
             if not row.enabled:
                 reasons.append("the rule is disabled")
+            problem = rule_problem(row.issuer, row.conditions)
+            if problem is not None:
+                reasons.append(f"the rule is not allowed and never matches: {problem}")
             reasons.extend(
                 describe_mismatch(name, problem, claims, row.conditions[name])
                 for name, problem in condition_mismatches(row.conditions, claims)

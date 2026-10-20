@@ -153,6 +153,7 @@ def claims(**changes: object) -> dict[str, object]:
         "repository": "org/repo",
         "repository_id": "123456",
         "ref": "refs/heads/main",
+        "event_name": "push",
         "environment": "prod",
         "sha": SHA,
     }
@@ -267,7 +268,8 @@ def add_rule(
         environment=environment,
         repository=repository,
         kinds=list(kinds),
-        conditions=conditions or {"repository_id": "123456", "ref": "refs/heads/main"},
+        conditions=conditions
+        or {"repository_id": "123456", "ref": "refs/heads/main", "event_name": "push"},
     )
     return view.id
 

@@ -47,7 +47,9 @@ def create(
         typer.Option(
             "--claim",
             help="NAME=VALUE the ID token's claim must equal exactly (repeatable). Must include "
-            "repository_id (GitHub) or project_id (GitLab), and ref or environment.",
+            "repository_id (GitHub) or project_id (GitLab), ref or environment, and how the run "
+            "was started: event_name or environment (GitHub); ref_protected, pipeline_source or "
+            "environment (GitLab).",
         ),
     ],
     kind: Annotated[
