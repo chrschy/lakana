@@ -52,6 +52,7 @@ from lakana_server.body_limit import BodyLimitMiddleware, streaming_routes
 from lakana_server.concurrency import AppendConcurrencyLimiter
 from lakana_server.errors import install_exception_handlers
 from lakana_server.settings import Settings
+from lakana_server.sign_in_audit import SignInAuditLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +143,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         install_query_text(resolved_settings.audit.query_text)
         app.state.auth_audit_limiter = AuthAuditLimiter(
             resolved_settings.auth_audit.per_ip_per_minute
+        )
+        app.state.sign_in_audit_limiter = SignInAuditLimiter(
+            resolved_settings.audit.sign_in_window_minutes * 60.0
         )
         app.state.denial_audit_limiter = DenialAuditLimiter(
             resolved_settings.denial_audit.per_principal_per_minute

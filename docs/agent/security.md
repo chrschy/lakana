@@ -2392,6 +2392,32 @@ presented `key_id` was. The limiter's client dictionary is bounded at 10 000 ent
 threadpool. `X-Forwarded-For` is not trusted for the client key — see the threat model's
 "Explicitly not defended" for what that means for a proxied deployment.
 
+**Bounding successful-authentication audit writes (#217).** `get_principal` records
+`AUTHENTICATION_SUCCEEDED` only when `lakana_server.sign_in_audit.SignInAuditLimiter`
+(`app.state.sign_in_audit_limiter`, built by the lifespan from
+`LAKANA_AUDIT__SIGN_IN_WINDOW_MINUTES`, `lakana_server.settings.ServerAuditConfig`, default 15,
+0 to 1,440; server only) admits it: once per credential per window, the window running from the
+last *recorded* row, so a poller writes one row per window, not none. The next recorded row carries
+`detail.suppressed` (only when nonzero). A suppressed success writes nothing and commits nothing in
+`get_principal` (`PatService.verify`'s own `last_used_at` commit is unchanged). **Mechanism: in
+process, not a database lookup** — a lookup would add a query to every authenticated request (and
+an index on `detail->>'key_id'`), exactly the per-request database cost this exists to remove; the
+price is that each server process records a credential once per window, and a restart records
+again. **Key:** `(kind, key_id)` with `kind` `"pat"` or `"task"` (a PAT and a task token cannot share
+a window), and the principal kept beside it: the same key id authenticating another principal is
+recorded. Key ids are random and unique per table and a revoked token keeps its own
+(`credential.py`, `unique=True`), so a revoked-and-recreated token is a new credential. **Every rule
+can only add rows:** a failed attempt that parsed a key id (`forget`) makes that credential's next
+success recorded (a token that works again after a refusal, e.g. after its principal was
+reactivated, leaves a row; an attacker who knows a key id can at most cause one extra success row
+per attempt, never hide one); a row whose write raised (`not_recorded`) makes the next success
+recorded and counts this one; the dict is bounded at 10 000 credentials, least recently used
+evicted, and an evicted credential is recorded at its next success (its pending count is lost);
+only verified credentials are inserted, so an unauthenticated caller cannot grow it. Counts pending
+when the process stops are not written (unlike `DenialAuditLimiter.drain`). Failures are
+unchanged (`AuthAuditLimiter` above). `authenticate_before_body` already makes a request one
+`get_principal` call, so a body route is not counted twice.
+
 ## Query isolation: credential scoping, not blacklisting (M2/M3)
 
 **This is running code, not a plan.** The query executor

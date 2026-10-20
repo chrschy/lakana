@@ -126,13 +126,29 @@ def test_the_view_audit_is_on_with_an_hour_and_reads_the_environment(
 def test_the_audit_stores_full_query_text_by_default_and_refuses_an_unknown_mode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from lakana_core.config import AuditConfig
+    from lakana_server.settings import ServerAuditConfig
 
     monkeypatch.setenv("LAKANA_DATABASE__URL", "sqlite://")
     monkeypatch.delenv("LAKANA_AUDIT__QUERY_TEXT", raising=False)
-    assert Settings().audit == AuditConfig(query_text="full")
+    assert Settings().audit == ServerAuditConfig(query_text="full")
     monkeypatch.setenv("LAKANA_AUDIT__QUERY_TEXT", "OFF")
     assert Settings().audit.query_text == "off"
     monkeypatch.setenv("LAKANA_AUDIT__QUERY_TEXT", "none")
     with pytest.raises(pydantic.ValidationError, match="must be full, hash or off"):
         Settings()
+
+
+def test_a_sign_in_is_recorded_once_per_quarter_hour_and_zero_records_every_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LAKANA_DATABASE__URL", "sqlite://")
+    monkeypatch.delenv("LAKANA_AUDIT__SIGN_IN_WINDOW_MINUTES", raising=False)
+    assert Settings().audit.sign_in_window_minutes == 15
+    monkeypatch.setenv("LAKANA_AUDIT__SIGN_IN_WINDOW_MINUTES", "0")
+    assert Settings().audit.sign_in_window_minutes == 0
+    monkeypatch.setenv("LAKANA_AUDIT__SIGN_IN_WINDOW_MINUTES", "1440")
+    assert Settings().audit.sign_in_window_minutes == 1440
+    for wrong in ("-1", "1441"):
+        monkeypatch.setenv("LAKANA_AUDIT__SIGN_IN_WINDOW_MINUTES", wrong)
+        with pytest.raises(pydantic.ValidationError, match="sign_in_window_minutes"):
+            Settings()

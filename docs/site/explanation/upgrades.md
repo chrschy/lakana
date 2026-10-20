@@ -126,6 +126,15 @@ Each cell is a summary. The page named in the last column has the detail. The ch
 
 ## Notes for the next release
 
+### Fewer sign-in events in the audit log
+
+A successful sign-in (`AUTHENTICATION_SUCCEEDED`) used to be written for every request. It is now
+written once per token every 15 minutes, with the number of sign-ins left out since the previous
+event in `detail.suppressed`, so a screen that refreshes itself no longer fills the audit log. A
+token's first use is always recorded, and failed sign-ins are recorded as before. If you count
+sign-in events, for example in a report, add up `detail.suppressed` as well, or set
+`LAKANA_AUDIT__SIGN_IN_WINDOW_MINUTES=0` on the server to write one event per request as before.
+
 ### The first administrator's token is written to a file, never to the log
 
 When the server has to create its first administrator and no token was supplied

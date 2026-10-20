@@ -56,6 +56,14 @@ text in new events (`LAKANA_AUDIT__QUERY_TEXT`: `full`, `hash` or `off`); see
 ([the command](../reference/cli.md#lakana-audit-list)). To keep the log bounded, repeated refusals of one
 principal are counted after a number per minute that an operator sets
 (`LAKANA_DENIAL_AUDIT__PER_PRINCIPAL_PER_MINUTE`, [settings](../reference/settings.md)).
+For the same reason a successful sign-in is recorded once per token every 15 minutes, not on every
+request: a screen that refreshes itself every few seconds would otherwise write thousands of
+`AUTHENTICATION_SUCCEEDED` events a day. The next event of the token says in `detail.suppressed` how
+many sign-ins were left out. Each token counts on its own, and its first use, a new token and the
+first use after a refused attempt always write an event. Each server process counts on its own, so
+a deployment with two server processes can write two events per window. Failed sign-ins are
+recorded as before. `LAKANA_AUDIT__SIGN_IN_WINDOW_MINUTES` sets the window (0 records every
+request; [settings](../reference/settings.md)).
 
 Seeing other people's activity is recorded too. When a manager lists other people's queries
 (`lakana query list`), an administrator sees who read a table (`lakana table health`), or someone

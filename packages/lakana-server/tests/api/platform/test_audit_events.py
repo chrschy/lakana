@@ -11,10 +11,9 @@ from sqlalchemy.orm import Session
 from lakana_core.audit.content import fingerprint, install_query_text, stored_query_text
 from lakana_core.audit.service import AuditService
 from lakana_core.auth import Securable
-from lakana_core.config import AuditConfig
 from lakana_core.models import AuditEvent, AuditEventType, Principal
 from lakana_server.app import create_app
-from lakana_server.settings import Settings
+from lakana_server.settings import ServerAuditConfig, Settings
 from tests.conftest import AUTH_HEADER
 from tests.server_test_helpers import create_environment, create_namespace
 
@@ -404,7 +403,7 @@ def hashing_client(settings: Settings) -> Iterator[TestClient]:
     TestClient
         A client for the running app; the process's mode is set back to `full` after it.
     """
-    hashing = settings.model_copy(update={"audit": AuditConfig(query_text="hash")})
+    hashing = settings.model_copy(update={"audit": ServerAuditConfig(query_text="hash")})
     try:
         with TestClient(create_app(hashing)) as c:
             yield c

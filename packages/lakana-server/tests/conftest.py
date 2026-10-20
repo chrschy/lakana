@@ -18,6 +18,7 @@ from lakana_core.models import Base
 from lakana_server.app import create_app
 from lakana_server.auth_rate_limit import AuthAuditLimiter
 from lakana_server.settings import Settings
+from lakana_server.sign_in_audit import SignInAuditLimiter
 
 _TEST_MASTER_KEY = base64.b64encode(b"0" * 32).decode()
 """A valid base64-encoded 32-byte master key, matching the fixed test key
@@ -136,12 +137,15 @@ def _isolate_create_environment_storage(tmp_path: Path, monkeypatch: pytest.Monk
 
 
 def fake_request(
-    limiter: AuthAuditLimiter | None = None, client_host: str | None = "1.2.3.4"
+    limiter: AuthAuditLimiter | None = None,
+    client_host: str | None = "1.2.3.4",
+    sign_in_limiter: SignInAuditLimiter | None = None,
 ) -> Request:
     """Build a minimal stand-in for `Request`, for calling `get_principal` directly.
 
     Carries only the attributes `get_principal` actually reads: `app.state.
-    auth_audit_limiter`, `client.host` and the per-request `state`. Matches this test suite's
+    auth_audit_limiter`, `app.state.sign_in_audit_limiter`, `client.host` and the per-request
+    `state`. Matches this test suite's
     existing pattern (see `test_deps.py`) of a `SimpleNamespace` `cast` to
     `Request` rather than constructing a real ASGI request.
 
@@ -155,6 +159,9 @@ def fake_request(
         The value `request.client.host` should report, or `None` to
         simulate a request with no client info at all (`request.client` is
         `None`).
+    sign_in_limiter
+        The limiter `get_principal` should consult on a successful attempt. Defaults to a fresh
+        `SignInAuditLimiter` with the default window of 15 minutes.
 
     Returns
     -------
@@ -166,6 +173,7 @@ def fake_request(
     state = SimpleNamespace(
         auth_audit_limiter=limiter or AuthAuditLimiter(1000),
         denial_audit_limiter=DenialAuditLimiter(1000),
+        sign_in_audit_limiter=sign_in_limiter or SignInAuditLimiter(15 * 60.0),
     )
     return cast(
         Request,
