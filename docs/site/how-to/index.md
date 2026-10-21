@@ -5,6 +5,8 @@ A how-to guide solves one task by the shortest path, for someone who knows what 
 Pages:
 
 - [Projects and deploys](projects.md): start a project, deploy it, run it, set up CI and write a first Python asset. The layout, the keys and the rules are in the reference.
+- [Deploy from GitHub Actions without a stored secret](deploy-from-github-actions.md): let a workflow exchange its OIDC ID token for a one-deploy token, with the trust rules, the workflow and what to do when the exchange is refused.
+- [Deploy from GitLab CI without a stored secret](deploy-from-gitlab-ci.md): the same for a GitLab pipeline, and how one job submits twice.
 - [Check your data](check-your-data.md): state in SQL what must be true of a table, and what happens to the table when it is not.
 - [Run a job on a schedule](run-a-job-on-a-schedule.md): declare a job and its cron schedule, bind a run principal, pause it, start it from CI, and what happens when the project is busy or the platform was down.
 - [Get told when a job fails](get-told-when-a-job-fails.md): send a message to your chat tool or a webhook when a run fails and when the job works again, test it, and verify its signature.

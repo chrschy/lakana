@@ -57,6 +57,94 @@ def env_supplies_credentials() -> bool:
     return os.environ.get("LAKANA_URL") is not None or os.environ.get("LAKANA_TOKEN") is not None
 
 
+_BOTH_CREDENTIALS = (
+    "Both LAKANA_TOKEN and LAKANA_OIDC (or LAKANA_OIDC_TOKEN) are set, and Lakana does not guess "
+    "which credential you meant. Unset LAKANA_TOKEN to deploy with the CI job's ID token, or "
+    "unset LAKANA_OIDC and LAKANA_OIDC_TOKEN to use the stored token."
+)
+_ONLY_DEPLOY = (
+    "LAKANA_OIDC (or LAKANA_OIDC_TOKEN) is set, and only `lakana deploy` (with or without "
+    "--dry-run) exchanges the CI job's ID token; a CI token may do nothing else. Run this "
+    "command with LAKANA_TOKEN or a profile instead, without LAKANA_OIDC."
+)
+_NO_URL = (
+    "LAKANA_OIDC needs the Lakana server's URL to exchange the CI job's ID token at: set "
+    "LAKANA_URL in the job (or pass --url)."
+)
+
+
+def _oidc_variables_set() -> bool:
+    """Report whether `LAKANA_OIDC` or `LAKANA_OIDC_TOKEN` is set.
+
+    Returns
+    -------
+    bool
+        `True` if either is set and not empty.
+    """
+    return bool(os.environ.get("LAKANA_OIDC") or os.environ.get("LAKANA_OIDC_TOKEN"))
+
+
+def ci_oidc_in_use() -> bool:
+    """Report whether this invocation's credential is a CI job's ID token, without raising.
+
+    Returns
+    -------
+    bool
+        `True` when `LAKANA_OIDC` or `LAKANA_OIDC_TOKEN` is set and `LAKANA_TOKEN` is not.
+    """
+    return _oidc_variables_set() and not os.environ.get("LAKANA_TOKEN")
+
+
+def ci_oidc_requested() -> bool:
+    """Report whether this invocation should exchange the CI job's ID token for its credential.
+
+    Returns
+    -------
+    bool
+        `True` when `LAKANA_OIDC` or `LAKANA_OIDC_TOKEN` is set.
+
+    Raises
+    ------
+    ConfigError
+        If `LAKANA_TOKEN` is set as well: which one wins is not guessed (exit 3).
+    """
+    if not _oidc_variables_set():
+        return False
+    if os.environ.get("LAKANA_TOKEN"):
+        raise ConfigError(_BOTH_CREDENTIALS)
+    return True
+
+
+def default_ci_client_factory(state: CliState, environment: str, repository: str) -> lakana.Client:
+    """Build a client for a CI job by exchanging its ID token (`Client.from_ci_oidc`).
+
+    Parameters
+    ----------
+    state
+        The CLI state with `--url` and the request timeout.
+    environment
+        The environment the job deploys to.
+    repository
+        The repository it deploys.
+
+    Returns
+    -------
+    lakana.Client
+        A client holding the CI token.
+
+    Raises
+    ------
+    ConfigError
+        If neither `--url` nor `LAKANA_URL` names the server (exit 3).
+    """
+    url = state.url or os.environ.get("LAKANA_URL")
+    if not url:
+        raise ConfigError(_NO_URL)
+    return lakana.Client.from_ci_oidc(
+        url, environment=environment, repository=repository, timeout=state.timeout
+    )
+
+
 def _origin(url: str) -> tuple[str, str, int | None] | None:
     """Return a URL's origin: scheme, host and effective port.
 
@@ -104,8 +192,11 @@ def default_client_factory(state: CliState) -> lakana.Client:
     ------
     ConfigError
         If `--url` leaves the origin of the profile whose token would be
-        sent (exit 3).
+        sent, or if `LAKANA_OIDC` asks for a CI exchange, which only `lakana deploy`
+        makes (exit 3).
     """
+    if ci_oidc_requested():
+        raise ConfigError(_ONLY_DEPLOY)
     config = resolve_config(profile=state.profile, config_path=state.config_path)
     if state.url is None or env_supplies_credentials():
         return lakana.Client(url=state.url or config.url, token=config.token, timeout=state.timeout)
@@ -221,6 +312,8 @@ class CliState:
         `--verbose`.
     client_factory
         Builds the SDK client for ordinary commands.
+    ci_client_factory
+        Builds the SDK client of `lakana deploy` in a CI job, from its ID token.
     login_client_factory
         Builds a client from explicit credentials, for `login`.
     is_interactive
@@ -238,6 +331,7 @@ class CliState:
     output: str = "table"
     verbose: bool = False
     client_factory: Callable[[CliState], lakana.Client] = default_client_factory
+    ci_client_factory: Callable[[CliState, str, str], lakana.Client] = default_ci_client_factory
     login_client_factory: Callable[[str, str], lakana.Client] = _login_client
     is_interactive: Callable[[], bool] = _stdin_is_tty
     config_path: Path | None = None
@@ -256,6 +350,39 @@ class CliState:
         if self._client is None:
             self._client = self.client_factory(self)
         return self._client
+
+    def use_ci_oidc(self, environment: str, repository: str) -> None:
+        """Exchange the CI job's ID token for this invocation's client, when one is asked for.
+
+        Each call exchanges anew: a CI token queues one submission, so every `lakana deploy`
+        gets its own. A line on standard error says what the token may do, never the token.
+
+        Parameters
+        ----------
+        environment
+            The environment the job deploys to.
+        repository
+            The repository it deploys.
+
+        Raises
+        ------
+        ConfigError
+            If `LAKANA_TOKEN` is set as well (exit 3).
+        """
+        if not ci_oidc_requested():
+            return
+        self.close()
+        self._client = self.ci_client_factory(self, environment, repository)
+        issued = self._client.ci_token
+        if issued is not None:
+            kinds = " or ".join(kind.replace("_", " ") for kind in issued.kinds)
+            commit = f" at {issued.sha}" if issued.sha else ""
+            typer.echo(
+                f"Exchanged the CI job's ID token: acting as {_output.inline(issued.principal)} "
+                f"for one {kinds} of {_output.inline(issued.repository)}{commit} to "
+                f"{_output.inline(issued.environment)}, until {issued.expires_at.isoformat()}.",
+                err=True,
+            )
 
     def close(self) -> None:
         """Close the SDK client if one was built."""

@@ -179,6 +179,10 @@ class CiOidcConfig(ProxyAndCaBundleChecks):
     ca_bundle
         Absolute path of a PEM file of certificate authorities that the discovery and key
         requests trust; it replaces the built-in store and never turns verification off.
+    token_ttl_seconds
+        How long the Lakana token a CI job receives for its ID token stays valid, in seconds
+        (default 3600, one hour; at most 21600, six hours). The token allows one deploy or dry
+        run, so it only has to outlive the job's wait for its deploy to be queued.
     """
 
     model_config = ConfigDict(hide_input_in_errors=True)
@@ -190,6 +194,7 @@ class CiOidcConfig(ProxyAndCaBundleChecks):
     allow_hosts: Annotated[list[str], NoDecode] = Field(default_factory=list)
     proxy: SecretStr | None = None
     ca_bundle: Path | None = None
+    token_ttl_seconds: int = Field(default=3600, ge=60, le=21600)
 
     @property
     def enabled(self) -> bool:

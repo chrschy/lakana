@@ -127,7 +127,95 @@ Each cell is a summary. The page named in the last column has the detail. The ch
 
 ## Notes for the next release
 
-Nothing yet.
+### CI deploys without a stored secret
+
+A GitHub Actions or GitLab CI job can now deploy with its OIDC ID token instead of a stored Lakana
+token: `lakana deploy` exchanges it when the job sets `LAKANA_OIDC=github` or `LAKANA_OIDC=gitlab`,
+under a CI trust rule an administrator creates once. `lakana whoami` and `Client.whoami()` show
+what a CI token may do (`ci_token`), and `Client.from_ci_oidc` does the exchange in Python. See
+[Deploy from GitHub Actions without a stored secret](../how-to/deploy-from-github-actions.md) and
+[Deploy from GitLab CI without a stored secret](../how-to/deploy-from-gitlab-ci.md).
+
+- **Existing CI keeps working.** A workflow or pipeline that reads a stored token
+  (`LAKANA_TOKEN`) needs no change.
+- **`lakana init` writes the CI files without a stored token** by default now. For files that read
+  a stored token, as before, pass `--ci-auth pat`.
+- **Setting both is refused.** A job that sets `LAKANA_TOKEN` and `LAKANA_OIDC` (or
+  `LAKANA_OIDC_TOKEN`) stops with exit 3 and a message naming both: remove one.
+
+### A new environment's root cannot lie in another environment's files
+
+`lakana env create` (and `POST /api/v1/environments`) now refuses a storage root at or inside
+another environment's `managed/`, `raw/`, `artifacts/` or `_artifacts/` directory, a deleted
+environment's too, and a root whose own such directory would hold another environment's root.
+There each environment keeps files the other cannot tell from its own, so the clean-up kept both
+environments' leftovers for ever. The refusal (422) names the other environment and a root to use
+instead. Environments may still share a root, and one may still lie elsewhere in another's (prod
+at `s3://bucket`, dev at `s3://bucket/dev`).
+
+- **Existing environments are not changed.** One that already lies in such a place keeps working,
+  and `lakana env orphaned-locations` keeps all its directories as before; its `kept_because` now
+  says to move the environment to a root of its own.
+- **Scripts that create environments** at such a root fail at that step: give the environment a
+  root of its own, such as the one the message names.
+
+### The root of the disk cannot hold an environment
+
+A new environment's storage root may no longer be the root of the disk, `file:///`, in any
+spelling (`file://`, `file:////`, `file://localhost/`): the refusal (422) suggests a directory,
+such as `file:///data/lakana`. Lakana's storage read such a root as each process's working
+directory, so the files of an environment created earlier at `file:///` were written, read and
+cleaned up relative to wherever the server and the workers were started, not at `/`.
+
+- **An environment created earlier at `file:///`** is left as it is; the table-location clean-up and
+  `lakana env orphaned-locations` keep its table directories, while the sweeps of unreferenced code
+  archives and artifact files still run, in the worker's working directory. Create a new environment on a directory,
+  move the tables there (deploy the projects to it, or load the data again), and then delete the
+  old environment.
+
+### A storage root must be in the environment's storage scheme
+
+`POST /api/v1/environments` (and `Client.environments.create`) now refuses a storage root whose
+scheme is not the environment's storage scheme: a `file` environment needs a `file://` root, an
+`s3` one an `s3://` root and an `abfs` one an `abfs://` root. The refusal (422) names both schemes
+and a root to use, such as `file:///data/lakana`. A root reaches the storage of its own scheme, not
+the one the request named: `local://` is each process's working directory and `memory://` the
+process's memory, and a `file://` root sent as `s3` was quietly a local directory. `s3a://`,
+`s3n://` and `abfss://` count as `s3` and `abfs`; the message names the spelling to use, as before.
+`lakana env create` is not affected: it takes the scheme from the root. An `s3` or `abfs` root
+must also start with a bucket or container: `s3://`, `s3:///data` and `abfs:///x` are refused
+(422) with the shape to use, such as `s3://bucket/lakana`, because the storage took the first
+directory, or `managed/` itself, for the bucket. Existing environments on such a root are not
+changed. A root may not contain `::` (an fsspec chain such as `file:///data/lake::memory:/x`),
+which the storage read as only the part before it; an environment created earlier with one is
+refused at every use: create it again on a plain root.
+
+- **Existing environments are not changed.** One whose root has a scheme Lakana does not support
+  (`local://`, `memory://`, `gs://` and the like) could never be used: every query, deploy and
+  clean-up of it fails with `Unsupported storage scheme`, and nothing of it was written. Create a
+  new environment under another name on a supported root, and delete the old one with
+  `lakana env delete`. The deleted one keeps its name and stays in the database: its storage
+  cannot be reached to purge it, so the clean-up logs that it skipped it on each run.
+- **Scripts that create environments** with a root in another scheme fail at that step: send the
+  scheme of the root, or a root in the scheme you meant.
+
+### An allowed webhook host can no longer reach loopback or cloud metadata addresses
+
+A host on `LAKANA_WEBHOOK__ALLOW_HOSTS` used to skip every address check of the worker's webhook
+client. It still may use `http`, any port and a private address (`10.0.0.0/8` and the like), but a
+name that resolves to a loopback, link-local or cloud metadata address (`127.0.0.1`, `::1`,
+`169.254.169.254`, `fd00:ec2::254`, `100.100.100.200`, or an IPv6 address that carries one) is now
+refused, so a listed name whose DNS changes cannot point the worker at them. The deprecated IPv6
+site-local range `fec0::/10` is now treated as private everywhere: a webhook URL or a CI OIDC
+issuer's host that resolves there needs its name in `LAKANA_WEBHOOK__ALLOW_HOSTS` or
+`LAKANA_CI_OIDC__ALLOW_HOSTS`.
+
+- **Who is affected.** Only an instance whose `LAKANA_WEBHOOK__ALLOW_HOSTS` lists a name that
+  resolves to such an address. Its notifications fail with `the webhook host is a loopback,
+  link-local or cloud metadata address, which is refused even for a host in
+  LAKANA_WEBHOOK__ALLOW_HOSTS …`; point the name at the chat server's own address instead.
+- **A receiver on the worker's own machine** keeps working when the setting lists `localhost`
+  itself and the webhook URL names `localhost`: that entry, and only it, may reach loopback.
 
 ## Notes for 0.17.0
 

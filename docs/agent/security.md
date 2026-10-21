@@ -32,6 +32,10 @@ query path sit relative to `lakana-core`/`lakana-server`, see `docs/agent/archit
   (`lakana_core.grants.authorization`). If you add a new `Action`, decide explicitly whether
   a task token should ever be allowed to invoke it — the default for anything not added to
   that set is refusal, and that default is deliberate.
+- **A CI token may only ever `DEPLOY` on its own environment** (`GrantAuthorization._ci_scope_refusal`),
+  and each `DEPLOY` check decides what that allows (`lakana_core.ci_oidc.scope`). A new `DEPLOY`
+  check must decide it too, and go into `test_ci_token_enforcement.py`'s `_DEPLOY_CHECKS`; see "CI
+  OIDC exchange and CI tokens (#15)".
 - **Environment creation and storage changes are instance-scoped, not environment-scoped.**
   `create_environment` and `update_environment_storage` authorize
   `Action.MANAGE_ENVIRONMENT` at instance scope; do not change either to authorize against
@@ -39,9 +43,9 @@ query path sit relative to `lakana-core`/`lakana-server`, see `docs/agent/archit
   create or re-root it.
 - **Every identity or policy mutation records an audit event, in the same transaction as
   the change.** Adding a new mutation to `GrantService`, `SecretService`,
-  `CatalogService`, `PatService`, `TaskTokenService`, `GroupService`, or
-  `PrincipalService` without an accompanying `AuditService.record` call is a gap, not a
-  style choice — see "Audit log" below for the event types and detail shapes already in
+  `CatalogService`, `PatService`, `TaskTokenService`, `GroupService`,
+  `PrincipalService`, or `CiTrustRuleService` without an accompanying `AuditService.record` call
+  is a gap, not a style choice — see "Audit log" below for the event types and detail shapes already in
   use.
 
 ## Syntax errors name only the reader's own SQL
@@ -1533,7 +1537,37 @@ dropped, a leading `//` included, which `posixpath.normpath` keeps; `..` unjudge
 location must be absolute with an empty host: `_is_canonical_uri`, `is_within_location` and
 `spelled_canonically` build on it, and `create_environment` refuses a root that is not canonical
 (`check_storage_root`, 422 naming the spelling to use; relative and host `file` roots, percent
-escapes, glob characters and scheme aliases refused too). `near_other_location` compares every
+escapes, glob characters and scheme aliases refused too). It also refuses (#231,
+`locations.refuse_root_clash`, 422 naming the other environment, its root, the directory and a
+root of its own, `<outer root>/<name>` when that one would be accepted) a root that is, or lies
+inside, another environment's `managed/` or `UNRECORDED_ZONES` directory, or whose own such
+directory is or holds another environment's root, compared under every `readings` spelling of
+both and against every `environments` row, deleted ones included; a shared root (equal under some
+reading) and one nested elsewhere in another root stay accepted, and a stored root that cannot be
+read at all is skipped (the checks above fail closed on it). `update_environment_storage` cannot
+change a root. Existing environments in such a layout are untouched and keep failing closed: the
+listing names the other root with `HELD_PREFIX` ("move this environment to a root of its own")
+instead of `UNJUDGED_PREFIX`. Pins: `test_environment_root_placement.py`.
+
+**The root of the disk.** `check_storage_root` refuses `file:///` in every spelling (`file://`,
+`FILE:///`, `file:////`, `file:///.`, `file://localhost[/]`; `ROOT_DISK_MESSAGE`, 422, suggests
+`file:///data/lakana`). Many sites build paths with `root.rstrip("/")`, which turns `file:///`
+into `file:`, and `fsspec.core.url_to_fs("file:")` (also `"file://"`) answers the **working
+directory**: `FsspecStorage.__init__` (`fsspec_storage.py`), `ResolvedStorage.table_location`
+(`file:/managed/...`), `CatalogService` external-table claims and maintenance's `root_prefix`
+(`service.py`), `code_sweep._code_uri` and its grouping key, `orphaned_locations.target`, the
+worker's `deploy.py` (`code_uri`), `task_integrity.py`, `pipeline.py` and `python_tasks.py`
+(root prefixes), and `orphaned_locations._ineligible`'s `spelled_canonically` check. **Residual:**
+an environment created at `file:///` before this refusal keeps those spellings: its files land
+relative to each process's working directory; the sweep never purges its records (`file:/...`
+is not inside `file:///managed` for `_confined`), and the leftovers command lists nothing for it
+(`target` keeps `file:`), so its table directories stay; the sweeps of unreferenced code archives
+and artifact files still run for it, in the worker's working directory. Do **not** fix one of these sites in isolation: `root_base`
+(`resolver.py`, used by `near_other_location`, `child_location`, the sweep's `_Run` and
+`root_relative_path` since #231) is safe only because every other site still fails closed on such
+a root; giving `orphaned_locations.target` its real root alone would let `--delete` purge
+id-suffixed directories under the server's working directory. The fix for users is a new
+environment on a directory (upgrade note). `near_other_location` compares every
 root, record (`record_states`; never the purge's own) and table directory under all `readings`:
 percent-decoded up to three times, case-folded and NFC, `normpath` and, for `file`, `realpath`
 (symbolic links), object-store keys literal and with `..` resolved, `abfs` reduced to the
@@ -1546,6 +1580,50 @@ not listed; any other match lists it as kept, with a reason naming the location.
 are taken literally (storage names are literal). A directory whose
 newest file is younger than `older_than_days` (1 to 3,650, default 30), or has a file of unknown
 age, is `recent` and never deleted. The listing writes nothing and records no event.
+
+**A root in another scheme (#260).** `check_root_scheme` (`resolver.py`), called by
+`create_environment` before `check_storage_root`, refuses a root whose scheme, lower-cased and
+mapped through `SCHEME_ALIASES` (`s3a`/`s3n` → `s3`, `abfss` → `abfs`), is not
+`StorageConfig.scheme` (`ROOT_SCHEME_MESSAGE`, 422, names the root, both schemes and a root from
+`ROOT_SCHEME_EXAMPLES`). The scheme comparison is total over the text before the first `://`:
+`StorageConfig.scheme` is one of `file`, `s3`, `abfs` (the REST schema has the same `Literal`),
+and every value but the storage's own (and its aliases) is refused, so `local://`, `local:///`,
+`local:///data`, `asynclocal://`, `memory://` and every other fsspec protocol (`gs`, `az`, `hdfs`,
+`https`, ...) are refused for every storage scheme, and so are `s3://` for `file` and `file://`
+for `s3`. The scheme alone does not judge a root: fsspec reads `a::b` as filesystem `a` over `b`,
+and `url_to_fs` keeps only the part before the first `::`, so a chain *after* the scheme
+(`file:///data/a/managed::memory:/dev` is `/data/a/managed`; `s3://bucket/x::file:/etc` is S3
+`bucket/x`) passed both checks and let a new root reach into another environment's `managed/`
+(found in the review of #262: writing through it overwrote prod's files). `check_storage_root`
+therefore refuses `::` anywhere in a root, first, whatever the scheme (`ROOT_CHAIN_MESSAGE`, 422,
+"cannot be an fsspec chain"; a chain before the scheme, `simplecache::file:///…`, meets
+`check_root_scheme` first and gets the scheme message). `FsspecStorage.__init__` refuses `::` too,
+so a chained root stored earlier fails closed at every `for_environment` before `url_to_fs` reads
+it. `url_to_fs` on the root is Lakana's only fsspec call that parses a URL: table, metadata and
+external locations reach pyiceberg's `FileIO` (`PyArrowFileIO`/`FsspecFileIO` take `::` literally,
+probed) or DuckDB, and artifact and code paths go through `FsspecStorage._full` and the
+filesystem object's own methods, which take `::` as part of a name. A root without `://` (`local:`, `/data`) has no scheme to compare and
+is refused by `check_storage_root` (`ROOT_UNJUDGEABLE_MESSAGE`). An alias of the storage's scheme
+passes this check and gets the spelling to use from `check_storage_root`. Why: the stored row has no
+scheme column; `StorageResolver.for_environment` derives the scheme from the root
+(`_parse_scheme`), so the scheme a client sent was dropped, and fsspec reads `local:` /
+`local://` as the working directory (the hazard of "The root of the disk") and `memory://` as the
+process's memory. `lakana env create` already sent the root's own scheme (`urlsplit`) and refused
+anything but `file`, `s3`, `abfs`; the REST API and the SDK did not. **Existing rows** are left
+alone: one in a scheme `_parse_scheme` does not know fails closed at every `for_environment`
+(`Unsupported storage scheme`, 422): the table-location, artifact and code-archive sweeps count it
+as a failed environment and touch nothing, `lakana env orphaned-locations` (with and without
+`--delete`) is refused, so nothing of it lands in the working directory. **Residual:** deleting
+such an environment works, but its purge never comes (the sweep skips it, `ValidationError`, each
+run), so the row and its name stay. One created as `s3` with a
+`file://` root (or the other way round) cannot be told apart from a correct one, since the sent
+scheme was never stored: it has always been, and stays, an environment of its root's scheme.
+`check_storage_root` also refuses an `s3`/`abfs` root (aliases and case included) whose normalised
+path is empty or starts with `/` (`s3://`, `s3:///data`, `s3://.`, `abfs:///x`;
+`ROOT_BUCKET_MESSAGE`, 422, shows `s3://bucket/lakana` / `abfs://container/lakana`): s3fs drops
+leading slashes, so `s3:///data` is bucket `data` and an `s3://` root puts tables in bucket
+`managed`, while the location checks compare the spelling as written. Existing rows are left alone
+and keep that behaviour. Pins: `test_environment_root_scheme.py`.
 
 **How it deletes.** Per directory: measure the age again, `_eligible` again, then insert and commit
 an `ABANDONED` record (`purge_after = now`) for the location. `location` is unique, so a create
@@ -2403,7 +2481,7 @@ last *recorded* row, so a poller writes one row per window, not none. The next r
 process, not a database lookup** — a lookup would add a query to every authenticated request (and
 an index on `detail->>'key_id'`), exactly the per-request database cost this exists to remove; the
 price is that each server process records a credential once per window, and a restart records
-again. **Key:** `(kind, key_id)` with `kind` `"pat"` or `"task"` (a PAT and a task token cannot share
+again. **Key:** `(kind, key_id)` with `kind` `"pat"`, `"task"` or `"ci"` (a PAT, a task token and a CI token cannot share
 a window), and the principal kept beside it: the same key id authenticating another principal is
 recorded. Key ids are random and unique per table and a revoked token keeps its own
 (`credential.py`, `unique=True`), so a revoked-and-recreated token is a new credential. **Every rule
@@ -3703,16 +3781,36 @@ pins each line.
   check to prove no second resolution happens.
 - **Refused:** everything the standard library does not call global, plus explicit lists:
   private, loopback, link-local (`169.254.0.0/16`, `fe80::/10`), `100.64.0.0/10`, `0.0.0.0/8`,
-  documentation and benchmarking ranges, multicast, `240.0.0.0/4`, `fc00::/7`, the unspecified
+  documentation and benchmarking ranges, multicast, `240.0.0.0/4`, `fc00::/7`, `fec0::/10`
+  (deprecated site-local, which `ipaddress` calls global on 3.11 and 3.14; #243), the unspecified
   address, and any IPv6 form that embeds such an IPv4 (mapped, compatible, 6to4, Teredo,
-  NAT64). All of 6to4 is refused. A shorthand IPv4 spelling (`127.1`, `2130706433`, a last label
+  NAT64: the well-known `64:ff9b::/96` and the local-use `64:ff9b:1::/48` of RFC 8215, both
+  judged by their last 32 bits). All of 6to4 is refused. A shorthand IPv4 spelling (`127.1`, `2130706433`, a last label
   of digits) is refused before any lookup. Userinfo in the URL is refused.
 - **No ambient configuration.** `httpx` runs with `trust_env=False` and `follow_redirects=False`;
   `HTTPS_PROXY`, `SSL_CERT_FILE` and the like change nothing. `LAKANA_WEBHOOK__PROXY` is the
   only proxy; with it the destination name is still checked but cannot be pinned (the proxy
   resolves it), so the proxy is trusted. `LAKANA_WEBHOOK__CA_BUNDLE` replaces trust and never
-  disables verification. `LAKANA_WEBHOOK__ALLOW_HOSTS` exempts named hosts from the scheme, port
-  and address rules, nothing else.
+  disables verification. `LAKANA_WEBHOOK__ALLOW_HOSTS` exempts named hosts from the scheme and
+  port rules and from the private-address check, nothing else: a listed host is still refused
+  (`NEVER_REACHABLE`) when any of its addresses `is_never_reachable` (loopback, link-local,
+  unspecified, multicast, reserved, `fd00:ec2::254`, `100.100.100.200`, or an IPv6 form that
+  carries such an IPv4), the rule of `LAKANA_CI_OIDC__ALLOW_HOSTS` (#243). One exception: the
+  entry `localhost`, for the URL host `localhost` only, may reach loopback addresses (never the
+  rest of the set), so that a receiver on the worker's own machine still works (the get-told
+  documentation example); any other listed name whose DNS points at loopback is refused. The
+  scheme and port exemption stays: an internal chat server on `http` or another port is the
+  setting's purpose, and with the address rule the exemption reaches no address the rule
+  refuses. Pins: `test_an_allowed_host_never_reaches_loopback_link_local_or_metadata`,
+  `test_a_listed_localhost_may_reach_loopback_and_nothing_else_never_reachable`.
+  **Residual:** a NAT64 prefix length other than /96 inside the local-use `64:ff9b:1::/48`
+  (RFC 6052 then places the IPv4 elsewhere) is not decoded, so a host on
+  `LAKANA_WEBHOOK__ALLOW_HOSTS` or `LAKANA_CI_OIDC__ALLOW_HOSTS` that resolves to such an address
+  carrying a metadata or loopback IPv4 is reached as a private address; an unlisted host is
+  refused there, because the whole `/48` is not global. A NAT64 prefix an operator chose in their
+  own global IPv6 space cannot be known at all: an address in it looks public, to listed and
+  unlisted hosts alike, and only the NAT64 gateway's own rules keep it from internal IPv4
+  destinations.
 - **No URL in any text.** Every exception is reduced to a fixed reason
   (`lakana_core.net.egress.classify`); `str(exc)`
   of an `httpx` error embeds the URL and is never read. Refusals are raised outside `except`
@@ -3777,9 +3875,8 @@ pins each line.
 ## CI OIDC verification (#15)
 
 `lakana_core.ci_oidc` verifies the OIDC ID token of a CI job (GitHub Actions, GitLab CI). It is the
-first part of a second authentication path, and nothing calls it yet: the exchange endpoint, the
-trust rules and the single use of each `jti` come with the second part, which gets its own
-adversarial review. `test_ci_oidc_verification.py`, `test_ci_oidc_jwks.py`,
+first part of a second authentication path; the exchange endpoint, the trust rules and the single
+use of each `jti` are the next section. `test_ci_oidc_verification.py`, `test_ci_oidc_jwks.py`,
 `test_ci_oidc_config.py` and `test_net_https_json.py` pin each line, with locally generated RSA keys
 and a fake fetcher; no test reaches the network.
 
@@ -3852,13 +3949,104 @@ and a fake fetcher; no test reaches the network.
   be public. Even a listed host is refused when any of its addresses is loopback, link-local
   (`169.254.0.0/16`, `fe80::/10`, so 169.254.169.254), unspecified, multicast or reserved, a
   known metadata address inside a private range (`fd00:ec2::254`, `100.100.100.200`), or an
-  IPv6 form that carries such an IPv4 address (`is_never_reachable`). This is stricter than
-  `LAKANA_WEBHOOK__ALLOW_HOSTS`, which exempts a listed host from every address check, the
-  scheme and the port. Pinning, `https` on 443, no redirects, the 64 KiB cap and the deadlines
+  IPv6 form that carries such an IPv4 address (`is_never_reachable`). Since #243
+  `LAKANA_WEBHOOK__ALLOW_HOSTS` applies the same rule (with a loopback exception for the entry
+  `localhost`), and it still exempts the scheme and the port. Pinning, `https` on 443, no redirects, the 64 KiB cap and the deadlines
   still apply. As with the webhooks, list only names whose DNS you control: whoever controls
   a listed name's DNS can point it at any private address.
 - **Residuals:** the `typ` header is not checked; `aud` and the issuer's own key set keep other
   tokens of the same issuer out.
+
+## CI OIDC exchange and CI tokens (#15)
+
+User documentation: `docs/site/reference/ci-trust-rules.md`. Threat model: "CI OIDC exchange
+(#15)". This section is what a reviewer of code in this area has to know.
+
+- **Trust rules** (`lakana_core.ci_oidc.rules`, table `ci_trust_rules`): issuer (one of
+  `LAKANA_CI_OIDC__ISSUERS`, presets resolved), an active `SERVICE_ACCOUNT`, environment and
+  repository (all by id; issuer, environment and repository never change), kinds (`deploy`,
+  `dry_run`; never rollback or undeploy), exact-match claim conditions. Required: the numeric id
+  claim (`id_claim`: `repository_id` for `GITHUB_ISSUER`, `project_id` for every other issuer,
+  which the settings only accept as GitLab), digits only, `ref` or `environment`, and one claim of
+  `trigger_claims` (decided 2026-10-20): `event_name` or `environment` for GitHub (a
+  `pull_request_target` run has the base branch as `ref`), `ref_protected`, `pipeline_source` or
+  `environment` for GitLab (a `ref` pin alone also matches the branch while it is unprotected and
+  pipelines of every source: schedules, triggers, web, API; a fork's merge request pipeline
+  carries the fork's `project_id`, which the id pin already refuses). `update` and `enable` check the stored conditions again;
+  `rule_problem` makes a stored rule that fails them match no exchange and appear in `explain` as
+  not allowed. Reserved
+  claims (`iss`, `aud`, `exp`, `iat`, `nbf`, `jti`), more than 16 conditions, a non-text value,
+  an empty one, one over 255 characters or with a control character are refused.
+  `CiTrustRuleService` has eight call sites of `authorize_admin_only(..., MANAGE_TOKEN)` (a rule
+  lets CI act as an account, which is issuing it a token), each in `test_admin_only_call_sites`'s
+  `_GUARDED`. Every change records `CI_TRUST_RULE_*` in its transaction and raises `revision`
+  (enable and disable too, a repeat changes nothing); a token is valid only under the revision it
+  was issued with.
+- **Matching** is `condition_mismatches`, the one function of the exchange and of `explain`: the
+  claim must be present, a `str`, and equal. No case folding, no strip, no coercion (`123` never
+  matches `"123"`, `["x"]` never matches `"x"`). Only enabled rules of the verified issuer for the
+  requested environment (live) and repository count; two matches refuse as ambiguous.
+- **The exchange** (`CiTokenService.exchange`, `POST /api/v1/auth/oidc/token`; the route reads
+  at most 16 KiB itself, `streams_its_own_body`, and runs the synchronous verifier in the
+  threadpool with a session of its own): verify; record `jti_digest(issuer, jti)` in
+  `ci_oidc_jtis` and **commit before matching**, so a refused exchange still uses the ID token
+  up and one ID token probes one environment and repository at most (a concurrent duplicate fails
+  on the primary key); rows whose ID token expired more than the 60 s skew ago are swept in that
+  transaction. Then rules, an active service account, and for a rule with `deploy` a `sha` claim
+  of 40 lower-case hex digits (`valid_sha`). The `CiToken` (`lakana_ci_<key id>_<secret>`,
+  SHA-256 of the secret, like a PAT) stores rule, revision, principal, environment, repository,
+  kinds, `sha`, `jti_sha256`, TTL `LAKANA_CI_OIDC__TOKEN_TTL_SECONDS` (3600, 60 to 21600), and
+  `OIDC_TOKEN_EXCHANGED` is recorded as the service account in the same transaction.
+- **What a refused caller learns** (decided): a verifier refusal answers 401 with its
+  `RefusalCode` message, a replay 401 with its own; everything after verification (no rule,
+  ambiguous, unknown environment or repository, inactive principal, missing commit) answers one
+  403 text that echoes the requested names only. The server records `OIDC_EXCHANGE_REFUSED`
+  through `app.state.oidc_exchange_audit_limiter` (an `AuthAuditLimiter` of its own,
+  `LAKANA_AUTH_AUDIT__PER_IP_PER_MINUTE`): `code`, the issuer only when it is a configured one
+  (`_claimed_issuer` reads the unverified `iss` of a refused token and keeps it only then), and the
+  requested names, `jti_sha256` and rule ids only after verification. Never the JWT or the token.
+  The 422 for a bad body names fields, never values (`hide_input_in_errors`).
+- **Authentication** (`get_principal`, prefix `lakana_ci`): `CiTokenService.verify` → hash
+  lookup, not expired, then `resolve_ci_scope` (fresh reads, `populate_existing`): rule exists,
+  enabled, same revision, same principal, environment and repository; principal an active
+  `SERVICE_ACCOUNT`; environment live; repository exists. The result is
+  `PrincipalRef.ci_scope` (`CiScope`: token, rule, environment and repository with ids, kinds,
+  `sha`, `used`). Sign-ins are bounded like PATs (`("ci", key_id)`).
+- **The authorizer** (`GrantAuthorization._ci_scope_refusal`, before any grant): a CI-scoped
+  principal may only `DEPLOY` on an `ENVIRONMENT` securable that is its environment. Not
+  `READ_ENVIRONMENT` (narrower than the design's "DEPLOY and READ_ENVIRONMENT": nothing the CI
+  flow needs reads it, since `DeployService.get` takes the `DEPLOY` branch), no table, namespace or
+  instance action. The grants still decide `DEPLOY`. `GrantService.explain` treats a CI token like
+  a task token: never "about oneself".
+- **Every `DEPLOY` check** decides the rest (`lakana_core.ci_oidc.scope`; refusals are audited
+  as `AUTHORIZATION_DENIED` with `reason: ci_token` through the denial limiter):
+  - `DeployService.submit`: `check_ci_request` (its environment and repository by id, a kind in
+    `kinds`, never a rollback, a deploy only with a `sha`, and only of it: no ref means the
+    `sha`, another ref is refused), `deploy_runs.ci_token_id` set, and `use_ci_token` in the same
+    transaction (one conditional `UPDATE` on unused, unexpired, same rule, rule enabled at the
+    same revision). A second submission, of either kind, is refused.
+  - `DeployService.get`: only a run whose `ci_token_id` is the token's; any other is the same 404
+    as a missing one.
+  - `DeployService.authorize_deploy` (the worker, `run_deploy`): `ci_scope_for_run` resolves the
+    run's token again (missing, another principal, or invalid: refused; an expiry since queuing is
+    not), `DEPLOY` is authorized with the scope, `check_ci_request` again, and a deploy's
+    `requested_ref` must be the `sha`. After the fetch, `DeployService.check_ci_commit` refuses
+    another commit. The table checks of the deploy use the account without the scope, as any
+    deploy.
+  - `DeployService.undeploy`, `JobService.pause`, `resume`, `notify_test` and `delivery`:
+    refused (`refuse_ci_token`, before their own check).
+  - `test_ci_token_enforcement.py::test_every_deploy_check_is_covered` lists every function in
+    `packages/*/src` that names `DEPLOY` and fails on a new one; add it there with a test.
+- **No foreign key on `deploy_runs.ci_token_id`** (like `QueryRun.task_token_id`): a missing
+  token row must not make the run look like one no CI token queued; the worker refuses it.
+- **Tests:** `test_ci_trust_rules.py`, `test_ci_oidc_exchange.py`, `test_ci_token_enforcement.py`
+  (core), `test_deploy_ci_token.py` (worker: the signed commit, another fetched commit, a rule
+  disabled after queuing, a tampered ref), `api/platform/test_ci_oidc.py` and
+  `test_ci_trust_rules.py` (server), `sdk/test_sdk_ci_trust.py`. Locally signed keys and a fake
+  fetcher; nothing reaches the network.
+- **Review checklist:** a new `DEPLOY` check decides what a CI token may do there; a new action
+  stays refused for a CI scope unless it is `DEPLOY`; nothing logs or records a JWT or a
+  `lakana_ci_` token; a refusal after verification keeps the one text.
 
 ## Git fetch hardening (M5b)
 

@@ -19,6 +19,11 @@ lease counter, which a request must never set; no request parameter or body fiel
 platform contains it today, and the test fails when one appears. `writefence` and `workerid`
 are the write fence's two halves: only the worker, for the run it executes, sets them."""
 
+_ALLOWED = {"claims"}
+"""Names that contain a forbidden one and are not it, compared exactly in `_squash` form. `claims`
+is the body field of `POST /api/v1/ci-trust-rules/explain`: the decoded claims of a CI job's OIDC
+ID token, which an administrator pastes to test the trust rules, not a task run's claim counter."""
+
 
 def _squash(name: str) -> str:
     """Reduce a parameter or field name to what FastAPI and clients treat as one name.
@@ -49,7 +54,11 @@ def forbidden_in(names: set[str]) -> set[str]:
     set[str]
         The offending names, as written.
     """
-    return {name for name in names if any(bad in _squash(name) for bad in _FORBIDDEN)}
+    return {
+        name
+        for name in names
+        if _squash(name) not in _ALLOWED and any(bad in _squash(name) for bad in _FORBIDDEN)
+    }
 
 
 def _walk(
@@ -171,6 +180,16 @@ def test_a_header_a_query_parameter_and_a_path_level_parameter_are_found_by_any_
         "task-run-id",
         "taskRunId",
         "claim_token",
+    }
+
+
+def test_only_the_exact_allowed_name_escapes_the_guard() -> None:
+    """`claims` (a CI ID token's claims) passes; a claim counter by any other spelling does not."""
+    assert forbidden_in({"claims", "claim", "task_claim", "claims_count", "Claim"}) == {
+        "claim",
+        "task_claim",
+        "claims_count",
+        "Claim",
     }
 
 

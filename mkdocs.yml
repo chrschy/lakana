@@ -30,6 +30,8 @@ nav:
   - How-to guides:
       - how-to/index.md
       - how-to/projects.md
+      - how-to/deploy-from-github-actions.md
+      - how-to/deploy-from-gitlab-ci.md
       - how-to/check-your-data.md
       - how-to/run-a-job-on-a-schedule.md
       - how-to/get-told-when-a-job-fails.md
@@ -60,6 +62,7 @@ nav:
       - reference/index.md
       - reference/artifacts.md
       - reference/package-indexes.md
+      - reference/ci-trust-rules.md
       - reference/checks.md
       - reference/descriptions.md
       - reference/table-health.md

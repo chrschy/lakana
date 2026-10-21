@@ -148,6 +148,17 @@ class IdTokenVerifier:
         self._issuers = frozenset(config.issuers)
         self._algorithms = frozenset(config.algorithms)
 
+    @property
+    def issuers(self) -> frozenset[str]:
+        """The configured issuers (`LAKANA_CI_OIDC__ISSUERS`, resolved).
+
+        Returns
+        -------
+        frozenset of str
+            The issuer URLs; empty when CI OIDC is off.
+        """
+        return self._issuers
+
     def _header(self, token: str) -> tuple[str, str, dict[str, object]]:
         """Check the token's shape and header (steps 1 to 4).
 

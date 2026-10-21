@@ -77,6 +77,35 @@ def _config(tmp_path: Path) -> StorageConfig:
     return StorageConfig(scheme="file", root=f"file://{tmp_path}", options={})
 
 
+def _earlier_layout(catalog: CatalogService, principal: PrincipalRef, name: str, root: str) -> None:
+    """Create an environment on a root that only an earlier release could give it.
+
+    `CatalogService.create_environment` refuses a root at or inside another environment's
+    ``managed/`` or unrecorded directories, but such environments may exist from before: this
+    creates the environment elsewhere and then moves its row to `root`, for the tests of the
+    checks that keep their files.
+
+    Parameters
+    ----------
+    catalog
+        The catalog service.
+    principal
+        The acting principal.
+    name
+        The environment's name.
+    root
+        Its storage root.
+    """
+    placeholder = f"file:///earlier-layout-{uuid.uuid4().hex}"
+    env = catalog.create_environment(
+        principal, name=name, storage=StorageConfig(scheme="file", root=placeholder, options={})
+    )
+    session = Session.object_session(env)
+    assert session is not None
+    env.storage_root = root
+    session.commit()
+
+
 def _minimal_schema() -> Schema:
     """Build a minimal schema for tables that exist only as fixtures.
 

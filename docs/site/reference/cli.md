@@ -80,6 +80,8 @@ Usage: `lakana deploy [OPTIONS] [repo]`
 
 Deploy REPO to an environment; exit 1 if the deploy fails.
 
+In a CI job, LAKANA_OIDC=github or LAKANA_OIDC=gitlab (or LAKANA_OIDC_TOKEN) exchanges the job's OIDC ID token for a one-deploy CI token instead of reading a stored token.
+
 | Name | Type | Default | Description |
 |---|---|---|---|
 | `REPO` | text | none | Repository name (default: lakana.yaml's repo:). |
@@ -168,6 +170,7 @@ Create a Lakana project that deploys unchanged.
 | `DIRECTORY` | path | `.` | Project directory (default: here). |
 | `--repo` | text | none | Repository name (default: the directory name). |
 | `--sample` / `--no-sample` | flag | none | Write a small sample to build and query (default: yes for a local instance). |
+| `--ci-auth` | one of `oidc`, `pat` | `oidc` | How the CI files sign in: oidc exchanges the CI job's ID token, so nothing secret is stored in CI; pat reads a stored Lakana token. |
 
 ## `lakana profile`
 
@@ -215,7 +218,9 @@ Usage: `lakana env create [OPTIONS] {name}`
 
 Create environment NAME (with bronze/silver/gold namespaces).
 
-Write the storage root the one way Lakana compares locations: a lower-case scheme (`s3`, not `s3a`), one slash between path segments and none doubled after `file://` (`file:///data`, not `file:////data`), for `file` an absolute path and no host (not `file://data` or `file://localhost/data`), no `.` or `..` segments, no percent escapes and no `*`, `?`, `[` or `]`. One trailing slash is fine. Another spelling is refused, and the message names the one to use.
+Write the storage root the one way Lakana compares locations: a lower-case scheme (`s3`, not `s3a`), one slash between path segments and none doubled after `file://` (`file:///data`, not `file:////data`), for `file` an absolute path and no host (not `file://data` or `file://localhost/data`), no `.` or `..` segments, no percent escapes and no `*`, `?`, `[` or `]`. One trailing slash is fine. Another spelling is refused, and the message names the one to use. The root of the disk (`file:///`) cannot hold an environment: use a directory, such as `file:///data/lakana`.
+
+Environments may share a root, and one may lie elsewhere in another's (prod at `s3://bucket`, dev at `s3://bucket/dev`). A root at or inside another environment's `managed/`, `raw/`, `artifacts/` or `_artifacts/`, a deleted environment's too, is refused, and so is one whose own such directory would hold another environment's root: the message names that environment and a root to use instead.
 
 | Name | Type | Default | Description |
 |---|---|---|---|
@@ -1416,6 +1421,102 @@ Delete package index NAME.
 |---|---|---|---|
 | `NAME` | text | required |  |
 | `--yes` | flag | off | Don't ask for confirmation. |
+
+## `lakana ci-trust`
+
+Usage: `lakana ci-trust [OPTIONS] COMMAND [ARGS]...`
+
+Let CI jobs (GitHub Actions, GitLab CI) deploy with their OIDC ID token, without a stored token.
+
+### `lakana ci-trust create`
+
+Usage: `lakana ci-trust create [OPTIONS]`
+
+Create a CI trust rule.
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `--issuer` | text | required | github, gitlab or a configured issuer URL. |
+| `--env` | text | required | The environment CI may deploy to. |
+| `--repo` | text | required | The registered repository CI may deploy. |
+| `--principal` | text | required | The service account the CI job acts as; it needs DEPLOY. |
+| `--claim` | text, repeatable | required | NAME=VALUE the ID token's claim must equal exactly (repeatable). Must include repository_id (GitHub) or project_id (GitLab), ref or environment, and how the run was started: event_name or environment (GitHub); ref_protected, pipeline_source or environment (GitLab). |
+| `--kind` | text, repeatable | none | deploy (the default) or dry_run; repeat for both. |
+
+### `lakana ci-trust list`
+
+Usage: `lakana ci-trust list [OPTIONS]`
+
+List every CI trust rule, oldest first.
+
+### `lakana ci-trust show`
+
+Usage: `lakana ci-trust show [OPTIONS] {rule_id}`
+
+Show CI trust rule RULE_ID.
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `RULE_ID` | text | required |  |
+
+### `lakana ci-trust update`
+
+Usage: `lakana ci-trust update [OPTIONS] {rule_id}`
+
+Change CI trust rule RULE_ID; the tokens issued under it stop working at once.
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `RULE_ID` | text | required |  |
+| `--principal` | text | none | A new service account. |
+| `--claim` | text, repeatable | none | NAME=VALUE (repeatable); replaces all of the rule's conditions. |
+| `--kind` | text, repeatable | none | deploy or dry_run (repeatable). |
+
+### `lakana ci-trust enable`
+
+Usage: `lakana ci-trust enable [OPTIONS] {rule_id}`
+
+Enable CI trust rule RULE_ID.
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `RULE_ID` | text | required |  |
+
+### `lakana ci-trust disable`
+
+Usage: `lakana ci-trust disable [OPTIONS] {rule_id}`
+
+Disable CI trust rule RULE_ID; the tokens issued under it stop working at once.
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `RULE_ID` | text | required |  |
+
+### `lakana ci-trust delete`
+
+Usage: `lakana ci-trust delete [OPTIONS] {rule_id}`
+
+Delete CI trust rule RULE_ID; the tokens issued under it stop working at once.
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `RULE_ID` | text | required |  |
+| `--yes` | flag | off | Don't ask for confirmation. |
+
+### `lakana ci-trust explain`
+
+Usage: `lakana ci-trust explain [OPTIONS]`
+
+Say which rule a CI job's claims would match, and why the others do not.
+
+Needs no ID token: give the decoded claims, for example from the job's log.
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `--claims` | text | required | A JSON file with the ID token's decoded claims, or - for standard input. |
+| `--env` | text | required | The environment the job deploys to. |
+| `--repo` | text | required | The repository it deploys. |
+| `--issuer` | text | none | The issuer; the claims' iss by default. |
 
 ## `lakana deploys`
 

@@ -31,7 +31,8 @@ cloud credential lookup under "What we could not verify", are not.
 |---|---|---|
 | Worker (`git`) | The git remotes you registered, for `ls-remote` and `fetch`, over HTTPS or SSH. Nothing else: submodules, credential helpers and other protocols are off. | The repository's URL. For HTTPS: `LAKANA_GIT__HTTPS_PROXY`, `LAKANA_GIT__NO_PROXY`, `LAKANA_GIT__CA_BUNDLE` (see "Git network settings" in [Projects](../how-to/projects.md)) |
 | Worker (`uv`) | A package index, when it builds the environment of a project with Python assets: the default index (PyPI) and the files the project's `uv.lock` names, plus an extra index if you set one, plus each registered package index a project's lock names, with that index's credential from the environment's secret. The build connects to the hosts the lock names, follows the redirects those hosts send, and goes through the operator's proxy when one is set. A build without a credential may build a source distribution, whose build requirements can come from the index and whose build backend has network access; a build with a registered index's credential installs wheels only. It never downloads a Python interpreter. | `LAKANA_RUN__INDEX_URL` (an extra index), `lakana index add` (registered indexes), `LAKANA_RUN__HTTPS_PROXY`, `LAKANA_RUN__NO_PROXY`, `LAKANA_RUN__CA_BUNDLE` |
-| Worker (webhooks) | The webhook URL a job's `notify:` names, as a secret of the environment: only a public `https` address on port 443, checked before it connects, with no redirect followed, and a message that carries job, run and check names only. | The secret. `LAKANA_WEBHOOK__ALLOW_HOSTS`, `LAKANA_WEBHOOK__PROXY`, `LAKANA_WEBHOOK__CA_BUNDLE` (see "Webhook network settings" in [Projects](../how-to/projects.md)); `LAKANA_WORKER__NOTIFICATIONS=false` stops a worker from sending |
+| Server (CI OIDC) | The CI providers in `LAKANA_CI_OIDC__ISSUERS` (GitHub Actions, GitLab.com or your own GitLab), only when a CI job exchanges an ID token: the issuer's discovery document (`/.well-known/openid-configuration`) and its public signing keys, over `https` on port 443, at most once an hour per issuer (once a minute for an unknown key), from public addresses only unless the host is in `LAKANA_CI_OIDC__ALLOW_HOSTS`, with no redirect followed and at most 64 KiB read. Nothing about the job or the instance is sent. Off while `LAKANA_CI_OIDC__ISSUERS` is empty (the default). | `LAKANA_CI_OIDC__ISSUERS`, `LAKANA_CI_OIDC__ALLOW_HOSTS`, `LAKANA_CI_OIDC__PROXY`, `LAKANA_CI_OIDC__CA_BUNDLE` (see [CI trust rules and CI tokens](../reference/ci-trust-rules.md)) |
+| Worker (webhooks) | The webhook URL a job's `notify:` names, as a secret of the environment: only a public `https` address on port 443 (or a host the operator allowed, never a loopback, link-local or cloud metadata address), checked before it connects, with no redirect followed, and a message that carries job, run and check names only. | The secret. `LAKANA_WEBHOOK__ALLOW_HOSTS`, `LAKANA_WEBHOOK__PROXY`, `LAKANA_WEBHOOK__CA_BUNDLE` (see "Webhook network settings" in [Projects](../how-to/projects.md)); `LAKANA_WORKER__NOTIFICATIONS=false` stops a worker from sending |
 
 **One connection to the DuckDB project**
 
@@ -56,8 +57,9 @@ A few more things you may see:
   data, a secret, or the text of an error message. The address is a secret of the environment; it
   is never written to a log, the audit log or an answer. See
   [Get told when a job fails](../how-to/get-told-when-a-job-fails.md).
-- **Not built yet.** There is no OIDC login in the code today. When it arrives it will make
-  connections to the provider you configure, and this page will list them.
+- **Not built yet.** There is no OIDC login for people in the code today. When it arrives it
+  will make connections to the provider you configure, and this page will list them. (The CI
+  OIDC exchange above is for CI jobs only.)
 - **There is no web interface** in the repository today.
 - **This documentation site** loads no font, script, image or style sheet from another host, so
   it also works on an internal network.
@@ -77,9 +79,10 @@ libraries in the lock file, and ran two small tests against DuckDB 1.5.5, the ve
 the lock file.
 
 - **Our code.** We searched for HTTP clients, sockets, `urllib`, subprocesses, update checks,
-  usage reporting and the host names of analytics services. The only HTTP client is `httpx` in
+  usage reporting and the host names of analytics services. The only HTTP client is `httpx`: in
   the SDK, which talks to the URL of the profile (and, with proxy settings from the
-  environment ignored, to the loopback address in local mode). The only other request is the
+  environment ignored, to the loopback address in local mode), and in `lakana_core.net`, which the
+  worker uses for webhooks and the server for the CI providers' keys, both listed above. The only other request is the
   container's health check, to `127.0.0.1`. The only programs the code starts are `git`,
   `uv`, the task's own Python interpreter, and Lakana's own server and worker.
 - **Python libraries.** We searched the installed source of the libraries Lakana depends on

@@ -12,6 +12,7 @@ from lakana_core.artifacts.manifest import shown
 from lakana_core.auth import (
     Action,
     BoundTask,
+    CiScope,
     PrincipalRef,
     Securable,
     SecurableKind,
@@ -279,6 +280,10 @@ class GrantAuthorization:
                 self._check_task_scope(principal, principal.task_scope, action, securable)
             except PermissionDenied as exc:
                 return Decision(allowed=False, grants=(), reason=str(exc))
+        if principal.ci_scope is not None:
+            reason = self._ci_scope_refusal(principal, principal.ci_scope, action, securable)
+            if reason is not None:
+                return Decision(allowed=False, grants=(), reason=reason)
         env_id = (
             self._resolve_environment_id(securable.environment)
             if securable.environment is not None
@@ -462,6 +467,42 @@ class GrantAuthorization:
                 grant.namespace + NAMESPACE_SEPARATOR
             )
         return table_id is not None and grant.table_id == table_id
+
+    @staticmethod
+    def _ci_scope_refusal(
+        principal: PrincipalRef, scope: CiScope, action: Action, securable: Securable
+    ) -> str | None:
+        """Refuse everything a CI token may not do, before any grant is consulted.
+
+        A CI token may only `DEPLOY` on its own environment (an `ENVIRONMENT` securable): it
+        reads nothing, lists nothing and changes nothing else, whatever its principal's own
+        grants allow. Narrows only; the grants still decide `DEPLOY` itself. What `DEPLOY`
+        then permits is decided at each `DEPLOY` check (`lakana_core.ci_oidc.scope`).
+
+        Parameters
+        ----------
+        principal
+            The CI-authenticated principal, for the message.
+        scope
+            Its scope.
+        action
+            The action requested.
+        securable
+            The object acted upon.
+
+        Returns
+        -------
+        str or None
+            The refusal's text, or `None` when the grants decide.
+        """
+        if action is not Action.DEPLOY:
+            return f"{principal.name!r}'s CI token may only deploy; it may not {action.value}."
+        if (
+            securable.kind != SecurableKind.ENVIRONMENT
+            or securable.environment != scope.environment
+        ):
+            return f"{principal.name!r}'s CI token may deploy only to {scope.environment!r}."
+        return None
 
     @staticmethod
     def _check_task_scope(

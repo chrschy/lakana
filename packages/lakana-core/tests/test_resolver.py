@@ -1054,3 +1054,20 @@ def test_a_relative_or_hosted_file_location_is_not_canonical() -> None:
     """Without an absolute path and an empty host, a file location has no one reading."""
     assert not is_within_location("file://store", "file://store/managed/x")
     assert not is_within_location("file://localhost/data", "file://localhost/data/x")
+
+
+@pytest.mark.parametrize(
+    ("root", "base"),
+    [
+        ("file:///", "file://"),
+        ("file:///data/", "file:///data"),
+        ("s3://bucket//", "s3://bucket"),
+        ("s3://bucket/lake", "s3://bucket/lake"),
+        ("no-scheme/", "no-scheme"),
+    ],
+)
+def test_root_base_keeps_the_root_of_a_disk_a_root(root: str, base: str) -> None:
+    """Only the path's slashes go: ``file:///`` + ``/managed`` is its ``managed/``."""
+    from lakana_core.storage.resolver import root_base
+
+    assert root_base(root) == base

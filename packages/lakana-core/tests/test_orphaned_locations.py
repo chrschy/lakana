@@ -17,7 +17,7 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
-from core_test_helpers import ActionAllowList
+from core_test_helpers import ActionAllowList, _earlier_layout
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from test_table_location_sweep import _claim, _events, _files, _location, _put, _record, _schema
@@ -28,6 +28,7 @@ from lakana_core.catalog import location_sweep
 from lakana_core.catalog import orphaned_locations as orphaned_module
 from lakana_core.catalog import service as service_module
 from lakana_core.catalog.orphaned_locations import (
+    HELD_PREFIX,
     KEPT_BUSY,
     KEPT_CLAIMED,
     KEPT_EMPTY,
@@ -36,7 +37,6 @@ from lakana_core.catalog.orphaned_locations import (
     KEPT_RECENT,
     KEPT_UNJUDGED,
     KEPT_WAITING,
-    UNJUDGED_PREFIX,
     OrphanedLocations,
 )
 from lakana_core.catalog.service import CatalogService
@@ -396,9 +396,7 @@ def test_another_environment_whose_root_lies_under_managed_is_never_listed(
     inner = f"file://{store}/managed/inner-{uuid.uuid4().hex}"
     nested = f"file://{store}/managed/gold/nest"
     for name, root in (("inner", inner), ("nest", nested)):
-        catalog.create_environment(
-            principal, name=name, storage=StorageConfig(scheme="file", root=root, options={})
-        )
+        _earlier_layout(catalog, principal, name, root)
     _leftover(f"{inner}/raw/x")
     _leftover(f"{nested}/artifacts/gold/model-{uuid.uuid4().hex}")
     mine = _leftover(_location(store, "mine"))
@@ -411,11 +409,7 @@ def test_another_environment_whose_root_is_managed_itself_is_never_listed(
     catalog: CatalogService, store: Path, principal: PrincipalRef, slash: str
 ) -> None:
     """Everything in ``managed/`` then lies in that environment's root, its raw zone too."""
-    catalog.create_environment(
-        principal,
-        name="other",
-        storage=StorageConfig(scheme="file", root=f"file://{store}/managed{slash}", options={}),
-    )
+    _earlier_layout(catalog, principal, "other", f"file://{store}/managed{slash}")
     raw = f"file://{store}/managed/raw/exports/batch-{uuid.uuid4().hex}"
     mine = _location(store, "mine")
     for location in (raw, mine):
@@ -431,9 +425,7 @@ def test_an_environment_rooted_at_another_ones_managed_lists_its_own(
 ) -> None:
     """From the inner side, the enclosing environment's records still count, and nothing else."""
     inner = f"file://{store}/managed"
-    catalog.create_environment(
-        principal, name="other", storage=StorageConfig(scheme="file", root=inner, options={})
-    )
+    _earlier_layout(catalog, principal, "other", inner)
     location = f"{inner}/managed/gold/t-{uuid.uuid4().hex}"
     _leftover(location)
 
@@ -447,14 +439,14 @@ def test_an_environment_rooted_in_another_ones_unrecorded_files_keeps_everything
 ) -> None:
     """There the enclosing environment keeps files no record names: listed, kept."""
     inner = f"file://{store}/{zone}/inner"
-    catalog.create_environment(
-        principal, name="inner", storage=StorageConfig(scheme="file", root=inner, options={})
-    )
+    _earlier_layout(catalog, principal, "inner", inner)
     location = f"{inner}/managed/gold/t-{uuid.uuid4().hex}"
     _leftover(location)
 
     (entry,) = catalog.find_orphaned_locations(principal, "inner").locations
-    assert entry.kept_because == UNJUDGED_PREFIX + f"file://{store}"
+    assert entry.kept_because == HELD_PREFIX + f"file://{store}"
+    assert "move this environment to a root of its own" in entry.kept_because
+    assert "remove that location first" not in entry.kept_because
     (entry,) = catalog.delete_orphaned_locations(principal, "inner").locations
     assert not entry.deleted
     assert len(_files(location)) == 2
@@ -480,11 +472,7 @@ def test_an_environment_rooted_outside_managed_does_not_block_the_leftovers(
     catalog: CatalogService, store: Path, principal: PrincipalRef
 ) -> None:
     """Its root inside this one's but beside ``managed/`` holds nothing of ``managed/``."""
-    catalog.create_environment(
-        principal,
-        name="beside",
-        storage=StorageConfig(scheme="file", root=f"file://{store}/raw/beside", options={}),
-    )
+    _earlier_layout(catalog, principal, "beside", f"file://{store}/raw/beside")
     location = _location(store, "mine")
     _leftover(location)
 
@@ -498,9 +486,7 @@ def test_an_environment_inside_another_ones_managed_lists_its_own(
 ) -> None:
     """The enclosing environment's root does not hide the inner one's own leftovers."""
     inner = f"file://{store}/managed/gold/nest"
-    catalog.create_environment(
-        principal, name="nest", storage=StorageConfig(scheme="file", root=inner, options={})
-    )
+    _earlier_layout(catalog, principal, "nest", inner)
     location = f"{inner}/managed/gold/t-{uuid.uuid4().hex}"
     _leftover(location)
     (entry,) = catalog.find_orphaned_locations(principal, "nest").locations

@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from lakana_core.audit.service import AuditService
 from lakana_core.auth import Action, AuthorizationService, PrincipalRef, Securable
+from lakana_core.ci_oidc.scope import refuse_ci_token
 from lakana_core.db import db_now
 from lakana_core.errors import ConflictError, NotFoundError, ValidationError
 from lakana_core.grants.authorization import GrantAuthorization
@@ -1006,6 +1007,46 @@ class JobService:
         session.commit()
         return run
 
+    def _deployer_job(
+        self, p: PrincipalRef, environment: str, repository: str, job: str, what: str
+    ) -> tuple[Environment, Repository, Mapping[str, Any], JobSchedule]:
+        """Authorize a deployer's change of a job, then look the job up and lock its schedule.
+
+        Parameters
+        ----------
+        p
+            The caller.
+        environment
+            Environment name.
+        repository
+            Repository name.
+        job
+            The job's name.
+        what
+            What is asked, for the refusal of a CI token (``pause a job``).
+
+        Returns
+        -------
+        tuple of (Environment, Repository, Mapping, JobSchedule)
+            The environment, the repository, the job's manifest entry and its locked schedule.
+
+        Raises
+        ------
+        PermissionDenied
+            For a CI token, always; otherwise without DEPLOY on the environment (checked first;
+            DEPLOY is environment-scoped, so it covers every repository there).
+        NotFoundError
+            If the environment, repository or job does not exist or is not deployed.
+        """
+        refuse_ci_token(self._authz, p, environment, what)
+        self._authz.authorize(p, Action.DEPLOY, Securable.environment_scope(environment))
+        env, repo = (
+            environment_by_name(self._session, environment),
+            repository_by_name(self._session, repository),
+        )
+        entry, row = self._lock_job(env, repo, job)
+        return env, repo, entry, row
+
     # -- pause and resume ----------------------------------------------------
 
     def pause(self, p: PrincipalRef, environment: str, repository: str, job: str) -> JobView:
@@ -1033,19 +1074,14 @@ class JobService:
         Raises
         ------
         PermissionDenied
-            Without DEPLOY on the environment (checked first; DEPLOY is environment-scoped, so it
-            covers every repository there).
+            For a CI token, always; otherwise without DEPLOY on the environment (checked first;
+            DEPLOY is environment-scoped, so it covers every repository there).
         NotFoundError
             If the environment, repository or job does not exist or is not deployed.
         ConflictError
             If the job has no schedule here, so there is nothing to pause.
         """
-        self._authz.authorize(p, Action.DEPLOY, Securable.environment_scope(environment))
-        env, repo = (
-            environment_by_name(self._session, environment),
-            repository_by_name(self._session, repository),
-        )
-        entry, row = self._lock_job(env, repo, job)
+        env, repo, entry, row = self._deployer_job(p, environment, repository, job, "pause a job")
         if job_schedule(entry) is None:
             self._session.rollback()
             raise ConflictError(
@@ -1091,16 +1127,12 @@ class JobService:
         Raises
         ------
         PermissionDenied
-            Without DEPLOY on the environment (checked first).
+            A CI token is always refused, before anything else; any other caller without
+            DEPLOY on the environment (checked first, like pause).
         NotFoundError
             If the environment, repository or job does not exist or is not deployed.
         """
-        self._authz.authorize(p, Action.DEPLOY, Securable.environment_scope(environment))
-        env, repo = (
-            environment_by_name(self._session, environment),
-            repository_by_name(self._session, repository),
-        )
-        entry, row = self._lock_job(env, repo, job)
+        env, repo, entry, row = self._deployer_job(p, environment, repository, job, "resume a job")
         if row.paused:
             wanted = job_schedule(entry)
             row.paused = False
@@ -1148,19 +1180,17 @@ class JobService:
         Raises
         ------
         PermissionDenied
-            Without DEPLOY on the environment (checked first, like pause and resume).
+            For a CI token, always; otherwise without DEPLOY on the environment (checked first,
+            like pause and resume).
         NotFoundError
             If the environment, repository or job does not exist or is not deployed; the
             message lists the jobs that exist.
         ConflictError
             If the job has no usable `notify:` in the environment (none, or a damaged one).
         """
-        self._authz.authorize(p, Action.DEPLOY, Securable.environment_scope(environment))
-        env, repo = (
-            environment_by_name(self._session, environment),
-            repository_by_name(self._session, repository),
+        env, repo, entry, _ = self._deployer_job(
+            p, environment, repository, job, "send a test message"
         )
-        entry, _ = self._lock_job(env, repo, job)
         notify = job_notify({"jobs": {job: entry}}, job)
         if notify is None:
             self._session.rollback()
@@ -1215,10 +1245,12 @@ class JobService:
         Raises
         ------
         PermissionDenied
-            With none of DEPLOY, RUN and READ_ENVIRONMENT on the environment.
+            For a CI token, always; otherwise with none of DEPLOY, RUN and READ_ENVIRONMENT on
+            the environment.
         NotFoundError
             If the delivery does not exist in this environment.
         """
+        refuse_ci_token(self._authz, p, environment, "read a notification delivery")
         scope = Securable.environment_scope(environment)
         if self._authz.permits(p, Action.DEPLOY, scope):
             self._authz.authorize(p, Action.DEPLOY, scope)

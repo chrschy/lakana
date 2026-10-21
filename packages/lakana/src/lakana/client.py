@@ -2,14 +2,24 @@
 
 from __future__ import annotations
 
+import os
+from datetime import datetime
 from typing import Literal, overload
 
 import httpx
 import pyarrow as pa
 
+from lakana._ci_oidc import (
+    AUDIENCE_VARIABLE,
+    GITLAB_ONE_SUBMISSION,
+    id_token_for,
+    resolve_provider,
+)
 from lakana._config import resolve_config
 from lakana._http import HttpTransport
 from lakana._models import (
+    CiToken,
+    CiTokenScope,
     InstanceInfo,
     QueryStatus,
     SearchHit,
@@ -19,10 +29,11 @@ from lakana._models import (
 )
 from lakana._routes import ROUTES
 from lakana._tokens import mask_token
-from lakana.errors import InvalidResponse
+from lakana.errors import AuthenticationError, ConfigError, InvalidResponse
 from lakana.resources.artifacts import Artifacts
 from lakana.resources.audit_events import AuditEvents
 from lakana.resources.checks import Checks
+from lakana.resources.ci_trust_rules import CiTrustRules, exchange_id_token
 from lakana.resources.column_masks import ColumnMasks
 from lakana.resources.deploys import Deployments, Deploys, OrphanTables, ProjectVersions
 from lakana.resources.environments import Environments
@@ -76,6 +87,8 @@ class Client:
         http_client: httpx.Client | None = None,
     ) -> None:
         self._config = resolve_config(url, token, profile)
+        self.ci_token: CiToken | None = None
+        """The CI token's details when `from_ci_oidc` built this client; never shows the token."""
         self._transport = HttpTransport(
             self._config, timeout=timeout, verify=verify, http_client=http_client
         )
@@ -94,6 +107,7 @@ class Client:
         self.secrets = Secrets(self._transport)
         self.repositories = Repositories(self._transport)
         self.package_indexes = PackageIndexes(self._transport)
+        self.ci_trust_rules = CiTrustRules(self._transport)
         self.audit_events = AuditEvents(self._transport)
         self.deploys = Deploys(self._transport)
         self.deployments = Deployments(self._transport)
@@ -104,6 +118,104 @@ class Client:
         self.checks = Checks(self._transport)
         self.scheduler = Scheduler(self._transport)
         self.workers = Workers(self._transport)
+
+    @classmethod
+    def from_ci_oidc(
+        cls,
+        url: str,
+        *,
+        environment: str,
+        repository: str,
+        provider: Literal["github", "gitlab"] | None = None,
+        id_token: str | None = None,
+        audience: str | None = None,
+        timeout: float = 30.0,
+        verify: bool | str = True,
+        http_client: httpx.Client | None = None,
+    ) -> Client:
+        """Build a client for a CI job from its OIDC ID token, without a stored secret.
+
+        The job's ID token is exchanged for a CI token (``lakana_ci_…``) that may queue one
+        deploy of the job's own commit, or one dry run, of `repository` to `environment`, and
+        then follow that run. Each client needs a new exchange: build one per submission. The
+        ID token and the CI token stay in memory; neither is written, logged or shown.
+
+        Parameters
+        ----------
+        url
+            The Lakana server's base URL.
+        environment
+            The environment the job deploys to.
+        repository
+            The registered repository it deploys.
+        provider
+            ``github`` asks the GitHub Actions runner for a new ID token (the job needs
+            ``permissions: id-token: write``); ``gitlab`` reads ``LAKANA_OIDC_TOKEN``, which the
+            job's ``id_tokens:`` entry sets. `None` reads ``LAKANA_OIDC``, and without it takes
+            the ID token from ``LAKANA_OIDC_TOKEN``.
+        id_token
+            The ID token itself; wins over `provider`.
+        audience
+            The audience to ask GitHub for: the server's ``LAKANA_CI_OIDC__AUDIENCE``. By
+            default ``LAKANA_OIDC_AUDIENCE``, and without it `url` exactly as given.
+        timeout
+            Request timeout in seconds.
+        verify
+            TLS verification for the Lakana server: `True`, `False` or a CA bundle path.
+        http_client
+            An existing `httpx.Client` to send through, for example in tests.
+
+        Returns
+        -------
+        Client
+            A client authenticated with the CI token; `ci_token` describes it.
+
+        Raises
+        ------
+        lakana.errors.ConfigError
+            If no ID token can be found; the message names the variable or permission to add.
+        lakana.errors.AuthenticationError
+            If the provider or the server refuses the ID token; the message says why.
+        lakana.errors.PermissionDenied
+            If no single enabled CI trust rule accepts it for this environment and repository.
+        """
+        chosen = resolve_provider(provider, os.environ)
+        if id_token is not None:
+            token = id_token.strip()
+            if not token:
+                raise ConfigError("id_token is empty: pass the CI job's ID token, or leave it out.")
+        else:
+            token = id_token_for(
+                chosen,
+                audience=audience or os.environ.get(AUDIENCE_VARIABLE) or url,
+                environ=os.environ,
+                timeout=timeout,
+                http_client=http_client,
+            )
+        try:
+            issued = exchange_id_token(
+                url,
+                token,
+                environment=environment,
+                repository=repository,
+                timeout=timeout,
+                verify=verify,
+                http_client=http_client,
+            )
+        except AuthenticationError as exc:
+            if chosen == "github" or "exchanged before" not in str(exc):
+                raise
+            raise AuthenticationError(
+                f"{exc}{GITLAB_ONE_SUBMISSION}",
+                status=exc.status,
+                error_type=exc.error_type,
+                retry_after=exc.retry_after,
+            ) from None
+        client = cls(
+            url=url, token=issued.token, timeout=timeout, verify=verify, http_client=http_client
+        )
+        client.ci_token = issued
+        return client
 
     @property
     def url(self) -> str:
@@ -215,8 +327,8 @@ class Client:
         Returns
         -------
         Whoami
-            The principal's name and type, and its task-token scope if the
-            credential is a task token.
+            The principal's name and type, and its scope if the credential is a task token
+            or a CI token.
 
         Raises
         ------
@@ -225,12 +337,26 @@ class Client:
         """
         body = self._transport.request(ROUTES["whoami"]).json()
         scope = body["task_token"]
+        ci = body.get("ci_token")
         return Whoami(
             name=body["name"],
             type=body["type"],
             task_token=None
             if scope is None
             else TaskTokenScope(environment=scope["environment"], asset_scope=scope["asset_scope"]),
+            ci_token=None
+            if ci is None
+            else CiTokenScope(
+                rule_id=ci["rule_id"],
+                environment=ci["environment"],
+                repository=ci["repository"],
+                kinds=list(ci["kinds"]),
+                sha=ci["sha"],
+                expires_at=None
+                if ci["expires_at"] is None
+                else datetime.fromisoformat(ci["expires_at"]),
+                used=bool(ci["used"]),
+            ),
         )
 
     def search(

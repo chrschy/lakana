@@ -44,7 +44,14 @@ def create(
     (`file:///data`, not `file:////data`), for `file` an absolute path and no host
     (not `file://data` or `file://localhost/data`), no `.` or `..` segments, no percent escapes
     and no `*`, `?`, `[` or `]`. One trailing slash is fine. Another spelling is refused, and the
-    message names the one to use.
+    message names the one to use. The root of the disk (`file:///`) cannot hold an environment:
+    use a directory, such as `file:///data/lakana`.
+
+    Environments may share a root, and one may lie elsewhere in another's (prod at
+    `s3://bucket`, dev at `s3://bucket/dev`). A root at or inside another environment's
+    `managed/`, `raw/`, `artifacts/` or `_artifacts/`, a deleted environment's too, is refused,
+    and so is one whose own such directory would hold another environment's root: the message
+    names that environment and a root to use instead.
 
     Parameters
     ----------

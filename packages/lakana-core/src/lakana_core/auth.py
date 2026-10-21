@@ -10,6 +10,7 @@ from __future__ import annotations
 import enum
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING, Protocol
 
 from lakana_core.identifiers import NamespacePath
@@ -97,6 +98,53 @@ class TaskScope:
 
 
 @dataclass(frozen=True)
+class CiScope:
+    """What a CI token (`lakana_ci_…`) is bound to; carried on `PrincipalRef.ci_scope`.
+
+    Resolved from the database at every authentication (`lakana_core.ci_oidc.exchange`), never
+    from the token's text. It narrows, never widens: `GrantAuthorization` allows a CI-scoped
+    principal nothing but `DEPLOY` on `environment`, and only where the principal's own grants
+    allow it too; `DeployService` allows one submission of `repository`, of a kind in `kinds`,
+    pinned to `sha` for a deploy, and afterwards only reading that run.
+
+    Parameters
+    ----------
+    token_id
+        The CI token's own id (`CiToken.id`), recorded on the run it submits.
+    rule_id
+        The trust rule the token was issued under.
+    environment
+        The one environment's name.
+    environment_id
+        Its id.
+    repository
+        The one repository's name.
+    repository_id
+        Its id.
+    kinds
+        ``deploy`` and/or ``dry_run``.
+    sha
+        The signed commit (the ID token's ``sha`` claim), the only one a deploy may deploy;
+        `None` when the ID token carried none (then only a dry run is possible).
+    used
+        Whether the token has already submitted its one run.
+    expires_at
+        When the token stops working; `None` only where a scope is built without a token row.
+    """
+
+    token_id: uuid.UUID
+    rule_id: uuid.UUID
+    environment: str
+    environment_id: uuid.UUID
+    repository: str
+    repository_id: uuid.UUID
+    kinds: frozenset[str]
+    sha: str | None
+    used: bool = False
+    expires_at: datetime | None = None
+
+
+@dataclass(frozen=True)
 class RunContext:
     """The task run a write is executed for (the claim form).
 
@@ -175,6 +223,10 @@ class PrincipalRef:
         Set only by the worker (`lakana_worker.pipeline._run_one`) for the run it executes;
         never taken from a request. The guard then refuses a table write unless that run is
         still `RUNNING` under that worker; `None` otherwise.
+    ci_scope
+        Set when this principal was authenticated with a CI token, and by the worker for the
+        re-check of a deploy such a token submitted; `None` otherwise. An
+        `AuthorizationService` must narrow every check to it before consulting any grant.
     """
 
     id: uuid.UUID
@@ -184,6 +236,7 @@ class PrincipalRef:
     run_context: RunContext | None = None
     break_glass_reason: str | None = None
     write_fence: WriteFence | None = None
+    ci_scope: CiScope | None = None
 
 
 class SecurableKind(enum.StrEnum):

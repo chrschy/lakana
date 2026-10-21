@@ -197,7 +197,18 @@ def invoke(
         Exit code, stdout, stderr and any exception.
     """
     clean: dict[str, str | None] = {
-        name: None for name in ("LAKANA_OUTPUT", "LAKANA_PROFILE", "LAKANA_TOKEN", "LAKANA_URL")
+        name: None
+        for name in (
+            "LAKANA_OUTPUT",
+            "LAKANA_PROFILE",
+            "LAKANA_TOKEN",
+            "LAKANA_URL",
+            "LAKANA_OIDC",
+            "LAKANA_OIDC_TOKEN",
+            "LAKANA_OIDC_AUDIENCE",
+            "ACTIONS_ID_TOKEN_REQUEST_URL",
+            "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+        )
     }
     clean["COLUMNS"] = "200"
     # Plain output regardless of the caller's terminal settings (CI, FORCE_COLOR). `NO_COLOR`

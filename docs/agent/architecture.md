@@ -77,11 +77,15 @@ and `lakana` also now contains the CLI built on top of it (details below).
   - `ci_oidc/` — verification of CI providers' OIDC ID tokens (#15): `config.py`
     (`CiOidcConfig`, `LAKANA_CI_OIDC__*`, a field of the server's settings), `jwks.py`
     (`JwksCache`: discovery and the issuers' keys), `verification.py` (`IdTokenVerifier`) and
-    `errors.py` (`IdTokenRefused` with a stable `RefusalCode`). Nothing calls it yet: the
-    exchange endpoint, which also makes each `jti` single-use, comes with the second part of
-    #15. See "CI OIDC verification" in `security.md`.
+    `errors.py` (`IdTokenRefused` with a stable `RefusalCode`); `rules.py`
+    (`CiTrustRuleService`, the claim matching of the exchange and of `explain`), `exchange.py`
+    (`CiTokenService`: the exchange, single use of each `jti`, verification of a `lakana_ci_`
+    token, `resolve_ci_scope`, `ci_scope_for_run`) and `scope.py` (what a CI token may ask the
+    `DEPLOY` checks for). The server's `POST /api/v1/auth/oidc/token` and
+    `/api/v1/ci-trust-rules` call it. See "CI OIDC verification" and "CI OIDC exchange and CI
+    tokens (#15)" in `security.md`.
   - Top-level modules: `auth.py` (`AuthorizationService`, `PrincipalRef`, `Securable`,
-    `TaskScope`), `bootstrap.py`, `config.py`, `db.py`, `errors.py`, `identifiers.py`
+    `TaskScope`, `CiScope`), `bootstrap.py`, `config.py`, `db.py`, `errors.py`, `identifiers.py`
     (`NamespacePath`, path-component validation), `iceberg_json.py`, `lineage.py`, and
     `query_rewrite.py` (the policy-rewriting query rewriter — parse, AST blacklist,
     per-table CTE substitution).

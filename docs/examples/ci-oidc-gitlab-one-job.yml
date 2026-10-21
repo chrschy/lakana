@@ -1,0 +1,18 @@
+lakana-dry-run-then-deploy:
+  stage: deploy
+  image: python:3.14-slim
+  environment: prod
+  resource_group: lakana-deploy-prod
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+  id_tokens:
+    LAKANA_OIDC_TOKEN:
+      aud: $LAKANA_URL
+    LAKANA_OIDC_TOKEN_2:
+      aud: $LAKANA_URL
+  variables:
+    LAKANA_OIDC: gitlab
+  script:
+    - pip install --index-url "${LAKANA_INDEX_URL:-https://pypi.org/simple}" "lakana==<version>"
+    - lakana deploy --env prod --ref "$CI_COMMIT_SHA" --dry-run --timeout 1800
+    - LAKANA_OIDC_TOKEN="$LAKANA_OIDC_TOKEN_2" lakana deploy --env prod --ref "$CI_COMMIT_SHA" --timeout 1800

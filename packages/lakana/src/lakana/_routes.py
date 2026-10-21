@@ -29,6 +29,15 @@ class Route:
 
 
 ROUTES: dict[str, Route] = {
+    "ci_oidc.exchange": Route("POST", "/api/v1/auth/oidc/token"),
+    "ci_trust_rules.create": Route("POST", "/api/v1/ci-trust-rules"),
+    "ci_trust_rules.list": Route("GET", "/api/v1/ci-trust-rules"),
+    "ci_trust_rules.explain": Route("POST", "/api/v1/ci-trust-rules/explain"),
+    "ci_trust_rules.get": Route("GET", "/api/v1/ci-trust-rules/{rule_id}"),
+    "ci_trust_rules.update": Route("PATCH", "/api/v1/ci-trust-rules/{rule_id}"),
+    "ci_trust_rules.enable": Route("POST", "/api/v1/ci-trust-rules/{rule_id}/enable"),
+    "ci_trust_rules.disable": Route("POST", "/api/v1/ci-trust-rules/{rule_id}/disable"),
+    "ci_trust_rules.delete": Route("DELETE", "/api/v1/ci-trust-rules/{rule_id}"),
     "deploys.create": Route("POST", "/api/v1/environments/{env}/deploys"),
     "deploys.list": Route("GET", "/api/v1/environments/{env}/deploys"),
     "deploys.get": Route("GET", "/api/v1/environments/{env}/deploys/{deploy_id}"),
