@@ -9,7 +9,7 @@ changelog and PR trail.
 PRs are squash-merged: the PR title becomes the commit subject and the PR description the
 commit body (repository setting: squash title = PR title, message = PR body). That commit
 is all release-please reads, so `.github/workflows/conventional.yml` (the required
-`conventional` check) enforces three things on every PR:
+`conventional` check) enforces four things on every PR:
 
 - **Title** — Conventional Commits, linted by commitlint with `commitlint.config.mjs`,
   which extends `@commitlint/config-conventional` (conventional-changelog's Conventional
@@ -21,6 +21,48 @@ is all release-please reads, so `.github/workflows/conventional.yml` (the requir
   keyword followed by several issues closes only the first) and, when the title has `!`,
   `BREAKING CHANGE: <what changed and how to migrate>`. HTML comments and Markdown code (the PR template's
   guidance, quoted examples) are ignored.
+- **The platform REST API** — a breaking change of it needs `!` in the title
+  (`scripts/openapi_diff.py`, next section).
+
+## The REST API contract
+
+The platform REST API (every route under `/api/`) is a versioned public contract; the user page is
+`docs/site/reference/rest-api.md`, and the Iceberg REST catalog (`/v1/`) is not part of it. The
+rule for agents:
+
+- **The snapshot is generated, never edited.** `docs/site/reference/openapi.json` is written by
+  `uv run python scripts/generate_reference.py` from the platform routers in
+  `lakana_server.app.ROUTERS` (without the Iceberg router), with `info.version` fixed to
+  `unreleased`. Any change to a route, a parameter, a request or response model (a field, a type,
+  a default, a `Literal`, a constraint, a docstring) changes it: regenerate and commit it in the
+  same change. CI's `docs` job runs `--check`, and `scripts/tests/test_generate_reference.py`
+  checks it and that an instance's `/openapi.json` serves the same platform routes.
+- **A breaking difference needs `!`.** The `conventional` check compares the snapshot of the merge
+  commit with its first parent's (the base branch) using `scripts/openapi_diff.py
+  --require-breaking-title`. `scripts/openapi_diff.py`'s docstring lists what is breaking and
+  what is additive; its tests have a case for each. Run it locally against `main` before opening
+  the PR, for example:
+
+  ```bash
+  git show main:docs/site/reference/openapi.json > ~/.cache/openapi-main.json
+  python3 scripts/openapi_diff.py ~/.cache/openapi-main.json docs/site/reference/openapi.json
+  ```
+
+  A breaking change before v1.0.0 needs `!`, the `BREAKING CHANGE:` footer and an upgrade note in
+  `docs/site/explanation/upgrades.md`. From v1.0.0 a breaking change lands only in a major
+  release: deprecate instead.
+- **Deprecate with `lakana_server.deprecation.deprecated`.** `@router.get(path,
+  **deprecated(since=date(...), sunset=date(...)))` marks the route `deprecated: true` in the
+  document (with `x-deprecated-since` and `x-sunset`), and `DeprecationHeaders` (installed by
+  `create_app`) then sends `Deprecation` (RFC 9745) and `Sunset` (RFC 8594) on its answers. Never
+  write `deprecated=True` on a route by itself: `test_every_deprecated_route_says_since_when`
+  fails. A field or a parameter is deprecated with pydantic's / FastAPI's `deprecated=True`; it
+  gets no header. A deprecated route, field or parameter keeps working for at least two minor
+  releases and three months, whichever is longer, and is removed only in a major release; say so
+  in the changelog and the upgrade note of the release that deprecates it.
+- **The release attaches it.** The `openapi` job of `release.yml` writes the tag's version into
+  `info.version` of the committed snapshot and `sbom-release` uploads it as `lakana-openapi.json`
+  next to the SBOM.
 
 **Changelog sections** follow the Conventional Commits preset, set explicitly as
 `changelog-sections` in `release-please-config.json` (the same `{type, section, hidden}`
@@ -160,7 +202,7 @@ runs in the environment `release-approval`, has `permissions: {}`, checks nothin
 one `echo`. The run stops there until the maintainer approves it (Actions run page, "Review
 deployments"). Every job that publishes or signs depends on it, directly or through its
 `needs`: the four PyPI jobs, `publish-image` and `attest-image`, `attest-dist` and
-`provenance-release`, `sbom-release`, `pages` and `pages-deploy`. `release-please` (tag and
+`provenance-release`, `openapi` and `sbom-release`, `pages` and `pages-deploy`. `release-please` (tag and
 GitHub release), `build` and `sbom` run before the gate: they upload nothing but workflow
 artifacts (`dist`, the SBOM), which logged-in users can download from a public repository. The
 two smoke jobs follow the publish jobs, so they run after it too.
@@ -296,7 +338,8 @@ specific measured time as a promise, since CI runner speed varies.
 
 ## The SBOM
 
-Two jobs of `release.yml` ship the SBOM. `sbom` builds an SPDX software bill of materials of the
+Two jobs of `release.yml` ship the SBOM (and `sbom-release` also attaches the OpenAPI document
+that the read-only `openapi` job writes; see "The REST API contract"). `sbom` builds an SPDX software bill of materials of the
 tagged tree with `anchore/sbom-action` (read-only token) and keeps it as the workflow artifact
 `lakana-sbom.spdx.json`. `sbom-release` then downloads that artifact and attaches it to the
 **GitHub release** of the tag, so it is found on the release page; it runs

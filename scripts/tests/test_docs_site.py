@@ -7,6 +7,7 @@ from pathlib import Path
 import yaml
 
 from scripts.docs_blocks import check, find_blocks
+from scripts.generate_reference import OPENAPI_PAGE
 
 ROOT = Path(__file__).resolve().parents[2]
 SITE = ROOT / "docs" / "site"
@@ -301,12 +302,16 @@ def test_only_pages_and_assets_live_under_docs_site() -> None:
 
     Zensical copies any other file into the site as is: an ``.html`` or ``.markdown`` page
     would be published without the block check or the navigation check. Put images and the
-    like under ``docs/site/assets``.
+    like under ``docs/site/assets``. The one exception is the OpenAPI document of the REST
+    API, which ``scripts/generate_reference.py`` writes next to the other generated references.
     """
     stray = [
         p.relative_to(SITE).as_posix()
         for p in sorted(SITE.rglob("*"))
-        if p.is_file() and p.suffix != ".md" and "assets" not in p.relative_to(SITE).parts[:1]
+        if p.is_file()
+        and p.suffix != ".md"
+        and "assets" not in p.relative_to(SITE).parts[:1]
+        and p.relative_to(SITE).as_posix() != OPENAPI_PAGE
     ]
     assert stray == [], f"move these under docs/site/assets or convert them to .md pages: {stray}"
 

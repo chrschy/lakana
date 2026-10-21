@@ -321,10 +321,34 @@ jobs:
           output-file: lakana-sbom.spdx.json
           upload-release-assets: false
 
+  # The OpenAPI document of the platform REST API, for whoever builds against a release: the
+  # committed snapshot (CI's docs job keeps it current) with the release's version in
+  # `info.version`. Read-only, after the approval; `sbom-release` attaches it.
+  openapi:
+    needs: [release-please, approve]
+    if: needs.release-please.outputs.released == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+          ref: ${{ needs.release-please.outputs.tag }}
+      - name: Write the release's version into the document
+        run: jq --arg version "${TAG#v}" '.info.version = $version' docs/site/reference/openapi.json > lakana-openapi.json
+        env: {TAG: "${{ needs.release-please.outputs.tag }}"}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7
+        with:
+          name: lakana-openapi.json
+          path: lakana-openapi.json
+
   # The only job that can write to the repository's contents. It runs no third-party code
-  # that builds anything: it downloads the SBOM and uploads it to the release.
+  # that builds anything: it downloads the SBOM and the OpenAPI document and uploads them to
+  # the release.
   sbom-release:
-    needs: [release-please, approve, sbom]
+    needs: [release-please, approve, sbom, openapi]
     if: needs.release-please.outputs.released == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -334,8 +358,12 @@ jobs:
         with:
           name: lakana-sbom.spdx.json
           path: sbom
-      - name: Attach the SBOM to the GitHub release
-        run: gh release upload "$TAG" sbom/lakana-sbom.spdx.json --clobber --repo "$GITHUB_REPOSITORY"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
+        with:
+          name: lakana-openapi.json
+          path: openapi
+      - name: Attach the SBOM and the OpenAPI document to the GitHub release
+        run: gh release upload "$TAG" sbom/lakana-sbom.spdx.json openapi/lakana-openapi.json --clobber --repo "$GITHUB_REPOSITORY"
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.release-please.outputs.tag }}

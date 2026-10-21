@@ -1,13 +1,15 @@
-"""Generate the CLI and settings references of the documentation site from the code.
+"""Generate the CLI, settings and REST API references of the documentation site from the code.
 
 ``docs/site/reference/cli.md`` is written from the Typer app (every command and sub-command,
 with its arguments, options and help text, in the app's order). ``docs/site/reference/settings.md``
 is written from the settings models of lakana-core and lakana-server (every ``LAKANA_*``
 variable with its type, default, reader and description, taken from the ``Parameters`` section
-of the model's docstring).
+of the model's docstring). ``docs/site/reference/openapi.json`` is the OpenAPI document of the
+platform REST API (every route under ``/api/``; the Iceberg REST catalog is versioned by the
+Iceberg specification and left out), the snapshot ``scripts/openapi_diff.py`` compares in CI.
 
-Neither page is edited by hand. ``--check`` writes nothing and fails when a page differs from
-what the code produces, naming the page and the command that regenerates it. The generated pages
+No page is edited by hand. ``--check`` writes nothing and fails when a page differs from
+what the code produces, naming the page and the command that regenerates it. The Markdown pages
 contain no fenced or indented code, because the block checker (``scripts/docs_blocks.py``) can
 only judge blocks that a person marked.
 
@@ -18,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import inspect
+import json
 import re
 import sys
 import types
@@ -26,6 +29,7 @@ from pathlib import Path
 from typing import Any, Literal, Union, get_args, get_origin
 
 import typer
+from fastapi import APIRouter, FastAPI
 from pydantic import BaseModel, SecretStr
 from pydantic.fields import FieldInfo
 from pydantic_settings import BaseSettings
@@ -36,6 +40,11 @@ ROOT = Path(__file__).resolve().parents[1]
 SITE = ROOT / "docs" / "site"
 CLI_PAGE = "reference/cli.md"
 SETTINGS_PAGE = "reference/settings.md"
+OPENAPI_PAGE = "reference/openapi.json"
+OPENAPI_TITLE = "Lakana platform API"
+OPENAPI_VERSION = "unreleased"
+"""The snapshot's ``info.version``; the release workflow writes the release's version instead."""
+CONTRACT_URL = "https://lakana-labs.github.io/lakana/reference/rest-api/"
 REGENERATE = "uv run python scripts/generate_reference.py"
 _MAX_HEADING = 6
 _NOT_DOCUMENTED = "(not documented)"
@@ -547,6 +556,34 @@ def render_settings(sources: Sequence[tuple[str, type[BaseSettings]]]) -> str:
     return "\n".join(out).rstrip("\n") + "\n"
 
 
+def render_openapi(routers: Sequence[APIRouter]) -> str:
+    """Render the OpenAPI document of the platform REST API.
+
+    Parameters
+    ----------
+    routers
+        The routers of the platform API, in the order the application includes them.
+
+    Returns
+    -------
+    str
+        The document as indented JSON with a final newline. Its ``info.version`` is
+        ``OPENAPI_VERSION``, so the snapshot changes only when the API does.
+    """
+    app = FastAPI(
+        title=OPENAPI_TITLE,
+        version=OPENAPI_VERSION,
+        description=(
+            "The platform REST API of Lakana: every route under `/api/`. It is a versioned "
+            f"contract: {CONTRACT_URL}. The Iceberg REST catalog under `/v1` is not part of "
+            "this document; it follows the Apache Iceberg REST catalog specification."
+        ),
+    )
+    for router in routers:
+        app.include_router(router)
+    return json.dumps(app.openapi(), indent=2, ensure_ascii=False) + "\n"
+
+
 def real_pages() -> dict[str, str]:
     """Generate the pages from the real code.
 
@@ -557,11 +594,16 @@ def real_pages() -> dict[str, str]:
     """
     from lakana.cli.app import build_app
     from lakana_core.config import Settings as CoreSettings
+    from lakana_server.api.iceberg.router import router as iceberg_router
+    from lakana_server.app import ROUTERS
     from lakana_server.settings import Settings as ServerSettings
 
     return {
         CLI_PAGE: render_cli(build_app(), prog="lakana"),
         SETTINGS_PAGE: render_settings([("server", ServerSettings), ("worker", CoreSettings)]),
+        OPENAPI_PAGE: render_openapi(
+            [router for router in ROUTERS if router is not iceberg_router]
+        ),
     }
 
 

@@ -57,6 +57,7 @@ from lakana_server.api.platform.whoami import router as whoami_router
 from lakana_server.auth_rate_limit import AuthAuditLimiter
 from lakana_server.body_limit import BodyLimitMiddleware, streaming_routes
 from lakana_server.concurrency import AppendConcurrencyLimiter
+from lakana_server.deprecation import DeprecationHeaders
 from lakana_server.errors import install_exception_handlers
 from lakana_server.readiness import ReadinessCheck
 from lakana_server.settings import Settings
@@ -298,4 +299,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         exempt=streaming_routes(ROUTERS),
         iceberg=iceberg_router.routes,
     )
+    app.add_middleware(DeprecationHeaders)
     return app

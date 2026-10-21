@@ -11,7 +11,8 @@ when you use it, and where to go with a question or a problem.
   Apache License 2.0 (sections 7 and 8: disclaimer of warranty and limitation of liability).
   This is true during the beta and stays true from v1.0.0 onwards.
 - **A stable API is not a support promise.** From v1.0.0 the API stops changing in ways that
-  break your code, and that is a promise about compatibility only. It says nothing about how
+  break your code ([The REST API as a contract](../reference/rest-api.md)), and that is a
+  promise about compatibility only. It says nothing about how
   fast anyone answers.
 - **Words on the other pages are not promises.** "Governed", "audited" and "secure by default"
   describe what the software does. They are not a certification, a compliance claim or a

@@ -11,9 +11,12 @@ promises and does not promise, see [Support](support.md).
   together.
 - **A minor release (0.N.0) may contain breaking changes**, until v1.0.0. A breaking change in a
   commit makes the next release a minor one, not 1.0.0.
-- **A patch release (0.N.P) is for fixes** and is not meant to break anything. Nothing technical
-  stops a breaking change from landing in a patch release: a change counts as breaking only when
-  its author marks it so. Read the changelog entry of every release you skip.
+- **A patch release (0.N.P) is for fixes** and is not meant to break anything. For the platform
+  REST API a check enforces it: a breaking change of the API cannot land unless it is marked
+  breaking, and a marked change makes the next release a minor one ([The REST API as a
+  contract](../reference/rest-api.md)). Elsewhere nothing technical stops a breaking change from
+  landing in a patch release: a change counts as breaking only when its author marks it so. Read
+  the changelog entry of every release you skip.
 - Fixes go into the latest release only (see [Support](support.md)). Upgrade first, then report.
 
 ## Where a breaking change is announced

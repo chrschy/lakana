@@ -3,7 +3,9 @@ name: Conventional
 # Enforces Conventional Commits (PR title, via commitlint and the
 # conventional-changelog preset), Conventional Branch (head branch), and the
 # footer rules release-please's changelog depends on (PR description). PRs are
-# squash-merged with the title as subject and the description as body.
+# squash-merged with the title as subject and the description as body. It also
+# requires a breaking title ('!') for a breaking change of the platform REST
+# API, found by comparing the committed OpenAPI snapshot with the base branch's.
 on:
   pull_request:
     types: [opened, edited, synchronize, reopened]
@@ -16,6 +18,10 @@ jobs:
     runs-on: ${{ (github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER) || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          # The pull request's merge commit and its first parent, the base branch it merges into.
+          fetch-depth: 2
+          persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7
         with:
           node-version: "22"
@@ -32,3 +38,18 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
         run: python3 scripts/check_conventional.py
+      - name: A breaking change of the platform REST API has a breaking title
+        # The snapshot is docs/site/reference/openapi.json; CI's docs job fails when it is stale,
+        # so comparing the two committed copies compares the two APIs. A base branch without the
+        # file has nothing to compare. What counts as breaking: scripts/openapi_diff.py.
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          SNAPSHOT: docs/site/reference/openapi.json
+        run: |
+          git rev-parse --verify --quiet HEAD^1 > /dev/null
+          rm -f "$RUNNER_TEMP/openapi-base.json"
+          if git cat-file -e "HEAD^1:$SNAPSHOT" 2> /dev/null; then
+            git show "HEAD^1:$SNAPSHOT" > "$RUNNER_TEMP/openapi-base.json"
+          fi
+          python3 scripts/openapi_diff.py "$RUNNER_TEMP/openapi-base.json" "$SNAPSHOT" \
+            --require-breaking-title
