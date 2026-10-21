@@ -225,11 +225,11 @@ def test_an_unreadable_root_of_an_older_release_does_not_block_a_create(
     assert catalog.get_environment(principal, "dev").name == "dev"
 
 
-def test_the_root_of_the_disk_is_compared_too(
-    catalog: CatalogService, principal: PrincipalRef
+def test_an_earlier_environment_at_the_root_of_the_disk_is_compared_too(
+    session: Session, catalog: CatalogService, principal: PrincipalRef
 ) -> None:
-    """``file:///`` has its directories at ``file:///managed`` and so on."""
-    _create(catalog, principal, "prod", "file:///")
+    """``file:///`` (refused for a new environment now) has its ``managed/`` at ``/managed``."""
+    _stored(session, "prod", "file:///")
     assert "'prod'" in _refusal(catalog, principal, "dev", "file:///managed/dev")
     _create(catalog, principal, "dev", "file:///dev")
 

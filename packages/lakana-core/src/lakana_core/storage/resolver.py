@@ -181,6 +181,11 @@ ROOT_RELATIVE_MESSAGE = (
     "file:// followed by an absolute path and no host, such as 'file:///data/lake'. A relative "
     "path would be read against each process's working directory."
 )
+ROOT_DISK_MESSAGE = (
+    "The storage root {root!r} is the root of the disk, which cannot hold an environment: "
+    "Lakana's storage would read and write its files in each process's working directory. Use "
+    "a directory instead, such as 'file:///data/lakana'."
+)
 ROOT_SPELLING_MESSAGE = (
     "The storage root {root!r} is written differently from the way Lakana compares locations, "
     "so the files of one environment could be taken for another's. Use {canonical!r} instead."
@@ -224,13 +229,20 @@ def check_storage_root(root: str) -> None:
     Raises
     ------
     ValidationError
-        If a ``file`` root is relative or has a host (`ROOT_RELATIVE_MESSAGE`; ``localhost``
+        If a ``file`` root is the root of the disk in any spelling (``file:///``, ``file://``,
+        ``file://localhost/``, ``file:////``; `ROOT_DISK_MESSAGE`: the storage backend would
+        resolve it against the working directory), relative or has a host
+        (`ROOT_RELATIVE_MESSAGE`; ``localhost``
         is named with the spelling to use), it cannot be normalised exactly
         (`ROOT_UNJUDGEABLE_MESSAGE`), or its canonical spelling differs
         (`ROOT_SPELLING_MESSAGE`, which names that spelling).
     """
     scheme, sep, rest = root.partition("://")
     lowered = scheme.lower()
+    if lowered == "file" and sep:
+        host, _, tail = rest.partition("/")
+        if host.lower() in {"", "localhost"} and normalised_path("/" + tail) == "/":
+            raise ValidationError(ROOT_DISK_MESSAGE.format(root=root))
     if lowered == "file" and not rest.startswith("/"):
         host, slash, tail = rest.partition("/")
         if host.lower() == "localhost" and slash:

@@ -159,6 +159,19 @@ at `s3://bucket`, dev at `s3://bucket/dev`).
 - **Scripts that create environments** at such a root fail at that step: give the environment a
   root of its own, such as the one the message names.
 
+### The root of the disk cannot hold an environment
+
+A new environment's storage root may no longer be the root of the disk, `file:///`, in any
+spelling (`file://`, `file:////`, `file://localhost/`): the refusal (422) suggests a directory,
+such as `file:///data/lakana`. Lakana's storage read such a root as each process's working
+directory, so the files of an environment created earlier at `file:///` were written, read and
+cleaned up relative to wherever the server and the workers were started, not at `/`.
+
+- **An environment created earlier at `file:///`** is left as it is; the clean-up of the workers
+  and `lakana env orphaned-locations` keep all its files. Create a new environment on a directory,
+  move the tables there (deploy the projects to it, or load the data again), and then delete the
+  old environment.
+
 ### An allowed webhook host can no longer reach loopback or cloud metadata addresses
 
 A host on `LAKANA_WEBHOOK__ALLOW_HOSTS` used to skip every address check of the worker's webhook

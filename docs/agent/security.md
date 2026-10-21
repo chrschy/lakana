@@ -1547,7 +1547,26 @@ reading) and one nested elsewhere in another root stay accepted, and a stored ro
 read at all is skipped (the checks above fail closed on it). `update_environment_storage` cannot
 change a root. Existing environments in such a layout are untouched and keep failing closed: the
 listing names the other root with `HELD_PREFIX` ("move this environment to a root of its own")
-instead of `UNJUDGED_PREFIX`. Pins: `test_environment_root_placement.py`. `near_other_location` compares every
+instead of `UNJUDGED_PREFIX`. Pins: `test_environment_root_placement.py`.
+
+**The root of the disk.** `check_storage_root` refuses `file:///` in every spelling (`file://`,
+`FILE:///`, `file:////`, `file:///.`, `file://localhost[/]`; `ROOT_DISK_MESSAGE`, 422, suggests
+`file:///data/lakana`). Many sites build paths with `root.rstrip("/")`, which turns `file:///`
+into `file:`, and `fsspec.core.url_to_fs("file:")` (also `"file://"`) answers the **working
+directory**: `FsspecStorage.__init__` (`fsspec_storage.py`), `ResolvedStorage.table_location`
+(`file:/managed/...`), `CatalogService` external-table claims and maintenance's `root_prefix`
+(`service.py`), `code_sweep._code_uri` and its grouping key, `orphaned_locations.target`, the
+worker's `deploy.py` (`code_uri`), `task_integrity.py`, `pipeline.py` and `python_tasks.py`
+(root prefixes), and `orphaned_locations._ineligible`'s `spelled_canonically` check. **Residual:**
+an environment created at `file:///` before this refusal keeps those spellings: its files land
+relative to each process's working directory; the sweep never purges its records (`file:/...`
+is not inside `file:///managed` for `_confined`), and the leftovers command lists nothing for it
+(`target` keeps `file:`). Do **not** fix one of these sites in isolation: `root_base`
+(`resolver.py`, used by `near_other_location`, `child_location`, the sweep's `_Run` and
+`root_relative_path` since #231) is safe only because every other site still fails closed on such
+a root; giving `orphaned_locations.target` its real root alone would let `--delete` purge
+id-suffixed directories under the server's working directory. The fix for users is a new
+environment on a directory (upgrade note). `near_other_location` compares every
 root, record (`record_states`; never the purge's own) and table directory under all `readings`:
 percent-decoded up to three times, case-folded and NFC, `normpath` and, for `file`, `realpath`
 (symbolic links), object-store keys literal and with `..` resolved, `abfs` reduced to the

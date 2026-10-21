@@ -959,9 +959,39 @@ def test_a_file_root_must_be_an_absolute_path_without_a_host(
     assert fix in str(refused.value)
 
 
-def test_the_root_of_the_disk_is_accepted(catalog: CatalogService, principal: PrincipalRef) -> None:
-    """``file:///`` is canonical; it is not refused with itself as the spelling to use."""
+@pytest.mark.parametrize(
+    "root",
+    [
+        "file:///",
+        "file://",
+        "FILE:///",
+        "file:////",
+        "file:///.",
+        "file://localhost/",
+        "file://localhost",
+    ],
+)
+def test_the_root_of_the_disk_is_refused_with_a_directory_to_use(
+    catalog: CatalogService, principal: PrincipalRef, root: str
+) -> None:
+    """Storage would read the disk root as each process's working directory, whatever spelling."""
+    with pytest.raises(ValidationError) as refused:
+        catalog.create_environment(
+            principal, name="dev", storage=StorageConfig(scheme="file", root=root, options={})
+        )
+    message = str(refused.value)
+    assert "root of the disk" in message
+    assert "cannot hold an environment" in message
+    assert "'file:///data/lakana'" in message
+    assert catalog.list_environments(principal) == []
+
+
+@pytest.mark.parametrize("root", ["file:///data", "file:///d", "file:///data/", "file:///.lakana"])
+def test_a_directory_just_below_the_root_of_the_disk_is_accepted(
+    catalog: CatalogService, principal: PrincipalRef, root: str
+) -> None:
+    """Only the disk root itself is refused."""
     catalog.create_environment(
-        principal, name="dev", storage=StorageConfig(scheme="file", root="file:///", options={})
+        principal, name="dev", storage=StorageConfig(scheme="file", root=root, options={})
     )
-    assert catalog.get_environment(principal, "dev").storage_root == "file:///"
+    assert catalog.get_environment(principal, "dev").storage_root == root
