@@ -517,7 +517,7 @@ def test_sigterm_releases_a_long_task_uncounted_and_writes_nothing(world: World)
 
 
 def test_a_worker_that_lost_its_lease_records_nothing(
-    world: World, monkeypatch: pytest.MonkeyPatch
+    world: World, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """The scheduler reclaimed the task meanwhile: the old worker's outcome is dropped."""
     _start(world)
@@ -537,6 +537,7 @@ def test_a_worker_that_lost_its_lease_records_nothing(
     run_claimed(_engine(world), claimed)
     task = _task(world, "silver.clean")
     assert (task.status, task.lease_owner) == (TaskStatus.RUNNING, "thief")
+    assert "lease_lost" in {getattr(r, "event", None) for r in caplog.records}
     assert _attempts(world, claimed.task_run_id)[0].finished_at is None
     with world.session() as session:
         write = session.get(QueryRun, task.query_run_id)
@@ -989,6 +990,7 @@ def test_an_unexpected_error_while_running_an_sql_attempt_is_a_recorded_transien
         RUN_ERROR_MESSAGE,
     )
     assert "failed unexpectedly" in caplog.text
+    assert "internal_error" in {getattr(r, "event", None) for r in caplog.records}
     assert "secret internals" not in (task.error_message or "")
     assert task.failure_code == "internal"
 

@@ -368,7 +368,11 @@ def test_rollback_moves_the_pointer_without_fetching(
 
 
 def test_unexpected_errors_do_not_leak(
-    session: Session, principal: PrincipalRef, world: World, monkeypatch: pytest.MonkeyPatch
+    session: Session,
+    principal: PrincipalRef,
+    world: World,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A bug is logged, not stored: the run gets a generic message and the loop survives."""
 
@@ -378,6 +382,7 @@ def test_unexpected_errors_do_not_leak(
     monkeypatch.setattr(deploy_module, "discover", explode)
     run = _submit_and_run(session, principal, world)
     assert run.error_message == INTERNAL_ERROR_MESSAGE
+    assert "internal_error" in {getattr(r, "event", None) for r in caplog.records}
 
 
 def test_job_time_limit(

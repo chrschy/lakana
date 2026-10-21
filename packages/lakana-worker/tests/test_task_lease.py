@@ -206,7 +206,7 @@ def test_the_lease_keeper_thread_renews_once_per_wake_until_stopped(
 
 
 def test_lease_keeper_survives_a_renewal_error(
-    world: World, monkeypatch: pytest.MonkeyPatch
+    world: World, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A database hiccup during renewal is logged and retried next time."""
 
@@ -217,6 +217,7 @@ def test_lease_keeper_survives_a_renewal_error(
     keeper = LeaseKeeper(world.session, uuid.uuid4(), "w1", 1, lease_seconds=60, renew_seconds=0)
     keeper.renew_once()
     assert not keeper.cancel.is_set()
+    assert "lease_renewal_failed" in {getattr(r, "event", None) for r in caplog.records}
 
 
 def test_lease_keeper_thread_starts_and_stops(

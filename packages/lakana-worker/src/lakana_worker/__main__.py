@@ -1,4 +1,4 @@
-"""Entry point: `python -m lakana_worker`."""
+"""Entry point: `python -m lakana_worker`, and the worker that `lakana-worker` runs."""
 
 from __future__ import annotations
 
@@ -32,6 +32,7 @@ from lakana_core.db import create_engine
 from lakana_core.errors import LakanaError
 from lakana_core.grants.authorization import GrantAuthorization
 from lakana_core.jobs.scheduler import sweep_job_fires
+from lakana_core.log_events import LogEvent, log_event
 from lakana_core.log_setup import configure_logging
 from lakana_core.models import Worker
 from lakana_core.projects.code_sweep import CODE_SWEEP_MAX_SECONDS, sweep_code_archives
@@ -459,7 +460,12 @@ def main() -> None:
                     should_stop=stop.is_set,
                 )
         except Exception as exc:
-            logger.warning("The artifact sweep failed (%s).", type(exc).__name__, exc_info=True)
+            logger.warning(
+                "The artifact sweep failed (%s).",
+                type(exc).__name__,
+                exc_info=True,
+                extra=log_event(LogEvent.SWEEP_FAILED),
+            )
         try:
             with session_factory() as session:
                 sweep_table_locations(
@@ -474,7 +480,10 @@ def main() -> None:
                 )
         except Exception as exc:
             logger.warning(
-                "The table location sweep failed (%s).", type(exc).__name__, exc_info=True
+                "The table location sweep failed (%s).",
+                type(exc).__name__,
+                exc_info=True,
+                extra=log_event(LogEvent.SWEEP_FAILED),
             )
         try:
             with session_factory() as session:
@@ -486,23 +495,41 @@ def main() -> None:
                     should_stop=stop.is_set,
                 )
         except Exception as exc:
-            logger.warning("The code archive sweep failed (%s).", type(exc).__name__, exc_info=True)
+            logger.warning(
+                "The code archive sweep failed (%s).",
+                type(exc).__name__,
+                exc_info=True,
+                extra=log_event(LogEvent.SWEEP_FAILED),
+            )
         try:
             with session_factory() as session:
                 sweep_job_fires(session)
         except Exception as exc:
-            logger.warning("The job fire sweep failed (%s).", type(exc).__name__, exc_info=True)
+            logger.warning(
+                "The job fire sweep failed (%s).",
+                type(exc).__name__,
+                exc_info=True,
+                extra=log_event(LogEvent.SWEEP_FAILED),
+            )
         try:
             with session_factory() as session:
                 sweep_table_reads(session, keep_days=settings.table_reads.keep_days, now=now)
         except Exception as exc:
-            logger.warning("The table reads sweep failed (%s).", type(exc).__name__, exc_info=True)
+            logger.warning(
+                "The table reads sweep failed (%s).",
+                type(exc).__name__,
+                exc_info=True,
+                extra=log_event(LogEvent.SWEEP_FAILED),
+            )
         try:
             with session_factory() as session:
                 backfill_table_columns(session, StorageResolver(session, key_provider))
         except Exception as exc:
             logger.warning(
-                "The table column backfill failed (%s).", type(exc).__name__, exc_info=True
+                "The table column backfill failed (%s).",
+                type(exc).__name__,
+                exc_info=True,
+                extra=log_event(LogEvent.SWEEP_FAILED),
             )
 
     if settings.run.sweep_interval <= 0:
@@ -606,4 +633,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":  # pragma: no cover — exercised only by `python -m lakana_worker`
-    main()
+    from lakana_worker.command import cli
+
+    cli()

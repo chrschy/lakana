@@ -105,12 +105,14 @@ from lakana_core.errors import (
     NotFoundError,
     NotPublishedError,
     PermissionDenied,
+    StorageUnavailableError,
     UnsupportedTableError,
     ValidationError,
 )
-from lakana_core.identifiers import NamespacePath, TableRef
+from lakana_core.identifiers import NamespacePath, TableRef, shown
 from lakana_core.identity.task_tokens import resolve_task_token_scope
 from lakana_core.lineage import extract_lineage
+from lakana_core.log_events import LogEvent, log_event
 from lakana_core.models import (
     AuditEventType,
     CheckResult,
@@ -163,6 +165,7 @@ from lakana_core.storage.resolver import (
     nested_locations_within,
     table_root_from_metadata_location,
 )
+from lakana_core.storage.unavailable import TABLE_STORAGE_UNREACHABLE, is_storage_unavailable
 from lakana_worker.activity import ACTIVITY
 from lakana_worker.executor import (
     INTERNAL_ADVICE,
@@ -1037,7 +1040,10 @@ def _resolve_sources_opaquely(
         If `_resolve_sources` raised it — passed through verbatim.
     _ResolutionFailed
         If `_resolve_sources` raised anything else. The original exception
-        is the `__cause__`; only its class name survives into the message.
+        is the `__cause__`; only its class name survives into the message, except for a
+        storage that did not answer (`StorageUnavailableError`, or an `OSError` that
+        `is_storage_unavailable` accepts), which gets `TABLE_STORAGE_UNREACHABLE`: the name
+        of the environment the query runs against and what to do next.
     """
     try:
         return _resolve_sources(
@@ -1063,6 +1069,18 @@ def _resolve_sources_opaquely(
     ):
         raise
     except Exception as exc:
+        if isinstance(exc, StorageUnavailableError) or is_storage_unavailable(exc):
+            if not isinstance(exc, StorageUnavailableError):  # the catalog logged that one
+                logger.warning(
+                    "The storage of environment %s could not be reached while the tables of a "
+                    "query were resolved (%s).",
+                    shown(environment_name),
+                    type(exc).__name__,
+                    extra=log_event(LogEvent.STORAGE_UNREACHABLE),
+                )
+            raise _ResolutionFailed(
+                TABLE_STORAGE_UNREACHABLE.format(environment=shown(environment_name))
+            ) from exc
         raise _ResolutionFailed(
             f"Resolving the tables this query reads failed ({type(exc).__name__})."
         ) from exc

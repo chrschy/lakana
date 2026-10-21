@@ -165,6 +165,14 @@ Compose](../how-to/deploy-with-compose.md).
 | `LAKANA_CI_OIDC__CA_BUNDLE` | path | not set | server | Absolute path of a PEM file of certificate authorities that the discovery and key requests trust; it replaces the built-in store and never turns verification off. |
 | `LAKANA_CI_OIDC__TOKEN_TTL_SECONDS` | whole number, 60 or more, 21600 or less | `3600` | server | How long the Lakana token a CI job receives for its ID token stays valid, in seconds (default 3600, one hour; at most 21600, six hours). The token allows one deploy or dry run, so it only has to outlive the job's wait for its deploy to be queued. |
 
+## `LAKANA_READINESS__*`
+
+| Variable | Type | Default | Read by | Description |
+|---|---|---|---|---|
+| `LAKANA_READINESS__TIMEOUT_SECONDS` | number, above 0, 30 or less | `2` | server | How long the database check may take, and then the storage checks together, in seconds (default 2; more than 0, at most 30). A check that takes longer fails. A check that has not ended is not started again by the next request, so a database or storage that hangs holds at most one connection of the server each. |
+| `LAKANA_READINESS__CACHE_SECONDS` | number, 1 or more, 300 or less | `5` | server | How long one answer of `/readyz` is reused, in seconds (default 5; 1 to 300). However often the route is asked, the server checks at most once in this time, so the route, which needs no sign-in, cannot be used to load the database or the storage. |
+| `LAKANA_READINESS__ENVIRONMENTS` | list | empty | server | The environments whose storage `/readyz` checks, as a JSON list, for example `["dev", "prod"]`. Empty (the default): every environment, at most the first 5 by name. Name the ones that must work when another environment's storage is out of reach on purpose; a name no environment has fails the check. |
+
 ## `LAKANA_GIT__*`
 
 | Variable | Type | Default | Read by | Description |

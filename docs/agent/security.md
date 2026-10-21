@@ -173,7 +173,7 @@ including `IcebergRoute`) runs `get_principal` first for a route that has a body
 and stores the principal on `request.state` under the private name `PRINCIPAL_STATE_KEY`;
 `get_principal` returns it, if it is a `PrincipalRef`, instead of verifying and auditing the
 credential a second time. `test_body_limit.py` reads the running app (`create_app`), not the `ROUTERS`
-tuple: every route with a body is an `AuthenticateFirstRoute`, and every route but `/healthz` and
+tuple: every route with a body is an `AuthenticateFirstRoute`, and every route but `/healthz`, `/readyz` and
 `/v1/config` depends on `get_principal`, however it got into the app. A request with no credential, or a wrong one, is 401 and is
 audited and rate-limited as before. The limit above bounds what a caller *with* a credential can make
 the server decode.
@@ -4292,6 +4292,17 @@ checklist true; `packages/lakana-worker/tests/test_git.py` pins each line.
   from a non-interactive shell) still stops on `kill -INT`. All three are set to `SIG_IGN`
   for the duration of the final `stop()` call itself, so a second interrupt can't abort
   cleanup partway through and leave an untracked child behind.
+- **`GET /readyz` is unauthenticated and reveals check names only.** It answers 200
+  `{"status": "ready"}` or 503 `{"status": "not_ready", "failed": [...]}` with `database`,
+  `storage` and `worker`; never a host, an environment, an error or a version (the reasons go to
+  the server log). It cannot be used to load the database or a storage: one answer is reused for
+  `LAKANA_READINESS__CACHE_SECONDS` (at least 1 s), requests during a check wait for that check
+  (an `asyncio.Lock`, no thread each), each check runs in one daemon thread with a time limit,
+  and a check still running from an earlier request is reported failed instead of started
+  again, so a hanging database or storage holds one thread each. No rate limit: past the cache a
+  request costs what `/healthz` costs, and a limit would fail a monitor's own probes. The
+  storage probe asks about the root (no object read or written), at most the first 5
+  environments by name (`lakana_server.readiness`, `lakana_core.readiness`).
 - **`GET /healthz` is unauthenticated and reveals only liveness.** It lives outside
   `/api/v1` (not part of the SDK route contract) and returns `{"status": "ok"}` with no
   other information — the same shape the supervisor's own readiness probe and `lakana server

@@ -853,7 +853,7 @@ def test_a_cut_download_over_http_ends_without_a_complete_body(
 
 
 def test_storage_that_cannot_be_read_is_a_503_with_retry_after_not_a_500(
-    stored: TestClient, monkeypatch: pytest.MonkeyPatch
+    stored: TestClient, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     def failing(self: FsspecStorage, path: str, **kw: Any) -> Iterator[bytes]:  # ruff: ignore[any-type]
         raise OSError(5, "/secret/bucket/path: connection refused")
@@ -864,6 +864,7 @@ def test_storage_that_cannot_be_read_is_a_503_with_retry_after_not_a_500(
     assert down.headers["Retry-After"] == "5"
     assert down.json()["detail"] == STORAGE_NOT_READ
     assert "secret" not in down.text
+    assert "storage_unreachable" in {getattr(r, "event", None) for r in caplog.records}
     monkeypatch.undo()
     assert stored.get(f"{_BASE}/versions/1/blobs/{_SHA}", headers=AUTH_HEADER).status_code == 200
 

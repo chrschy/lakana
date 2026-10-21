@@ -174,8 +174,9 @@ server starts, and read the changelog.
 Look at three things regularly: whether the instance answers, what the logs say, and what people
 did.
 
-**Is it healthy?** `docker compose ps` shows whether each service runs and is healthy. Two
-commands show whether workers are registered and which one holds the scheduler role; they need the
+**Is it healthy?** `docker compose ps` shows whether each service runs and is healthy, and the
+address `/readyz` answers `{"status":"ready"}` when the database, the storage and a worker all
+work; point your monitoring at it. Two commands show whether workers are registered and which one holds the scheduler role; they need the
 right to manage environments on the instance, which an administrator has:
 
 <!-- source: docs/examples/getting-started/run.sh#worker-list -->
@@ -195,10 +196,13 @@ with what a bad answer looks like. What the two commands show, and what to do wh
 
 **Logs worth alerting on.** The server and the workers print to standard error:
 `docker compose logs server` and `docker compose logs worker`. Set the level with
-`LAKANA_LOG__LEVEL` in the `x-lakana-env` block of `compose.yaml` ([the steps](deploy-with-compose.md#the-sweep)). Three messages deserve an alert: a worker that stops for its memory limit
-(`Memory limit exceeded`; see [Memory limits](deploy-with-compose.md#memory-limits)), a sweep
-that "left an artifact whole" (see [After a restore](deploy-with-compose.md#after-a-restore)),
-and a start-up that stops with a message that names a setting. [The sweep](deploy-with-compose.md#the-sweep)
+`LAKANA_LOG__LEVEL` in the `x-lakana-env` block of `compose.yaml` ([the steps](deploy-with-compose.md#the-sweep)). The lines worth an alert end with a stable code, such as
+`event=memory_stop` for a worker that stops for its memory limit
+([Memory limits](deploy-with-compose.md#memory-limits)); match alert rules on the code, not on the
+wording. Every code and what to do: [Log events](../reference/log-events.md). Two more deserve
+an alert and have no code: a sweep that "left an artifact whole" (see
+[After a restore](deploy-with-compose.md#after-a-restore)), and a start-up that stops with a
+message that names a setting. [The sweep](deploy-with-compose.md#the-sweep)
 describes both logs and what the lines look like.
 
 **The audit log.** It records who signed in, what was granted and revoked, who deployed and

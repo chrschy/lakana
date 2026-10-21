@@ -104,6 +104,32 @@ class RequestBodyConfig(BaseModel):
     max_bytes: int = Field(default=1_048_576, gt=0)
 
 
+class ReadinessConfig(BaseModel):
+    """How the readiness route `/readyz` checks the instance (`LAKANA_READINESS__*`).
+
+    Parameters
+    ----------
+    timeout_seconds
+        How long the database check may take, and then the storage checks together, in seconds
+        (default 2; more than 0, at most 30). A check that takes longer fails. A check that has
+        not ended is not started again by the next request, so a database or storage that hangs
+        holds at most one connection of the server each.
+    cache_seconds
+        How long one answer of `/readyz` is reused, in seconds (default 5; 1 to 300). However
+        often the route is asked, the server checks at most once in this time, so the route,
+        which needs no sign-in, cannot be used to load the database or the storage.
+    environments
+        The environments whose storage `/readyz` checks, as a JSON list, for example
+        `["dev", "prod"]`. Empty (the default): every environment, at most the first 5 by name.
+        Name the ones that must work when another environment's storage is out of reach on
+        purpose; a name no environment has fails the check.
+    """
+
+    timeout_seconds: float = Field(default=2.0, gt=0, le=30)
+    cache_seconds: float = Field(default=5.0, ge=1, le=300)
+    environments: list[str] = []
+
+
 class Settings(BaseSettings):
     """Configuration for the control plane.
 
@@ -176,6 +202,10 @@ class Settings(BaseSettings):
     ci_oidc
         Which CI providers' OIDC ID tokens the server verifies, for which audience, and how it
         reaches their keys (`LAKANA_CI_OIDC__*`). Off by default.
+    readiness
+        How `/readyz` checks the database, the storages and the workers
+        (`LAKANA_READINESS__TIMEOUT_SECONDS`, `LAKANA_READINESS__CACHE_SECONDS`,
+        `LAKANA_READINESS__ENVIRONMENTS`).
     host
         Address the server listens on. `127.0.0.1` (the default) accepts connections from this
         machine only; the Compose bundle publishes the port through `LAKANA_BIND`.
@@ -210,6 +240,7 @@ class Settings(BaseSettings):
     run: RunConfig = RunConfig()
     log: LogConfig = LogConfig()
     ci_oidc: CiOidcConfig = CiOidcConfig()
+    readiness: ReadinessConfig = ReadinessConfig()
     host: str = "127.0.0.1"
     port: int = 8000
     repo_roots: list[str] = []

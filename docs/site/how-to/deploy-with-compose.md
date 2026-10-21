@@ -649,7 +649,8 @@ more.
 When the worker ends a query it logs `Memory limit exceeded: the worker and its tasks use <n> MB,
 the limit is 3686 MB, 90% of the container's 4096 MB; raise the container's memory limit (in the
 Compose bundle: LAKANA_WORKER_MEMORY in .env). The largest consumer, a query (process <pid>), was
-ended; the worker keeps running if that frees enough memory.` and that query fails with the cause
+ended; the worker keeps running if that frees enough memory. event=memory_task_ended` and that
+query fails with the cause
 `out_of_memory` and the message `Query failed: this query made the worker exceed its memory limit
 (3686 MB) and was stopped. Read or compute less (filter or aggregate earlier, or select fewer
 columns), or ask the operator to raise the worker's memory limit (LAKANA_WORKER__MEMORY_LIMIT, or
@@ -669,7 +670,8 @@ nothing else can be ended, the worker stops itself.
 When the worker stops itself it logs `Memory limit exceeded: the worker and its tasks use <n> MB,
 the limit is 3686 MB, 90% of the container's 4096 MB; raise the container's memory limit (in the
 Compose bundle: LAKANA_WORKER_MEMORY in .env). The worker stops now. What it was running is marked failed; a task is retried if it
-has attempts left.` A Python task with checks that may have written its table does not end over
+has attempts left. event=memory_stop` (the codes: [Log events](../reference/log-events.md)). A
+Python task with checks that may have written its table does not end over
 unchecked rows when the stop ends it: on its last attempt, or on any attempt when the blame is
 certain, the next worker sets the table back first (see [A worker that is
 lost](check-your-data.md#a-worker-that-is-lost)). A query that was running then fails with the cause `out_of_memory` and the message

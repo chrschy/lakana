@@ -16,7 +16,7 @@ Run these in order. The first that looks wrong is where to read on.
 
 1. `docker compose ps --all`: every service is `running` and `healthy`, and the one-off services
    (`migrate`, `bucket`, `setup`) have `Exited (0)`. ([The services](#the-services))
-2. The address `/healthz` answers. ([The health route](#the-health-route))
+2. The address `/readyz` answers `{"status":"ready"}`. ([The health routes](#the-health-routes))
 3. `lakana worker list`: as many workers are `alive` as you started. ([The workers](#the-workers))
 4. `lakana query list --env dev --status queued` does not grow. ([The queue](#the-queue))
 5. The disks have room. ([Disk space](#disk-space))
@@ -40,25 +40,25 @@ What each line tells you:
 | `postgres` | The database accepts connections on its network address. | That the catalog inside it is intact, or that it has room left. |
 | `seaweedfs-core` | The storage's master answers and its file service accepts connections. | That the volume has room left. |
 | `seaweedfs` | The S3 gateway, the only way to the data, answers HTTP. | That the credentials and the `lakana` bucket work. |
-| `server` | The server answers `/healthz` (next section). | That the database, the storage or any worker works. |
-| `worker` (and `worker-interactive`, `worker-pipeline`) | The worker's process is alive. | That it has reached the database, registered, or takes work. |
+| `server` | The server answers `/healthz` (next section). | That the database, the storage or any worker works: `/readyz` says that. |
+| `worker` (and `worker-interactive`, `worker-pipeline`) | The worker of the container wrote its heartbeat to the database in the last 60 seconds, so it reaches the database. | That it takes work, or that it can reach the storage. |
 
 The one-off services `migrate`, `bucket` and `setup` run once and end; `Exited (0)` is their
 healthy state. One that exited with another number is the reason the services behind it did not
 start: read its log with `docker compose logs migrate` (or `bucket`, `setup`). A service that
 restarts again and again shows `Restarting`; its log says why.
 
-## The health route
+## The health routes
 
-The server has one health route, `/healthz`. It needs no sign-in, so a script, a load balancer or
-Docker can ask it:
+The server has two health routes. Neither needs a sign-in, so a script, a load balancer, a
+monitoring system or Docker can ask them. `$URL` is the public address of the instance.
+
+**`/healthz`: the server process answers.**
 
 <!-- source: docs/examples/getting-started/run.sh#healthz -->
 ```bash
 curl -s "$URL/healthz"
 ```
-
-`$URL` is the public address of the instance. It answers:
 
 <!-- output -->
 ```text
@@ -66,10 +66,47 @@ curl -s "$URL/healthz"
 ```
 
 That proves one thing: the server process is running and answers HTTP. It does not look at the
-database, the storage or the workers, so a server that answers can still fail every query. The
-image's own check asks the same route from inside the container every 10 seconds, which is what
-the `healthy` of the `server` service in `docker compose ps` comes from. There is no second route
-that checks the database or the storage; the rest of this page is how you check them.
+database, the storage or the workers. The `server` service's healthcheck asks this route from
+inside the container every 10 seconds, which is what its `healthy` in `docker compose ps` comes
+from.
+
+**`/readyz`: the instance can do work.**
+
+<!-- source: docs/examples/getting-started/run.sh#readyz -->
+```bash
+curl -s "$URL/readyz"
+```
+
+<!-- output -->
+```text
+{"status":"ready"}
+```
+
+It answers `200` and `{"status":"ready"}` when all three of these hold, and `503` with the ones
+that do not, for example `{"status":"not_ready","failed":["worker"]}`:
+
+| Name | Holds when | When it fails, look at |
+|---|---|---|
+| `database` | The catalog database answers a query within 2 seconds. When it fails, `storage` and `worker` are listed too: both are read from the database. | [The catalog database](#the-catalog-database-and-the-object-storage). |
+| `storage` | The storage of every environment answers within 2 seconds and accepts its credentials (at most the first 5 environments by name). Nothing is read or written. | [The object storage](#the-catalog-database-and-the-object-storage). |
+| `worker` | At least one worker wrote its heartbeat in the last 60 seconds (`LAKANA_RUN__LEASE_SECONDS`). | [The workers](#the-workers). |
+
+The answer names the checks and nothing else: no address, no environment, no error. The server
+log has the reason, in one line when the answer turns to `503` and one when it is back
+(see [Log lines that matter](#log-lines-that-matter)). One answer is reused for 5 seconds, so a
+caller that asks often does not load the database or the storage. A brand-new instance answers
+`503` until `setup` has run and the first worker has started.
+
+Three settings change it, on the `server` service ([all settings](../reference/settings.md)):
+
+- `LAKANA_READINESS__ENVIRONMENTS`: the environments whose storage counts, as a JSON list such
+  as `'["dev","prod"]'`. Set it when an environment's storage is out of reach from the server on
+  purpose, or when you have more than 5 environments.
+- `LAKANA_READINESS__TIMEOUT_SECONDS` (2) and `LAKANA_READINESS__CACHE_SECONDS` (5).
+
+Point a load balancer's or a monitoring system's check at `/readyz`, not at `/healthz`. Do not
+make the bundle's own `server` healthcheck ask `/readyz`: the workers start only after the server
+is healthy, so it would never become healthy.
 
 A server that does not answer at all is a stopped or restarting container, a proxy or a firewall
 in front of it, or a wrong address. `docker compose ps` and `docker compose logs server` tell
@@ -141,33 +178,37 @@ More filters and paging: [Find a run, a query or a deploy](find-a-run.md).
 
 ## The catalog database and the object storage
 
-Two things the instance cannot work without. Neither has a command of its own; you read them from
-what else works.
+Two things the instance cannot work without. `/readyz` checks both from the server
+([The health routes](#the-health-routes)); this is how to read them from the rest of the instance.
 
 **The catalog database.** `docker compose ps` shows `postgres` as `healthy` when it accepts
 connections. A command that reads the catalog, such as `lakana worker list`, answers only when
 the server reaches the database, so an answer proves it. When the database goes away:
 
-- every request that needs it fails, and a new server container does not start (the `migrate`
-  service runs first and exits with an error);
-- each worker logs `The worker's heartbeat could not be written; it is tried again every 5 s.`
-  and, after a minute without success, `No heartbeat was written for 60 s (LAKANA_RUN__LEASE_SECONDS): this worker claims nothing and stops the query it runs until one is written. Check that the database is reachable.`
+- every request that needs it fails, `/readyz` answers `503` with `database`, and a new server
+  container does not start (the `migrate` service runs first and exits with an error);
+- each worker's container turns `unhealthy` within about half a minute after its heartbeat is a
+  minute old;
+- each worker logs `The worker's heartbeat could not be written; it is tried again every 5 s.` (the line ends `event=database_unreachable`)
+  and, after a minute without success, `No heartbeat was written for 60 s (LAKANA_RUN__LEASE_SECONDS): this worker claims nothing and stops the query it runs until one is written. Check that the database is reachable. event=heartbeat_missed`
   Its queries and deploys are then ended as lost. When the database is back, it logs
-  `The worker's heartbeat is fresh again; it claims work again.`
+  `The worker's heartbeat is fresh again; it claims work again. event=heartbeat_recovered`
 
-**The object storage.** `seaweedfs` being `healthy` shows the gateway answers. Whether the
-instance can read and write its data you only learn by doing it: run a query that reads a table
-of yours. The tutorial's query is an example; use a table you have:
+**The object storage.** `seaweedfs` being `healthy` shows the gateway answers, and `/readyz`
+without `storage` shows that the server reaches each environment's storage with its credentials.
+That the workers can read and write your data you learn by doing it: run a query that reads a
+table of yours. The tutorial's query is an example; use a table you have:
 
 <!-- source: docs/examples/getting-started/run.sh#query -->
 ```bash
 lakana sql "SELECT * FROM gold.station_ranking ORDER BY warmth_rank"
 ```
 
-When the storage cannot be reached, a query that reads a table fails instead of returning rows,
-and a request that stores or sends an artifact file answers that the storage could not be written
-or read and that the operator should check whether it is unreachable. Read `docker compose logs
-seaweedfs` and `docker compose logs seaweedfs-core`.
+When the storage cannot be reached, a query that reads a table fails with
+`The storage of environment 'dev' could not be reached, so no table was read.` and says to try
+again and to tell the operator; a request that stores or sends an artifact file answers that the
+storage could not be written or read and that the operator should check whether it is
+unreachable. Read `docker compose logs seaweedfs` and `docker compose logs seaweedfs-core`.
 
 ## Disk space
 
@@ -226,18 +267,22 @@ level, `INFO`, shows all of the lines below. How to change the level and what th
 sweep mean: [The sweep](deploy-with-compose.md#the-sweep) and
 [After a restore](deploy-with-compose.md#after-a-restore).
 
-| Where | The line starts | What it means and what to do |
-|---|---|---|
-| worker | `Memory limit exceeded: the worker and its tasks use` | The worker passed 90 percent of its memory limit and ended its largest query or task, or stopped itself. Narrow the work or raise `LAKANA_WORKER_MEMORY`: [Memory limits](deploy-with-compose.md#memory-limits). |
-| worker | `The worker's heartbeat could not be written` | The worker cannot reach the database (see above). `The worker's heartbeat is still failing` repeats it, and `No heartbeat was written for` says the worker has stopped claiming work. |
-| worker | `Task run <id> is no longer ours; its outcome is dropped.` | The worker's claim on a task had run out when the task finished, so the worker dropped the result. Look for `worker_lost` on the run. |
-| worker | `Lease renewal of task run <id> failed; retrying.` | The worker could not extend its claim on a task. If it keeps failing, the task is taken from it. |
-| worker | `Polling iteration failed; continuing.` | The worker's loop that looks for work hit an error, followed by the error itself. Occasional lines are harmless; a stream of them is not. |
-| worker | `Running task run <id> failed unexpectedly.`, `Deploy run <id> failed unexpectedly.` | The platform failed in a way it did not expect. The run shows the code `internal` and says to see the worker log; the traceback follows the line. |
-| worker | `Python assets: disabled:` | At start-up: this worker cannot run Python tasks; the line ends with `To enable it:` and the fix. |
-| server | `The grants that have no effect could not be listed at start-up (a database error)` | The database answered with an error while the server started. Start-up goes on; check the database. |
-| server | A start-up that stops with a message that names a setting | A setting has a value the program does not accept. The message names it; correct it in `compose.yaml` or `.env`. |
-| server | An access line that ends `500 Internal Server Error` or `503` | The server could not answer a request (a 503 asks the client to try again, for example when the storage could not be opened). The lines around it have the cause. |
+The lines worth an alert end with a stable code, `event=<code>`: match your alert rules on it,
+not on the wording. Every code, its process and what to do: [Log events](../reference/log-events.md).
+
+| Where | The line starts | Code | What it means and what to do |
+|---|---|---|---|
+| worker | `Memory limit exceeded: the worker and its tasks use` | `memory_stop`, `memory_task_ended` | The worker passed 90 percent of its memory limit and ended its largest query or task, or stopped itself. Narrow the work or raise `LAKANA_WORKER_MEMORY`: [Memory limits](deploy-with-compose.md#memory-limits). |
+| worker | `The worker's heartbeat could not be written` | `database_unreachable` | The worker cannot reach the database (see above). `The worker's heartbeat is still failing` repeats it, and `No heartbeat was written for` (`heartbeat_missed`) says the worker has stopped claiming work. |
+| worker | `Task run <id> is no longer ours; its outcome is dropped.` | `lease_lost` | The worker's claim on a task had run out when the task finished, so the worker dropped the result. Look for `worker_lost` on the run. |
+| worker | `Lease renewal of task run <id> failed; retrying.` | `lease_renewal_failed` | The worker could not extend its claim on a task. If it keeps failing, the task is taken from it. |
+| worker | `Polling iteration failed; continuing.` | `poll_failed` | The worker's loop that looks for work hit an error, followed by the error itself. Occasional lines are harmless; a stream of them is not. |
+| worker | `Running task run <id> failed unexpectedly.`, `Deploy run <id> failed unexpectedly.` | `internal_error` | The platform failed in a way it did not expect. The run shows the code `internal` and says to see the worker log; the traceback follows the line. |
+| worker | `Python assets: disabled:` | none | At start-up: this worker cannot run Python tasks; the line ends with `To enable it:` and the fix. |
+| server | `The instance is not ready: /readyz answers 503.` | `readiness_failed` | The readiness check turned to failing; the line says which check and why. `readiness_recovered` says it is back. |
+| server | `The grants that have no effect could not be listed at start-up (a database error)` | none | The database answered with an error while the server started. Start-up goes on; check the database. |
+| server | A start-up that stops with a message that names a setting | none | A setting has a value the program does not accept. The message names it; correct it in `compose.yaml` or `.env`. |
+| server | An access line that ends `500 Internal Server Error` or `503` | none | The server could not answer a request (a 503 asks the client to try again, for example when the storage could not be opened). The lines around it have the cause. |
 
 ## What to collect before you ask
 
@@ -290,4 +335,5 @@ you for more.
 - [Run Lakana for other people](operate-for-others.md): the whole job of an operator, in order.
 - [Why is my query or task waiting?](why-is-it-waiting.md) and [Why did it fail?](../reference/why-did-it-fail.md).
 - [Deploying with Compose](deploy-with-compose.md): the services, the memory limit, the sweep and the logs.
+- [Log events](../reference/log-events.md): the codes of the log lines worth an alert.
 - [The audit log](../explanation/security.md#what-the-audit-log-records): who did what.

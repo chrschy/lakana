@@ -102,10 +102,13 @@ class SafeFormatterMixin:
     formatted (arguments that do not fit the message, an object whose `str` fails), one line
     still says that a record from that logger and level could not be formatted, with the
     message template escaped.
+
+    A record with a code (`extra=lakana_core.log_events.log_event(...)`, the attribute `event`)
+    has ` event=<code>` at the end of its message's first line, before any traceback.
     """
 
     def format(self, record: logging.LogRecord) -> str:
-        """Format a record, then escape it.
+        """Format a record, with its code if it has one, then escape it.
 
         Parameters
         ----------
@@ -118,6 +121,14 @@ class SafeFormatterMixin:
             The escaped text; a one-line notice when the record cannot be formatted.
         """
         try:  # a formatter that raises loses the record
+            code = getattr(record, "event", None)
+            if isinstance(code, str):
+                # A copy: other handlers of the same record keep the message as it was.
+                # On the first line, so a shipper that reads line by line sees it: a message can
+                # hold line breaks (a driver error's "Background on this error" line).
+                record = copy.copy(record)
+                first, newline, rest = record.getMessage().partition("\n")
+                record.msg, record.args = f"{first} event={code}{newline}{rest}", None
             return escape_record(super().format(record))  # ty: ignore[unresolved-attribute]
         except Exception:
             return self._fallback(record)

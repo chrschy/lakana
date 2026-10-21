@@ -13,11 +13,11 @@ from lakana_server.log_config import uvicorn_log_config
 
 
 def test_the_console_scripts_are_registered() -> None:
-    """`lakana-server` and `lakana-worker` resolve to their `main` functions."""
+    """`lakana-server` resolves to its `main`, `lakana-worker` to `command.cli` (`healthcheck`)."""
     scripts = {ep.name: ep.value for ep in entry_points(group="console_scripts")}
 
     assert scripts["lakana-server"] == "lakana_server.__main__:main"
-    assert scripts["lakana-worker"] == "lakana_worker.__main__:main"
+    assert scripts["lakana-worker"] == "lakana_worker.command:cli"
 
 
 def test_migrate_upgrades_the_configured_database(

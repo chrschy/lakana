@@ -30,6 +30,7 @@ from lakana_core.errors import (
     NotFoundError,
     NotPublishedError,
     PermissionDenied,
+    StorageUnavailableError,
     ValidationError,
 )
 from lakana_server.api.routing import AuthenticateFirstRoute
@@ -53,6 +54,7 @@ _STATUS_CODES: dict[type[Exception], int] = {
     ConflictError: 409,
     ValidationError: 422,
     PermissionDenied: 403,
+    StorageUnavailableError: 503,
     pydantic.ValidationError: 422,
     RequestValidationError: 422,
 }
@@ -62,8 +64,9 @@ _STATUS_CODES: dict[type[Exception], int] = {
 Iceberg REST catalog's 404 as "no such table", which is what a table with no published
 snapshot is to it, and the message says why. `KeptAfterCheckError` (a task refused a table
 that was kept after a failed check) is a 404 for the same reason: to the task's engine
-the table is not there to read. The lookup is by exact type, so a subclass of
-a mapped error needs its own entry.
+the table is not there to read. `StorageUnavailableError` (the environment's storage did not
+answer) is a 503 with `Retry-After: 5`, which an engine may try again. The lookup is by
+exact type, so a subclass of a mapped error needs its own entry.
 
 `pydantic.ValidationError` is listed explicitly and is distinct from
 `lakana_core.errors.ValidationError`, which is also in this table under its
@@ -103,11 +106,14 @@ def _error_response(exc: Exception, status_code: int, message: str) -> JSONRespo
     Returns
     -------
     JSONResponse
-        A response carrying `{"error": {"message", "type", "code"}}`.
+        A response carrying `{"error": {"message", "type", "code"}}`; for a storage that did not
+        answer also `Retry-After: 5`, as the platform API sends.
     """
+    headers = {"Retry-After": "5"} if isinstance(exc, StorageUnavailableError) else None
     return JSONResponse(
         status_code=status_code,
         content={"error": {"message": message, "type": type(exc).__name__, "code": status_code}},
+        headers=headers,
     )
 
 

@@ -132,6 +132,11 @@ def test_a_failed_write_is_logged_once_with_its_cause_then_one_line_each(
     assert second.levelno == logging.WARNING and second.exc_info is None
     assert "2 in a row" in second.getMessage()
     assert third.getMessage() == "The worker's heartbeat was written again after 2 failed attempts."
+    assert [getattr(r, "event", None) for r in caplog.records] == [
+        "database_unreachable",
+        "database_unreachable",
+        None,
+    ]
 
 
 def test_every_outage_is_logged_once_with_its_cause_and_once_recovered(
@@ -211,6 +216,8 @@ def test_turning_stale_and_fresh_again_is_logged_once_each(
         clock.now += 60.0
         assert heartbeat.stale()
     assert len(stale_lines) == 1
+    assert caplog.records[0].event == "heartbeat_missed"  # ty: ignore[unresolved-attribute]
+    assert caplog.records[1].event == "heartbeat_recovered"  # ty: ignore[unresolved-attribute]
     assert "claims nothing and stops the query it runs" in stale_lines[0]
     assert "60 s" in stale_lines[0]
     messages = [r.getMessage() for r in caplog.records]

@@ -27,5 +27,6 @@ Pages:
 - [Python assets](python-assets.md): the rules, what a deploy checks, what a task may do, failures and the operator's settings.
 - [Network settings of the worker](network-settings.md): git and webhook proxies and CA files.
 - [The Compose bundle](compose-bundle.md): the keys of `.env`, the services and the settings an operator changes most.
+- [Log events](log-events.md): the stable codes (`event=<code>`) of the log lines worth an alert, what each means and what to do.
 
 Pages are added here as they are written.

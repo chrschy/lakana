@@ -21,6 +21,7 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session
 
+from lakana_core.log_events import LogEvent, log_event
 from lakana_core.runs import workers
 
 logger = logging.getLogger(__name__)
@@ -124,12 +125,14 @@ class WorkerHeartbeat:
                         else "Until then it still claims work."
                     ),
                     self._lease_seconds,
+                    extra=log_event(LogEvent.DATABASE_UNREACHABLE),
                 )
             else:
                 logger.warning(
                     "The worker's heartbeat is still failing (%d in a row): %s",
                     self._failures,
                     error,
+                    extra=log_event(LogEvent.DATABASE_UNREACHABLE),
                 )
             return False
         if self._failures:
@@ -143,7 +146,10 @@ class WorkerHeartbeat:
             self._last_success = started
             recovered, self._stale_reported = self._stale_reported, False
         if recovered:
-            logger.info("The worker's heartbeat is fresh again; it claims work again.")
+            logger.info(
+                "The worker's heartbeat is fresh again; it claims work again.",
+                extra=log_event(LogEvent.HEARTBEAT_RECOVERED),
+            )
         return True
 
     def stale(self) -> bool:
@@ -166,6 +172,7 @@ class WorkerHeartbeat:
                 "claims nothing and stops the query it runs until one is written. Check that "
                 "the database is reachable.",
                 self._lease_seconds,
+                extra=log_event(LogEvent.HEARTBEAT_MISSED),
             )
         return stale
 

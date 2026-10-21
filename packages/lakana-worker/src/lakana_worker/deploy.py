@@ -36,6 +36,7 @@ from lakana_core.errors import (
     ValidationError,
 )
 from lakana_core.identifiers import shown
+from lakana_core.log_events import LogEvent, log_event
 from lakana_core.models import (
     DeployKind,
     DeployRun,
@@ -587,7 +588,9 @@ def run_deploy(
         session.rollback()
         _fail(service, run, _describe(exc), worker_id)
     except Exception:
-        logger.exception("Deploy run %s failed unexpectedly.", run_id)
+        logger.exception(
+            "Deploy run %s failed unexpectedly.", run_id, extra=log_event(LogEvent.INTERNAL_ERROR)
+        )
         session.rollback()
         _fail(service, run, INTERNAL_ERROR_MESSAGE, worker_id)
 

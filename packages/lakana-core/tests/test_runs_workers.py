@@ -25,7 +25,9 @@ from lakana_core.runs import workers
 from lakana_core.runs.workers import (
     WORKER_ROW_KEEP_SECONDS,
     alive_ids,
+    alive_on_host,
     alive_takes,
+    any_alive,
     beat,
     forget_lost,
     register,
@@ -354,3 +356,34 @@ def test_alive_takes_and_alive_ids_name_the_same_workers(session: Session) -> No
     _worker(session, "edge", now - timedelta(seconds=60))
     _worker(session, "fresh", now - timedelta(seconds=59))
     assert alive_takes(session, now, 60).keys() == alive_ids(session, now, 60) == {"fresh"}
+
+
+def test_any_alive_is_true_while_one_heartbeat_is_younger_than_the_lease(
+    session: Session,
+) -> None:
+    now = db_now(session)
+    assert any_alive(session, now, 60) is False
+    _worker(session, "edge", now - timedelta(seconds=60))
+    assert any_alive(session, now, 60) is False
+    _worker(session, "fresh", now - timedelta(seconds=59))
+    assert any_alive(session, now, 60) is True
+
+
+def test_alive_on_host_looks_only_at_the_workers_of_that_host(session: Session) -> None:
+    now = db_now(session)
+    register(session, "here", host="box-1", version="1")
+    register(session, "there", host="box-2", version="1")
+    session.execute(
+        update(Worker).where(Worker.id == "here").values(heartbeat_at=now - timedelta(seconds=61))
+    )
+    session.expire_all()
+    assert alive_on_host(session, "box-1", now, 60) is False
+    assert alive_on_host(session, "box-2", now, 60) is True
+    assert alive_on_host(session, "box-3", now, 60) is False
+
+
+def test_alive_on_host_cuts_the_host_name_as_register_does(session: Session) -> None:
+    now = db_now(session)
+    long_host = "h" * 300
+    register(session, "w1", host=long_host, version="1")
+    assert alive_on_host(session, long_host, now + timedelta(seconds=1), 60) is True

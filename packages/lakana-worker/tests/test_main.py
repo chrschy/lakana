@@ -723,6 +723,7 @@ def test_a_failing_artifact_sweep_does_not_stop_the_code_archive_sweep(
         _housekeeping(tmp_path, monkeypatch, artifacts, code)
     assert code.call_count == 1
     assert "RuntimeError" in caplog.text
+    assert "sweep_failed" in {getattr(r, "event", None) for r in caplog.records}
 
 
 def test_a_failing_code_archive_sweep_does_not_raise(
@@ -733,6 +734,7 @@ def test_a_failing_code_archive_sweep_does_not_raise(
         _housekeeping(tmp_path, monkeypatch, artifacts, code)
     assert artifacts.call_count == 1
     assert "RuntimeError" in caplog.text
+    assert "sweep_failed" in {getattr(r, "event", None) for r in caplog.records}
 
 
 def test_housekeeping_also_deletes_the_old_job_fires(
@@ -751,6 +753,7 @@ def test_a_failing_job_fire_sweep_is_logged_and_the_others_still_run(
         _housekeeping(tmp_path, monkeypatch, artifacts, code, mock.MagicMock(side_effect=OSError))
     assert artifacts.call_count == code.call_count == 1
     assert "OSError" in caplog.text
+    assert "sweep_failed" in {getattr(r, "event", None) for r in caplog.records}
 
 
 def _housekeeping_with_table_reads(
@@ -789,6 +792,7 @@ def test_a_failing_table_reads_sweep_is_logged_and_does_not_raise(
     with caplog.at_level(logging.WARNING):
         _housekeeping_with_table_reads(tmp_path, monkeypatch, mock.MagicMock(side_effect=OSError))
     assert "The table reads sweep failed (OSError)" in caplog.text
+    assert "sweep_failed" in {getattr(r, "event", None) for r in caplog.records}
 
 
 def test_housekeeping_also_stores_the_columns_of_tables_that_have_none(
@@ -814,6 +818,7 @@ def test_a_failing_column_backfill_is_logged_and_does_not_raise(
             columns=mock.MagicMock(side_effect=OSError),
         )
     assert "The table column backfill failed (OSError)" in caplog.text
+    assert "sweep_failed" in {getattr(r, "event", None) for r in caplog.records}
 
 
 def test_housekeeping_also_sweeps_table_locations_with_the_grace_period(
@@ -859,6 +864,7 @@ def test_a_failing_table_location_sweep_is_logged_and_the_others_still_run(
         )
     assert columns.call_count == 1
     assert "The table location sweep failed (OSError)" in caplog.text
+    assert "sweep_failed" in {getattr(r, "event", None) for r in caplog.records}
 
 
 def test_the_start_up_log_says_when_nothing_collects_leftovers(

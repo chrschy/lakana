@@ -166,6 +166,12 @@ curl -s "$URL/healthz"
 # docs:end healthz
 out=$(curl -s "$URL/healthz")
 test "$out" = '{"status":"ok"}'
+# The worker above is alive and `dev`'s storage is this machine's disk, so the instance is ready.
+# docs:start readyz
+curl -s "$URL/readyz"
+# docs:end readyz
+out=$(curl -s "$URL/readyz")
+test "$out" = '{"status":"ready"}'
 # docs:start queue-length
 lakana query list --env dev --status queued
 # docs:end queue-length
