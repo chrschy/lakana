@@ -968,6 +968,8 @@ def _resolve_sources(
     return sources
 
 
+# `_resolve_sources_opaquely` wraps `_resolve_sources` and takes the same parameters.
+# jscpd:ignore-start
 def _resolve_sources_opaquely(
     session: Session,
     environment_name: str,
@@ -981,6 +983,7 @@ def _resolve_sources_opaquely(
     withheld: dict[str, str] | None = None,
     prefixes: list[str] | None = None,
 ) -> dict[str, TableSource]:
+    # jscpd:ignore-end
     """Call `_resolve_sources`, replacing any failure's message with a safe one.
 
     Everything this stage touches knows a resolved storage location — a
