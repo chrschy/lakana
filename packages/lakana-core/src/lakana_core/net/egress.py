@@ -151,6 +151,10 @@ _REFUSED_NETWORKS = tuple(
     )
 )
 _NAT64 = ipaddress.ip_network("64:ff9b::/96")
+# The local-use NAT64 prefix (RFC 8215), from which operators pick their own prefixes; its
+# addresses are judged by their last 32 bits, as the well-known prefix's are. A prefix an
+# operator chose elsewhere cannot be known.
+_LOCAL_NAT64 = ipaddress.ip_network("64:ff9b:1::/48")
 
 
 class EgressRefused(Exception):
@@ -180,8 +184,9 @@ def _embedded_ipv4(
     Returns
     -------
     list[ipaddress.IPv4Address]
-        The IPv4-mapped, IPv4-compatible, 6to4, Teredo and NAT64 embedded addresses; empty for
-        IPv4 and for IPv6 addresses that carry none.
+        The IPv4-mapped, IPv4-compatible, 6to4, Teredo and NAT64 embedded addresses (the
+        well-known ``64:ff9b::/96`` and the local-use ``64:ff9b:1::/48``, by their last 32
+        bits); empty for IPv4 and for IPv6 addresses that carry none.
     """
     if not isinstance(address, ipaddress.IPv6Address):
         return []
@@ -192,7 +197,7 @@ def _embedded_ipv4(
         found.append(address.sixtofour)
     if address.teredo is not None:
         found.extend(address.teredo)
-    if address in _NAT64 or int(address) >> 32 == 0:
+    if address in _NAT64 or address in _LOCAL_NAT64 or int(address) >> 32 == 0:
         found.append(ipaddress.IPv4Address(int(address) & 0xFFFFFFFF))
     return found
 

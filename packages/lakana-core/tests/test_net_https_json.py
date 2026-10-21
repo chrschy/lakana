@@ -213,7 +213,15 @@ def test_a_name_that_resolves_to_an_internal_address_is_refused(
 
 @pytest.mark.parametrize(
     "address",
-    ["10.1.2.3", "172.16.0.1", "192.168.0.1", "100.64.0.1", "fd12:3456::1", "fec0::1"],
+    [
+        "10.1.2.3",
+        "172.16.0.1",
+        "192.168.0.1",
+        "100.64.0.1",
+        "fd12:3456::1",
+        "fec0::1",
+        "64:ff9b:1::a01:203",
+    ],
 )
 def test_an_operator_listed_host_may_resolve_to_a_private_address(
     monkeypatch: pytest.MonkeyPatch, address: str
@@ -240,6 +248,8 @@ def test_an_operator_listed_host_may_resolve_to_a_private_address(
         "::ffff:127.0.0.1",
         "::ffff:169.254.169.254",
         "64:ff9b::a9fe:a9fe",
+        "64:ff9b:1::a9fe:a9fe",
+        "64:ff9b:1:ffff::7f00:1",
     ],
 )
 def test_loopback_link_local_and_metadata_stay_refused_for_a_listed_host(

@@ -285,6 +285,9 @@ NEVER_REACHABLE = [
     "::127.0.0.1",
     "64:ff9b::7f00:1",
     "64:ff9b::a9fe:a9fe",
+    "64:ff9b:1::a9fe:a9fe",  # the local-use NAT64 prefix (RFC 8215)
+    "64:ff9b:1::7f00:1",
+    "64:ff9b:1:ffff::a9fe:a9fe",
     "2002:a9fe:a9fe::1",
 ]
 
@@ -298,7 +301,9 @@ def test_an_allowed_host_never_reaches_loopback_link_local_or_metadata(
     assert refusal(url, allowed("chat.corp.test")) == egress.NEVER_REACHABLE
 
 
-@pytest.mark.parametrize("address", ["10.0.0.5", "192.168.1.1", "100.64.0.1", "fd12::1", "fec0::1"])
+@pytest.mark.parametrize(
+    "address", ["10.0.0.5", "192.168.1.1", "100.64.0.1", "fd12::1", "fec0::1", "64:ff9b:1::a00:5"]
+)
 def test_an_allowed_host_keeps_its_private_address_exemption(
     monkeypatch: pytest.MonkeyPatch, address: str
 ) -> None:

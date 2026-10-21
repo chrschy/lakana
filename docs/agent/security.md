@@ -3720,7 +3720,8 @@ pins each line.
   documentation and benchmarking ranges, multicast, `240.0.0.0/4`, `fc00::/7`, `fec0::/10`
   (deprecated site-local, which `ipaddress` calls global on 3.11 and 3.14; #243), the unspecified
   address, and any IPv6 form that embeds such an IPv4 (mapped, compatible, 6to4, Teredo,
-  NAT64). All of 6to4 is refused. A shorthand IPv4 spelling (`127.1`, `2130706433`, a last label
+  NAT64: the well-known `64:ff9b::/96` and the local-use `64:ff9b:1::/48` of RFC 8215, both
+  judged by their last 32 bits). All of 6to4 is refused. A shorthand IPv4 spelling (`127.1`, `2130706433`, a last label
   of digits) is refused before any lookup. Userinfo in the URL is refused.
 - **No ambient configuration.** `httpx` runs with `trust_env=False` and `follow_redirects=False`;
   `HTTPS_PROXY`, `SSL_CERT_FILE` and the like change nothing. `LAKANA_WEBHOOK__PROXY` is the
@@ -3738,6 +3739,14 @@ pins each line.
   setting's purpose, and with the address rule the exemption reaches no address the rule
   refuses. Pins: `test_an_allowed_host_never_reaches_loopback_link_local_or_metadata`,
   `test_a_listed_localhost_may_reach_loopback_and_nothing_else_never_reachable`.
+  **Residual:** a NAT64 prefix length other than /96 inside the local-use `64:ff9b:1::/48`
+  (RFC 6052 then places the IPv4 elsewhere) is not decoded, so a host on
+  `LAKANA_WEBHOOK__ALLOW_HOSTS` or `LAKANA_CI_OIDC__ALLOW_HOSTS` that resolves to such an address
+  carrying a metadata or loopback IPv4 is reached as a private address; an unlisted host is
+  refused there, because the whole `/48` is not global. A NAT64 prefix an operator chose in their
+  own global IPv6 space cannot be known at all: an address in it looks public, to listed and
+  unlisted hosts alike, and only the NAT64 gateway's own rules keep it from internal IPv4
+  destinations.
 - **No URL in any text.** Every exception is reduced to a fixed reason
   (`lakana_core.net.egress.classify`); `str(exc)`
   of an `httpx` error embeds the URL and is never read. Refusals are raised outside `except`

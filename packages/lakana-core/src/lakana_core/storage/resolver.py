@@ -187,6 +187,27 @@ ROOT_SPELLING_MESSAGE = (
 )
 
 
+def root_base(root: str) -> str:
+    """Write a storage root without its trailing slashes, so that ``base/name`` is a child of it.
+
+    Only the slashes of the path go, never those of ``scheme://``: the root of a disk,
+    ``file:///``, becomes ``file://``, so ``file:///managed`` is its ``managed/`` (a plain
+    ``rstrip("/")`` would make it ``file:``).
+
+    Parameters
+    ----------
+    root
+        A storage root, with or without trailing slashes.
+
+    Returns
+    -------
+    str
+        The root to join a relative path to with one ``/``.
+    """
+    scheme, sep, rest = root.partition("://")
+    return f"{scheme}{sep}{rest.rstrip('/')}" if sep else root.rstrip("/")
+
+
 def check_storage_root(root: str) -> None:
     """Refuse a storage root that is not written canonically.
 

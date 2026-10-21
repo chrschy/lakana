@@ -124,6 +124,7 @@ from lakana_core.storage.resolver import (
     StorageResolver,
     is_within_location,
     nested_locations_within,
+    root_base,
 )
 
 logger = logging.getLogger(__name__)
@@ -317,7 +318,7 @@ class _Run:
         self.stopped_early = False
         self._session = session
         self._storage = storage
-        self._root = root.rstrip("/")
+        self._root = root_base(root)
         self._environment = environment
         self._now = now
         self._grace = grace
@@ -1096,7 +1097,7 @@ def sweep_table_locations(
             )
             try:
                 run.environment(environment_id, rotation, max_expiries - totals["tables_expired"])
-                key = root.rstrip("/")
+                key = root_base(root)
                 if key not in walked:
                     known = _known_locations(session) if known is None else known
                     walked[key] = run.unrecorded(known)

@@ -1903,3 +1903,54 @@ def test_places_that_only_look_alike_are_not_compared_as_one(
     ):
         _claim(session, other, state=TableLocationState.LIVE)
     assert near_other_location(session, target, root="s3://bucket") is None
+
+
+@pytest.mark.parametrize("root", ["file:///", "file://"])
+def test_a_location_under_the_root_of_the_disk_is_judged_like_any_other(
+    session: Session, catalog: CatalogService, root: str
+) -> None:
+    """``file:///`` is a root like any other: its ``managed/`` is ``file:///managed``.
+
+    ``file://`` is how the sweep holds that root, without its trailing slash.
+    """
+    from lakana_core.catalog.locations import Nearby, near_other_location
+
+    target = f"file:///managed/gold/t-{_HEX}"
+    assert near_other_location(session, target, root=root) is None
+
+    _existing_environment(session, "inner", "FILE:///managed/")
+    assert near_other_location(session, target, root=root) == Nearby(
+        "FILE:///managed/", environment_root=True
+    )
+
+
+def test_an_unreadable_root_beside_the_root_of_the_disk_still_keeps_the_location(
+    session: Session, catalog: CatalogService
+) -> None:
+    """A relative ``file`` root on the same scheme cannot be compared, so it keeps everything."""
+    from lakana_core.catalog.locations import Nearby, near_other_location
+
+    _existing_environment(session, "rel", "file://relative")
+    target = f"file:///managed/gold/t-{_HEX}"
+    assert near_other_location(session, target, root="file:///") == Nearby(
+        "file://relative", environment_root=True
+    )
+
+
+def test_the_sweep_confines_a_location_under_the_root_of_the_disk(session: Session) -> None:
+    """Its own root's ``managed/`` and the root-relative path, for an environment at ``file:///``."""
+    run = sweep_module._Run(
+        session,
+        mock.Mock(),
+        "file:///",
+        "disk",
+        _NOW,
+        timedelta(hours=1),
+        7,
+        lambda: 0.0,
+        1.0,
+        lambda: False,
+    )
+    assert run._confined(f"file:///managed/gold/t-{_HEX}") == f"managed/gold/t-{_HEX}"
+    assert run._confined(f"file:///raw/gold/t-{_HEX}") is None
+    assert run._confined(f"file:///managed//gold/t-{_HEX}") is None

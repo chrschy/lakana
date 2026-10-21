@@ -53,6 +53,7 @@ from lakana_core.storage.resolver import (
     SCHEME_ALIASES,
     _is_canonical_uri,
     check_storage_root,
+    root_base,
     table_root_from_metadata_location,
 )
 
@@ -647,9 +648,10 @@ def near_other_location(
         return cache[path]
 
     target = readings(location, resolved)
-    base = root.rstrip("/") or root
-    own_root = readings(base, resolved)
-    own_managed = readings(f"{root.rstrip('/')}/{MANAGED_PREFIX}", resolved)
+    # `root_base` keeps ``file:///`` a root (``file://`` + ``/``), where ``rstrip`` made it
+    # ``file:``, which cannot be read and so kept every location under the root of a disk.
+    own_root = readings(f"{root_base(root)}/", resolved)
+    own_managed = readings(child_location(root, MANAGED_PREFIX), resolved)
     if target is None or own_root is None or own_managed is None:
         return Nearby(location, environment_root=False)
     scheme = _scheme_of(location)
@@ -660,7 +662,7 @@ def near_other_location(
     for stored in session.scalars(select(Environment.storage_root)):
         if stored == root:
             continue
-        other = readings(stored.rstrip("/") or stored, resolved)
+        other = readings(stored, resolved)
         if other is None:
             if unreadable(stored):
                 return Nearby(stored, environment_root=True)
@@ -675,7 +677,7 @@ def near_other_location(
             return Nearby(stored, environment_root=True)
         if _inside(other, own_root):
             for zone in UNRECORDED_ZONES:
-                files = readings(f"{stored.rstrip('/')}/{zone}", resolved)
+                files = readings(child_location(stored, zone), resolved)
                 if files is None or files & own_root or _inside(files, own_root):
                     return Nearby(stored, environment_root=True, holds_this_root=True)
     records = select(TableLocation.location.label("path"), literal(False).label("derive")).where(
@@ -738,8 +740,7 @@ def child_location(root: str, name: str) -> str:
     str
         ``root/name`` with one slash between them.
     """
-    scheme, sep, rest = root.partition("://")
-    return f"{scheme}{sep}{rest.rstrip('/')}/{name}"
+    return f"{root_base(root)}/{name}"
 
 
 def _in_directory(
