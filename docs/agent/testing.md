@@ -668,6 +668,24 @@ child by a mock to win it back.
 - A result is complete only when the supervisor's batch iterator ended normally. A test of a read,
   a write or a describe that ends the child after its last batch (`full_stream_then_killed`)
   asserts that nothing is returned, stored or committed.
+- The query process runs in allow-list mode: it opens only `read_prefixes`, its temp directory and
+  the CA bundle. A test that hands `execute_query` local files of its own passes their directories
+  (`worker_test_helpers.local_prefixes(parameters)`, or `read_prefixes=(f"{tmp_path}/",)`); one
+  that wants DuckDB's own spill passes `spill=True`. Every string of a list-valued variable must lie
+  under a prefix, or the child refuses the request as `internal` before running anything.
+- **HTTPS without a store: `packages/lakana-worker/tests/tls_fixture.py`.** `make_authority(dir,
+  name)` makes a certificate authority with `cryptography` (a runtime dependency of `lakana-core`)
+  and writes its certificate to a PEM file; `serving(directory, authority, certs, redirects)` serves
+  a directory over HTTPS on `127.0.0.1` from a thread of the test process, with a leaf for
+  `127.0.0.1`/`localhost` signed by that authority, answers listed paths with a `302`, and records
+  every request line (`Serving.seen`). A test gives the query process the authority's file by
+  replacing `lakana_worker.executor.query_ca_bundle` (the `authority` fixture of
+  `test_query_allow_list.py` does). A second `make_authority` with another name is the foreign CA
+  of a verification test. Why not a TLS SeaweedFS: this exercises exactly what DuckDB 2.0 broke
+  (httpfs loading the CA bundle under the restriction, which does not depend on the server), runs in
+  the unit tier under coverage with no container and no network, and plays what a store cannot: a
+  second host, another authority, a redirect. The integration tier keeps plain-HTTP SeaweedFS for
+  the presigned path, and `compose-smoke` the image.
 
 **Integration tier.** `packages/lakana-server/tests/test_query_process_integration.py` runs real
 children against Postgres and SeaweedFS, over a real HTTP server (`python_asset_helpers.serving`)

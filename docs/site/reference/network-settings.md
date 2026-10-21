@@ -1,7 +1,8 @@
 # Network settings of the worker
 
 How the worker reaches git remotes and webhook addresses through a proxy or with an internal CA,
-and what it refuses to reach. Where the settings go in a Compose bundle:
+which certificate authorities its queries trust when they read an object store over HTTPS, and
+what it refuses to reach. Where the settings go in a Compose bundle:
 [Deploy with Compose](../how-to/deploy-with-compose.md). Every other setting:
 [Settings](settings.md).
 
@@ -28,6 +29,34 @@ CVE-2024-50349 fix): the worker answers only git's exact credential prompts, whi
 prints with the username unencoded. On an older git, a username with a reserved character such
 as `gitlab+deploy-token-1` fails with an authentication error. The Lakana image ships a current
 git; this matters for local mode, where your own git runs.
+
+## Object store certificates for queries
+
+A query reads table files from the object store over the presigned URLs the worker creates. If
+your store (MinIO, SeaweedFS, Ceph or another S3-compatible service) uses a certificate from a
+private certificate authority, tell the worker where that authority's certificate is. There is no
+Lakana setting for it: the worker uses the variables its own S3 client already reads.
+
+The worker takes the **first** of these that exists, at startup, and its log names the file it
+chose (`Query processes trust the certificate authorities in /path (SOURCE).`):
+
+| Source | Meaning |
+|---|---|
+| `AWS_CA_BUNDLE` | Path of a PEM file of trusted CAs. The same variable the worker's own S3 client uses, so one setting covers both. It **replaces** the system store for queries, so include every CA your stores need. |
+| `SSL_CERT_FILE` | Path of a PEM file of trusted CAs, used when `AWS_CA_BUNDLE` is not set. |
+| The system store | The first readable file of `/etc/ssl/certs/ca-certificates.crt`, `/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem`, `/etc/pki/tls/certs/ca-bundle.crt`, `/etc/ssl/ca-bundle.pem` and `/etc/ssl/cert.pem`. A corporate CA installed into the system store (`update-ca-certificates`, `update-ca-trust`) works without any variable. The Lakana image has one. |
+| `certifi` | Mozilla's list of public CAs, shipped with the worker, when the machine has no system store. |
+
+Set the variables on the **worker only**. A variable that names a missing, unreadable or non-PEM
+file stops the worker at startup:
+`AWS_CA_BUNDLE names /x, which is not a readable file of PEM certificates. Point it at your object
+store's certificate authority, or unset it.` Give a file of certificates only, never one that also
+holds a private key: a query that got past Lakana's checks could read the file.
+
+A query opens only the locations of the tables it reads (and its own temporary files and this
+file), never another address; see [What leaves the machine](../explanation/what-leaves-the-machine.md).
+If a query fails with `the query process could not read its certificate authorities from …`,
+the file is gone or unreadable since the worker started: fix the variable and restart the worker.
 
 ## Webhook network settings
 

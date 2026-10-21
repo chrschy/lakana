@@ -236,25 +236,17 @@ at its next tick, and the child's process boundary is not a security boundary (s
 child" below). The Docker runner for Python tasks (M7b, #38; Kubernetes #34) is separate.
 Never present any of these as a security boundary.
 
-- Spilling needs the local filesystem. Every mode but local `file://` sets
-  `disabled_filesystems = 'LocalFileSystem'`, which also blocks DuckDB's own spill file
-  (verified on 1.5.5; `allowed_directories` does not lift it). Restricted mode therefore fails
-  a query over `memory_limit` instead of spilling, with the same permission error a refused
-  local read gets. The child (`query_child.failure`) reports it as out of memory only when the
-  statement also plans again on the same connection (`EXPLAIN`): a local read is refused
-  while planning, a spill while running. The text alone never decides. Only a text of exactly
-  one `SELECT` is planned again (`extract_statements`, then `EXPLAIN` of that statement):
-  `EXPLAIN a; b` would run `b`, and the worker must not run user SQL twice whatever its caller
-  sent. The file readers (`read_csv`, `read_parquet`, `read_text`, `glob`, a replacement scan,
-  `COPY`) are refused at planning. A few catalog functions (`sniff_csv`, `duckdb_extensions`,
-  `duckdb_temporary_files`) touch the disk only at execution and would be reported as out of
-  memory if the server's rewriter ever let them through; the server refuses them, nothing is
-  read either way, and a test pins the behaviour so a DuckDB upgrade is noticed. The re-plan
-  takes as long as planning takes (it can fetch remote file metadata, and an interrupt does not
-  abort an HTTP request in flight); a deadline or cancel that lands during it still wins, but
-  how long a hung request delays that is a residual, the same one the first run has. The child has
-  no log of its own, so DuckDB's text is not logged. Do not re-enable the local filesystem to
-  make spilling work.
+- Spilling is decided by the request, never by DuckDB's text. Only local `file://` mode sends
+  `spill = true`; every other mode sets `max_temp_directory_size = '0KB'`, so a query over
+  `memory_limit` fails with DuckDB's `Out of Memory Error: failed to offload data block …`
+  (the same on 1.5.5 and 2.0.0), which the child words as "the query ran out of memory and
+  cannot spill to disk" plus the advice. DuckDB allows its own `temp_directory` in allow-list
+  mode, so the limit, not a refused file system, is what keeps the spill off. Nothing is
+  planned a second time: the `EXPLAIN` re-plan that once told a refused spill from a refused
+  local read is gone, and with it two residuals (user SQL planned twice, and a hung HTTP
+  request in the re-plan delaying a stop). In the Compose bundle the worker's `TMPDIR` is the
+  container's writable layer, which is why spill stays off there; enabling it is its own issue.
+  The child has no log of its own, so DuckDB's text is not logged.
 - The write deadline covers the whole streaming phase, including Parquet encoding and storage
   uploads inside `write_batches`, so a slow store can trip it while DuckDB is idle; the write
   message says so. The clock runs in the worker and is looked at on every read of the child's
@@ -2521,15 +2513,15 @@ that reads bytes directly, e.g.
 (`read_parquet`, `ATTACH`, `INSTALL`, `COPY … TO`) is a losing game: DuckDB ships new
 file-reading functions regularly, and the list is always one release behind.
 
-**Known gap.** The local-filesystem restriction described below is conditional, not
-unconditional: `lakana_worker.pipeline.run_one` derives `restrict = not
-environment.storage_root.startswith("file://")` and passes it as
-`restrict_local_filesystem` to every DuckDB entry point — directly to `execute_query` (a
-read), through `_run_write` to `stream_query` (a write, M5a), and through `_create_view` and
-`_diagnose_views` to `describe_query` (planning a view, M5a) — so a `file://` (single-node, local-mode) storage root leaves the worker's own disk enabled
-— there is no cloud credential to scope in that mode, but the filesystem guard that would
-otherwise close the gap is off, and isolation there rests on `check_blacklist`'s AST
-blacklist alone.
+**Known gap, narrowed by allow-list mode.** In local `file://` mode there is no cloud
+credential to scope. The query process runs in the same allow-list mode as everywhere else
+(see "Allow-list mode" under "The query child"): it opens the directories of the tables the
+query reads, its private temp directory and the CA bundle, and DuckDB refuses anything else
+at planning, a `..` path, a symlink out of a table directory (DuckDB compares real paths) and
+a glob above a table directory included. What remains, reachable only if the guard is
+passed: reading **and writing** (`COPY … TO`) inside the allowed table directories, which
+includes the files of a table nested in another's location and a raw claim whose listing a
+later external read would pick up; the temp directory; reading the CA bundle.
 
 **An `EXTERNAL` table's `location_pattern` claims an exclusive `raw/<dir>` directory,
 never an arbitrary glob.** `lakana_core.catalog.external_location.parse_external_location`
@@ -2560,13 +2552,12 @@ scheme existed — where `tables.external_claim` is `NULL` — must not go unche
 (NFD, casefold, NFD again — not a single NFC-then-casefold pass, which disagrees with the
 canonical algorithm on some characters), so `raw/Customers`
 and `raw/customers` — or an NFD- and an NFC-encoded `raw/café` — are still caught as the
-same directory on a case- or normalization-insensitive local filesystem. **Known gap, not yet closed:** on local (`file://`) storage, a symlink
-placed under a table's `raw/` claim is followed by the listing/read that infers its schema
-and by the worker's own read — this requires write access to the *host* filesystem underneath
-the storage root, which local mode already runs without the credential-scoping and
-filesystem guards this section describes for cloud storage (see the local-filesystem gap
-noted above), so it does not by itself grant anything beyond what running in that mode
-already exposes, but it is not defended against explicitly either.
+same directory on a case- or normalization-insensitive local filesystem. **Known gap, partly
+closed:** on local (`file://`) storage, a symlink placed under a table's `raw/` claim is
+still followed by the listing/read that infers its schema at creation. The query process no
+longer follows it: allow-list mode refuses a symlink whose target lies outside the
+directories the query may open (unless it points into another table the same query reads).
+Placing one needs write access to the *host* filesystem underneath the storage root.
 
 ### The query child (M5c3a)
 
@@ -2575,9 +2566,11 @@ Every query (a read, a write stream, a describe, and the start-up check) runs in
 own process opens no DuckDB connection and imports no `duckdb`.
 
 - **What it is given** is its request, written to its standard input: `mode`, `sql`,
-  `parameters`, `restrict_local_filesystem`, `memory_limit`, `threads`, `temp_directory`,
-  `max_temp_directory_size`, `batch_rows`, `extension_directory` and `parent_pid`: the rewritten SQL
-  and the values it reads as variables (the presigned URLs among them), the limits DuckDB applies, and two process facts. No
+  `parameters`, `read_prefixes`, `ca_bundle`, `spill`, `memory_limit`, `threads`,
+  `temp_directory`, `max_temp_directory_size`, `batch_rows`, `extension_directory` and
+  `parent_pid`: the rewritten SQL and the values it reads as variables (the presigned URLs among
+  them), the locations it may open, the path of its CA bundle, whether it may spill, the limits
+  DuckDB applies, and two process facts. No
   database URL, no storage credential, no token, no secret.
   `test_the_document_has_exactly_the_fields_the_child_is_given` pins the list.
   The request is at most 64 MiB (`MAX_REQUEST_BYTES`; one presigned URL per data file, about
@@ -2597,6 +2590,79 @@ own process opens no DuckDB connection and imports no `duckdb`.
   first query), so it loads the extension without network access.
 - **The child dies with the worker:** `PR_SET_PDEATHSIG` (Linux), and a `parent_pid` check at
   start that refuses to run for another parent.
+- **Allow-list mode.** The connection runs with `enable_external_access = false`,
+  `allowed_paths = [the CA bundle]` and `allowed_directories = [read_prefixes]`, replacing
+  `disabled_filesystems = 'LocalFileSystem'` (under which DuckDB 2.0 cannot load its CA bundle,
+  so every HTTPS read failed). The prefixes are **per query and per table**: the location of
+  each table the query reads (an Iceberg table's id-suffixed location, an external table's
+  `raw/<dir>` claim) in the form its files' URLs take, made by
+  `Storage.read_url_prefix` (local: the absolute directory plus `/`; remote: the signer's URL
+  of `<location>/<sentinel>` without query, fragment and sentinel, so path-style, virtual-host
+  and SAS URLs come out right without parsing endpoints; any other shape raises). An Iceberg
+  location that does not start with the environment's root is refused, so a foreign commit
+  through the REST catalog cannot widen the list to another host. A direct `execute_query`
+  call without prefixes can open nothing. `query_child.configure`'s order is load-bearing and
+  documented in the module docstring: `ca_cert_file`, `temp_directory`, `allowed_paths` and
+  `allowed_directories` must be set before `enable_external_access = false` (DuckDB refuses to
+  change them afterwards); the limits after it; **`lock_configuration = true` last**, after
+  which no `SET`, `RESET` or `PRAGMA` of any setting succeeds while `SET VARIABLE` still does
+  (probed on 1.5.5 and 2.0.0). The lock is the second layer behind the guard (which refuses
+  `SET` itself) against `http_proxy` (a proxy set at run time would receive the query's
+  presigned URLs; it defaults from `HTTP_PROXY`, which the child's environment does not have),
+  `extra_http_headers`, `ca_cert_file`, `lambda_syntax` and `allow_extension_repositories`.
+- **What DuckDB enforces** (probed on 1.5.5 and 2.0.0, and pinned by
+  `test_query_allow_list.py` against TLS servers in the test process): another host, scheme
+  or port, `169.254.169.254`, user-information tricks and a sibling directory (`t10` against
+  `t1/`) are refused at planning with a `Permission Error`, which the child reports as
+  `invalid` with a fixed text that names no path ("the query tried to open a file or an
+  address that is not one of the tables it reads"); locally also `..`, a symlink out of an
+  allowed directory and a glob above one. `INSTALL` and `duckdb_extensions()` are refused (the
+  extension directory is not allowed); `LOAD` of a built-in extension works. httpfs refuses
+  writes to http(s).
+- **The child checks the file lists itself, before anything runs.** DuckDB compares URL
+  strings and lets a URL's `..` through to the server. So every string of every list-valued
+  variable must start with one of the prefixes, and the rest (up to `?` for a URL) must hold no
+  `.`/`..` segment, also once percent-decoded and split at `/` and `\`, and no `%2e`; each prefix
+  must end in `/`, a remote one be `http(s)://host[:port]/` plus a non-empty path without user
+  information, query or fragment, a local one be absolute, `normpath`-canonical and not `/`;
+  the CA bundle must be absolute. A violation is an `internal` failure ("a file of the query
+  lies outside the locations it was given. This is a defect of Lakana"), not retried, and
+  nothing is configured or run (`file_outside_prefixes`, with a property test).
+- **The CA bundle** (`lakana_worker.ca_bundle`) is one PEM file, resolved once at start-up and
+  logged by path, never by content: `AWS_CA_BUNDLE`, then `SSL_CERT_FILE`, then the first
+  readable file of DuckDB 2.0's own system list, then `certifi.where()`. A variable naming a
+  missing, unreadable or non-PEM file stops the worker at start-up with a message that names
+  it. The bundle is the connection's `ca_cert_file` and its only `allowed_paths` entry, so SQL
+  past the guard could read it with `read_text` (public data, unless an operator points the
+  variable at a file that also holds a private key: do not). DuckDB's refusal to read it
+  (`Cannot read a CA certificate bundle`) is classified `internal` with a message naming the
+  bundle, both variables and the network-settings page; it should not occur once configured.
+  **Both 1.5.5 and 2.0.0 verify the store's certificate already** (probed with the fixture:
+  `enable_server_cert_verification = false` notwithstanding, a certificate of another
+  authority fails with `SSL peer certificate or SSH remote key was not OK`, an `IO Error`, so
+  today it is classified `transient` and retried); setting `ca_cert_file` changes which
+  authorities are trusted, not whether.
+- **What allow-list mode still leaves open** (reachable only past the guard; the guard is the
+  first layer, credential scoping the structural one):
+  - **The whole store host:port, not just the prefix**, for SQL that spells a literal URL: a
+    `..` or `%2e%2e` segment passes DuckDB's string check (the HTTP client normalises `..` and
+    asks for the other path). Without a signature the store answers 403, so what remains is what
+    it serves without authentication on that port: anonymous-readable buckets or objects, and
+    unauthenticated endpoints on the S3 port. AWS virtual-host style confines this to the
+    bucket's host. Pinned by `test_known_residual_a_literal_dotdot_reaches_the_same_server`.
+  - **Unsigned requests to the allowed prefixes**: objects of a table nested in another's
+    location; the same 403 limit.
+  - **Redirects are followed.** httpfs follows a 3xx from an allowed URL to another host
+    without consulting the allow-list (1.5.5 and 2.0.0;
+    `test_known_residual_a_redirect_from_the_store_is_followed_to_another_host`). The reach is
+    what the store itself redirects to; a query cannot choose the target.
+  - **Method and payload:** GET and HEAD only; httpfs refuses writes to http(s). No credential
+    is sent (none is held), and `http_proxy`/`extra_http_headers` are locked.
+  - **Local `file://` mode:** read and write inside the allowed table directories, the temp
+    directory, and reading the CA bundle (see "Known gap" above).
+  - **DNS:** the store's name is resolved per request; the operator's DNS decides.
+  - Unchanged: the SeaweedFS gateway's gRPC port 18333 (not HTTP), and Python tasks (trusted
+    code, not the query process).
 - **A result counts only with exit status 0, the pipe read to its real end and the Arrow
   end-of-stream marker as the last eight bytes.** pyarrow reads a stream cut at a message boundary,
   or after a `SIGKILL`, as a clean end with fewer rows, so the worker checks all three itself.
@@ -2615,8 +2681,9 @@ query's authorized scope.** The executor resolves table references through the c
 into the concrete file list a principal may read and hands DuckDB presigned URLs for
 exactly those files, on a connection, in a process of its own, that holds no object-store credential of its own —
 the ambient `AWS_*` credentials DuckDB auto-populates are cleared, persistent secrets are
-off, and the local filesystem is disabled (`lakana_worker.query_child`'s module docstring says
-why each of those three is separately load-bearing). A crafted query then has no
+off, and the connection opens only the locations of the tables the query reads, in allow-list
+mode (`lakana_worker.query_child`'s module docstring says why each of those is separately
+load-bearing). A crafted query then has no
 unauthorized bytes to reach — not because a check caught it, but because the process never
 holds a credential that reaches them. AST blacklisting (`query_rewrite.check_blacklist`)
 still runs as defence in depth; it is explicitly not meant to be the primary control —
@@ -2624,9 +2691,10 @@ still runs as defence in depth; it is explicitly not meant to be the primary con
 structurally unreachable (cloud storage), regardless of which DuckDB function a query
 calls; the blacklist only turns the common, obvious bypasses into a clear error instead
 of a confusing one.** In local `file://` mode there is no cloud credential to scope, so
-that structural guarantee does not hold — see "Known gap" above: catalog resolution plus
-the AST blacklist are the only controls there, and the threat model's "Bypassing policy
-by reading files directly" row says so too.
+that structural guarantee does not hold — see "Known gap" above: catalog resolution,
+allow-list mode (the directories of the query's own tables) and the AST blacklist are the
+controls there, and the threat model's "Bypassing policy by reading files directly" row says
+so too.
 
 `_BLACKLISTED_FUNCTIONS` covers every file-reading, SQL-evaluating, or
 secret-revealing DuckDB table function found by inspecting DuckDB 1.5.5's function list,
@@ -4396,7 +4464,9 @@ matter for an operator deciding where to run it:
   `SUCCEEDED`. Nothing stays `RUNNING` for ever. A venv build in progress is not interrupted
   (#48).
 - **SeaweedFS's internal HTTP APIs are unreachable from the worker (#14), by network isolation.**
-  The worker runs user SQL with DuckDB's `httpfs` and external access enabled, and SeaweedFS's
+  The worker runs user SQL with DuckDB's `httpfs` (since allow-list mode, a query process opens
+  only the URL prefixes of the tables it reads, but follows a redirect and lets a literal `..`
+  reach the same host; see "Allow-list mode"), and SeaweedFS's
   master (9333), volume (8080) and filer HTTP APIs need no credentials, so anything the worker
   can reach would be a way around credential scoping. Chosen: `weed server` (master, volume,
   filer; `-disableHttp` too) runs as `seaweedfs-core` on `seaweed-internal` (`internal: true`),
