@@ -17,6 +17,7 @@ from lakana._models import (
     SchedulerStatus,
     TaskAttempt,
     TaskLog,
+    WorkerCaches,
     WorkerInfo,
 )
 from lakana._routes import ROUTES
@@ -593,6 +594,30 @@ class Scheduler:
         )
 
 
+def _caches(data: object) -> WorkerCaches | None:
+    """Read the cache sizes of a listed worker.
+
+    Parameters
+    ----------
+    data
+        The entry's `caches`: an object, `null`, or absent from a server of an earlier release.
+
+    Returns
+    -------
+    WorkerCaches or None
+        `None` unless it is an object.
+    """
+    if not isinstance(data, dict):
+        return None
+    return WorkerCaches(
+        environments_bytes=data["environments_bytes"],
+        packages_bytes=data["packages_bytes"],
+        tasks_bytes=data["tasks_bytes"],
+        complete=data["complete"],
+        measured_at=datetime.fromisoformat(data["measured_at"]),
+    )
+
+
 class Workers:
     """The workers of this instance (admin).
 
@@ -612,7 +637,7 @@ class Workers:
         after that; a lost worker's row is kept for an hour. Each entry shows the run ids of
         what the worker is doing (a query, a deploy, a pipeline task), never SQL, and `takes`
         says which work it takes: `all`, `interactive` or `pipeline` (`all` when the server is
-        of an earlier release and sends none).
+        of an earlier release and sends none). `caches` has the sizes of the worker's caches.
 
         Returns
         -------
@@ -636,6 +661,7 @@ class Workers:
                 query_run_id=item["query_run_id"],
                 deploy_run_id=item["deploy_run_id"],
                 task_run_id=item["task_run_id"],
+                caches=_caches(item.get("caches")),
             )
             for item in self._transport.request(ROUTES["workers.list"]).json()
         ]

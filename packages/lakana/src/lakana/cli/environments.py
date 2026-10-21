@@ -2,16 +2,24 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from typing import Annotated
 from urllib.parse import urlsplit
 
 import typer
 
-from lakana._models import OrphanedLocation, OrphanedLocations
+from lakana._models import (
+    EnvironmentUsage,
+    OrphanedLocation,
+    OrphanedLocations,
+    UsagePart,
+    WorkerInfo,
+)
 from lakana.cli import _output
 from lakana.cli._retention import parse_within
 from lakana.cli._state import CliError, CliState, confirm, parse_key_values, state_of
 from lakana.cli.artifacts import human_size
+from lakana.errors import PermissionDenied
 
 env_app = typer.Typer(help="Manage environments.", no_args_is_help=True)
 
@@ -637,6 +645,181 @@ def _cut(state: CliState, found: OrphanedLocations) -> None:
             "The server stopped at its time limit, so the list may be incomplete; run the "
             "command again, after a --delete, to see more.",
         )
+
+
+_USAGE_COLUMNS = ["environment", "tables", "dropped", "artifacts", "code", "total"]
+_UNMEASURED_NOTE = "A total with + is a floor: the worker's next sweep (hourly) measures the rest."
+_CACHE_COLUMNS = ["id", "environments", "packages", "tasks", "total", "measured_at"]
+_PACKAGES_NOTE = "packages leaves out files shared with an environment; + marks a floor."
+_SHARED_NOTE = "Workers that share one cache volume show the same figures: do not add them up."
+
+
+def _part(part: UsagePart) -> str:
+    """Write one part of a usage for a table cell.
+
+    Parameters
+    ----------
+    part
+        The part.
+
+    Returns
+    -------
+    str
+        ``3.0 GiB in 2``, with ``, N unmeasured`` when some sizes are missing.
+    """
+    text = f"{human_size(part.bytes)} in {part.count}"
+    return f"{text}, {part.unmeasured} unmeasured" if part.unmeasured else text
+
+
+def cache_size_cell(worker: WorkerInfo, field: str) -> str:
+    """Write one cache size of a worker.
+
+    Parameters
+    ----------
+    worker
+        The worker.
+    field
+        The attribute of its `WorkerCaches`: ``environments_bytes``, ``packages_bytes``,
+        ``tasks_bytes`` or ``total_bytes``.
+
+    Returns
+    -------
+    str
+        The size, ``+`` after a measurement cut short, ``-`` before the first one.
+    """
+    caches = worker.caches
+    if caches is None:
+        return "-"
+    shown = human_size(getattr(caches, field))
+    return shown if caches.complete else shown + "+"
+
+
+def _usage_rows(state: CliState, name: str | None) -> tuple[list[EnvironmentUsage], list[str]]:
+    """Read the usage of one environment, or of every one the caller may manage.
+
+    Parameters
+    ----------
+    state
+        The CLI state.
+    name
+        The environment; `None` for every one the caller sees.
+
+    Returns
+    -------
+    tuple
+        The usages, and the names of the environments the caller sees but may not manage.
+
+    Raises
+    ------
+    CliError
+        If no environment is left to show.
+    """
+    client = state.client()
+    if name is not None:
+        return [client.environments.usage(name)], []
+    found: list[EnvironmentUsage] = []
+    refused: list[str] = []
+    for environment in client.environments.list():
+        try:
+            found.append(client.environments.usage(environment.name))
+        except PermissionDenied:
+            refused.append(environment.name)
+    if not found:
+        raise CliError(
+            "There is no environment whose storage you may see: the usage needs "
+            "MANAGE_ENVIRONMENT on the environment. Ask an administrator for the grant, or name "
+            "an environment you manage: lakana env usage NAME.",
+            exit_code=1,
+        )
+    return found, refused
+
+
+@env_app.command("usage")
+def usage(
+    ctx: typer.Context,
+    name: Annotated[
+        str | None,
+        typer.Argument(help="The environment; every environment you manage when left out."),
+    ] = None,
+) -> None:
+    """Show how much storage environments use, and the size of the workers' caches.
+
+    For each environment: its managed tables (the files of their current version), the dropped
+    tables that can still be restored, its artifacts and its code archives. The figures come
+    from the catalog database; the worker measures the tables in its hourly sweep, so a table
+    written since counts as unmeasured until then. Not counted: the files of older table versions
+    that maintenance has not removed yet, external tables, and files nothing names. Needs
+    MANAGE_ENVIRONMENT on each environment; the workers' caches need it on the instance.
+
+    Parameters
+    ----------
+    ctx
+        The Typer context.
+    name
+        The environment, or `None` for every one the caller may manage.
+    """
+    state = state_of(ctx)
+    usages, refused = _usage_rows(state, name)
+    try:
+        workers: list[WorkerInfo] | None = state.client().workers.list()
+    except PermissionDenied:
+        workers = None
+    if state.output == "json":
+        _output.print_json(
+            {
+                "environments": [asdict(found) for found in usages],
+                "workers": None if workers is None else [asdict(w) for w in workers],
+            }
+        )
+        return
+    _output.emit(
+        state,
+        usages,
+        columns=_USAGE_COLUMNS,
+        derived={
+            "tables": lambda u: _part(u.tables),
+            "dropped": lambda u: _part(u.dropped_tables),
+            "artifacts": lambda u: _part(u.artifacts),
+            "code": lambda u: _part(u.code_archives),
+            "total": lambda u: human_size(u.total_bytes) + ("" if u.complete else "+"),
+        },
+        whole=["total"],
+        footnotes=None if all(u.complete for u in usages) else {"total": _UNMEASURED_NOTE},
+    )
+    if refused:
+        typer.echo(
+            f"{len(refused)} environment{'s' if len(refused) > 1 else ''} not shown "
+            f"({', '.join(_output.inline(n) for n in refused)}): you may not manage "
+            f"{'them' if len(refused) > 1 else 'it'}."
+        )
+    typer.echo("")
+    if workers is None:
+        typer.echo(
+            "The workers' caches are shown to administrators of the instance "
+            "(MANAGE_ENVIRONMENT on the instance)."
+        )
+        return
+    if not workers:
+        typer.echo("No worker is registered, so no cache is shown.")
+        return
+    _output.emit(
+        state,
+        workers,
+        columns=_CACHE_COLUMNS,
+        derived={
+            "environments": lambda w: cache_size_cell(w, "environments_bytes"),
+            "packages": lambda w: cache_size_cell(w, "packages_bytes"),
+            "tasks": lambda w: cache_size_cell(w, "tasks_bytes"),
+            "total": lambda w: cache_size_cell(w, "total_bytes"),
+            "measured_at": lambda w: (
+                "not measured yet"
+                if w.caches is None
+                else w.caches.measured_at.isoformat(timespec="seconds")
+            ),
+        },
+        whole=["total", "measured_at"],
+        footnotes={"packages": _PACKAGES_NOTE, "id": _SHARED_NOTE},
+    )
 
 
 def register(app: typer.Typer) -> None:

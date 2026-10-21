@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import math
 import threading
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from lakana_core.config import DatabaseConfig
 from lakana_core.db import create_engine
 from lakana_core.models import Base, Worker
+from lakana_core.runs.workers import CacheSizes
 from lakana_worker.heartbeat import RETRY_SECONDS, WorkerHeartbeat
 
 _THREAD_BOUND_SECONDS = 10.0
@@ -40,7 +41,12 @@ class _Clock:
 
 
 def _heartbeat(
-    session: Session, clock: _Clock, *, fail: list[bool] | None = None, takes: str = "all"
+    session: Session,
+    clock: _Clock,
+    *,
+    fail: list[bool] | None = None,
+    takes: str = "all",
+    caches: Callable[[], CacheSizes | None] | None = None,
 ) -> WorkerHeartbeat:
     """Build a heartbeat on the test's session; `fail[0]` makes the next writes raise.
 
@@ -54,6 +60,8 @@ def _heartbeat(
         A one-element list; while its element is true the session factory raises.
     takes
         What the worker takes.
+    caches
+        Returns the latest cache sizes.
 
     Returns
     -------
@@ -76,6 +84,7 @@ def _heartbeat(
         lease_seconds=60,
         takes=takes,
         monotonic=clock,
+        caches=caches,
     )
 
 
@@ -329,3 +338,43 @@ def test_unregister_that_fails_is_logged_and_does_not_raise(
     (record,) = caplog.records
     assert "shown as lost for an hour and then removed" in record.getMessage()
     assert record.exc_info is not None
+
+
+def test_the_heartbeat_stores_new_cache_sizes_and_again_after_registering(session: Session) -> None:
+    latest: list[CacheSizes | None] = [None]
+    heartbeat = _heartbeat(session, _Clock(), caches=lambda: latest[0])
+    assert heartbeat.beat_once()
+    assert session.scalars(select(Worker.cache_measured_at)).one() is None
+    latest[0] = CacheSizes(environments_bytes=1, packages_bytes=2, tasks_bytes=3, complete=True)
+    assert heartbeat.beat_once()
+    session.expire_all()
+    row = session.scalars(select(Worker)).one()
+    assert (row.cache_packages_bytes, row.cache_complete) == (2, True)
+    first = row.cache_measured_at
+    assert first is not None
+    session.execute(delete(Worker))
+    session.commit()
+    assert heartbeat.beat_once()
+    session.expire_all()
+    assert session.scalars(select(Worker.cache_packages_bytes)).one() == 2
+    latest[0] = CacheSizes(environments_bytes=1, packages_bytes=5, tasks_bytes=3, complete=True)
+    assert heartbeat.beat_once()
+    session.expire_all()
+    assert session.scalars(select(Worker.cache_packages_bytes)).one() == 5
+
+
+def test_cache_sizes_that_could_not_be_written_are_written_with_the_next_beat(
+    session: Session,
+) -> None:
+    sizes = CacheSizes(environments_bytes=1, packages_bytes=2, tasks_bytes=3, complete=True)
+    fail = [False]
+    heartbeat = _heartbeat(session, _Clock(), fail=fail, caches=lambda: sizes)
+    heartbeat.beat_once()
+    session.execute(delete(Worker))
+    session.commit()
+    fail[0] = True
+    assert not heartbeat.beat_once()
+    fail[0] = False
+    assert heartbeat.beat_once()
+    session.expire_all()
+    assert session.scalars(select(Worker.cache_packages_bytes)).one() == 2

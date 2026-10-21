@@ -89,7 +89,7 @@ from lakana_core.runs.waiting import (
     task_wait_reason,
     with_work,
 )
-from lakana_core.runs.workers import alive_ids
+from lakana_core.runs.workers import CacheSizes, alive_ids, cache_sizes
 from lakana_core.secrets.keys import KeyProvider
 from lakana_core.storage.resolver import StorageResolver
 
@@ -524,6 +524,10 @@ class WorkerView:
         Its oldest `RUNNING` deploy run, or `None`.
     task_run_id
         The `RUNNING` task run whose lease it holds, or `None`.
+    caches
+        The sizes of its caches it last measured; `None` before its first measurement.
+    caches_measured_at
+        When it stored them (the database's time); `None` with `caches`.
     """
 
     id: str
@@ -536,6 +540,8 @@ class WorkerView:
     query_run_id: uuid.UUID | None
     deploy_run_id: uuid.UUID | None
     task_run_id: uuid.UUID | None
+    caches: CacheSizes | None = None
+    caches_measured_at: datetime | None = None
 
 
 def _entries(manifest: Mapping[str, object]) -> dict[str, Mapping[str, object]]:
@@ -2274,6 +2280,8 @@ class RunService:
                 query_run_id=query_runs.get(w.id),
                 deploy_run_id=deploy_runs.get(w.id),
                 task_run_id=task_runs.get(w.id),
+                caches=cache_sizes(w),
+                caches_measured_at=w.cache_measured_at,
             )
             for w in workers
         ]

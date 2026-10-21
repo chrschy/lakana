@@ -1075,3 +1075,34 @@ def test_the_expiry_warning_is_between_zero_and_3650_days(days: int) -> None:
 
     with pytest.raises(PydanticValidationError, match="expiry_warning_days"):
         TableUndoConfig(expiry_warning_days=days)
+
+
+def test_the_package_cache_is_trimmed_above_ten_gibibytes_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`LAKANA_WORKER__PACKAGE_CACHE_MAX_BYTES` is 10 GiB unless set; 0 turns the trim off."""
+    monkeypatch.setenv("LAKANA_DATABASE__URL", "sqlite:///x.db")
+    monkeypatch.delenv("LAKANA_WORKER__PACKAGE_CACHE_MAX_BYTES", raising=False)
+    monkeypatch.delenv("LAKANA_WORKER__PACKAGE_CACHE_MIN_AGE_HOURS", raising=False)
+    worker = Settings().worker
+    assert (worker.package_cache_max_bytes, worker.package_cache_min_age_hours) == (
+        10 * 1024**3,
+        24.0,
+    )
+    monkeypatch.setenv("LAKANA_WORKER__PACKAGE_CACHE_MAX_BYTES", "0")
+    monkeypatch.setenv("LAKANA_WORKER__PACKAGE_CACHE_MIN_AGE_HOURS", "0")
+    worker = Settings().worker
+    assert (worker.package_cache_max_bytes, worker.package_cache_min_age_hours) == (0, 0.0)
+
+
+@pytest.mark.parametrize(
+    "variable",
+    ["LAKANA_WORKER__PACKAGE_CACHE_MAX_BYTES", "LAKANA_WORKER__PACKAGE_CACHE_MIN_AGE_HOURS"],
+)
+def test_a_negative_package_cache_setting_is_refused(
+    monkeypatch: pytest.MonkeyPatch, variable: str
+) -> None:
+    monkeypatch.setenv("LAKANA_DATABASE__URL", "sqlite:///x.db")
+    monkeypatch.setenv(variable, "-1")
+    with pytest.raises(PydanticValidationError, match=variable.split("__")[1].lower()):
+        Settings()

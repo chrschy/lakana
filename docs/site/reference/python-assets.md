@@ -295,10 +295,17 @@ can run Python assets, and why not. Its cache directory is `$XDG_CACHE_HOME/laka
 - `venvs/` holds the venvs (at most `LAKANA_RUN__VENV_KEEP`), next to one pair of empty lock
   files (`<key>.lock`, `<key>.build.lock`) per environment ever built there; they are never
   removed by the worker, and you may delete the ones of environments that no longer exist while no
-  worker is running. `uv/` holds uv's own download cache. Nothing limits or cleans the uv cache: it grows with
-  every package version a project locks. To reclaim the space, stop the worker and delete the `uv/`
-  directory (the next build downloads what it needs again), or run `uv cache clean` as the
-  worker's user with `UV_CACHE_DIR` set to that directory. A process that a task detaches from its
+  worker is running. `uv/` holds uv's own download cache. It grows with every package version a project locks, and
+  the worker's sweep trims it above `LAKANA_WORKER__PACKAGE_CACHE_MAX_BYTES` (10 GiB by default;
+  `0` never trims): first what no package refers to any more (`uv cache prune`), then the packages
+  downloaded longest ago (`uv cache clean`), never one downloaded within
+  `LAKANA_WORKER__PACKAGE_CACHE_MIN_AGE_HOURS` (24), never while the worker builds an environment,
+  and not while another worker that shares the cache builds one (it tries again at the next
+  sweep). Environments that exist keep working: their files are linked or copied from the cache,
+  never symbolic links into it. `lakana env usage` and `lakana worker list` show how large the
+  three directories are ([Is my instance healthy?](../how-to/instance-health.md#disk-use)). To
+  reclaim all of it at once, stop the worker and delete the `uv/` directory (the next build
+  downloads what it needs again). A process that a task detaches from its
   process group is not killed when the task ends.
 - `attempts/` holds one directory per running attempt. It is removed when the attempt ends. After
   a hard kill of the worker, the leftover is removed by the worker's sweep: at start and then every

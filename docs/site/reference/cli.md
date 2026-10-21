@@ -345,6 +345,18 @@ Releases before location records could leave table directories under `managed/` 
 | `--delete` | flag | off | Delete the directories listed as old enough. |
 | `--yes` | flag | off | Don't ask for confirmation. |
 
+### `lakana env usage`
+
+Usage: `lakana env usage [OPTIONS] [name]`
+
+Show how much storage environments use, and the size of the workers' caches.
+
+For each environment: its managed tables (the files of their current version), the dropped tables that can still be restored, its artifacts and its code archives. The figures come from the catalog database; the worker measures the tables in its hourly sweep, so a table written since counts as unmeasured until then. Not counted: the files of older table versions that maintenance has not removed yet, external tables, and files nothing names. Needs MANAGE_ENVIRONMENT on each environment; the workers' caches need it on the instance.
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `NAME` | text | none | The environment; every environment you manage when left out. |
+
 ## `lakana ns`
 
 Usage: `lakana ns [OPTIONS] COMMAND [ARGS]...`
@@ -1695,7 +1707,7 @@ Usage: `lakana worker list [OPTIONS]`
 
 List the registered workers and what each is doing (admin).
 
-A worker is alive while its heartbeat is recent and lost after that; a lost worker's row stays for an hour, and the query or deploy it held is ended by the scheduler. The column takes is the work the worker takes: all, interactive (ad-hoc queries) or pipeline (deploys, pipeline tasks and table maintenance).
+A worker is alive while its heartbeat is recent and lost after that; a lost worker's row stays for an hour, and the query or deploy it held is ended by the scheduler. The column takes is the work the worker takes: all, interactive (ad-hoc queries) or pipeline (deploys, pipeline tasks and table maintenance). The column caches is the disk its caches take, as it last measured them (hourly).
 
 ## `lakana job`
 

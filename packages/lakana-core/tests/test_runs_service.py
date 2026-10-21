@@ -56,6 +56,7 @@ from lakana_core.models import (
     Worker,
 )
 from lakana_core.projects.run_policy import MAX_RETRY_DELAY_SECONDS, RunCaps
+from lakana_core.runs import workers
 from lakana_core.runs.checks import ASSET, SOURCE_CHECK
 from lakana_core.runs.failures import UNKNOWN_FAILURE, FailureCode, failure_of
 from lakana_core.runs.selection import Selection
@@ -2657,3 +2658,17 @@ def test_task_log_attempts_carry_their_failure(
         UNKNOWN_FAILURE,
         None,
     ]
+
+
+def test_the_list_shows_the_cache_sizes_a_worker_stored(
+    session: Session, principal: PrincipalRef
+) -> None:
+    _register(session, "measured", 5)
+    _register(session, "new", 5)
+    sizes = workers.CacheSizes(environments_bytes=5, packages_bytes=6, tasks_bytes=7, complete=True)
+    workers.beat(session, "measured", caches=sizes)
+    session.commit()
+    views = {v.id: v for v in _service(session).list_workers(principal)}
+    assert views["measured"].caches == sizes
+    assert views["measured"].caches_measured_at is not None
+    assert (views["new"].caches, views["new"].caches_measured_at) == (None, None)

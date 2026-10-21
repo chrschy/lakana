@@ -77,6 +77,7 @@ ROUTES: dict[str, Route] = {
     "environments.update_storage": Route("PATCH", "/api/v1/environments/{name}/storage"),
     "environments.set_protection": Route("PATCH", "/api/v1/environments/{name}"),
     "environments.set_retention": Route("PUT", "/api/v1/environments/{name}/retention"),
+    "environments.usage": Route("GET", "/api/v1/environments/{name}/usage"),
     "environments.orphaned_locations": Route(
         "GET", "/api/v1/environments/{name}/orphaned-locations"
     ),

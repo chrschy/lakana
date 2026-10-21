@@ -56,6 +56,16 @@ would never start. To know whether the instance can do work (the database, the s
 environment and a live worker), ask `/readyz`:
 [The health routes](../how-to/instance-health.md#the-health-routes).
 
+## Volumes
+
+| Volume | Mounted by | Holds | Kept small by |
+|---|---|---|---|
+| `pgdata` | `postgres` | The catalog database. | Nothing; it grows with tables, runs and audit events. |
+| `seaweed` | `seaweedfs-core` | The object storage: every table, artifact and code archive. | Table maintenance and the sweep of dropped tables; `lakana env usage` shows its size per environment. |
+| `worker-cache` | `worker`, `worker-interactive`, `worker-pipeline`, at `/home/lakana/.cache/lakana-worker` | `venvs/` (Python environments), `uv/` (uv's package download cache) and `attempts/` (task directories), shared by every worker. | `LAKANA_RUN__VENV_KEEP` environments; the sweep trims `uv/` above `LAKANA_WORKER__PACKAGE_CACHE_MAX_BYTES` (10 GiB) and removes leftover task directories. `lakana worker list` shows its size. |
+
+See [Disk use](../how-to/instance-health.md#disk-use).
+
 ## Secrets settings
 
 | Variable | Default | Meaning |

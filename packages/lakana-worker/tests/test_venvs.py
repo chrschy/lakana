@@ -18,6 +18,7 @@ import sysconfig
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -31,6 +32,7 @@ from lakana_worker.venvs import (
     VenvSettings,
     acquire,
     build_environment,
+    builds_in_progress,
     venv_key,
 )
 
@@ -333,6 +335,35 @@ def test_a_second_acquire_reuses_the_venv_and_records_the_use(fake: Fake) -> Non
     assert marker.stat().st_mtime > 1_000_000
 
 
+def test_a_build_counts_as_in_progress_while_it_runs_and_not_after(
+    fake: Fake, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[int] = []
+    real = venvs_module._build
+
+    def counting(*args: Any, **kwargs: Any) -> None:  # ruff: ignore[any-type]
+        """Record the count during the build, then build.
+
+        Parameters
+        ----------
+        *args
+            Passed through.
+        **kwargs
+            Passed through.
+        """
+        seen.append(builds_in_progress())
+        real(*args, **kwargs)
+
+    monkeypatch.setattr(venvs_module, "_build", counting)
+    assert builds_in_progress() == 0
+    fake.acquire().release()
+    fake.behave(mode="fail")
+    with pytest.raises(VenvBuildError):
+        fake.acquire(_SHA_B)
+    assert seen == [1, 1]
+    assert builds_in_progress() == 0
+
+
 def test_a_failed_build_surfaces_uv_output_redacted_and_leaves_nothing(fake: Fake) -> None:
     fake.behave(mode="fail", code=3, output="error: no wheel for x; proxy http://u:pw123@p:1")
     with pytest.raises(VenvBuildError) as caught:
@@ -425,7 +456,7 @@ def test_uv_is_started_so_that_it_dies_with_the_worker(
     fake.acquire().release()
     (argv,) = started
     assert argv[:3] == [sys.executable, "-I", "-c"]
-    assert argv[3] == venvs_module._LAUNCHER
+    assert argv[3] == venvs_module.UV_LAUNCHER
     assert argv[4:7] == [str(os.getpid()), fake.settings.uv, "sync"]
     assert fake.calls()[0]["argv"] == argv[6:]
 

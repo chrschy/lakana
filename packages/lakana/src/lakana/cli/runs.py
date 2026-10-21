@@ -14,6 +14,7 @@ from lakana.cli import _output
 from lakana.cli._paging import more_results, parse_since
 from lakana.cli._state import CliState, resolve_environment, state_of
 from lakana.cli.deploys import resolve_repository
+from lakana.cli.environments import cache_size_cell
 from lakana.errors import RunFailed
 
 _ENV = Annotated[str | None, typer.Option("--env", help="Environment (default: the profile's).")]
@@ -60,11 +61,22 @@ _FINISHED = frozenset({"succeeded", "failed", "cancelled"})
 runs_app = typer.Typer(help="Runs of deployed project versions.", no_args_is_help=True)
 scheduler_app = typer.Typer(help="The scheduler role.", no_args_is_help=True)
 worker_app = typer.Typer(help="The workers of this instance.", no_args_is_help=True)
-_WORKER_COLUMNS = ["id", "host", "version", "started_at", "last_seen", "status", "takes", "doing"]
+_WORKER_COLUMNS = [
+    "id",
+    "host",
+    "version",
+    "started_at",
+    "last_seen",
+    "status",
+    "takes",
+    "doing",
+    "caches",
+]
 _ID_SHOWN = 8
 """How many characters of a run id the `doing` column shows."""
 _DOING_NOTE = "doing shows 8 characters of each run id; --output json has them whole."
-_WORKER_DROPPABLE = ["started_at", "version", "host"]
+_CACHES_NOTE = "caches: the disk its caches take (+ a floor, - not measured); see lakana env usage."
+_WORKER_DROPPABLE = ["started_at", "version", "host", "caches"]
 """What `worker list` leaves out first on a narrow terminal: the id, state and work stay."""
 
 
@@ -1068,7 +1080,8 @@ def list_workers(ctx: typer.Context) -> None:
     A worker is alive while its heartbeat is recent and lost after that; a lost worker's row
     stays for an hour, and the query or deploy it held is ended by the scheduler. The column
     takes is the work the worker takes: all, interactive (ad-hoc queries) or pipeline (deploys,
-    pipeline tasks and table maintenance).
+    pipeline tasks and table maintenance). The column caches is the disk its caches take, as it
+    last measured them (hourly).
 
     Parameters
     ----------
@@ -1088,7 +1101,14 @@ def list_workers(ctx: typer.Context) -> None:
         workers,
         columns=_WORKER_COLUMNS,
         droppable=_WORKER_DROPPABLE,
-        derived={"last_seen": _last_seen, "doing": _doing},
-        whole=["takes", "doing"],
-        footnotes={"doing": _DOING_NOTE} if any(_doing(w) != "idle" for w in workers) else None,
+        derived={
+            "last_seen": _last_seen,
+            "doing": _doing,
+            "caches": lambda w: cache_size_cell(w, "total_bytes"),
+        },
+        whole=["takes", "doing", "caches"],
+        footnotes={
+            **({"doing": _DOING_NOTE} if any(_doing(w) != "idle" for w in workers) else {}),
+            "caches": _CACHES_NOTE,
+        },
     )

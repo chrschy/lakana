@@ -175,6 +175,7 @@ from lakana_core.catalog.tombstones import (
     restore_table,
     revive,
 )
+from lakana_core.catalog.usage import EnvironmentUsage, environment_usage
 from lakana_core.catalog.watermark import Watermark, check_incremental_key, compute_watermark
 from lakana_core.catalog.writes import (
     DataFileWriter,
@@ -1441,6 +1442,35 @@ class CatalogService:
                 p, Action.READ_ENVIRONMENT, Securable.environment_scope(env.name)
             )
         ]
+
+    def environment_usage(self, p: PrincipalRef, name: str) -> EnvironmentUsage:
+        """Report how much storage an environment uses, from the catalog database alone.
+
+        Reads nothing from object storage (`lakana_core.catalog.usage`): the sizes of managed
+        tables are those the worker's housekeeping measured.
+
+        Parameters
+        ----------
+        p
+            The acting principal; needs ``MANAGE_ENVIRONMENT`` on the environment, because the
+            figures cover tables and dropped tables the caller may not be allowed to see.
+        name
+            Environment name.
+
+        Returns
+        -------
+        EnvironmentUsage
+            Its tables, dropped tables, artifacts and code archives.
+
+        Raises
+        ------
+        PermissionDenied
+            If the principal may not manage the environment.
+        NotFoundError
+            If no environment has that name, or it is deleted.
+        """
+        self._authz.authorize(p, Action.MANAGE_ENVIRONMENT, Securable.environment_scope(name))
+        return environment_usage(self._session, self._find_environment(name, p))
 
     def find_orphaned_locations(
         self, p: PrincipalRef, name: str, *, older_than_days: int = DEFAULT_OLDER_THAN_DAYS

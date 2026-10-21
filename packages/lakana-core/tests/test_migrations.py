@@ -1699,6 +1699,11 @@ def test_0022_adds_workers_the_worker_ids_and_the_status_index_and_downgrades_cl
             "version",
             "heartbeat_at",
             "takes",
+            "cache_environments_bytes",
+            "cache_packages_bytes",
+            "cache_tasks_bytes",
+            "cache_complete",
+            "cache_measured_at",
         }
         for table in ("query_runs", "deploy_runs"):
             column = {c["name"]: c for c in inspect(engine).get_columns(table)}["worker_id"]
@@ -3976,3 +3981,63 @@ def test_0047_adds_the_ci_oidc_tables_and_an_empty_ci_token_id(
         assert "ci_token_id" not in {c["name"] for c in inspector.get_columns("deploy_runs")}
     finally:
         engine.dispose()
+
+
+_REVISION_0048 = "f1a2b3c4d5e6"
+_SIZE_COLUMNS = {
+    "tables": {"size_bytes", "size_metadata_location"},
+    "job_versions": {"code_bytes"},
+    "workers": {
+        "cache_environments_bytes",
+        "cache_packages_bytes",
+        "cache_tasks_bytes",
+        "cache_complete",
+        "cache_measured_at",
+    },
+}
+
+
+def test_0048_adds_empty_size_columns(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Revision `0048`: the measured sizes of tables, code archives and worker caches, all empty.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    """
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, _REVISION_0047)
+
+    def columns() -> dict[str, dict[str, bool]]:
+        """Read the nullability of the size columns that exist.
+
+        Returns
+        -------
+        dict of str to dict of str to bool
+            By table, each size column present with whether it is nullable.
+        """
+        engine = create_engine(f"sqlite:///{db_path}")
+        try:
+            inspector = inspect(engine)
+            return {
+                table: {
+                    c["name"]: c["nullable"]
+                    for c in inspector.get_columns(table)
+                    if c["name"] in names
+                }
+                for table, names in _SIZE_COLUMNS.items()
+            }
+        finally:
+            engine.dispose()
+
+    assert columns() == {table: {} for table in _SIZE_COLUMNS}
+    command.upgrade(config, _REVISION_0048)
+    assert columns() == {
+        table: dict.fromkeys(names, True) for table, names in _SIZE_COLUMNS.items()
+    }
+    command.downgrade(config, _REVISION_0047)
+    assert columns() == {table: {} for table in _SIZE_COLUMNS}

@@ -757,6 +757,7 @@ def _deploy(
             )
         ).scalar_one_or_none()
         uploaded: _Upload | None = None
+        code_bytes: int | None = None
         if existing is not None:
             # record_deploy reuses the row and discards any new digest, so the
             # stored tarball must not be replaced under the old one.
@@ -777,6 +778,7 @@ def _deploy(
             path = code_path(repository_name, fetched.sha, code_sha256)
             resolved = StorageResolver(session, key_provider).for_environment(environment_name)
             resolved.storage.write(path, tarball)
+            code_bytes = len(tarball)
             code_uri = f"{storage_root.rstrip('/')}/{path}"
             uploaded = _Upload(resolved.storage, path, code_uri)
         try:
@@ -792,6 +794,7 @@ def _deploy(
                 expected_job_version_id=current.id if current is not None else None,
                 worker_id=worker_id,
                 checks=checks_listing(checks) or None,
+                code_bytes=code_bytes,
             )
             if uploaded is not None:
                 _restore_if_missing(

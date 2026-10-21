@@ -19,7 +19,7 @@ Run these in order. The first that looks wrong is where to read on.
 2. The address `/readyz` answers `{"status":"ready"}`. ([The health routes](#the-health-routes))
 3. `lakana worker list`: as many workers are `alive` as you started. ([The workers](#the-workers))
 4. `lakana query list --env dev --status queued` does not grow. ([The queue](#the-queue))
-5. The disks have room. ([Disk space](#disk-space))
+5. `lakana env usage` and the disks have room. ([Disk use](#disk-use))
 
 Nothing here is a service level, and none of it replaces looking at what your own people notice:
 a dashboard that is slow or a job that did not run is a signal too.
@@ -210,20 +210,71 @@ again and to tell the operator; a request that stores or sends an artifact file 
 storage could not be written or read and that the operator should check whether it is
 unreachable. Read `docker compose logs seaweedfs` and `docker compose logs seaweedfs-core`.
 
-## Disk space
+## Disk use
 
-Lakana itself reports no disk use and sends no alert, so look at the disk yourself. The bundle
-keeps its state in three named Docker volumes, all on the disk that holds Docker's data:
+Two places fill up: the object storage, with your tables and artifacts, and the disk under the
+workers' cache, with Python environments and downloaded packages. `lakana env usage` shows both
+(it needs the right to manage the environment; the workers' part, the right to manage
+environments on the instance, which an administrator has):
+
+<!-- source: docs/examples/getting-started/run.sh#env-usage -->
+```bash
+lakana env usage dev
+```
+
+Leave out `dev` to see every environment you manage. The first table has one row per environment:
+
+| Column | What it counts |
+|---|---|
+| `tables` | The managed tables: the files of each table's current version, and how many tables. |
+| `dropped` | The dropped tables you can still restore; their files stay until the undo period ends (7 days by default). |
+| `artifacts` | The files stored for the artifacts. |
+| `code` | The code archives of the deployed project versions. |
+| `total` | The four together. |
+
+The figures come from the catalog database, never from a walk over the storage, so the command is
+quick however large the bucket is. The sizes of tables are measured by the worker's hourly sweep:
+a table written since then is counted with its earlier size, and one never measured not at all;
+the cell then says how many are `unmeasured`, and the total ends with `+`, a floor. After an
+upgrade the first sweeps measure the tables that existed before, up to 200 per sweep. Code archives
+of deploys made before this release have no recorded size and stay `unmeasured`. Not counted: the
+files of older table versions that [maintenance](../reference/table-health.md) has not removed yet,
+the tables' metadata files, external tables (their files are yours, not Lakana's) and files
+nothing names ([Clean up files left by older releases](clean-up-files-left-by-older-releases.md)).
+
+The second table has one row per worker: its Python environments, uv's package download cache and
+the working directories of running tasks, as the worker measured them in its last sweep, and when.
+`-` means the worker has not measured yet (it does shortly after it starts). `lakana worker
+list` shows the same total in its column `caches`. Workers that share one cache volume, as the
+replicas of the Compose bundle do, show the same figures: do not add them up. The package cache
+leaves out the files it shares with an environment, so its figure is what trimming it can free at
+most.
+
+**The package cache trims itself.** Above `LAKANA_WORKER__PACKAGE_CACHE_MAX_BYTES` (10 GiB by
+default; `0` never trims) the worker's sweep removes what no package refers to any more, then the
+packages downloaded longest ago, never one downloaded within
+`LAKANA_WORKER__PACKAGE_CACHE_MIN_AGE_HOURS` (24 by default). It never runs while the worker builds
+an environment, and when another worker that shares the cache is building, it tries again at the
+next sweep. The environments that exist keep working; the next build that needs a removed package
+downloads it again. Each trim logs `The package cache was trimmed from … to … bytes`
+(`event=package_cache_trimmed`). A trim that leaves the cache above the limit logs a warning that
+says why (`event=package_cache_over_limit`): every package left is recent, a `uv cache` command
+failed, or the trim ran out of time. Then raise the limit, give the volume more room, or lower the
+minimum age. The Python environments themselves are limited by count
+(`LAKANA_RUN__VENV_KEEP`, 10), and the task directories are removed when their task ends.
+
+**The disks themselves.** Lakana sends no alert when a disk fills, so look at the disks too. The
+bundle keeps its state in three named Docker volumes, all on the disk that holds Docker's data:
 
 | Volume | Holds | What fills it |
 |---|---|---|
 | `pgdata` | The catalog (PostgreSQL). | Table, run and audit history. |
-| `seaweed` | The data of every table and every artifact. | Your data. |
-| `worker-cache` | At `/home/lakana/.cache/lakana-worker`: the Python environments of the projects and the download cache of `uv`, and the working directories of the tasks that run. | Every package version a project locks; **the download cache is never trimmed**. |
+| `seaweed` | The data of every table and every artifact. | Your data: the `total` of `lakana env usage`, plus older table versions. |
+| `worker-cache` | At `/home/lakana/.cache/lakana-worker`: the Python environments of the projects, the download cache of `uv`, and the working directories of the tasks that run. | Every package version a project locks; the download cache is trimmed above its limit. |
 
 The worker containers also keep temporary files under `/var/tmp/lakana`, inside the container.
 The sweep removes what a worker that was killed left behind, once an hour
-(`LAKANA_RUN__SWEEP_INTERVAL`).
+(`LAKANA_RUN__SWEEP_INTERVAL`; `0` turns every sweep off, and then nothing is measured or trimmed).
 
 <!-- not tested: asks Docker for the disk use of a running stack, and the example runner has no Docker -->
 ```bash
@@ -233,7 +284,6 @@ docker compose exec worker df -h /home/lakana/.cache/lakana-worker
 
 The first command lists every volume with its size. The second shows how full the disk under
 the workers' cache is. Also look at the disk of the machine itself with `df -h` on the host.
-How to reclaim the download cache of the workers is in [Python assets](deploy-with-compose.md#python-assets).
 The documentation gives no figure for how much space your data needs; measure on your own data.
 
 ## A stuck run and why

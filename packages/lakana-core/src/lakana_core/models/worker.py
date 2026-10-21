@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import String
+from sqlalchemy import BigInteger, Boolean, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from lakana_core.models.base import Base, UTCDateTime
@@ -30,3 +30,13 @@ class Worker(Base):
 
     The server default is what a row inserted by code that does not set the column means.
     """
+    cache_environments_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    """The size of the worker's Python environments of projects, as it last measured them."""
+    cache_packages_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    """The size of uv's package download cache, as the worker last measured it."""
+    cache_tasks_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    """The size of the working directories of the Python tasks, as the worker last measured it."""
+    cache_complete: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    """Whether the last measurement finished; a measurement cut off by its time limit is a floor."""
+    cache_measured_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    """When the figures were written (the database's time); `None` before the first measurement."""

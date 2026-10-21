@@ -772,6 +772,7 @@ def _worker(worker_id: str = "box:41:ab12", **more: object) -> dict[str, object]
         "query_run_id": None,
         "deploy_run_id": None,
         "task_run_id": None,
+        "caches": None,
         **more,
     }
 
@@ -871,7 +872,7 @@ def test_doing_folds_the_three_ids(tmp_path: Path) -> None:
     )
     result = invoke(make_state(tmp_path, api), "worker", "list", env={"COLUMNS": "400"})
     rows = [line for line in result.stdout.splitlines() if line.startswith("│")]
-    doing = [re.split(r"\s+│\s*", row.strip("│ "))[-1] for row in rows]
+    doing = [re.split(r"\s+│\s*", row.strip("│ "))[-2] for row in rows]
     assert doing == [
         "query 11111111",
         "deploy 22222222",
@@ -904,6 +905,39 @@ def test_a_worker_text_cannot_inject_terminal_controls(tmp_path: Path) -> None:
     result = invoke(make_state(tmp_path, api), "worker", "list", env={"COLUMNS": "300"})
     assert "\x1b" not in result.stdout
     assert "\x07" not in result.stdout
+
+
+@pytest.mark.usefixtures("_worker_clock")
+def test_worker_list_shows_the_size_of_the_caches(tmp_path: Path) -> None:
+    measured = {
+        "environments_bytes": 1024**3,
+        "packages_bytes": 2 * 1024**3,
+        "tasks_bytes": 0,
+        "complete": True,
+        "measured_at": _WNOW.isoformat(),
+    }
+    api = FakeApi()
+    api.on(
+        "GET",
+        _WORKERS,
+        json=[
+            _worker("a:1:x", caches=measured),
+            _worker("b:2:y", caches={**measured, "complete": False}),
+            _worker("c:3:z", caches=None),
+            {key: value for key, value in _worker("d:4:w").items() if key != "caches"},
+        ],
+    )
+    result = invoke(make_state(tmp_path, api), "worker", "list", env={"COLUMNS": "300"})
+    assert result.exit_code == 0, result.stderr
+    rows = [line for line in result.stdout.splitlines() if line.startswith("│")]
+    caches = [re.split(r"\s+│\s*", row.strip("│ "))[-1] for row in rows]
+    assert caches == ["3.0 GiB", "3.0 GiB+", "-", "-"]
+    assert "lakana env usage" in result.stdout
+    whole = json.loads(
+        invoke(make_state(tmp_path, api), "--output", "json", "worker", "list").stdout
+    )
+    assert whole[0]["caches"]["packages_bytes"] == 2 * 1024**3
+    assert whole[2]["caches"] is None
 
 
 def test_worker_list_is_refused_with_the_servers_message(tmp_path: Path) -> None:

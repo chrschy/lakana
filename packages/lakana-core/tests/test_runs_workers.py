@@ -387,3 +387,45 @@ def test_alive_on_host_cuts_the_host_name_as_register_does(session: Session) -> 
     long_host = "h" * 300
     register(session, "w1", host=long_host, version="1")
     assert alive_on_host(session, long_host, now + timedelta(seconds=1), 60) is True
+
+
+def test_a_beat_with_cache_sizes_stores_them_with_the_databases_time(session: Session) -> None:
+    register(session, "w1", host="h", version="v")
+    session.commit()
+    row = session.get(Worker, "w1")
+    assert row is not None and row.cache_measured_at is None
+    sizes = workers.CacheSizes(
+        environments_bytes=10, packages_bytes=20, tasks_bytes=3, complete=False
+    )
+    assert beat(session, "w1", caches=sizes)
+    session.commit()
+    session.expire_all()
+    row = session.get(Worker, "w1")
+    assert row is not None
+    assert (
+        row.cache_environments_bytes,
+        row.cache_packages_bytes,
+        row.cache_tasks_bytes,
+        row.cache_complete,
+    ) == (10, 20, 3, False)
+    assert row.cache_measured_at is not None
+    measured = row.cache_measured_at
+    assert beat(session, "w1")
+    session.commit()
+    session.expire_all()
+    row = session.get(Worker, "w1")
+    assert row is not None
+    assert (row.cache_packages_bytes, row.cache_measured_at) == (20, measured)
+
+
+def test_a_registration_with_cache_sizes_stores_them(session: Session) -> None:
+    sizes = workers.CacheSizes(environments_bytes=1, packages_bytes=2, tasks_bytes=0, complete=True)
+    register(session, "w1", host="h", version="v", caches=sizes)
+    session.commit()
+    register(session, "w1", host="h", version="v")
+    session.commit()
+    row = session.get(Worker, "w1")
+    assert row is not None
+    assert (row.cache_packages_bytes, row.cache_complete) == (2, True)
+    assert workers.cache_sizes(row) == sizes
+    assert workers.cache_sizes(Worker(id="new")) is None

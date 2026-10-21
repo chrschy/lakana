@@ -236,6 +236,59 @@ class OrphanedLocationsOut(BaseModel):
     complete: bool
 
 
+class UsagePartOut(BaseModel):
+    """The storage one kind of thing uses in an environment.
+
+    Parameters
+    ----------
+    count
+        How many there are.
+    bytes
+        The sum of the sizes that are known.
+    unmeasured
+        How many have no size yet, or one measured on an earlier version of a table (its last
+        known size is in `bytes`); the worker's next sweeps measure them.
+    """
+
+    model_config = {"from_attributes": True}
+
+    count: int
+    bytes: int
+    unmeasured: int
+
+
+class EnvironmentUsageOut(BaseModel):
+    """How much storage an environment uses, from the figures the catalog holds.
+
+    Parameters
+    ----------
+    environment
+        The environment.
+    tables
+        Its managed tables: the files of each one's current snapshot.
+    dropped_tables
+        Its dropped managed tables whose files wait for the end of their undo period.
+    artifacts
+        Its artifacts: `bytes` is the size of the files stored for them.
+    code_archives
+        The code archives of its project versions.
+    total_bytes
+        The four sums together.
+    complete
+        `false` when a part has unmeasured entries: the true figure is higher.
+    """
+
+    model_config = {"from_attributes": True}
+
+    environment: str
+    tables: UsagePartOut
+    dropped_tables: UsagePartOut
+    artifacts: UsagePartOut
+    code_archives: UsagePartOut
+    total_bytes: int
+    complete: bool
+
+
 class TableRetentionIn(BaseModel):
     """Request body that sets when a managed table expires: exactly one of the three fields.
 
@@ -2891,6 +2944,30 @@ class QueryListOut(BaseModel):
     )
 
 
+class WorkerCachesOut(BaseModel):
+    """The sizes of a worker's caches, as it last measured them.
+
+    Parameters
+    ----------
+    environments_bytes
+        The Python environments of projects.
+    packages_bytes
+        uv's package download cache, without the files it shares with an environment.
+    tasks_bytes
+        The working directories of Python tasks.
+    complete
+        `false` when the measurement stopped at its time limit: the figures are a floor.
+    measured_at
+        When the worker stored them.
+    """
+
+    environments_bytes: int
+    packages_bytes: int
+    tasks_bytes: int
+    complete: bool
+    measured_at: datetime
+
+
 class WorkerOut(BaseModel):
     """A registered worker.
 
@@ -2917,6 +2994,8 @@ class WorkerOut(BaseModel):
         Its oldest running deploy, if any.
     task_run_id
         The running task whose lease it holds, if any.
+    caches
+        The sizes of its caches; `null` before its first measurement.
     """
 
     id: str
@@ -2929,6 +3008,7 @@ class WorkerOut(BaseModel):
     query_run_id: str | None
     deploy_run_id: str | None
     task_run_id: str | None
+    caches: WorkerCachesOut | None = None
 
 
 class SchedulerOut(BaseModel):

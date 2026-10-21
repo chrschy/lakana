@@ -182,6 +182,13 @@ lakana runs list --env dev --status queued,running
 # docs:end open-runs
 out=$(lakana --output json runs list --env dev --status queued,running)
 python3 -c 'import json,sys; assert json.loads(sys.argv[1]) == [], sys.argv[1]' "$out"
+# The same how-to shows how much storage the environment and the workers' caches use. The tables
+# may not be measured yet (the worker's sweep measures them), so only the shape is checked.
+# docs:start env-usage
+lakana env usage dev
+# docs:end env-usage
+out=$(lakana --output json env usage dev)
+python3 -c 'import json,sys; u=json.loads(sys.argv[1]); e=u["environments"]; assert [x["environment"] for x in e] == ["dev"] and e[0]["tables"]["count"] >= 1 and len(u["workers"]) == 1 and "caches" in u["workers"][0], u' "$out"
 
 # The how-to "Use a private package index" shows how an index and its secret are registered. That
 # never contacts the index, and a local instance has a secrets master key, so the commands run

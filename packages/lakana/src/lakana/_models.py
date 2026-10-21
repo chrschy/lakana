@@ -113,6 +113,57 @@ class OrphanedLocations:
 
 
 @dataclass(frozen=True)
+class UsagePart:
+    """The storage one kind of thing uses in an environment.
+
+    Parameters
+    ----------
+    count
+        How many there are.
+    bytes
+        The sum of the sizes that are known.
+    unmeasured
+        How many have no size yet, or one measured on an earlier version of a table (its last
+        known size is in `bytes`); the worker's next sweeps measure them.
+    """
+
+    count: int
+    bytes: int
+    unmeasured: int
+
+
+@dataclass(frozen=True)
+class EnvironmentUsage:
+    """What `Client.environments.usage` returns: the storage one environment takes.
+
+    Parameters
+    ----------
+    environment
+        The environment's name.
+    tables
+        Managed tables, sized by the files their current snapshot names.
+    dropped_tables
+        Dropped managed tables that can still be restored; their files are kept until then.
+    artifacts
+        Artifacts, sized by the files stored for all their versions.
+    code_archives
+        One code archive per deployed project version.
+    total_bytes
+        `tables`, `dropped_tables`, `artifacts` and `code_archives` added up.
+    complete
+        Whether every size was known; when `False`, `total_bytes` is a floor.
+    """
+
+    environment: str
+    tables: UsagePart
+    dropped_tables: UsagePart
+    artifacts: UsagePart
+    code_archives: UsagePart
+    total_bytes: int
+    complete: bool
+
+
+@dataclass(frozen=True)
 class Namespace:
     """A namespace within an environment.
 
@@ -2235,6 +2286,9 @@ class WorkerInfo:
         Its oldest running deploy, `None` when none.
     task_run_id
         The running pipeline task whose lease it holds, `None` when none.
+    caches
+        The sizes of its caches, as it last measured them; `None` before its first measurement
+        and from a server of an earlier release.
     """
 
     id: str
@@ -2247,6 +2301,43 @@ class WorkerInfo:
     query_run_id: str | None
     deploy_run_id: str | None
     task_run_id: str | None
+    caches: WorkerCaches | None = None
+
+
+@dataclass(frozen=True)
+class WorkerCaches:
+    """The sizes of a worker's caches, as it last measured them (every sweep, hourly).
+
+    Parameters
+    ----------
+    environments_bytes
+        The Python environments of projects.
+    packages_bytes
+        uv's package download cache, without the files it shares with an environment.
+    tasks_bytes
+        The working directories of Python tasks.
+    complete
+        `False` when the measurement stopped at its time limit: the figures are a floor.
+    measured_at
+        When the worker stored them.
+    """
+
+    environments_bytes: int
+    packages_bytes: int
+    tasks_bytes: int
+    complete: bool
+    measured_at: datetime
+
+    @property
+    def total_bytes(self) -> int:
+        """The three sizes together.
+
+        Returns
+        -------
+        int
+            Environments, package cache and task directories.
+        """
+        return self.environments_bytes + self.packages_bytes + self.tasks_bytes
 
 
 @dataclass(frozen=True)

@@ -875,7 +875,19 @@ code in this area has to know.
   `comparable_index_url` rule refuses is not a registered index; the operator's index has its own
   lenient comparison (`KnownSources.is_known`). Local path and workspace dependencies are refused at deploy
   (`lockfile_issues`) and again before the build. Detached child processes of user code are not
-  killed (no cgroup); the uv cache is not size-limited (documented, with how to clear it). The attempt
+  killed (no cgroup). The uv cache is trimmed above `LAKANA_WORKER__PACKAGE_CACHE_MAX_BYTES`
+  (`lakana_worker.caches`, #206): the worker deletes nothing itself, it runs `uv cache prune` and
+  `uv cache clean <names>` (fixed argv, no shell, offline, `--no-config`) and ends a command at once
+  when uv says another process holds the cache's lock, so a build of another worker on the shared
+  volume is never interrupted; no trim starts while this worker builds (`builds_in_progress`). A
+  package name comes from the cache's own directories, which a task under `LocalProcessRunner` can
+  write (one trust domain), so it is passed only when it matches the normalised-name pattern (never
+  a leading `-`). Environments hold hard links or copies of the cache's files, never symbolic links,
+  so removing an entry never breaks a running task's environment. `GET
+  /api/v1/environments/{name}/usage` reads only the catalog database (sizes measured by the
+  leader's sweep from one metadata file per table, at most 200 per sweep), so it cannot make the
+  server walk a bucket; it needs `MANAGE_ENVIRONMENT` on the environment because the totals cover
+  tables and tombstones the caller may not see. The attempt
   sweep deletes only old, unheld direct children of the private `attempts/` directory with the
   worker's attempt-name pattern, via `remove_private_tree`; a link or foreign name is left alone. The venv cache directory must be owned
   by the worker's user, mode 0700 and not a symlink (`VenvCacheUnsafe`, a permanent failure).

@@ -39,6 +39,8 @@ finds the code in the record's attribute `event`.
 | `sweep_hung` | worker | WARNING | `Housekeeping has been running for` | A sweep has run for more than twice its time limit, and no further sweep starts until it ends. It may be waiting on the storage or the database. |
 | `poll_failed` | worker | ERROR | `Polling iteration failed; continuing.` | The worker's loop that looks for work hit an error; the traceback follows. Occasional lines are harmless; a stream of them is not. |
 | `internal_error` | worker | ERROR | `Running task run <id> failed unexpectedly.`, `Preparing task run <id> failed unexpectedly.`, `Deploy run <id> failed unexpectedly.` | The platform failed in a way it did not expect. The run shows the code `internal`; the traceback follows the line. |
+| `package_cache_trimmed` | worker | INFO | `The package cache was trimmed from` | The worker's housekeeping brought uv's package cache below `LAKANA_WORKER__PACKAGE_CACHE_MAX_BYTES`; the line has the sizes before and after. Nothing to do: [Disk use](../how-to/instance-health.md#disk-use). |
+| `package_cache_over_limit` | worker | WARNING | `The package cache is` … `after a trim` | A trim left uv's package cache above its limit: every package left was downloaded within `LAKANA_WORKER__PACKAGE_CACHE_MIN_AGE_HOURS`, a `uv cache` command failed, or the trim ran out of time. The line names which. Raise the limit or give the `worker-cache` volume more space: [Disk use](../how-to/instance-health.md#disk-use). |
 
 ## See also
 

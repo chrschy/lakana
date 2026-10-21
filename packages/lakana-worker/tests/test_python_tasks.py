@@ -31,6 +31,7 @@ from datetime import UTC, datetime, timedelta
 from importlib.metadata import version as package_version
 from pathlib import Path
 from typing import NoReturn, cast
+from unittest import mock
 
 import pyarrow as pa
 import pytest
@@ -2791,6 +2792,15 @@ def test_maintain_also_runs_the_deploy_checkout_sweep(py: PyWorld) -> None:
     runtime.deploy_sweeper = cast("DeploySweeper", spy)
     runtime.maintain()
     assert spy.events == [("sweep", "")]
+
+
+def test_maintain_also_starts_the_measurement_of_the_caches(py: PyWorld) -> None:
+    """The periodic point that sweeps attempt directories measures the caches too."""
+    keeper = mock.MagicMock()
+    runtime = py.runtime(_forged)
+    runtime.caches = keeper
+    runtime.maintain()
+    keeper.maybe_start.assert_called_once_with()
 
 
 def test_maintain_without_a_sweeper_does_nothing(py: PyWorld) -> None:

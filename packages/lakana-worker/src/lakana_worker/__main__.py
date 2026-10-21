@@ -27,6 +27,8 @@ from lakana_core.catalog.location_sweep import (
     DEFAULT_MAX_SECONDS as LOCATION_SWEEP_MAX_SECONDS,
 )
 from lakana_core.catalog.location_sweep import sweep_table_locations
+from lakana_core.catalog.usage import MEASURE_MAX_SECONDS as SIZE_MEASURE_MAX_SECONDS
+from lakana_core.catalog.usage import measure_table_sizes
 from lakana_core.config import QueryLimitsConfig, Settings, warn_about_tokens_in_url_paths
 from lakana_core.db import create_engine
 from lakana_core.errors import LakanaError
@@ -42,6 +44,7 @@ from lakana_core.secrets.crypto import ACCEPT_FORMAT_1_WARNING
 from lakana_core.secrets.keys import EnvKeyProvider
 from lakana_core.storage.resolver import StorageResolver
 from lakana_worker.attempt_sweep import AttemptSweeper
+from lakana_worker.caches import CacheKeeper, CachePaths, PackageCacheTrim, TrimSettings
 from lakana_worker.deploy import DeploySettings, platform_version
 from lakana_worker.deploy_sweep import DeploySweeper, sweep_deploy_checkouts
 from lakana_worker.executor import check_limits, install_drain, install_heartbeat
@@ -179,7 +182,9 @@ def _secret(value: SecretStr | None) -> str | None:
     return value.get_secret_value() if value is not None else None
 
 
-def _python_runtime(settings: Settings, python: PythonSupport) -> PythonRuntime:
+def _python_runtime(
+    settings: Settings, python: PythonSupport, stop: threading.Event | None = None
+) -> PythonRuntime:
     """Build what runs Python tasks, from the settings.
 
     A worker that can run Python assets creates its attempt directory here, privately
@@ -196,6 +201,8 @@ def _python_runtime(settings: Settings, python: PythonSupport) -> PythonRuntime:
     python
         Whether this worker can run Python assets. Without `uv` the runtime
         still exists and fails each Python task with the reason.
+    stop
+        Set when the worker drains; a trim of the package cache then starts no further step.
 
     Returns
     -------
@@ -205,7 +212,9 @@ def _python_runtime(settings: Settings, python: PythonSupport) -> PythonRuntime:
         ``<cache>/uv``, where ``<cache>`` is `worker_cache_dir()`. Its sweeper
         removes attempt directories unchanged for longer than a task can live (the
         token lifetime plus the venv build timeout), every
-        `LAKANA_RUN__SWEEP_INTERVAL` seconds.
+        `LAKANA_RUN__SWEEP_INTERVAL` seconds. As often, its cache keeper measures the three
+        directories and, with `uv` and `LAKANA_WORKER__PACKAGE_CACHE_MAX_BYTES` above 0, trims
+        uv's cache (`lakana_worker.caches`).
     """
     cache = worker_cache_dir()
     if python.reason() is None:
@@ -227,13 +236,31 @@ def _python_runtime(settings: Settings, python: PythonSupport) -> PythonRuntime:
             needed,
             timeout,
         )
+    paths = CachePaths(
+        environments=run.venv_cache or cache / "venvs",
+        packages=cache / "uv",
+        tasks=cache / "attempts",
+    )
+    worker = settings.worker
+    trim = (
+        None
+        if python.uv is None or worker.package_cache_max_bytes <= 0
+        else PackageCacheTrim(
+            paths,
+            TrimSettings(
+                uv=python.uv,
+                max_bytes=worker.package_cache_max_bytes,
+                min_age_seconds=worker.package_cache_min_age_hours * 3600,
+            ),
+        )
+    )
     return PythonRuntime(
         support=python,
         work_dir=cache / "attempts",
         venvs=VenvSettings(
             uv=python.uv or "uv",
-            cache=run.venv_cache or cache / "venvs",
-            uv_cache=cache / "uv",
+            cache=paths.environments,
+            uv_cache=paths.packages,
             keep=run.venv_keep,
             build_timeout=run.venv_build_timeout,
             max_bytes=run.venv_max_bytes,
@@ -257,6 +284,7 @@ def _python_runtime(settings: Settings, python: PythonSupport) -> PythonRuntime:
         deploy_sweeper=DeploySweeper(
             max_age=DeployLimits().job_seconds, interval=run.sweep_interval
         ),
+        caches=CacheKeeper(paths, interval=run.sweep_interval, trim=trim, stop=stop),
     )
 
 
@@ -394,7 +422,7 @@ def main() -> None:
     install_drain(drain, settings.run.drain_grace_seconds)
     install_maintenance_timeout(settings.run.maintenance_timeout)
     install_query_text(settings.audit.query_text)
-    runtime = _python_runtime(settings, python)
+    runtime = _python_runtime(settings, python, drain)
     limiter = DenialAuditLimiter(settings.denial_audit.per_principal_per_minute)
     authorization = functools.partial(_authorization, limiter=limiter)
     run_engine = RunEngine(
@@ -429,6 +457,7 @@ def main() -> None:
         renew_seconds=settings.run.renew_seconds,
         lease_seconds=settings.run.lease_seconds,
         takes=settings.worker.takes,
+        caches=None if runtime.caches is None else runtime.caches.latest,
     )
     install_heartbeat(heartbeat.stale)
 
@@ -437,7 +466,9 @@ def main() -> None:
     def housekeeping(now: datetime, stop: threading.Event) -> None:
         """Sweep artifacts, table locations (and expire tables), code archives, job fires and reads.
 
-        Also stores the columns of up to 50 tables that have none stored yet, so search finds them.
+        Also stores the columns of up to 50 tables that have none stored yet, so search finds them,
+        and the sizes of up to 200 managed tables never measured or changed since, for
+        `lakana env usage`.
 
         One sweep failing does not stop the others.
 
@@ -523,6 +554,18 @@ def main() -> None:
             )
         try:
             with session_factory() as session:
+                measure_table_sizes(
+                    session, StorageResolver(session, key_provider), should_stop=stop.is_set
+                )
+        except Exception as exc:
+            logger.warning(
+                "The table size measurement failed (%s).",
+                type(exc).__name__,
+                exc_info=True,
+                extra=log_event(LogEvent.SWEEP_FAILED),
+            )
+        try:
+            with session_factory() as session:
                 backfill_table_columns(session, StorageResolver(session, key_provider))
         except Exception as exc:
             logger.warning(
@@ -539,8 +582,9 @@ def main() -> None:
             "dropped tables and of tables whose create never finished, "
             "code archives of failed deploys, table read counts past "
             "their kept period and attempt directories and deploy checkouts of dead workers are "
-            "not removed, and the columns of tables that existed before search are not stored "
-            "for it. Set it to a number "
+            "not removed, the columns of tables that existed before search are not stored "
+            "for it, the sizes of tables and of the worker's caches are not measured, and uv's "
+            "package cache is not trimmed. Set it to a number "
             "of seconds (3600 is the default) to turn them on."
         )
     scheduler = SchedulerLoop(
@@ -551,7 +595,8 @@ def main() -> None:
         housekeeping_interval=settings.run.sweep_interval,
         housekeeping_limit=DEFAULT_MAX_SECONDS
         + LOCATION_SWEEP_MAX_SECONDS
-        + CODE_SWEEP_MAX_SECONDS,
+        + CODE_SWEEP_MAX_SECONDS
+        + SIZE_MEASURE_MAX_SECONDS,
         lease_seconds=settings.run.lease_seconds,
         renew_seconds=settings.run.renew_seconds,
         caps=RunCaps.from_config(settings.query_limits, settings.run),

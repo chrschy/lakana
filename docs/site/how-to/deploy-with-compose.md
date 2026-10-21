@@ -164,8 +164,12 @@ The volume does not clean itself completely. The workers remove the directory a 
 behind when a worker is killed mid-task (`LAKANA_RUN__SWEEP_INTERVAL`, default every hour; the same
 setting paces the artifact store's sweep, the sweep of code archives that failed deploys left and the
 sweep of deploy checkouts, and `0` turns all off, so nothing collects attempt
-directories, artifact leftovers or those) and keep the newest `LAKANA_RUN__VENV_KEEP` venvs, but uv's own download cache
-(`uv/` in the volume) is never trimmed. To reclaim it, stop the workers and run
+directories, artifact leftovers or those) and keep the newest `LAKANA_RUN__VENV_KEEP` venvs. The same sweep
+trims uv's own download cache (`uv/` in the volume) above `LAKANA_WORKER__PACKAGE_CACHE_MAX_BYTES`
+(10 GiB by default), never removing a package downloaded within
+`LAKANA_WORKER__PACKAGE_CACHE_MIN_AGE_HOURS` (24) and never while a worker builds an environment;
+`lakana env usage` shows how large it is ([Disk use](instance-health.md#disk-use)). To reclaim all
+of it at once, stop the workers and run
 `docker compose run --rm --no-deps --entrypoint sh worker -c 'rm -rf /home/lakana/.cache/lakana-worker/uv'`.
 
 The cache directory must be private to the worker: owned by uid 10001 and mode `0700`, or every

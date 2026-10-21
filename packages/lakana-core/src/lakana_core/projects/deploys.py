@@ -2701,6 +2701,7 @@ class DeployService:
         expected_job_version_id: uuid.UUID | None,
         worker_id: str | None,
         checks: Mapping[str, object] | None = None,
+        code_bytes: int | None = None,
     ) -> JobVersion:
         """Record a successful deploy in one transaction.
 
@@ -2731,6 +2732,9 @@ class DeployService:
             The id the worker claimed the run under (`None` if it recorded none).
         checks
             The checks the deploy found, per table (`checks_listing`); `None` for none.
+        code_bytes
+            The size of the code archive (`lakana env usage` adds it up); `None` when the deploy
+            reuses an existing project version, whose row keeps its own.
 
         Returns
         -------
@@ -2766,6 +2770,7 @@ class DeployService:
                 manifest_json=manifest,
                 code_uri=code_uri,
                 code_sha256=code_sha256,
+                code_bytes=code_bytes,
                 deployed_by=p.id,
             )
             self._session.add(version)

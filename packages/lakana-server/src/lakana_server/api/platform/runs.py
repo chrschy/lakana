@@ -30,6 +30,7 @@ from lakana_server.api.platform.schemas import (
     TaskAttemptOut,
     TaskLogOut,
     TaskRunOut,
+    WorkerCachesOut,
     WorkerOut,
 )
 from lakana_server.api.routing import AuthenticateFirstRoute
@@ -499,7 +500,7 @@ def list_workers(
     -------
     list of WorkerOut
         By id. `status` is `alive` or `lost`; `takes` is `all`, `interactive` or `pipeline`;
-        the three run ids say what it is doing.
+        the three run ids say what it is doing; `caches` the sizes of its caches.
     """
     return [
         WorkerOut(
@@ -513,6 +514,9 @@ def list_workers(
             query_run_id=None if w.query_run_id is None else str(w.query_run_id),
             deploy_run_id=None if w.deploy_run_id is None else str(w.deploy_run_id),
             task_run_id=None if w.task_run_id is None else str(w.task_run_id),
+            caches=None
+            if w.caches is None or w.caches_measured_at is None
+            else WorkerCachesOut(**dataclasses.asdict(w.caches), measured_at=w.caches_measured_at),
         )
         for w in service.list_workers(principal)
     ]

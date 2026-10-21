@@ -512,3 +512,151 @@ def test_env_orphaned_locations_shows_why_a_directory_is_kept(tmp_path: Path) ->
     flat = " ".join(result.stdout.split())
     assert "kept_because" in result.stdout and "x//y" in flat
     assert "1 is kept for the reason shown. Delete the other 1 (2 files, 2.0 KiB)" in flat
+
+
+# -- `lakana env usage` ------------------------------------------
+
+
+def _usage(name: str = "dev", *, unmeasured: int = 0) -> dict[str, object]:
+    """Build a usage response.
+
+    Parameters
+    ----------
+    name
+        The environment.
+    unmeasured
+        How many tables have no current size.
+
+    Returns
+    -------
+    dict
+        Two tables of 3 GiB together, one dropped table of 1 KiB, an artifact of 2 MiB and two
+        code archives of 512 bytes.
+    """
+    tables = {"count": 2, "bytes": 3 * 1024**3, "unmeasured": unmeasured}
+    return {
+        "environment": name,
+        "tables": tables,
+        "dropped_tables": {"count": 1, "bytes": 1024, "unmeasured": 0},
+        "artifacts": {"count": 1, "bytes": 2 * 1024**2, "unmeasured": 0},
+        "code_archives": {"count": 2, "bytes": 512, "unmeasured": 0},
+        "total_bytes": 3 * 1024**3 + 1024 + 2 * 1024**2 + 512,
+        "complete": unmeasured == 0,
+    }
+
+
+def _measured_worker(worker_id: str = "box:1:ab", **caches: object) -> dict[str, object]:
+    """Build a worker row with cache sizes.
+
+    Parameters
+    ----------
+    worker_id
+        Its id.
+    **caches
+        Fields of `caches` that differ from 1 GiB of environments, 5 GiB of packages, none of
+        tasks, complete; `caches=None` for a worker that has not measured yet.
+
+    Returns
+    -------
+    dict
+        The row.
+    """
+    measured: object = {
+        "environments_bytes": 1024**3,
+        "packages_bytes": 5 * 1024**3,
+        "tasks_bytes": 0,
+        "complete": True,
+        "measured_at": "2026-10-21T08:00:00+00:00",
+    }
+    measured = caches.pop("caches") if "caches" in caches else {**measured, **caches}  # type: ignore[dict-item]
+    return {
+        "id": worker_id,
+        "host": "box",
+        "version": "0.17.0",
+        "started_at": "2026-10-21T07:00:00+00:00",
+        "heartbeat_at": "2026-10-21T08:00:00+00:00",
+        "status": "alive",
+        "takes": "all",
+        "query_run_id": None,
+        "deploy_run_id": None,
+        "task_run_id": None,
+        "caches": measured,
+    }
+
+
+def test_env_usage_of_one_environment_and_the_workers_caches(tmp_path: Path) -> None:
+    api = FakeApi()
+    api.on("GET", "/api/v1/environments/dev/usage", json=_usage(unmeasured=1))
+    api.on(
+        "GET",
+        "/api/v1/workers",
+        json=[_measured_worker(), _measured_worker("box:2:cd", caches=None)],
+    )
+    result = invoke(make_state(tmp_path, api), "env", "usage", "dev", env={"COLUMNS": "200"})
+    assert result.exit_code == 0, result.stderr
+    out = result.stdout
+    assert re.search(
+        r"dev\s+│ 3\.0 GiB in 2, 1 unmeasured\s+│ 1\.0 KiB in 1\s+│ 2\.0 MiB in 1", out
+    )
+    assert "3.0 GiB+" in out
+    assert "not measured yet" in out
+    assert re.search(r"box:1:ab\s+│ 1\.0 GiB\s+│ 5\.0 GiB\s+│ 0 B\s+│ 6\.0 GiB", out)
+    assert re.search(r"box:2:cd\s+│ -\s+│ -\s+│ -\s+│ -\s+│ not measured yet", out)
+    assert "share one cache volume" in out
+
+
+def test_env_usage_without_a_name_shows_each_environment_you_may_manage(tmp_path: Path) -> None:
+    api = FakeApi()
+    api.on(
+        "GET",
+        "/api/v1/environments",
+        json=[_DEV, {**_DEV, "name": "prod"}, {**_DEV, "name": "staging"}],
+    )
+    api.on("GET", "/api/v1/environments/dev/usage", json=_usage())
+    api.on("GET", "/api/v1/environments/prod/usage", status=403, json={"detail": "No."})
+    api.on("GET", "/api/v1/environments/staging/usage", json=_usage("staging"))
+    api.on("GET", "/api/v1/workers", status=403, json={"detail": "No."})
+    result = invoke(make_state(tmp_path, api), "env", "usage", env={"COLUMNS": "200"})
+    assert result.exit_code == 0, result.stderr
+    assert "staging" in result.stdout and "dev" in result.stdout
+    assert "1 environment not shown (prod)" in result.stdout
+    assert "The workers' caches are shown to administrators of the instance" in result.stdout
+
+
+def test_env_usage_with_no_environment_you_may_manage_says_so(tmp_path: Path) -> None:
+    api = FakeApi()
+    api.on("GET", "/api/v1/environments", json=[_DEV])
+    api.on("GET", "/api/v1/environments/dev/usage", status=403, json={"detail": "No."})
+    result = invoke(make_state(tmp_path, api), "env", "usage")
+    assert result.exit_code != 0
+    assert "MANAGE_ENVIRONMENT" in result.stderr
+
+
+def test_env_usage_as_json_has_the_environments_and_the_workers(tmp_path: Path) -> None:
+    api = FakeApi()
+    api.on("GET", "/api/v1/environments/dev/usage", json=_usage())
+    api.on("GET", "/api/v1/workers", json=[_measured_worker()])
+    result = invoke(make_state(tmp_path, api), "--output", "json", "env", "usage", "dev")
+    assert result.exit_code == 0, result.stderr
+    body = json.loads(result.stdout)
+    assert body["environments"][0]["tables"] == {"count": 2, "bytes": 3 * 1024**3, "unmeasured": 0}
+    assert body["environments"][0]["complete"] is True
+    assert body["workers"][0]["id"] == "box:1:ab"
+    assert body["workers"][0]["caches"]["packages_bytes"] == 5 * 1024**3
+
+
+def test_env_usage_of_an_environment_you_may_not_manage_is_refused(tmp_path: Path) -> None:
+    api = FakeApi()
+    api.on("GET", "/api/v1/environments/dev/usage", status=403, json={"detail": "Not allowed."})
+    result = invoke(make_state(tmp_path, api), "env", "usage", "dev")
+    assert result.exit_code != 0
+    assert "Not allowed." in result.stderr
+
+
+def test_env_usage_without_a_worker_says_no_cache_is_shown(tmp_path: Path) -> None:
+    api = FakeApi()
+    api.on("GET", "/api/v1/environments/dev/usage", json=_usage())
+    api.on("GET", "/api/v1/workers", json=[])
+    result = invoke(make_state(tmp_path, api), "env", "usage", "dev")
+    assert result.exit_code == 0, result.stderr
+    assert "No worker is registered, so no cache is shown." in result.stdout
