@@ -331,7 +331,25 @@ jobs:
         env:
           LAKANA_TEST_WHEELHOUSE: ${{ runner.temp }}/wheelhouse
           LAKANA_DOCS_EXAMPLE_BUDGET: "240"
+          LAKANA_DOCS_CAPTURE: ${{ runner.temp }}/docs-captures
         run: uv run bash scripts/run_docs_examples.sh
+      # What each region of an example printed, compared with the `<!-- output: EXAMPLE#REGION -->`
+      # blocks of the pages (parts that differ per run masked). A mismatch prints a diff; to repair
+      # the pages, download the artifact below and run
+      # `uv run python scripts/docs_blocks.py --fix --captured DIR` (docs/agent/testing.md).
+      - name: Compare the pages' output blocks with what the examples printed
+        env:
+          LAKANA_DOCS_CAPTURE: ${{ runner.temp }}/docs-captures
+        run: uv run python scripts/docs_blocks.py
+      - name: Upload what the examples printed
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7
+        with:
+          name: docs-captures
+          path: ${{ runner.temp }}/docs-captures
+          if-no-files-found: warn
+          include-hidden-files: false
+          retention-days: 7
 
   integration:
     needs: changes

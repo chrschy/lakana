@@ -13,12 +13,19 @@ block the check cannot judge: a fence inside a block quote and an HTML ``<pre>``
 element. Not detected: a four-space indented code block (it cannot be told from a list
 continuation without a full Markdown parser) and a hard link under ``docs/examples``
 (git cannot store one).
+
+An output block may name the region of an example it shows, ``<!-- output: example#region -->``.
+The example runner (``scripts/run_docs_examples.sh``) writes what each region printed to
+``$LAKANA_DOCS_CAPTURE/<example>/<region>.txt``; given that directory, this module compares the
+block with the file after hiding the parts that differ on every run (`MASKS`), and ``--fix``
+copies the changed lines from the file into the page.
 """
 
 from __future__ import annotations
 
 import argparse
 import ast
+import difflib
 import json
 import os
 import re
@@ -46,6 +53,7 @@ _MARKER = re.compile(
 _COMMENT = re.compile(r"^[ \t]*<!--(?P<inner>.*?)-->\s*$")
 _QUOTED_FENCE = re.compile(r"^[ \t]*>[> \t]*(?:`{3,}|~{3,})")
 _PRE = re.compile(r"^[ \t]*<pre(?:[\s>]|$)", re.IGNORECASE)
+_OUTPUT_REGION = re.compile(r"^[A-Za-z0-9_-]+#[A-Za-z0-9_-]+$")
 _KINDS = ("source", "not tested", "output")
 _FORMS = (
     "`<!-- source: docs/examples/<file> -->`, `<!-- not tested: <reason> -->` or `<!-- output -->`"
@@ -66,7 +74,8 @@ class Marker:
     kind
         ``"source"``, ``"not-tested"`` or ``"output"``.
     value
-        The source path (with an optional ``#region``), the reason, or ``""``.
+        The source path (with an optional ``#region``), the reason, the ``example#region`` an
+        output block shows, or ``""``.
     """
 
     kind: str
@@ -267,7 +276,16 @@ def _marker(path: Path, number: int, text: str) -> Marker | None:
     kind = match["kind"].replace(" ", "-")
     value = (match["value"] or "").strip()
     if kind == "output":
-        return Marker("output", "")
+        if value and _OUTPUT_REGION.match(value) is None:
+            _stop(
+                path,
+                number,
+                f"`output: {value}` does not name a region; "
+                "write `<!-- output: <example>#<region> -->`"
+                " (the example's directory name under docs/examples, a `#`, and a `docs:start` name"
+                " of its run.sh), or plain `<!-- output -->` for a block no example prints.",
+            )
+        return Marker("output", value)
     if not value or value.startswith("#"):
         need = "a path under docs/examples" if kind == "source" else "a reason"
         _stop(path, number, f"the `{match['kind']}` marker needs {need} after the colon.")
@@ -581,6 +599,179 @@ def _region(name: str, region: str, lines: list[str]) -> str:
     return "".join(kept)
 
 
+_HEX = r"[0-9a-f]"
+MASKS: tuple[tuple[str, re.Pattern[str], str], ...] = tuple(
+    (name, re.compile(pattern), replacement)
+    for name, pattern, replacement in (
+        (
+            "uuid",
+            rf"(?<![0-9A-Za-z]){_HEX}{{8}}-{_HEX}{{4}}-{_HEX}{{4}}-{_HEX}{{4}}-{_HEX}{{12}}(?![0-9A-Za-z])",
+            "<uuid>",
+        ),
+        (
+            "timestamp",
+            r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?",
+            "<timestamp>",
+        ),
+        ("hash", rf"(?<![0-9A-Za-z]){_HEX}{{40,64}}(?![0-9A-Za-z])", "<hash>"),
+        (
+            "token",
+            r"\b(lakana_(?:pat|ci|task)_)[A-Za-z0-9]{6,}_[A-Za-z0-9_-]{8,}",
+            r"\1<key id>_<secret>",
+        ),
+        ("port", r"\b(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]):\d{2,5}\b", r"\1:<port>"),
+        (
+            "path",
+            r"(?<![\w.:/-])/(?:tmp|var/tmp|var/folders|home|Users|root|run/user)/[^\s'\"`<>),;]*",
+            "<path>",
+        ),
+        (
+            "version",
+            r"(?<![\w.])\d+\.\d+\.\d+(?:[.-]?(?:dev|post|a|b|rc)\d+)*"
+            r"(?:\+[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?(?![\w]|\.\d)",
+            "<version>",
+        ),
+        (
+            "duration",
+            r"(?<![\w.])\d+(?:\.\d+)?\s?(?:ms|s|sec|seconds?|min|minutes?)\b",
+            "<duration>",
+        ),
+        ("size", r"(?<![\w.])\d+(?:\.\d+)?\s?(?:KiB|MiB|GiB|KB|MB|GB)\b", "<size>"),
+    )
+)
+"""The parts of an output that differ on every run, hidden before a comparison.
+
+Each rule is ``(name, pattern, replacement)``, applied in this order to the page and to the
+captured text alike, so a page that shows a real identifier and a run that prints another still
+match. A rule is one row of the table in ``docs/agent/testing.md``; keep the two equal.
+"""
+
+
+def mask(text: str) -> str:
+    """Hide the parts of an output that differ on every run.
+
+    Parameters
+    ----------
+    text
+        Output as a page shows it or as an example printed it.
+
+    Returns
+    -------
+    str
+        `text` with every match of `MASKS` replaced by its placeholder.
+    """
+    for _, pattern, replacement in MASKS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def _lines(text: str) -> list[str]:
+    """Split output into lines whose trailing space and final blank lines do not count.
+
+    Parameters
+    ----------
+    text
+        Output as a page shows it or as an example printed it.
+
+    Returns
+    -------
+    list of str
+        The lines without trailing white space; trailing empty lines are dropped.
+    """
+    lines = [line.rstrip() for line in text.replace("\r\n", "\n").split("\n")]
+    while lines and not lines[-1]:
+        lines.pop()
+    return lines
+
+
+def _captured_text(captured: Path | None, value: str) -> str | None:
+    """Read what the runner captured for ``example#region``.
+
+    Parameters
+    ----------
+    captured
+        The capture directory, or ``None`` for no run.
+    value
+        The marker's ``example#region``.
+
+    Returns
+    -------
+    str or None
+        The text, or ``None`` if there is no run or no file for the region.
+    """
+    example, _, region = value.partition("#")
+    if captured is None:
+        return None
+    try:
+        return (captured / example / f"{region}.txt").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+
+def _merge(shown: str, printed: str) -> str:
+    """Bring a block up to date with a run, keeping the page's own values.
+
+    A line that equals the printed one after masking stays as the page has it, so a fixed
+    block keeps the identifiers a page chose to show; every other line comes from the run.
+
+    Parameters
+    ----------
+    shown
+        The block's body.
+    printed
+        What the example printed.
+
+    Returns
+    -------
+    str
+        The new body, each line ending in a newline.
+    """
+    page, run = _lines(shown), _lines(printed)
+    matcher = difflib.SequenceMatcher(None, [mask(x) for x in page], [mask(x) for x in run])
+    out: list[str] = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        out += page[i1:i2] if tag == "equal" else run[j1:j2]
+    return "".join(line + "\n" for line in out)
+
+
+def _output_problem(
+    where: str, block: Block, value: str, printed: str, captured: Path
+) -> str | None:
+    """Compare an output block with the text its region printed.
+
+    Parameters
+    ----------
+    where
+        ``page:line`` for the message.
+    block
+        An output block that names a region.
+    value
+        The region it names, ``example#region``.
+    printed
+        What the example printed.
+    captured
+        The capture directory, for the message.
+
+    Returns
+    -------
+    str or None
+        The problem with a diff of the masked texts, or ``None`` if they are equal.
+    """
+    page = [mask(x) for x in _lines(block.body)]
+    run = [mask(x) for x in _lines(printed)]
+    if page == run:
+        return None
+    diff = "\n".join(
+        difflib.unified_diff(page, run, "the page", f"the run ({value})", lineterm="", n=2)
+    )
+    return (
+        f"{where}: this output block differs from what {value} printed "
+        f"(parts that differ per run are masked):\n{diff}\nRun the examples with "
+        f"LAKANA_DOCS_CAPTURE={captured} and `uv run python scripts/docs_blocks.py --fix "
+        f"--captured {captured}` to copy the run into the page, or change the CLI back."
+    )
+
+
 def _site_problem(root: Path, site: Path) -> str | None:
     """Say why the site directory may not be read or written.
 
@@ -700,7 +891,59 @@ def _first_difference(shown: str, source: str) -> str:
     )
 
 
-def check(root: Path, site: Path, counts: dict[str, int] | None = None) -> tuple[list[str], int]:
+def _tied_problem(
+    root: Path, where: str, block: Block, captured: Path | None, tally: dict[str, int]
+) -> str | None:
+    """Judge an output block against the region it names.
+
+    Parameters
+    ----------
+    root
+        The repository root.
+    where
+        ``page:line`` for the message.
+    block
+        An output block.
+    captured
+        The capture directory, or ``None`` for no run.
+    tally
+        The counts of `check`; one of ``unchecked``, ``skipped`` or ``compared`` rises.
+
+    Returns
+    -------
+    str or None
+        The problem, or ``None`` if the block is not tied, is skipped or matches.
+    """
+    value = block.marker.value if block.marker else ""
+    if not value:
+        tally["unchecked"] += 1
+        return None
+    example, _, region = value.partition("#")
+    try:
+        read_source(root, f"{EXAMPLES}/{example}/run.sh#{region}")
+    except BlockError as exc:
+        return f"{where}: {exc}"
+    if captured is None:
+        tally["skipped"] += 1
+        return None
+    printed = _captured_text(captured, value)
+    if printed is None:
+        return (
+            f"{where}: {captured} holds no capture of {value}. The example did not run that "
+            f"region (it stops at its first failing command; see the runner's output), or the "
+            f"capture is from before the region was added; run "
+            f"`LAKANA_DOCS_CAPTURE={captured} uv run bash scripts/run_docs_examples.sh {example}`."
+        )
+    tally["compared"] += 1
+    return _output_problem(where, block, value, printed, captured)
+
+
+def check(
+    root: Path,
+    site: Path,
+    counts: dict[str, int] | None = None,
+    captured: Path | None = None,
+) -> tuple[list[str], int]:
     """Judge every code block of the site.
 
     Parameters
@@ -710,7 +953,11 @@ def check(root: Path, site: Path, counts: dict[str, int] | None = None) -> tuple
     site
         The site directory.
     counts
-        If given, ``counts["output"]`` is set to the number of blocks marked as output.
+        If given, set to the number of blocks marked as output (``output``), of those not
+        tied to an example region (``unchecked``), compared with a run (``compared``) and
+        tied but not compared for want of a run (``skipped``).
+    captured
+        The directory the example runner captured the regions into, or ``None`` for no run.
 
     Returns
     -------
@@ -723,13 +970,13 @@ def check(root: Path, site: Path, counts: dict[str, int] | None = None) -> tuple
     final newline is a difference. Line endings are the one exception; a page
     with CRLF equals a source with LF.
     """
+    tally = dict.fromkeys(("output", "unchecked", "compared", "skipped"), 0)
     if counts is not None:
-        counts["output"] = 0
+        counts.update(tally)
     if (refusal := _site_problem(root, site)) is not None:
         return [refusal], 0
     pages, problems = _pages(root, site)
     not_tested = 0
-    outputs = 0
     for page in pages:
         shown = page.relative_to(root)
         try:
@@ -757,7 +1004,10 @@ def check(root: Path, site: Path, counts: dict[str, int] | None = None) -> tuple
                 not_tested += 1
             elif marker.kind == "output":
                 if block.lang in OUTPUT_LANGUAGES:
-                    outputs += 1
+                    tally["output"] += 1
+                    problem = _tied_problem(root, where, block, captured, tally)
+                    if problem is not None:
+                        problems.append(problem)
                 else:
                     problems.append(
                         f"{where}: the `output` marker is for what a command printed, in a "
@@ -781,12 +1031,46 @@ def check(root: Path, site: Path, counts: dict[str, int] | None = None) -> tuple
                         "or change the file and run its example."
                     )
     if counts is not None:
-        counts["output"] = outputs
+        counts.update(tally)
     return problems, not_tested
 
 
-def fix(root: Path, site: Path, failures: list[str] | None = None) -> list[Path]:
-    """Rewrite every synced block from its source.
+def _wanted(root: Path, block: Block, captured: Path | None) -> str | None:
+    """Say what a block should hold according to its marker.
+
+    Parameters
+    ----------
+    root
+        The repository root.
+    block
+        A block of a page.
+    captured
+        The capture directory, or ``None`` for no run.
+
+    Returns
+    -------
+    str or None
+        The new body of a synced block, or of an output block that names a region with a
+        capture; ``None`` if the block is none of these or its source cannot be read.
+    """
+    marker = block.marker
+    if marker is None:
+        return None
+    if marker.kind == "output" and marker.value:
+        printed = _captured_text(captured, marker.value)
+        return None if printed is None else _merge(block.body, printed)
+    if marker.kind != "source":
+        return None
+    try:
+        return read_source(root, marker.value)
+    except BlockError:
+        return None
+
+
+def fix(
+    root: Path, site: Path, failures: list[str] | None = None, captured: Path | None = None
+) -> list[Path]:
+    """Rewrite every synced block from its source, and every named output block from a run.
 
     Only real pages inside a real `site` directory are written; a page that cannot
     be read, a source that cannot be read and a link are skipped for `check` to
@@ -800,6 +1084,9 @@ def fix(root: Path, site: Path, failures: list[str] | None = None) -> list[Path]
         The site directory; nothing outside it is written.
     failures
         If given, a problem line is appended for each page that could not be written.
+    captured
+        The directory the example runner captured the regions into; without it no output
+        block is touched. Only the lines that differ after masking are replaced.
 
     Returns
     -------
@@ -817,11 +1104,8 @@ def fix(root: Path, site: Path, failures: list[str] | None = None) -> list[Path]
             continue
         lines = list(content.lines)
         for block in reversed(blocks):
-            if block.marker is None or block.marker.kind != "source":
-                continue
-            try:
-                source = read_source(root, block.marker.value)
-            except BlockError:
+            source = _wanted(root, block, captured)
+            if source is None:
                 continue
             ending = "\r" if lines[block.start - 1].endswith("\r") else ""
             lines[block.start : block.end] = [
@@ -863,17 +1147,31 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--fix", action="store_true", help="copy each source file into its block first"
     )
     parser.add_argument(
+        "--captured",
+        type=Path,
+        default=os.environ.get("LAKANA_DOCS_CAPTURE") or None,
+        help="the directory scripts/run_docs_examples.sh captured the regions into "
+        "(default: $LAKANA_DOCS_CAPTURE); without it output blocks are not compared with a run",
+    )
+    parser.add_argument(
         "--root", type=Path, default=Path(__file__).resolve().parents[1], help="the repository root"
     )
     args = parser.parse_args(argv)
     root = args.root.resolve()
     site = root / SITE
     problems: list[str] = []
+    captured: Path | None = args.captured
+    if captured is not None and not captured.is_dir():
+        problems.append(
+            f"{captured} is not a directory; run `LAKANA_DOCS_CAPTURE={captured} uv run bash "
+            "scripts/run_docs_examples.sh` first, or leave --captured out"
+        )
+        captured = None
     if args.fix:
-        for page in fix(root, site, problems):
+        for page in fix(root, site, problems, captured):
             print(f"updated {page.relative_to(root)}")
     counts: dict[str, int] = {}
-    found, not_tested = check(root, site, counts)
+    found, not_tested = check(root, site, counts, captured)
     problems += found
     for problem in problems:
         print(problem)
@@ -885,6 +1183,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"{not_tested} {blocks} marked as not tested, {outputs} {kind} marked as output; "
         f"{len(problems)} {count}."
     )
+    if counts["compared"]:
+        compared = "output block" if counts["compared"] == 1 else "output blocks"
+        print(
+            f"{counts['compared']} {compared} compared with a run, {counts['skipped']} skipped, "
+            f"{counts['unchecked']} not tied to a region."
+        )
+    elif counts["skipped"]:
+        print(
+            f"{counts['skipped']} output blocks not compared: no captured run. Run "
+            "`LAKANA_DOCS_CAPTURE=DIR uv run bash scripts/run_docs_examples.sh`, then this "
+            "script with --captured DIR (or the same variable)."
+        )
     return 1 if problems else 0
 
 

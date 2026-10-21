@@ -1008,7 +1008,7 @@ def test_output_blocks_are_counted_and_printed(
     root = _tree(tmp_path, {"p.md": page}, {})
     counts: dict[str, int] = {}
     assert check(root, root / "docs/site", counts) == ([], 0)
-    assert counts == {"output": 3}
+    assert counts == {"output": 3, "unchecked": 3, "compared": 0, "skipped": 0}
     assert main(["--root", str(root)]) == 0
     assert "0 blocks marked as not tested, 3 blocks marked as output; 0 problems" in (
         capsys.readouterr().out

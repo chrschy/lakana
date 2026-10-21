@@ -203,7 +203,7 @@ time.sleep(60)
 
 
 def _run_with_budget_file(
-    tmp_path: Path, budget_file: str | None, **env: str
+    tmp_path: Path, budget_file: str | None, script: str = "exit 0\n", **env: str
 ) -> subprocess.CompletedProcess[str]:
     """Run the runner on a one-example tree and a stub `lakana`; the example just succeeds.
 
@@ -213,6 +213,8 @@ def _run_with_budget_file(
         A scratch directory that holds the copy of the runner and the example.
     budget_file
         What the example's `budget` file holds; `None` for no file.
+    script
+        The example's `run.sh` after its first line.
     **env
         Extra environment variables (`LAKANA_DOCS_EXAMPLE_BUDGET`).
 
@@ -227,14 +229,16 @@ def _run_with_budget_file(
     for folder in (scripts, example, bin_dir):
         folder.mkdir(parents=True)
     (scripts / "run_docs_examples.sh").write_text(RUNNER.read_text(encoding="utf-8"))
-    (example / "run.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
+    (example / "run.sh").write_text("#!/usr/bin/env bash\n" + script)
     if budget_file is not None:
         (example / "budget").write_text(budget_file)
     stub = bin_dir / "lakana"
     stub.write_text(_START_STUB)
     stub.chmod(0o755)
     environment = {
-        key: value for key, value in os.environ.items() if key != "LAKANA_DOCS_EXAMPLE_BUDGET"
+        key: value
+        for key, value in os.environ.items()
+        if key not in ("LAKANA_DOCS_EXAMPLE_BUDGET", "LAKANA_DOCS_CAPTURE")
     }
     environment.update(
         {
@@ -274,3 +278,87 @@ def test_a_budget_file_that_is_not_a_number_is_refused_with_its_name(tmp_path: P
     assert result.returncode == 2
     assert "docs/examples/demo/budget" in result.stderr
     assert "one number of seconds" in result.stderr
+
+
+_REGIONS = """set -euo pipefail
+echo before
+# docs:start first
+echo "port $PORT_HINT" >&2
+echo 'a b  '
+# docs:end first
+echo between
+  # docs:start second
+printf 'no newline'
+  # docs:end second
+echo after
+"""
+
+
+def test_the_runner_captures_what_each_region_printed_and_still_shows_it(tmp_path: Path) -> None:
+    """One file per region under CAPTURE/EXAMPLE, stdout and stderr together, nothing outside."""
+    capture = tmp_path / "captures"
+    result = _run_with_budget_file(
+        tmp_path, None, _REGIONS, LAKANA_DOCS_CAPTURE=str(capture), PORT_HINT="9"
+    )
+    assert result.returncode == 0, result.stderr
+    assert (capture / "demo" / "first.txt").read_text() == "port 9\na b  \n"
+    assert (capture / "demo" / "second.txt").read_text() == "no newline"
+    assert sorted(p.name for p in (capture / "demo").iterdir()) == ["first.txt", "second.txt"]
+    # The output still reaches the log, in order, and nothing is lost around the regions.
+    out = result.stdout
+    assert out.index("before") < out.index("a b") < out.index("between") < out.index("no newline")
+    assert "after" in out
+    assert "port 9" in out  # stderr and stdout of a region are merged, as in its file
+
+
+def test_without_a_capture_directory_the_runner_captures_nothing(tmp_path: Path) -> None:
+    """The variable is the switch; there is no default directory."""
+    result = _run_with_budget_file(tmp_path, None, _REGIONS, PORT_HINT="9")
+    assert result.returncode == 0, result.stderr
+    assert "a b" in result.stdout
+    assert not list(tmp_path.rglob("first.txt"))
+
+
+def test_a_region_in_a_failing_example_is_shown_and_its_capture_kept(tmp_path: Path) -> None:
+    """A command that fails inside a region must not swallow what the region printed."""
+    script = "set -euo pipefail\n# docs:start boom\necho partial-output\nfalse\n# docs:end boom\n"
+    capture = tmp_path / "captures"
+    result = _run_with_budget_file(tmp_path, None, script, LAKANA_DOCS_CAPTURE=str(capture))
+    assert result.returncode != 0
+    assert (capture / "demo" / "boom.txt").read_text().startswith("partial-output\n")
+    assert "partial-output" in result.stdout + result.stderr
+    assert "region `boom`" in result.stderr
+
+
+def test_a_region_that_runs_twice_keeps_the_last_run(tmp_path: Path) -> None:
+    """A region in a loop is captured once more each time; the file holds the last."""
+    script = (
+        "set -euo pipefail\nfor i in 1 2; do\n# docs:start loop\necho $i\n# docs:end loop\ndone\n"
+    )
+    capture = tmp_path / "captures"
+    result = _run_with_budget_file(tmp_path, None, script, LAKANA_DOCS_CAPTURE=str(capture))
+    assert result.returncode == 0, result.stderr
+    assert (capture / "demo" / "loop.txt").read_text() == "2\n"
+
+
+def test_a_region_inside_an_existing_capture_nests(tmp_path: Path) -> None:
+    """check-your-data redirects output itself around its regions; both files get the text."""
+    script = (
+        'set -euo pipefail\nouter=$(mktemp)\nexec 3>&1 4>&2 >"$outer" 2>&1\n'
+        "# docs:start nested\necho inner\n# docs:end nested\n"
+        'exec >&3 2>&4 3>&- 4>&-\ngrep -qx inner "$outer"\nrm -f "$outer"\n'
+    )
+    capture = tmp_path / "captures"
+    result = _run_with_budget_file(tmp_path, None, script, LAKANA_DOCS_CAPTURE=str(capture))
+    assert result.returncode == 0, result.stderr
+    assert (capture / "demo" / "nested.txt").read_text() == "inner\n"
+
+
+def test_the_failure_trace_still_names_the_line_of_the_original_script(tmp_path: Path) -> None:
+    """The runner runs a copy with the markers replaced; line numbers must not move."""
+    script = "set -euo pipefail\n# docs:start a\n# docs:end a\nfalse\n"
+    result = _run_with_budget_file(
+        tmp_path, None, script, LAKANA_DOCS_CAPTURE=str(tmp_path / "captures")
+    )
+    assert result.returncode != 0
+    assert "run.sh line 5: false" in result.stderr

@@ -17,6 +17,7 @@ EXEMPT = (
     "scripts/tests/test_docs_only.py",
 )
 NOT_TESTED_CEILING = 52
+UNCHECKED_OUTPUT_CEILING = 113
 """Blocks marked as not tested; it only goes down, apart from the rises below.
 
 The artifact pages left six when they were written: the `artifact uploads abort` command,
@@ -319,6 +320,30 @@ def test_the_number_of_not_tested_blocks_does_not_rise() -> None:
         f"{NOT_TESTED_CEILING}. Test the new block (sync it from docs/examples or make it "
         "parse); if it truly cannot be tested, raise NOT_TESTED_CEILING in "
         "scripts/tests/test_docs_site.py in the same pull request and say why."
+    )
+
+
+def test_the_number_of_unchecked_output_blocks_does_not_rise() -> None:
+    """An output block no example prints can rot, so the count has a ceiling.
+
+    Tie a block to the region of an example that prints it with
+    `<!-- output: EXAMPLE#REGION -->` (see "The documentation site" in docs/agent/testing.md);
+    lower the ceiling in the same pull request. A block shown only in part, or for a case
+    no example runs, stays plain `<!-- output -->`.
+    """
+    counts: dict[str, int] = {}
+    problems, _ = check(ROOT, SITE, counts)
+    assert problems == []
+    assert counts["unchecked"] <= UNCHECKED_OUTPUT_CEILING, (
+        f"{counts['unchecked']} output blocks are not tied to an example, above the ceiling of "
+        f"{UNCHECKED_OUTPUT_CEILING}. Put `<!-- output: EXAMPLE#REGION -->` above the new "
+        "block, naming the region of docs/examples/EXAMPLE/run.sh that prints it; if no "
+        "example can, raise UNCHECKED_OUTPUT_CEILING in scripts/tests/test_docs_site.py in the "
+        "same pull request and say why."
+    )
+    assert counts["unchecked"] == UNCHECKED_OUTPUT_CEILING, (
+        f"{counts['unchecked']} output blocks are not tied to an example; lower "
+        f"UNCHECKED_OUTPUT_CEILING from {UNCHECKED_OUTPUT_CEILING} to that number."
     )
 
 
