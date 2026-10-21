@@ -37,7 +37,8 @@ list such as `VALUES (1, 'a'), (2, 'b')`. A statement that changes data or the s
 `DELETE`, `MERGE`, `COPY`, `CREATE`, `DROP`, `ATTACH`, `SET` and the like) fails the deploy
 wherever it sits, also inside a CTE or a subquery, with ``A query reads data and cannot change
 it: `DELETE` is not allowed, also not inside a CTE or subquery.`` A query may not call
-`getvariable` either.
+`getvariable` either, and a `PIVOT` must list the values of its `ON` column
+(`ON region IN ('eu', 'us')`).
 
 Unknown keys are errors. YAML anchors, aliases, `<<` merge keys and duplicate keys are refused
 (the error names the file and line); `evolve_schema` and `column_docs` must be real booleans, not

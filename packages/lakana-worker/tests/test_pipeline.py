@@ -68,6 +68,7 @@ from lakana_core.models import (
 )
 from lakana_core.policy.column_masks import ColumnMaskService
 from lakana_core.policy.row_filters import RowFilterService
+from lakana_core.query_rewrite import PIVOT_VALUES_MESSAGE
 from lakana_core.secrets.keys import EnvKeyProvider
 from lakana_core.secrets.service import SecretService
 from lakana_core.storage.fsspec_storage import FsspecStorage
@@ -239,6 +240,66 @@ def test_a_query_opens_only_the_locations_of_the_tables_it_reads(
     location = created.metadata.location.removeprefix("file://")
     assert seen == [tuple(sorted([f"{location}/", f"{tmp_path}/raw/events/"]))]
     assert _read_result(tmp_path, run).column("id").to_pylist() == [1, 2, 3]
+
+
+def _sales(session: Session, principal: PrincipalRef, tmp_path: Path) -> None:
+    """Create ``gold.sales`` (id, region) with rows (1, eu), (2, us), (3, eu).
+
+    Parameters
+    ----------
+    session
+        Database session.
+    principal
+        The acting principal.
+    tmp_path
+        The storage root.
+    """
+    catalog = _local_catalog(session, principal, tmp_path)
+    ref = TableRef(environment="dev", namespace=NamespacePath.from_parts(["gold"]), name="sales")
+    created = catalog.create_table(
+        principal,
+        ref,
+        schema=Schema(
+            NestedField(1, "id", LongType(), required=True),
+            NestedField(2, "region", StringType(), required=False),
+        ),
+    )
+    schema = pa.schema(
+        [pa.field("id", pa.int64(), nullable=False), pa.field("region", pa.string())]
+    )
+    data = pa.table({"id": [1, 2, 3], "region": ["eu", "us", "eu"]}, schema=schema)
+    _write_one_data_file_and_commit(catalog, principal, ref, created, data)
+
+
+def test_a_pivot_without_its_values_fails_with_what_to_write(
+    session: Session, principal: PrincipalRef, tmp_path: Path
+) -> None:
+    """The guard words it; the query process, which runs one SELECT, is never asked."""
+    _sales(session, principal, tmp_path)
+    run = QueryService(session, AllowAllAuthorization()).submit_query(
+        principal, "dev", "SELECT * FROM (PIVOT gold.sales ON region USING sum(id))"
+    )
+    with mock.patch(
+        "lakana_worker.pipeline.execute_query", side_effect=AssertionError("nothing may run")
+    ):
+        run_one(session, run.id, AllowAllAuthorization())
+    session.refresh(run)
+    assert run.status == QueryRunStatus.FAILED
+    assert run.error_message == PIVOT_VALUES_MESSAGE
+    assert run.error_cause == "invalid_query"
+
+
+def test_a_pivot_with_its_values_listed_returns_rows(
+    session: Session, principal: PrincipalRef, tmp_path: Path
+) -> None:
+    """DuckDB's statement form with an ``IN`` list runs as one SELECT on 1.5.5 and 2.0.0."""
+    sql = "SELECT * FROM (PIVOT gold.sales ON region IN ('eu', 'us') USING sum(id))"
+    _sales(session, principal, tmp_path)
+    run = QueryService(session, AllowAllAuthorization()).submit_query(principal, "dev", sql)
+    run_one(session, run.id, AllowAllAuthorization())
+    session.refresh(run)
+    assert run.status == QueryRunStatus.SUCCEEDED, run.error_message
+    assert _read_result(tmp_path, run).to_pylist() == [{"eu": 4, "us": 2}]
 
 
 def test_a_table_location_outside_the_storage_root_is_never_turned_into_a_prefix(

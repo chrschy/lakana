@@ -2629,7 +2629,11 @@ own process opens no DuckDB connection and imports no `duckdb`.
   proxy and header routes for SQL past the guard. What still parses as one `SELECT`: on 1.5.5 a
   reading `PRAGMA` (`PRAGMA version`, `PRAGMA table_info`, read-only `pragma_*` calls, refused by
   the guard; on 2.0.0 its type is `PRAGMA` and the child refuses it), and every function a
-  `SELECT` can call, which the guard and allow-list mode govern.
+  `SELECT` can call, which the guard and allow-list mode govern. A `PIVOT` without an `IN` list of its `ON`
+  column (DuckDB then creates a type first: `[CREATE, SELECT]` on 1.5.5, `MULTI` on 2.0.0) is
+  refused by the guard (`query_rewrite._reject_pivot_without_values`, both syntaxes, `UNPIVOT`
+  unaffected) with `PIVOT_VALUES_MESSAGE`, so the user gets the next step rather than the child's
+  defect message (review round 2 of #279).
 - **What DuckDB enforces** (probed on 1.5.5 and 2.0.0, and pinned by
   `test_query_allow_list.py` against TLS servers in the test process): another host, scheme
   or port, `169.254.169.254`, user-information tricks and a sibling directory (`t10` against

@@ -89,8 +89,9 @@ what its author may read by **credential scoping**:
 - The worker works out, from the catalog, the files the author may read, and gives DuckDB a
   time-limited link to exactly those files.
 - The process that runs the query holds no storage credential, no database address and no token,
-  and the local file system is closed to it. A query that reads a path it was not given has nothing to
-  read it with.
+  and it opens only the locations of the tables the query reads (in local mode, their directories).
+  A query that reads another path or address is refused, and one it was not given a link for has
+  nothing to read it with.
 - Limits on time, memory, rows and bytes stop a query that asks for too much
   ([Stop a query](../how-to/stop-a-query.md)).
 
@@ -98,7 +99,10 @@ A query only reads. It is one `SELECT` (also with `WITH`, or a set operation suc
 a `VALUES` list such as `VALUES (1, 'a'), (2, 'b')`, whose columns are named `col0`, `col1` and
 so on. A statement that changes data or the session is refused wherever it sits, also inside a CTE
 or a subquery, and so is a query that reads files directly instead of a table: register the data
-as a table and select from it.
+as a table and select from it. A `PIVOT` lists the values of its `ON` column, as in
+`PIVOT gold.sales ON region IN ('eu', 'us') USING sum(amount)` or
+`PIVOT (sum(amount) FOR region IN ('eu', 'us'))`; without the list it is refused with `A PIVOT
+needs the values of its ON column listed`, because DuckDB would run it as two statements.
 
 ## What this does not protect
 

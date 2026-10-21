@@ -879,6 +879,50 @@ def _reject_recursive_ctes(parsed: exp.Expr) -> None:
             raise ValidationError(_RECURSIVE_CTE_MESSAGE)
 
 
+PIVOT_VALUES_MESSAGE = (
+    "A PIVOT needs the values of its ON column listed: write PIVOT ... ON a IN ('x', 'y') "
+    "USING ..., or PIVOT (... FOR a IN ('x', 'y')), with the values as literals."
+)
+"""Why a PIVOT without an ``IN`` list of literals is refused, and what to write instead."""
+
+
+def _reject_pivot_without_values(parsed: exp.Expr) -> None:
+    """Refuse a PIVOT whose ON column does not list its values as literals.
+
+    Without the list DuckDB runs the PIVOT as two statements: it first creates a type of the
+    distinct values, then selects (``extract_statements`` gives ``CREATE`` and ``SELECT`` on
+    1.5.5, ``MULTI`` on 2.0.0). The query process runs exactly one ``SELECT`` and refuses
+    anything else as a defect, so the guard says what to write instead. Both syntaxes are
+    covered: DuckDB's statement form (``PIVOT t ON a IN (...) USING ...``, also inside
+    ``FROM (...)`` or a CTE) and the SQL-standard form (``FROM t PIVOT (... FOR a IN (...))``).
+    An ``IN`` with a subquery counts as no list. ``UNPIVOT`` creates nothing and passes.
+
+    Parameters
+    ----------
+    parsed
+        The parsed statement to check. Not modified.
+
+    Raises
+    ------
+    ValidationError
+        `PIVOT_VALUES_MESSAGE`, if a PIVOT anywhere in `parsed` has an ON column (statement
+        form) or a ``FOR`` field (standard form) that is not ``column IN (<values>)``.
+    """
+    for pivot in parsed.find_all(exp.Pivot):
+        if pivot.args.get("unpivot"):
+            continue
+        # The standard form keeps its FOR fields in `fields` (and its aggregates in
+        # `expressions`); DuckDB's statement form keeps its ON columns in `expressions`.
+        columns = pivot.args.get("fields") or pivot.args.get("expressions") or []
+        if not columns or any(
+            not isinstance(column, exp.In)
+            or column.args.get("query") is not None
+            or any(value.find(exp.Query) is not None for value in column.expressions)
+            for column in columns
+        ):
+            raise ValidationError(PIVOT_VALUES_MESSAGE)
+
+
 def _reject_placeholders(parsed: exp.Expr) -> None:
     """Refuse a statement carrying a query parameter or placeholder anywhere.
 
@@ -1151,6 +1195,7 @@ def _parse_checked(sql: str, dialect: str) -> exp.Expr:
     _reject_placeholders(parsed)
     _reject_statements_inside(parsed, dialect)
     _reject_recursive_ctes(parsed)
+    _reject_pivot_without_values(parsed)
     _require_unambiguous_references(parsed, dialect)
     return parsed
 
@@ -2042,3 +2087,4 @@ def check_blacklist(sql: str, dialect: str = "duckdb") -> None:
         _reject_values_clauses(parsed)
     _reject_statements_inside(parsed, dialect)
     _reject_recursive_ctes(parsed)
+    _reject_pivot_without_values(parsed)
