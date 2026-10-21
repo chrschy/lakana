@@ -117,7 +117,7 @@ Each cell is a summary. The page named in the last column has the detail. The ch
 
 | Release | What it asks | Where |
 |---|---|---|
-| 0.18.0 | Migrations `0047` and `0048`. A new environment's storage root must be in the environment's scheme, name a bucket or container, and may not be `file:///`, contain `::`, or lie in another environment's files (422 with a root to use; existing environments are not changed). An allowed webhook host may no longer reach loopback or cloud metadata addresses, except the entry `localhost`. Log lines worth an alert end with `event=<code>`. Copy the new healthchecks from a fresh `compose.yaml`. The workers trim uv's package cache above 10 GiB (`0` keeps it untrimmed). `lakana init` writes CI files that deploy without a stored secret; `--ci-auth pat` for the old ones. | [Notes for 0.18.0](#notes-for-0180) |
+| 0.18.0 | Migrations `0047` (CI trust rules and CI tokens) and `0048` (measured sizes), both adding only empty tables and columns. A new environment's storage root must be in the environment's scheme, name a bucket or container, and may not be `file:///`, contain `::`, or lie in another environment's files (422 with a root to use; existing environments are not changed). An allowed webhook host may no longer reach loopback or cloud metadata addresses, except the entry `localhost`. Log lines worth an alert end with `event=<code>`. Copy the new healthchecks from a fresh `compose.yaml`. The workers trim uv's package cache above 10 GiB (`0` keeps it untrimmed). `lakana init` writes CI files that deploy without a stored secret; `--ci-auth pat` for the old ones. | [Notes for 0.18.0](#notes-for-0180) |
 | 0.17.0 | Migrations `0042` to `0046`. **Breaking:** a dropped table's files, and those of the tables of a deleted environment, are deleted after `LAKANA_TABLES__UNDO_DAYS` (7 days; restore with `lakana table undrop` or `lakana env restore`), and `DELETE /api/v1/environments/{name}` answers 200 with the environment; the first administrator's token is written to `LAKANA_BOOTSTRAP_TOKEN_FILE`, never to the log; ADMINs no longer see other people's SQL text or column values in the audit log until granted `READ_QUERY_TEXT`. Set `LAKANA_TABLES__UNDO_DAYS` the same on the server and the workers. A new storage root must be written canonically. Nothing expires unless retention is set. Sign-in events are written once per token every 15 minutes. | [Notes for 0.17.0](#notes-for-0170) |
 | 0.16.0 | Migrations `0036` to `0041`. `GET /api/v1/grants` without a filter now returns every grant, in pages of 100 (follow `X-Next-Cursor`), and the principal and group lists come newest first, paged the same way. Filters and masks that exist are not checked again; a new one is type-checked when it is created. Descriptions appear after the next deploy; table readers count from the upgrade on; search finds the columns of existing tables once the sweep has filled them in (1,000 tables take about 20 hours). Upgrade the workers together with the server, so that every task failure gets its code. | [Notes for 0.16.0](#notes-for-0160) |
 | 0.15.0 | Migration `0035` (a database check on a secret's use; it stops and names any inconsistent secret). While an environment has a storage secret, changing its storage options needs `MANAGE_SECRET` there as well as `MANAGE_ENVIRONMENT`; the Compose set-up attaches its storage secret to `dev` only together with the bundle's own options. A commit through the Iceberg REST catalog is refused when one of its manifest files is over 64 MiB. | [Notes for 0.15.0](#notes-for-0150) |
@@ -142,6 +142,8 @@ Nothing yet.
 artifacts and code archives use, and the size of each worker's caches; `lakana worker list` has
 a column `caches`. See [Disk use](../how-to/instance-health.md#disk-use).
 
+- **Migration `0048`** adds nullable size columns to `tables`, `job_versions` and `workers`,
+  empty on every row, and changes no data.
 - **The figures fill in after the upgrade.** The worker's hourly sweep measures up to 200 tables
   each time, so on a large instance the first sweeps leave some tables `unmeasured`. Code archives
   deployed before this release keep no size and stay `unmeasured`.
@@ -163,6 +165,8 @@ what a CI token may do (`ci_token`), and `Client.from_ci_oidc` does the exchange
 [Deploy from GitHub Actions without a stored secret](../how-to/deploy-from-github-actions.md) and
 [Deploy from GitLab CI without a stored secret](../how-to/deploy-from-gitlab-ci.md).
 
+- **Migration `0047`** adds the tables `ci_trust_rules`, `ci_tokens` and `ci_oidc_jtis`, all
+  empty, and a nullable `ci_token_id` to `deploy_runs`; it changes no rows.
 - **Existing CI keeps working.** A workflow or pipeline that reads a stored token
   (`LAKANA_TOKEN`) needs no change.
 - **`lakana init` writes the CI files without a stored token** by default now. For files that read
