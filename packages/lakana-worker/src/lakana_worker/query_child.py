@@ -17,6 +17,13 @@ directory, is refused while the statement is planned. DuckDB compares URLs as st
 variables name against the prefixes (`file_outside_prefixes`) and refuses the request when one
 lies outside.
 
+**One SELECT, checked by DuckDB's parser.** The lock holds settings, not secrets: ``CREATE SECRET
+(TYPE http, HTTP_PROXY ...)`` or ``EXTRA_HTTP_HEADERS`` would still route the reads, presigned URLs
+included, through a proxy of the statement's choosing. So before anything is configured the child
+splits the text with `duckdb.DuckDBPyConnection.extract_statements` and runs it only if that is
+exactly one ``SELECT`` (`NOT_ONE_SELECT` otherwise, an ``internal`` failure). The guard refuses
+all of these first; this is the second layer.
+
 Why each configuration statement is there, and why their order matters:
 
 1. ``extension_directory`` comes first. The child's ``HOME`` is empty, and DuckDB looks for
@@ -47,7 +54,7 @@ Why each configuration statement is there, and why their order matters:
 10. ``lock_configuration = true`` last: no ``SET``, ``RESET`` or ``PRAGMA`` of any setting
     succeeds after it (``SET VARIABLE`` still does). A second layer behind the guard, which
     refuses ``SET`` itself, against ``http_proxy`` (a proxy would receive the presigned URLs),
-    ``extra_http_headers`` and ``ca_cert_file``.
+    ``extra_http_headers`` and ``ca_cert_file`` as settings (not as a secret: see above).
 
 **Values are variables, not parameters.** Every value the statement reads (a file list, a
 field-id map, a watermark) is set with ``SET VARIABLE "<name>" = ?`` before the statement, and
@@ -145,6 +152,15 @@ OUTSIDE_PREFIXES = (
 )
 """What a child says, without running anything, when a file of a variable lies outside the
 request's prefixes, or a prefix has a shape the child does not accept."""
+
+NOT_ONE_SELECT = (
+    "Query failed: the query process was given something other than one SELECT statement. "
+    "This is a defect of Lakana; please report it."
+)
+"""What a child says, without running anything, of SQL that DuckDB's parser does not read as
+exactly one ``SELECT``. Every mode sends one (a describe wraps it in ``SELECT * FROM (...)
+LIMIT 0``); anything else (a second statement, ``CREATE SECRET``, ``SET``, ``PRAGMA``,
+``ATTACH``, ``COPY``, ``LOAD``, ``CALL``) is refused here as the layer behind the guard."""
 
 NO_SPILL = (
     f"Query failed: the query ran out of memory and cannot spill to disk. {MEMORY_LIMIT_ADVICE}"
@@ -789,6 +805,11 @@ def serve(
                     return refused
                 reader = pa.RecordBatchReader.from_batches(pa.schema([]), [])
             else:
+                statements = connection.extract_statements(request.sql)
+                if not statements:
+                    return ErrorDocument(INVALID, NO_RESULT_MESSAGE)
+                if len(statements) != 1 or statements[0].type != duckdb.StatementType.SELECT:
+                    return ErrorDocument(INTERNAL, NOT_ONE_SELECT)
                 configure(connection, request)
                 if asked.is_set():
                     return ErrorDocument(INTERRUPTED, _ASKED)

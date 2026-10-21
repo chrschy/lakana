@@ -2606,10 +2606,30 @@ own process opens no DuckDB connection and imports no `duckdb`.
   `allowed_directories` must be set before `enable_external_access = false` (DuckDB refuses to
   change them afterwards); the limits after it; **`lock_configuration = true` last**, after
   which no `SET`, `RESET` or `PRAGMA` of any setting succeeds while `SET VARIABLE` still does
-  (probed on 1.5.5 and 2.0.0). The lock is the second layer behind the guard (which refuses
-  `SET` itself) against `http_proxy` (a proxy set at run time would receive the query's
-  presigned URLs; it defaults from `HTTP_PROXY`, which the child's environment does not have),
-  `extra_http_headers`, `ca_cert_file`, `lambda_syntax` and `allow_extension_repositories`.
+  (probed on 1.5.5 and 2.0.0). The lock holds **settings only**: behind the guard (which
+  refuses `SET` itself) it stops `SET`/`RESET`/`PRAGMA`/`SET GLOBAL` of `http_proxy` (a proxy
+  would receive the query's presigned URLs; it defaults from `HTTP_PROXY`, which the child's
+  environment does not have), `extra_http_headers`, `ca_cert_file`, `lambda_syntax` and
+  `allow_extension_repositories`. It does **not** stop a secret: after the lock
+  `CREATE SECRET (TYPE http, HTTP_PROXY …)` and `CREATE SECRET (TYPE http, EXTRA_HTTP_HEADERS …)`
+  still succeed, and a proxy secret then received `HEAD http://<store>/…?X-Amz-Signature=…`
+  over plain HTTP (the Compose default) or a `CONNECT` over HTTPS, on 1.5.5 and 2.0.0 (review
+  of #279).
+- **The child runs one SELECT, checked by DuckDB's own parser.** Before anything is
+  configured, `serve` splits the request's SQL with `connection.extract_statements` and runs it
+  only if that is exactly one statement of type `SELECT` (every mode sends one: a read, a write
+  stream, and a describe, which wraps it in `SELECT * FROM (…) LIMIT 0`; the start-up check runs
+  no SQL). Anything else is an `internal` failure ("the query process was given something other
+  than one SELECT statement. This is a defect of Lakana"), nothing run: a second statement,
+  `CREATE SECRET`, `SET`, `SET VARIABLE`, `PRAGMA` that sets something, `ATTACH`, `INSTALL`,
+  `LOAD`, `COPY`, `CALL`, `EXPLAIN`, a `CREATE`. Pinned by
+  `test_a_proxy_secret_in_the_statement_is_refused_before_anything_runs` (red before the check:
+  the stand-in proxy received the presigned URL) and
+  `test_anything_but_one_select_is_refused_by_the_child`. Together with the lock this closes the
+  proxy and header routes for SQL past the guard. What still parses as one `SELECT`: on 1.5.5 a
+  reading `PRAGMA` (`PRAGMA version`, `PRAGMA table_info`, read-only `pragma_*` calls, refused by
+  the guard; on 2.0.0 its type is `PRAGMA` and the child refuses it), and every function a
+  `SELECT` can call, which the guard and allow-list mode govern.
 - **What DuckDB enforces** (probed on 1.5.5 and 2.0.0, and pinned by
   `test_query_allow_list.py` against TLS servers in the test process): another host, scheme
   or port, `169.254.169.254`, user-information tricks and a sibling directory (`t10` against
@@ -2659,7 +2679,8 @@ own process opens no DuckDB connection and imports no `duckdb`.
     `test_known_residual_a_redirect_from_the_store_is_followed_to_another_host`). The reach is
     what the store itself redirects to; a query cannot choose the target.
   - **Method and payload:** GET and HEAD only; httpfs refuses writes to http(s). No credential
-    is sent (none is held), and `http_proxy`/`extra_http_headers` are locked.
+    is sent (none is held); `http_proxy`/`extra_http_headers` are locked as settings, and a
+    secret that sets them cannot be created, because the child runs nothing but one `SELECT`.
   - **Local `file://` mode:** read and write inside the allowed table directories, the temp
     directory, and reading the CA bundle (see "Known gap" above).
   - **DNS:** the store's name is resolved per request; the operator's DNS decides.

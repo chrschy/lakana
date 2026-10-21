@@ -1210,37 +1210,18 @@ def test_a_read_is_exported_in_the_zone_of_the_childs_tz_variable(tmp_path: Path
 LINUX = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc")
 
 
-def _wait_for_file(path: Path, timeout: float = 30.0) -> None:
-    """Wait, with a bound, until a file exists and holds something.
-
-    Parameters
-    ----------
-    path
-        The file.
-    timeout
-        Seconds to wait at most.
-    """
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if path.exists() and path.stat().st_size > 0:
-            return
-        time.sleep(0.01)
-    pytest.fail(f"{path} was not written in {timeout} s")
-
-
 def test_the_real_child_stops_within_seconds_of_sigterm_while_it_waits_for_a_batch(
     tmp_path: Path,
 ) -> None:
     """The probe's finding: with the statement on the main thread this never returns.
 
-    A first statement writes a marker file, so the test knows the child is past its set-up and
-    inside DuckDB; the slow statement follows it in the same text and is still running when the
-    signal arrives, whether it has started or is about to (the repeated interrupt reaches it).
+    The child runs one statement only, so the test cannot have it write a marker first. It
+    waits until the child has used half a second of processor time (`/proc`), which it spends
+    inside DuckDB on the slow statement (start-up costs about 0.1 s); the statement runs about
+    9 s, so the signal arrives while the child waits for its first batch.
     """
-    marker = tmp_path / "started.csv"
-    sql = f"COPY (SELECT 1 AS started) TO '{marker}'; {SLOW_STREAM}"
-    with _Real({"sql": sql, "read_prefixes": (f"{tmp_path}/",)}, tmp_path) as child:
-        _wait_for_file(marker)
+    with _Real({"sql": SLOW_STREAM}, tmp_path) as child:
+        _wait_for_cpu(child.process.pid, seconds=0.5)
         asked = time.monotonic()
         os.killpg(child.process.pid, signal.SIGTERM)
         code, _out, err = child.end(timeout=20)
@@ -1250,6 +1231,33 @@ def test_the_real_child_stops_within_seconds_of_sigterm_while_it_waits_for_a_bat
         "interrupted", "The query stopped because it was asked to."
     )
     assert seconds < 5
+
+
+def _wait_for_cpu(pid: int, seconds: float, timeout: float = 30.0) -> None:
+    """Wait until a process has used `seconds` of processor time, or fail the test.
+
+    Parameters
+    ----------
+    pid
+        The process.
+    seconds
+        User plus system time to wait for.
+    timeout
+        Seconds to wait at most.
+
+    Where there is no ``/proc`` (macOS) it waits 1.5 s instead, well inside the statement's 9 s.
+    """
+    if not Path(f"/proc/{pid}/stat").exists():
+        time.sleep(1.5)
+        return
+    ticks = os.sysconf("SC_CLK_TCK")
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        if (int(fields[11]) + int(fields[12])) / ticks >= seconds:
+            return
+        time.sleep(0.02)
+    pytest.fail(f"the child did not use {seconds} s of processor time within {timeout} s")
 
 
 def test_killing_the_group_mid_stream_leaves_no_process_no_end_marker_and_no_file(

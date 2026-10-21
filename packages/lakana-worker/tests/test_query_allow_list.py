@@ -7,7 +7,12 @@ CA bundle under the restriction) and can play what a store cannot: a second host
 
 from __future__ import annotations
 
+import contextlib
+import functools
+import http.server
 import os
+import socket
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -19,6 +24,10 @@ from tls_fixture import Authority, Serving, make_authority, serving
 from lakana_core.errors import ValidationError
 from lakana_worker.executor import DuckDBInternalError, execute_query
 from lakana_worker.query_child import OUTSIDE_PREFIXES, REFUSED_LOCATION
+
+NOT_ONE_SELECT = (
+    "Query failed: the query process was given something other than one SELECT statement."
+)
 
 
 def _parquet(path: Path, value: int) -> None:
@@ -254,3 +263,153 @@ def test_local_mode_refuses_a_glob_that_meets_a_symlink_out(local_store: Path) -
     with pytest.raises(ValidationError) as caught:
         _read(f"{local_store}/t1/*.parquet", (f"{local_store}/t1/",))
     assert str(caught.value) == REFUSED_LOCATION
+
+
+class _Proxy:
+    """A TCP listener that stands in for a proxy: records the first line of each request.
+
+    It answers nothing and closes the connection, so a client that reaches it fails; what
+    matters is that it was reached, and with what.
+    """
+
+    def __init__(self) -> None:
+        self._socket = socket.create_server(("127.0.0.1", 0))
+        self._socket.settimeout(0.2)
+        self.port = self._socket.getsockname()[1]
+        self.lines: list[str] = []
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    def _serve(self) -> None:
+        """Accept connections until stopped and record their first line."""
+        while not self._stop.is_set():
+            try:
+                connection, _ = self._socket.accept()
+            except TimeoutError:
+                continue
+            except OSError:
+                return
+            with connection:
+                connection.settimeout(2)
+                with contextlib.suppress(OSError):
+                    self.lines.append(connection.recv(4096).split(b"\r\n", 1)[0].decode())
+
+    def close(self) -> None:
+        """Stop accepting and close the listener."""
+        self._stop.set()
+        self._thread.join(timeout=5)
+        self._socket.close()
+
+
+@pytest.fixture
+def proxy() -> Iterator[_Proxy]:
+    """Run a proxy stand-in on loopback.
+
+    Yields
+    ------
+    _Proxy
+        The running stand-in; `lines` holds what reached it.
+    """
+    stand_in = _Proxy()
+    try:
+        yield stand_in
+    finally:
+        stand_in.close()
+
+
+@pytest.fixture
+def plain_store(tmp_path: Path) -> Iterator[str]:
+    """Serve ``t1/a.parquet`` over plain HTTP, as the Compose bundle's store is reached.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the served file.
+
+    Yields
+    ------
+    str
+        ``http://127.0.0.1:<port>``.
+    """
+    _parquet(tmp_path / "plain" / "t1" / "a.parquet", 1)
+    handler = functools.partial(
+        http.server.SimpleHTTPRequestHandler, directory=str(tmp_path / "plain")
+    )
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.mark.parametrize("scheme", ["http", "https"])
+def test_a_proxy_secret_in_the_statement_is_refused_before_anything_runs(
+    scheme: str, plain_store: str, store: Serving, proxy: _Proxy
+) -> None:
+    """Red before the statement check: the proxy got the presigned URL (http) or a CONNECT.
+
+    `lock_configuration` holds settings, and `CREATE SECRET (TYPE http, HTTP_PROXY ...)` is not
+    a setting. The guard refuses it first; the child refuses any text that is not one SELECT.
+    """
+    base = plain_store if scheme == "http" else store.base
+    url = f"{base}/t1/a.parquet?X-Amz-Signature=SECRETSIG"
+    sql = (
+        f"CREATE SECRET p (TYPE http, HTTP_PROXY '127.0.0.1:{proxy.port}'); "
+        "SELECT a FROM read_parquet(getvariable('v_0_files'))"
+    )
+    with pytest.raises(DuckDBInternalError) as caught:
+        execute_query(sql, {"v_0_files": [url]}, read_prefixes=(f"{base}/t1/",))
+    assert str(caught.value).startswith(NOT_ONE_SELECT)
+    assert proxy.lines == []
+    assert "SECRETSIG" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "CREATE SECRET h (TYPE http, EXTRA_HTTP_HEADERS MAP {'X-Leak': 'v'}); SELECT 1",
+        "SELECT 1; SELECT 2",
+        "SET VARIABLE x = 1",
+        "COPY (SELECT 1) TO '/tmp/x.csv'",
+        "ATTACH ':memory:' AS m",
+        "LOAD json",
+        "INSTALL json",
+        "PRAGMA threads = 1",
+        "CALL pragma_version()",
+        "SET threads = 1",
+        "CREATE TABLE t AS SELECT 1",
+        "EXPLAIN SELECT 1",
+    ],
+)
+def test_anything_but_one_select_is_refused_by_the_child(sql: str) -> None:
+    with pytest.raises(DuckDBInternalError) as caught:
+        execute_query(sql)
+    assert str(caught.value).startswith(NOT_ONE_SELECT)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT 1 AS a",
+        "WITH x AS (SELECT 1 AS a) SELECT a FROM x",
+        "FROM range(3)",
+        "VALUES (1)",
+        "SELECT 1 AS a;",
+        "SELECT 1 AS a UNION ALL SELECT 2",
+        "SELECT * FROM (SELECT 1 AS a, 2 AS b) PIVOT (sum(b) FOR a IN (1))",
+        "SELECT * FROM (SELECT 1 AS a, 2 AS b) UNPIVOT (v FOR k IN (a, b))",
+    ],
+)
+def test_one_select_in_any_spelling_still_runs(sql: str) -> None:
+    """Every form the guard lets through parses as one SELECT on 1.5.5 and 2.0.0.
+
+    Known: on 1.5.5 a reading ``PRAGMA`` (``PRAGMA version``) also parses as a SELECT of its
+    ``pragma_*`` function (on 2.0.0 it is a PRAGMA and refused); the guard refuses both forms,
+    and none of them changes a setting or a secret.
+    """
+    assert execute_query(sql).num_rows >= 1
