@@ -42,6 +42,7 @@ from sqlalchemy.orm import Session
 
 from lakana_core.auth import PrincipalRef
 from lakana_core.db import db_now, rowcount
+from lakana_core.errors import ValidationError
 from lakana_core.models import Environment, Namespace, Table, TableLocation, TableLocationState
 from lakana_core.models.table_location import IN_USE_STATES, PURGEABLE_STATES
 from lakana_core.storage.resolver import (
@@ -51,6 +52,7 @@ from lakana_core.storage.resolver import (
     RAW_PREFIX,
     SCHEME_ALIASES,
     _is_canonical_uri,
+    check_storage_root,
     table_root_from_metadata_location,
 )
 
@@ -694,6 +696,185 @@ def near_other_location(
         if other & target or _inside(target, other) or (around and _inside(other, target)):
             return Nearby(directory, environment_root=False)
     return None
+
+
+OWN_DIRECTORIES = (MANAGED_PREFIX, *UNRECORDED_ZONES)
+"""The directories of a storage root that hold an environment's own files."""
+
+
+@dataclass(frozen=True)
+class RootClash:
+    """Another environment whose own files a new storage root would share a directory with.
+
+    Parameters
+    ----------
+    environment
+        The other environment, deleted or not.
+    directory
+        The directory of `OWN_DIRECTORIES` the clash is in, such as ``managed``.
+    inside_other
+        `True` when the new root lies at or inside that directory of the other environment's
+        root; `False` when the other environment's root lies at or inside that directory of
+        the new root.
+    """
+
+    environment: Environment
+    directory: str
+    inside_other: bool
+
+
+def child_location(root: str, name: str) -> str:
+    """Join a storage root and a name, also for the root of a disk (``file:///``).
+
+    Parameters
+    ----------
+    root
+        A storage root, with or without a trailing slash.
+    name
+        A path segment.
+
+    Returns
+    -------
+    str
+        ``root/name`` with one slash between them.
+    """
+    scheme, sep, rest = root.partition("://")
+    return f"{scheme}{sep}{rest.rstrip('/')}/{name}"
+
+
+def _in_directory(
+    outer: str, inner: frozenset[Reading], realpath: Callable[[str], str]
+) -> str | None:
+    """Name the own directory of a root that another location is, or lies inside.
+
+    Parameters
+    ----------
+    outer
+        A storage root as stored.
+    inner
+        Readings of the other location.
+    realpath
+        Resolves symbolic links in a local path.
+
+    Returns
+    -------
+    str or None
+        The directory of `OWN_DIRECTORIES`; `None` when there is none.
+    """
+    for directory in OWN_DIRECTORIES:
+        own = readings(child_location(outer, directory), realpath)
+        if own is not None and (own & inner or _inside(own, inner)):
+            return directory
+    return None
+
+
+def root_clash(
+    session: Session, root: str, realpath: Callable[[str], str] = os.path.realpath
+) -> RootClash | None:
+    """Find another environment whose own files a new storage root would share a directory with.
+
+    The check `CatalogService.create_environment` makes. Every environment row counts, a deleted
+    one's too (its files stay until they are purged). A root equal to another under any of their
+    `readings` is a shared root and is allowed, and so is one nested elsewhere in another root.
+    A clash is a root at or inside another environment's ``managed/`` or `UNRECORDED_ZONES`
+    directory, or one whose own such directory is or holds another environment's root: both
+    layouts make `near_other_location` keep the leftovers of both environments for ever. A
+    stored root that cannot be read at all (an older release's relative ``file`` root) cannot be
+    compared and is left out; the clean-up keeps every file near it, as before.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    root
+        The new root, written canonically (`check_storage_root`).
+    realpath
+        Resolves symbolic links in a local path; `os.path.realpath` by default.
+
+    Returns
+    -------
+    RootClash or None
+        The first clash, by the other environment's name, or `None`.
+    """
+    new = readings(root, realpath)
+    if new is None:
+        return None
+    for other in session.scalars(select(Environment).order_by(Environment.name)):
+        other_readings = readings(other.storage_root, realpath)
+        if other_readings is None or other_readings & new:
+            continue
+        directory = _in_directory(other.storage_root, new, realpath)
+        if directory is not None:
+            return RootClash(other, directory, inside_other=True)
+        directory = _in_directory(root, other_readings, realpath)
+        if directory is not None:
+            return RootClash(other, directory, inside_other=False)
+    return None
+
+
+ROOT_INSIDE_MESSAGE = (
+    "The storage root {root!r} lies inside {directory}/ of environment {other!r}{deleted} "
+    "(storage root {other_root!r}), where that environment keeps files of its own; the clean-up "
+    "could not tell the two environments' files apart. {advice}, or share the root of {other!r} "
+    "exactly."
+)
+"""The refusal of a root at or inside another environment's own directory."""
+
+ROOT_AROUND_MESSAGE = (
+    "The storage root {root!r} would hold environment {other!r}{deleted} (storage root "
+    "{other_root!r}) inside its {directory}/ directory, where an environment keeps files of its "
+    "own; the clean-up could not tell the two environments' files apart. {advice}, or share the "
+    "root of {other!r} exactly."
+)
+"""The refusal of a root whose own directory holds another environment's root."""
+
+
+def refuse_root_clash(session: Session, root: str, name: str) -> None:
+    """Refuse a new environment's root that shares a directory with another one's own files.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    root
+        The new root, written canonically.
+    name
+        The new environment's name, for the suggested root.
+
+    Raises
+    ------
+    ValidationError
+        If `root_clash` finds one. The message names the other environment, its root and the
+        directory, and suggests ``<outer root>/<name>`` when that root would be accepted.
+    """
+    clash = root_clash(session, root)
+    if clash is None:
+        return
+    other = clash.environment
+    outer = other.storage_root if clash.inside_other else root
+    suggestion = child_location(outer, name)
+    try:
+        check_storage_root(suggestion)
+        acceptable = root_clash(session, suggestion) is None
+    except ValidationError:
+        acceptable = False
+    advice = (
+        f"Give the environment a root of its own, such as {suggestion!r}"
+        if acceptable
+        else "Give the environment a root of its own, outside the managed/, raw/, artifacts/ "
+        "and _artifacts/ directories of every other environment's root"
+    )
+    template = ROOT_INSIDE_MESSAGE if clash.inside_other else ROOT_AROUND_MESSAGE
+    raise ValidationError(
+        template.format(
+            root=root,
+            directory=clash.directory,
+            other=other.name,
+            deleted=" (deleted)" if other.deleted_at is not None else "",
+            other_root=other.storage_root,
+            advice=advice,
+        )
+    )
 
 
 def abandon_claim(session: Session, record: TableLocation, *, now: datetime) -> None:

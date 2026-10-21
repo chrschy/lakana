@@ -619,3 +619,19 @@ def test_a_storage_root_written_another_way_is_422_with_the_spelling_to_use(
     assert response.status_code == 422, response.text
     assert f"file://{tmp_path}/dev" in response.json()["detail"]
     assert client.get("/api/v1/environments/dev", headers=AUTH_HEADER).status_code == 404
+
+
+def test_a_storage_root_inside_another_environments_managed_files_is_422_naming_it(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """The answer names the other environment and a root of its own."""
+    for name, root in (("prod", f"file://{tmp_path}"), ("dev", f"file://{tmp_path}/managed/dev")):
+        response = client.post(
+            "/api/v1/environments",
+            headers=AUTH_HEADER,
+            json={"name": name, "storage": {"scheme": "file", "root": root, "options": {}}},
+        )
+    assert response.status_code == 422, response.text
+    assert "'prod'" in response.json()["detail"]
+    assert f"'file://{tmp_path}/dev'" in response.json()["detail"]
+    assert client.get("/api/v1/environments/dev", headers=AUTH_HEADER).status_code == 404

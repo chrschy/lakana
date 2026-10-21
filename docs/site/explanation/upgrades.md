@@ -143,6 +143,22 @@ what a CI token may do (`ci_token`), and `Client.from_ci_oidc` does the exchange
 - **Setting both is refused.** A job that sets `LAKANA_TOKEN` and `LAKANA_OIDC` (or
   `LAKANA_OIDC_TOKEN`) stops with exit 3 and a message naming both: remove one.
 
+### A new environment's root cannot lie in another environment's files
+
+`lakana env create` (and `POST /api/v1/environments`) now refuses a storage root at or inside
+another environment's `managed/`, `raw/`, `artifacts/` or `_artifacts/` directory, a deleted
+environment's too, and a root whose own such directory would hold another environment's root.
+There each environment keeps files the other cannot tell from its own, so the clean-up kept both
+environments' leftovers for ever. The refusal (422) names the other environment and a root to use
+instead. Environments may still share a root, and one may still lie elsewhere in another's (prod
+at `s3://bucket`, dev at `s3://bucket/dev`).
+
+- **Existing environments are not changed.** One that already lies in such a place keeps working,
+  and `lakana env orphaned-locations` keeps all its directories as before; its `kept_because` now
+  says to move the environment to a root of its own.
+- **Scripts that create environments** at such a root fail at that step: give the environment a
+  root of its own, such as the one the message names.
+
 ## Notes for 0.17.0
 
 ### Fewer sign-in events in the audit log

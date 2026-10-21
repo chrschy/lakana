@@ -17,7 +17,7 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
-from core_test_helpers import python_task_run
+from core_test_helpers import _earlier_layout, python_task_run
 from pyiceberg.schema import Schema
 from pyiceberg.types import LongType, NestedField
 from sqlalchemy import delete as sa_delete
@@ -1630,11 +1630,7 @@ def test_another_environment_root_inside_a_location_blocks_a_purge(
     location = _location(store)
     _put(location, "inner/raw/a.csv")
     _claim(session, location, state=TableLocationState.ABANDONED, purge_after=_NOW)
-    catalog.create_environment(
-        principal,
-        name="inner",
-        storage=StorageConfig(scheme="file", root=f"{location}/inner", options={}),
-    )
+    _earlier_layout(catalog, principal, "inner", f"{location}/inner")
 
     assert _sweep(session).purges_blocked == 1
     assert _files(location) == ["inner/raw/a.csv"]
@@ -1648,11 +1644,7 @@ def test_another_environment_rooted_at_managed_blocks_a_purge(
     location = _location(store)
     _put(location, "data/a.parquet")
     _claim(session, location, state=TableLocationState.ABANDONED, purge_after=_NOW)
-    catalog.create_environment(
-        principal,
-        name="other",
-        storage=StorageConfig(scheme="file", root=f"file://{store}/managed{slash}", options={}),
-    )
+    _earlier_layout(catalog, principal, "other", f"file://{store}/managed{slash}")
 
     assert _sweep(session).purges_blocked == 1
     assert _files(location) == ["data/a.parquet"]
@@ -1664,9 +1656,7 @@ def test_a_root_in_another_environments_unrecorded_files_blocks_a_purge(
 ) -> None:
     """The enclosing environment keeps files there that no record names."""
     inner = f"file://{store}/{zone}/inner"
-    catalog.create_environment(
-        principal, name="inner", storage=StorageConfig(scheme="file", root=inner, options={})
-    )
+    _earlier_layout(catalog, principal, "inner", inner)
     location = f"{inner}/managed/gold/t-{uuid.uuid4().hex}"
     _put(location, "data/a.parquet")
     _claim(
@@ -1694,11 +1684,7 @@ def test_an_environment_rooted_inside_this_one_away_from_the_location_does_not_b
     location = _location(store)
     _put(location, "data/a.parquet")
     _claim(session, location, state=TableLocationState.ABANDONED, purge_after=_NOW)
-    catalog.create_environment(
-        principal,
-        name="inner",
-        storage=StorageConfig(scheme="file", root=f"file://{store}/{inner}", options={}),
-    )
+    _earlier_layout(catalog, principal, "inner", f"file://{store}/{inner}")
 
     assert _sweep(session).locations_purged == 1
     assert _files(location) == []

@@ -105,6 +105,7 @@ from lakana_core.catalog.locations import (
     lock_location,
     other_table_locations,
     publish_location,
+    refuse_root_clash,
     release_claim,
 )
 from lakana_core.catalog.maintenance import (
@@ -1118,7 +1119,11 @@ class CatalogService:
             are kept (`NAME_HELD_MESSAGE` names the restore and the early purge).
         ValidationError
             If the storage root is not written canonically (`check_storage_root`; the message
-            names the spelling to use).
+            names the spelling to use), or it lies at or inside another environment's
+            ``managed/``, ``raw/``, ``artifacts/`` or ``_artifacts/``, deleted environments
+            included, or one of its own such directories holds another environment's root
+            (`refuse_root_clash`; the message names that environment and a root to use). A
+            shared root and one nested elsewhere in another root are accepted.
         PermissionDenied
             If the principal may not manage environments.
 
@@ -1144,6 +1149,7 @@ class CatalogService:
             )
         if existing is not None:
             raise AlreadyExistsError(f"Environment {name!r} already exists.")
+        refuse_root_clash(self._session, storage.root, name)
         env = Environment(
             id=uuid.uuid4(),
             name=name,

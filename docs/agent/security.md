@@ -1537,7 +1537,17 @@ dropped, a leading `//` included, which `posixpath.normpath` keeps; `..` unjudge
 location must be absolute with an empty host: `_is_canonical_uri`, `is_within_location` and
 `spelled_canonically` build on it, and `create_environment` refuses a root that is not canonical
 (`check_storage_root`, 422 naming the spelling to use; relative and host `file` roots, percent
-escapes, glob characters and scheme aliases refused too). `near_other_location` compares every
+escapes, glob characters and scheme aliases refused too). It also refuses (#231,
+`locations.refuse_root_clash`, 422 naming the other environment, its root, the directory and a
+root of its own, `<outer root>/<name>` when that one would be accepted) a root that is, or lies
+inside, another environment's `managed/` or `UNRECORDED_ZONES` directory, or whose own such
+directory is or holds another environment's root, compared under every `readings` spelling of
+both and against every `environments` row, deleted ones included; a shared root (equal under some
+reading) and one nested elsewhere in another root stay accepted, and a stored root that cannot be
+read at all is skipped (the checks above fail closed on it). `update_environment_storage` cannot
+change a root. Existing environments in such a layout are untouched and keep failing closed: the
+listing names the other root with `HELD_PREFIX` ("move this environment to a root of its own")
+instead of `UNJUDGED_PREFIX`. Pins: `test_environment_root_placement.py`. `near_other_location` compares every
 root, record (`record_states`; never the purge's own) and table directory under all `readings`:
 percent-decoded up to three times, case-folded and NFC, `normpath` and, for `file`, `realpath`
 (symbolic links), object-store keys literal and with `..` resolved, `abfs` reduced to the

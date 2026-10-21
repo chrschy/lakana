@@ -309,6 +309,14 @@ UNJUDGED_PREFIX = (
     "location first, or keep the directory: "
 )
 
+HELD_PREFIX = (
+    "this environment's storage root lies inside another environment's raw/, artifacts/ or "
+    "_artifacts/ directory, where that environment keeps files without a record, so none of "
+    "these directories is deleted; move this environment to a root of its own (a new "
+    "environment cannot be created there any more). The other environment's root: "
+)
+"""The reason of every directory of an environment rooted in another's unrecorded files."""
+
 
 def _ineligible(session: Session, run: _Run, location: str, environment: Target) -> str | None:
     """Say why a directory may not be deleted, or `None` when nothing names, holds or contains it.
@@ -361,7 +369,8 @@ def _ineligible(session: Session, run: _Run, location: str, environment: Target)
         and spelled_canonically(nearby.location.rstrip("/"))
     ):
         return _NOT_ORPHANED  # another environment's root: its files, not a leftover
-    return UNJUDGED_PREFIX + shown(nearby.location)
+    prefix = HELD_PREFIX if nearby.holds_this_root else UNJUDGED_PREFIX
+    return prefix + shown(nearby.location)
 
 
 def _measure(
