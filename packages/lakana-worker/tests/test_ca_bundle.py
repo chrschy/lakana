@@ -54,6 +54,12 @@ def test_the_first_readable_system_bundle_comes_third(tmp_path: Path) -> None:
         unreadable.chmod(0o600)
 
 
+def test_the_first_of_several_readable_system_bundles_wins(tmp_path: Path) -> None:
+    """The system list is tried in its order, as DuckDB tries it."""
+    first, second = _pem(tmp_path / "first.pem"), _pem(tmp_path / "second.pem")
+    assert resolve_ca_bundle({}, (str(first), str(second))) == str(first)
+
+
 def test_certifi_comes_last(tmp_path: Path) -> None:
     assert resolve_ca_bundle({}, (str(tmp_path / "missing.pem"),)) == certifi.where()
 
