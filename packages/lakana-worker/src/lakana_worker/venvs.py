@@ -42,8 +42,9 @@ import subprocess  # nosec B404 -- uv is invoked with fixed argv, no shell
 import sys
 import sysconfig
 import tempfile
+import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Generator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -77,10 +78,10 @@ when a build really runs, on the thread that runs it; raises `VenvBuildRefused` 
 that is safe to show when a credential cannot be read."""
 
 
-_NOT_STARTED = 127
+UV_NOT_STARTED = 127
 """Exit status of the launcher when uv itself could not be started."""
 
-_LAUNCHER = f"""\
+UV_LAUNCHER = f"""\
 import ctypes, os, signal, sys
 parent, uv = int(sys.argv[1]), sys.argv[2]
 if sys.platform.startswith("linux"):
@@ -93,7 +94,7 @@ try:
     os.execv(uv, sys.argv[2:])
 except OSError as exc:
     print("could not run uv (" + (exc.strerror or type(exc).__name__) + ")", flush=True)
-    os._exit({_NOT_STARTED})
+    os._exit({UV_NOT_STARTED})
 """
 """Starts uv so that it dies with the worker (Linux).
 
@@ -105,6 +106,43 @@ worker that died before the request was made is caught by the parent check.
 Processes uv starts itself (the build backend of a source distribution) are
 not covered.
 """
+
+
+_builds_lock = threading.Lock()
+_builds = 0
+
+
+@contextlib.contextmanager
+def _counted_build() -> Generator[None, None, None]:
+    """Count a build as in progress for as long as the block runs.
+
+    Yields
+    ------
+    None
+        Nothing; the count drops again when the block ends, however it ends.
+    """
+    global _builds
+    with _builds_lock:
+        _builds += 1
+    try:
+        yield
+    finally:
+        with _builds_lock:
+            _builds -= 1
+
+
+def builds_in_progress() -> int:
+    """Count the environment builds this worker process is running now.
+
+    The trim of uv's package cache (`lakana_worker.caches`) runs only while this is 0.
+
+    Returns
+    -------
+    int
+        How many `uv sync` builds have started and not ended.
+    """
+    with _builds_lock:
+        return _builds
 
 
 class VenvBuildError(Exception):
@@ -425,7 +463,7 @@ def _run_uv(
 ) -> None:
     """Run uv to completion, streaming its output and enforcing both limits.
 
-    uv is started through `_LAUNCHER`, so that it does not outlive a worker
+    uv is started through `UV_LAUNCHER`, so that it does not outlive a worker
     that is killed while it builds.
 
     Parameters
@@ -454,7 +492,7 @@ def _run_uv(
     """
     try:
         process = subprocess.Popen(  # nosec B603 -- fixed argv, no shell, minimal env
-            [sys.executable, "-I", "-c", _LAUNCHER, str(os.getpid()), *argv],
+            [sys.executable, "-I", "-c", UV_LAUNCHER, str(os.getpid()), *argv],
             cwd=cwd,
             env=env,
             stdin=subprocess.DEVNULL,
@@ -511,7 +549,7 @@ def _run_uv(
         failure = too_large
     if failure is not None:
         raise VenvBuildError(failure)
-    if code == _NOT_STARTED:
+    if code == UV_NOT_STARTED:
         raise VenvBuildError(f"{_FAILED}: could not run uv (the task log has the reason)")
     if code != 0:
         raise _UvExited(f"{_FAILED}: uv exited with status {code}")
@@ -778,7 +816,8 @@ def acquire(
                 try:
                     fcntl.flock(building, fcntl.LOCK_EX)
                     if not _usable(target):
-                        _build(settings, key, project, on_log, indexes)
+                        with _counted_build():
+                            _build(settings, key, project, on_log, indexes)
                         with contextlib.suppress(OSError):
                             _evict(settings, key)
                 finally:

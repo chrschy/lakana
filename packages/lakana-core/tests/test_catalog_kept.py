@@ -860,6 +860,10 @@ _NOTHING_OF_A_KEPT_TABLE = {
         "deletes only directories that no table and no location record names, and returns "
         "their counts; nothing of a table"
     ),
+    "environment_usage": (
+        "returns counts and byte totals per kind from the catalog database; no table's metadata "
+        "and no file locations"
+    ),
     "update_environment_storage": _NO_TABLE,
     "set_environment_protection": _NO_TABLE,
     "create_namespace": _NO_TABLE,

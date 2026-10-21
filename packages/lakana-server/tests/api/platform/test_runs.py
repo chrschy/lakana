@@ -167,7 +167,9 @@ def test_the_worker_list_is_refused_like_the_scheduler_status(client: TestClient
         "query_run_id",
         "deploy_run_id",
         "task_run_id",
+        "caches",
     }
+    assert row["caches"] is None  # not measured yet
     assert row["takes"] == "all"  # the column's default: a worker that did not say
     assert (row["id"], row["host"], row["version"], row["status"]) == ("w-1", "box", "1.0", "alive")
     assert (row["query_run_id"], row["deploy_run_id"], row["task_run_id"]) == (None, None, None)
@@ -204,6 +206,42 @@ def test_the_worker_list_has_takes(client: TestClient) -> None:
     assert {row["id"]: row["takes"] for row in listed.json()} == {
         "w-1": "pipeline",
         "w-2": "interactive",
+    }
+
+
+def test_the_worker_list_has_the_sizes_of_the_caches(client: TestClient) -> None:
+    """A worker that measured its caches is listed with their sizes and when it measured them."""
+    from datetime import UTC, datetime
+
+    from sqlalchemy.orm import Session
+
+    from lakana_core.models import Worker
+
+    now = datetime.now(UTC)
+    with Session(client.app.state.engine) as session:
+        session.add(
+            Worker(
+                id="w-1",
+                host="box",
+                version="1.0",
+                started_at=now,
+                heartbeat_at=now,
+                cache_environments_bytes=10,
+                cache_packages_bytes=20,
+                cache_tasks_bytes=30,
+                cache_complete=False,
+                cache_measured_at=now,
+            )
+        )
+        session.commit()
+    (row,) = client.get("/api/v1/workers", headers=AUTH_HEADER).json()
+    caches = row["caches"]
+    assert datetime.fromisoformat(caches.pop("measured_at")) == now
+    assert caches == {
+        "environments_bytes": 10,
+        "packages_bytes": 20,
+        "tasks_bytes": 30,
+        "complete": False,
     }
 
 

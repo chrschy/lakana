@@ -238,6 +238,7 @@ def test_deploy_records_a_job_version_and_uploads_the_code(
     assert version.code_uri == f"file://{tmp_path / 'storage'}/{path}"
     stored = StorageResolver(session).for_environment("dev").storage.read(path)
     assert hashlib.sha256(stored).hexdigest() == version.code_sha256
+    assert version.code_bytes == len(stored)
     with tarfile.open(fileobj=io.BytesIO(gzip.decompress(stored))) as archive:
         names = archive.getnames()
     assert "assets/silver/clean.sql" in names

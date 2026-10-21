@@ -101,6 +101,7 @@ from lakana_core.runs.tasks import (
 from lakana_core.secrets.keys import KeyProvider
 from lakana_core.storage.resolver import StorageResolver
 from lakana_worker.attempt_sweep import AttemptSweeper
+from lakana_worker.caches import CacheKeeper
 from lakana_worker.deploy import platform_version
 from lakana_worker.deploy_sweep import DeploySweeper
 from lakana_worker.index_credentials import (
@@ -639,6 +640,9 @@ class PythonRuntime:
     deploy_sweeper
         Removes deploy checkouts a dead worker left in the temp directory.
         `None` sweeps nothing.
+    caches
+        Measures the worker's caches and trims uv's package cache, in a thread of its own;
+        `None` measures nothing.
     """
 
     support: PythonSupport
@@ -653,13 +657,16 @@ class PythonRuntime:
     ] = acquire
     sweeper: AttemptSweeper | None = None
     deploy_sweeper: DeploySweeper | None = None
+    caches: CacheKeeper | None = None
 
     def maintain(self) -> None:
-        """Sweep orphaned attempt directories and deploy checkouts when due."""
+        """Sweep leftover attempt directories and deploy checkouts, and measure the caches."""
         if self.sweeper is not None:
             self.sweeper.maybe_sweep()
         if self.deploy_sweeper is not None:
             self.deploy_sweeper.maybe_sweep()
+        if self.caches is not None:
+            self.caches.maybe_start()
 
     def attempt(
         self,

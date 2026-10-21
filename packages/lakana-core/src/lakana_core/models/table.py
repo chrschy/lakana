@@ -85,6 +85,18 @@ class Table(Base, TimestampMixin):
     table_type: Mapped[TableType] = mapped_column(Enum(TableType, native_enum=False))
     metadata_location: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     previous_metadata_location: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True, default=None)
+    """The size of a managed table's current files (``total-files-size`` of its snapshot).
+
+    Measured by the worker's housekeeping (`lakana_core.catalog.usage`), never at request time;
+    `None` before the first measurement and when the snapshot's summary does not say. A tombstone
+    keeps it, so a dropped table's size is known for its undo period.
+    """
+    size_metadata_location: Mapped[str | None] = mapped_column(
+        String(1024), nullable=True, default=None
+    )
+    """The metadata file `size_bytes` was read from; differs from `metadata_location` once the
+    table changed after it was measured."""
     owner_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("principals.id", ondelete="SET NULL"), nullable=True
     )

@@ -6,7 +6,13 @@ from datetime import datetime
 from typing import Any
 
 from lakana._http import HttpTransport
-from lakana._models import Environment, OrphanedLocation, OrphanedLocations
+from lakana._models import (
+    Environment,
+    EnvironmentUsage,
+    OrphanedLocation,
+    OrphanedLocations,
+    UsagePart,
+)
 from lakana._routes import ROUTES
 
 
@@ -332,6 +338,44 @@ class Environments:
             ROUTES["environments.set_retention"], path_params={"name": name}, json={"days": days}
         )
         return _environment_from_json(response.json())
+
+    def usage(self, name: str) -> EnvironmentUsage:
+        """Report how much storage an environment uses.
+
+        The server adds up what the catalog database holds and reads nothing from object
+        storage: the sizes of managed tables are the ones the worker's hourly sweep measured,
+        so a table written since counts as `unmeasured` until the next sweep. Needs
+        `MANAGE_ENVIRONMENT` on the environment.
+
+        Parameters
+        ----------
+        name
+            The environment's name.
+
+        Returns
+        -------
+        EnvironmentUsage
+            Its tables, dropped tables, artifacts and code archives.
+
+        Raises
+        ------
+        lakana.errors.NotFound
+            If no environment of this name exists.
+        lakana.errors.PermissionDenied
+            Without `MANAGE_ENVIRONMENT` on the environment.
+        """
+        data = self._transport.request(
+            ROUTES["environments.usage"], path_params={"name": name}
+        ).json()
+        return EnvironmentUsage(
+            environment=data["environment"],
+            tables=UsagePart(**data["tables"]),
+            dropped_tables=UsagePart(**data["dropped_tables"]),
+            artifacts=UsagePart(**data["artifacts"]),
+            code_archives=UsagePart(**data["code_archives"]),
+            total_bytes=data["total_bytes"],
+            complete=data["complete"],
+        )
 
     def orphaned_locations(self, name: str, *, older_than_days: int = 30) -> OrphanedLocations:
         """List the table directories older releases left without a location record.

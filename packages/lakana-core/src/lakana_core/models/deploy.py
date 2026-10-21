@@ -6,7 +6,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import JSON, ForeignKey, String, Text, UniqueConstraint, Uuid
+from sqlalchemy import JSON, BigInteger, ForeignKey, String, Text, UniqueConstraint, Uuid
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -55,6 +55,8 @@ class JobVersion(Base):
     manifest_json: Mapped[dict] = mapped_column(JSON)
     code_uri: Mapped[str] = mapped_column(String(1024))
     code_sha256: Mapped[str] = mapped_column(String(64))
+    code_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True, default=None)
+    """The size of the code archive; `None` for a version deployed before sizes were recorded."""
     deployed_by: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("principals.id", ondelete="SET NULL"), nullable=True
     )

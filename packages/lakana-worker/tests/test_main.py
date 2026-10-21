@@ -612,6 +612,7 @@ def _run_main(
         mock.patch("lakana_worker.__main__.sweep_code_archives"),
         mock.patch("lakana_worker.__main__.sweep_table_locations"),
         mock.patch("lakana_worker.__main__.backfill_table_columns"),
+        mock.patch("lakana_worker.__main__.measure_table_sizes"),
         mock.patch("lakana_worker.__main__.signal.signal"),
     ):
         scheduler_mock.return_value.start.return_value.is_alive.return_value = False
@@ -662,6 +663,7 @@ def _housekeeping(
     reads: mock.MagicMock | None = None,
     columns: mock.MagicMock | None = None,
     locations: mock.MagicMock | None = None,
+    sizes: mock.MagicMock | None = None,
 ) -> None:
     """Run `main`, then the housekeeping callable it gave the scheduler, once.
 
@@ -683,6 +685,8 @@ def _housekeeping(
         Stands in for `backfill_table_columns`; a mock that succeeds when `None`.
     locations
         Stands in for `sweep_table_locations`; a mock that succeeds when `None`.
+    sizes
+        Stands in for `measure_table_sizes`; a mock that succeeds when `None`.
     """
     monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{tmp_path}/lakana.db")
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
@@ -695,6 +699,7 @@ def _housekeeping(
         mock.patch("lakana_worker.__main__.sweep_table_reads", reads or mock.MagicMock()),
         mock.patch("lakana_worker.__main__.backfill_table_columns", columns or mock.MagicMock()),
         mock.patch("lakana_worker.__main__.sweep_table_locations", locations or mock.MagicMock()),
+        mock.patch("lakana_worker.__main__.measure_table_sizes", sizes or mock.MagicMock()),
         mock.patch("lakana_worker.__main__.signal.signal"),
     ):
         scheduler_mock.return_value.start.return_value.is_alive.return_value = False
@@ -879,6 +884,7 @@ def test_the_start_up_log_says_when_nothing_collects_leftovers(
     assert len(lines) == 1
     assert "artifact" in lines[0] and "not removed" in lines[0]
     assert "tables whose create never finished" in lines[0]
+    assert "package cache is not trimmed" in lines[0]
 
 
 def test_the_worker_warns_at_start_up_only_when_old_format_secrets_are_accepted(
@@ -1372,6 +1378,7 @@ def test_main_starts_the_heartbeat_before_the_loop_and_hands_the_loop_its_id_and
         "renew_seconds": settings.run.renew_seconds,
         "lease_seconds": settings.run.lease_seconds,
         "takes": "all",
+        "caches": poll.call_args.kwargs["engine"].python.caches.latest,
     }
     assert worker_id.count(":") == 2
     assert poll.call_args.kwargs["may_claim"] == heartbeat.may_claim
@@ -1768,3 +1775,114 @@ def test_the_worker_starts_and_says_why_when_its_attempt_directory_is_a_symlink(
     assert "attempts" in caplog.text
     assert "real directory" in caplog.text
     assert (cache / "attempts").is_symlink()
+
+
+def test_housekeeping_also_measures_the_sizes_of_tables(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lakana_core.storage.resolver import StorageResolver
+
+    sizes = mock.MagicMock()
+    _housekeeping(tmp_path, monkeypatch, mock.MagicMock(), mock.MagicMock(), sizes=sizes)
+    assert sizes.call_count == 1
+    assert isinstance(sizes.call_args.args[1], StorageResolver)
+    assert sizes.call_args.kwargs["should_stop"]() is False
+
+
+def test_a_failing_table_size_measurement_is_logged_and_the_others_still_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    columns = mock.MagicMock()
+    with caplog.at_level(logging.WARNING):
+        _housekeeping(
+            tmp_path,
+            monkeypatch,
+            mock.MagicMock(),
+            mock.MagicMock(),
+            columns=columns,
+            sizes=mock.MagicMock(side_effect=OSError),
+        )
+    assert "The table size measurement failed (OSError)" in caplog.text
+    assert "sweep_failed" in {getattr(r, "event", None) for r in caplog.records}
+    assert columns.call_count == 1
+
+
+def _runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **environment: str) -> PythonRuntime:
+    """Build the Python runtime from settings read from the environment.
+
+    Parameters
+    ----------
+    tmp_path
+        Pytest's per-test directory; the worker's cache directory is under it.
+    monkeypatch
+        The fixture.
+    **environment
+        Settings to set.
+
+    Returns
+    -------
+    PythonRuntime
+        The runtime, with `uv` at ``/usr/bin/uv``.
+    """
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{tmp_path}/lakana.db")
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    monkeypatch.delenv("LAKANA_RUN__VENV_CACHE", raising=False)
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+    support = PythonSupport(server_url=None, uv="/usr/bin/uv")
+    return _python_runtime(Settings(), support, threading.Event())
+
+
+def test_the_runtime_measures_the_three_caches_and_trims_the_package_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lakana_worker.caches import CachePaths, PackageCacheTrim
+
+    runtime = _runtime(
+        tmp_path,
+        monkeypatch,
+        LAKANA_WORKER__PACKAGE_CACHE_MAX_BYTES="5000",
+        LAKANA_WORKER__PACKAGE_CACHE_MIN_AGE_HOURS="2",
+        LAKANA_RUN__SWEEP_INTERVAL="120",
+    )
+    keeper = runtime.caches
+    assert keeper is not None
+    cache = tmp_path / "xdg" / "lakana-worker"
+    assert keeper._measure is not None
+    trim = keeper._trim
+    assert isinstance(trim, PackageCacheTrim)
+    assert trim._paths == CachePaths(
+        environments=cache / "venvs", packages=cache / "uv", tasks=cache / "attempts"
+    )
+    assert (trim._settings.uv, trim._settings.max_bytes) == ("/usr/bin/uv", 5000)
+    assert math.isclose(trim._settings.min_age_seconds, 7200)
+    assert math.isclose(keeper._interval, 120)
+    assert keeper._stop is not None
+
+
+def test_without_uv_or_with_a_limit_of_zero_the_caches_are_only_measured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = _runtime(tmp_path, monkeypatch, LAKANA_WORKER__PACKAGE_CACHE_MAX_BYTES="0")
+    assert runtime.caches is not None and runtime.caches._trim is None
+    monkeypatch.setenv("LAKANA_WORKER__PACKAGE_CACHE_MAX_BYTES", "5000")
+    runtime = _python_runtime(Settings(), PythonSupport(server_url=None, uv=None))
+    assert runtime.caches is not None and runtime.caches._trim is None
+
+
+def test_the_heartbeat_writes_what_the_cache_keeper_measured(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    heartbeat_stand_in: list[_StandInHeartbeat],
+) -> None:
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{tmp_path}/lakana.db")
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    with (
+        mock.patch("lakana_worker.__main__.poll_forever") as poll_forever_mock,
+        mock.patch("lakana_worker.__main__.SchedulerLoop") as scheduler_mock,
+        mock.patch("lakana_worker.__main__.signal.signal"),
+    ):
+        scheduler_mock.return_value.start.return_value.is_alive.return_value = False
+        main()
+    keeper = poll_forever_mock.call_args.kwargs["engine"].python.caches
+    assert heartbeat_stand_in[0].kwargs["caches"] == keeper.latest

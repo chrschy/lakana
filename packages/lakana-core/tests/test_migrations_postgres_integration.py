@@ -2353,3 +2353,38 @@ def test_0047_on_postgres() -> None:
         assert not tables & set(inspector.get_table_names())
         assert "ci_token_id" not in {c["name"] for c in inspector.get_columns("deploy_runs")}
         engine.dispose()
+
+
+def test_0048_on_postgres() -> None:
+    """0048 adds the size columns, all empty and nullable, and drops them down."""
+    revision_0047 = "e0d9e6185736"
+    revision_0048 = "f1a2b3c4d5e6"
+    wanted = {
+        "tables": {"size_bytes", "size_metadata_location"},
+        "job_versions": {"code_bytes"},
+        "workers": {
+            "cache_environments_bytes",
+            "cache_packages_bytes",
+            "cache_tasks_bytes",
+            "cache_complete",
+            "cache_measured_at",
+        },
+    }
+    with PostgresContainer("postgres:16", driver="pg8000") as pg:
+        url = pg.get_connection_url()
+        migrate.upgrade(url, revision_0047)
+        engine = sqlalchemy.create_engine(url)
+
+        migrate.upgrade(url, revision_0048)
+        assert _alembic_version(engine) == revision_0048
+        inspector = sqlalchemy.inspect(engine)
+        for table, names in wanted.items():
+            found = {c["name"]: c["nullable"] for c in inspector.get_columns(table)}
+            assert {name: found.get(name) for name in names} == dict.fromkeys(names, True)
+
+        migrate.downgrade(url, revision_0047)
+        assert _alembic_version(engine) == revision_0047
+        inspector = sqlalchemy.inspect(engine)
+        for table, names in wanted.items():
+            assert not names & {c["name"] for c in inspector.get_columns(table)}
+        engine.dispose()

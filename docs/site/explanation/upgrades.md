@@ -127,6 +127,25 @@ Each cell is a summary. The page named in the last column has the detail. The ch
 
 ## Notes for the next release
 
+### How much disk an instance uses, and a package cache that trims itself
+
+`lakana env usage [ENV]` (REST `GET /api/v1/environments/{name}/usage`, SDK
+`Client.environments.usage`) shows how much storage each environment's tables, dropped tables,
+artifacts and code archives use, and the size of each worker's caches; `lakana worker list` has
+a column `caches`. See [Disk use](../how-to/instance-health.md#disk-use).
+
+- **The figures fill in after the upgrade.** The worker's hourly sweep measures up to 200 tables
+  each time, so on a large instance the first sweeps leave some tables `unmeasured`. Code archives
+  deployed before this release keep no size and stay `unmeasured`.
+- **The workers trim uv's package download cache** (`uv/` in the `worker-cache` volume) above
+  `LAKANA_WORKER__PACKAGE_CACHE_MAX_BYTES`, 10 GiB by default. A cache that is larger after the
+  upgrade is trimmed at the workers' first sweep; packages downloaded within
+  `LAKANA_WORKER__PACKAGE_CACHE_MIN_AGE_HOURS` (24) stay. Set the limit to `0` to keep the old
+  behaviour (never trimmed).
+- **The usage needs `MANAGE_ENVIRONMENT`** on the environment; the workers' caches, as
+  `lakana worker list`, on the instance.
+- **New log codes:** `package_cache_trimmed` and `package_cache_over_limit` ([Log events](../reference/log-events.md)).
+
 ### CI deploys without a stored secret
 
 A GitHub Actions or GitLab CI job can now deploy with its OIDC ID token instead of a stored Lakana

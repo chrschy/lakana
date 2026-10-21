@@ -25,6 +25,7 @@ COMMANDS: dict[str, tuple[str, ...]] = {
         "environments.orphaned_locations",
         "environments.delete_orphaned_locations",
     ),
+    "env usage": ("environments.list", "environments.usage", "workers.list"),
     "ns create": ("namespaces.create",),
     "ns list": ("namespaces.list",),
     "ns get": ("namespaces.get",),

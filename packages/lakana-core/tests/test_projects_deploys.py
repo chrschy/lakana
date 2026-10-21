@@ -222,6 +222,31 @@ def _deployed(
     )
 
 
+def test_record_deploy_keeps_the_size_of_the_code_archive(
+    session: Session, env: None, principal: PrincipalRef
+) -> None:
+    """A deploy records its archive's size; one that sends none leaves it unknown."""
+    repo = _repo(session)
+    service = DeployService(session, AllowAllAuthorization())
+    view = service.submit(principal, "dev", repository=repo.name, kind=DeployKind.DEPLOY)
+    run = _claimed(session, session.get(DeployRun, view.id))
+    assert run is not None
+    run.resolved_sha = "c" * 40
+    version = service.record_deploy(
+        principal,
+        run,
+        manifest=_manifest(),
+        code_uri="u",
+        code_sha256="0" * 64,
+        code_bytes=4321,
+        diff=DeployDiff(),
+        expected_job_version_id=None,
+        worker_id="w1",
+    )
+    assert version.code_bytes == 4321
+    assert _deployed(session, principal, repo, "d" * 40).code_bytes is None
+
+
 def test_submit_queues_a_run(session: Session, env: None, principal: PrincipalRef) -> None:
     """A deploy is queued with its ref; the view carries names, not ids."""
     _repo(session)

@@ -40,6 +40,8 @@ class LogEvent(StrEnum):
     SWEEP_HUNG = "sweep_hung"
     POLL_FAILED = "poll_failed"
     INTERNAL_ERROR = "internal_error"
+    PACKAGE_CACHE_TRIMMED = "package_cache_trimmed"
+    PACKAGE_CACHE_OVER_LIMIT = "package_cache_over_limit"
 
 
 WHERE: dict[LogEvent, str] = {
@@ -61,6 +63,8 @@ WHERE: dict[LogEvent, str] = {
     LogEvent.SWEEP_HUNG: "worker",
     LogEvent.POLL_FAILED: "worker",
     LogEvent.INTERNAL_ERROR: "worker",
+    LogEvent.PACKAGE_CACHE_TRIMMED: "worker",
+    LogEvent.PACKAGE_CACHE_OVER_LIMIT: "worker",
 }
 """The process whose log has each code, as the reference table says it."""
 

@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 
 from lakana_core.log_events import LogEvent, log_event
 from lakana_core.runs import workers
+from lakana_core.runs.workers import CacheSizes
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,9 @@ class WorkerHeartbeat:
         The work the worker takes (`LAKANA_WORKER__TAKES`); written with every registration.
     monotonic
         The clock the silence is measured on; a test replaces it.
+    caches
+        Returns the sizes of the worker's caches it last measured (`CacheKeeper.latest`); new
+        figures are written with the next beat, and with every registration. `None` writes none.
     """
 
     def __init__(
@@ -65,6 +69,7 @@ class WorkerHeartbeat:
         lease_seconds: float,
         takes: str = "all",
         monotonic: Callable[[], float] = time.monotonic,
+        caches: Callable[[], CacheSizes | None] | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._worker_id = worker_id
@@ -74,6 +79,8 @@ class WorkerHeartbeat:
         self._lease_seconds = lease_seconds
         self._takes = takes
         self._monotonic = monotonic
+        self._caches = caches
+        self._written: CacheSizes | None = None
         self._started_at: datetime | None = None
         self._registered = False
         self._failures = 0
@@ -96,9 +103,11 @@ class WorkerHeartbeat:
         # Read before the write is sent and kept only if it succeeds: the worker's view of its
         # freshness is then never younger than the database's, whatever the write took.
         started = self._monotonic()
+        current = None if self._caches is None else self._caches()
+        fresh = None if current == self._written else current
         try:
             with self._session_factory() as session:
-                if not self._registered or not workers.beat(session, self._worker_id):
+                if not self._registered or not workers.beat(session, self._worker_id, caches=fresh):
                     self._started_at = workers.register(
                         session,
                         self._worker_id,
@@ -106,6 +115,7 @@ class WorkerHeartbeat:
                         version=self._version,
                         started_at=self._started_at,
                         takes=self._takes,
+                        caches=current,
                     )
                 session.commit()
         except Exception as error:
@@ -141,6 +151,7 @@ class WorkerHeartbeat:
                 self._failures,
             )
         self._failures = 0
+        self._written = current
         with self._lock:
             self._registered = True
             self._last_success = started

@@ -14,6 +14,7 @@ from lakana_server.api.platform.schemas import (
     EnvironmentPatch,
     EnvironmentRetentionIn,
     EnvironmentStorageUpdate,
+    EnvironmentUsageOut,
     OrphanedLocationsDeleteIn,
     OrphanedLocationsOut,
 )
@@ -305,6 +306,37 @@ def restore_environment(
         files; mapped to 409.
     """
     return EnvironmentOut.model_validate(catalog.restore_environment(principal, name))
+
+
+@router.get("/{name}/usage", response_model=EnvironmentUsageOut)
+def environment_usage(
+    name: str,
+    principal: PrincipalRef = Depends(get_principal),
+    catalog: CatalogService = Depends(get_catalog),
+) -> EnvironmentUsageOut:
+    """Report how much storage an environment uses; reads the catalog database only.
+
+    Parameters
+    ----------
+    name
+        Environment name.
+    principal
+        The authenticated caller; needs `MANAGE_ENVIRONMENT` on the environment.
+    catalog
+        The catalog service for this request.
+
+    Returns
+    -------
+    EnvironmentUsageOut
+        Its tables, dropped tables, artifacts and code archives, as the worker's housekeeping
+        last measured them.
+
+    Raises
+    ------
+    lakana_core.errors.NotFoundError
+        No environment of that name; mapped to 404.
+    """
+    return EnvironmentUsageOut.model_validate(catalog.environment_usage(principal, name))
 
 
 @router.get("/{name}/orphaned-locations", response_model=OrphanedLocationsOut)

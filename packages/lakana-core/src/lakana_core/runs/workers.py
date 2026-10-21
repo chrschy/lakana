@@ -9,6 +9,7 @@ None of the functions commits; the caller does.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from sqlalchemy import ColumnElement, and_, delete, func, or_, select, update
@@ -19,6 +20,76 @@ from lakana_core.models import DeployRun, QueryRun, Worker
 
 WORKER_ROW_KEEP_SECONDS = 3600
 """How long the row of a worker that stopped beating is kept (and listed as `lost`)."""
+
+
+@dataclass(frozen=True)
+class CacheSizes:
+    """What a worker measured its own caches to be.
+
+    Parameters
+    ----------
+    environments_bytes
+        The Python environments of projects (``venvs``).
+    packages_bytes
+        uv's package download cache (``uv``).
+    tasks_bytes
+        The working directories of running and leftover Python tasks (``attempts``).
+    complete
+        Whether the measurement finished; `False` when its time limit cut it off, and the
+        figures are then a floor.
+    """
+
+    environments_bytes: int
+    packages_bytes: int
+    tasks_bytes: int
+    complete: bool
+
+
+def _cache_values(caches: CacheSizes, now: datetime) -> dict[str, object]:
+    """Map cache sizes to the columns of the worker's row.
+
+    Parameters
+    ----------
+    caches
+        The sizes.
+    now
+        The database's time, stored as when they were measured.
+
+    Returns
+    -------
+    dict of str to object
+        By attribute name.
+    """
+    return {
+        "cache_environments_bytes": caches.environments_bytes,
+        "cache_packages_bytes": caches.packages_bytes,
+        "cache_tasks_bytes": caches.tasks_bytes,
+        "cache_complete": caches.complete,
+        "cache_measured_at": now,
+    }
+
+
+def cache_sizes(row: Worker) -> CacheSizes | None:
+    """Read the cache sizes a worker stored.
+
+    Parameters
+    ----------
+    row
+        The worker's row.
+
+    Returns
+    -------
+    CacheSizes or None
+        `None` before the worker's first measurement.
+    """
+    if row.cache_measured_at is None:
+        return None
+    return CacheSizes(
+        environments_bytes=row.cache_environments_bytes or 0,
+        packages_bytes=row.cache_packages_bytes or 0,
+        tasks_bytes=row.cache_tasks_bytes or 0,
+        complete=bool(row.cache_complete),
+    )
 
 
 def _heartbeat_is_younger_than(cutoff: datetime) -> ColumnElement[bool]:
@@ -45,6 +116,7 @@ def register(
     version: str,
     started_at: datetime | None = None,
     takes: str = "all",
+    caches: CacheSizes | None = None,
 ) -> datetime:
     """Insert the worker's row, or refresh it.
 
@@ -64,6 +136,9 @@ def register(
     takes
         The work the worker takes (`all`, `interactive` or `pipeline`); written on insert and
         on refresh.
+    caches
+        The sizes of its caches, when it has measured them; a refresh without leaves the
+        stored ones.
 
     Returns
     -------
@@ -84,11 +159,14 @@ def register(
         session.add(row)
     else:
         row.host, row.version, row.heartbeat_at, row.takes = host[:255], version[:64], now, takes
+    if caches is not None:
+        for key, value in _cache_values(caches, now).items():
+            setattr(row, key, value)
     return row.started_at
 
 
-def beat(session: Session, worker_id: str) -> bool:
-    """Set the worker's heartbeat to the database's time.
+def beat(session: Session, worker_id: str, caches: CacheSizes | None = None) -> bool:
+    """Set the worker's heartbeat to the database's time, and its cache sizes when given.
 
     The time is read in the same transaction and bound, the way a task lease is renewed, not
     written as `CURRENT_TIMESTAMP`: SQLite's is text without a fraction.
@@ -99,16 +177,19 @@ def beat(session: Session, worker_id: str) -> bool:
         Database session; the caller commits.
     worker_id
         The worker's id.
+    caches
+        The sizes of its caches it measured since its last beat; `None` leaves the stored ones.
 
     Returns
     -------
     bool
         `False` when no row matched (it was removed), `True` otherwise.
     """
+    now = db_now(session)
     result = session.execute(
         update(Worker)
         .where(Worker.id == worker_id)
-        .values(heartbeat_at=db_now(session))
+        .values(heartbeat_at=now, **({} if caches is None else _cache_values(caches, now)))
         .execution_options(synchronize_session=False)
     )
     return rowcount(result) == 1

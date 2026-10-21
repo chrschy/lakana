@@ -1239,11 +1239,25 @@ class WorkerConfig(BaseModel):
         The work this worker takes (`LAKANA_WORKER__TAKES`): ``"all"`` (the default),
         ``"interactive"`` (ad-hoc queries) or ``"pipeline"`` (deploys, pipeline tasks and
         table maintenance), in any letter case. The worker says it when it registers.
+    package_cache_max_bytes
+        The size, in bytes, above which the worker trims uv's package download cache in the
+        ``uv`` directory of its cache (10 GiB by default; 0 never trims). The trim runs in the
+        worker's housekeeping, every `LAKANA_RUN__SWEEP_INTERVAL`, never while this worker builds
+        an environment, and waits for no other: when another worker that shares the cache is
+        building, it tries again at the next sweep. It removes first what no package refers to
+        any more (``uv cache prune``), then, while the cache is still too large, the packages
+        downloaded longest ago. Python environments that exist keep working; the next build that
+        needs a removed package downloads it again.
+    package_cache_min_age_hours
+        A package downloaded less than this many hours ago is never removed by the trim (24 by
+        default), so that the builds of the day do not download the same packages again.
     """
 
     memory_limit: str | None = None
     notifications: bool = True
     takes: str = "all"
+    package_cache_max_bytes: int = Field(default=10 * 1024**3, ge=0)
+    package_cache_min_age_hours: float = Field(default=24.0, ge=0)
 
     @field_validator("memory_limit")
     @classmethod
