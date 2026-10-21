@@ -2629,7 +2629,9 @@ the AST blacklist are the only controls there, and the threat model's "Bypassing
 by reading files directly" row says so too.
 
 `_BLACKLISTED_FUNCTIONS` covers every file-reading, SQL-evaluating, or
-secret-revealing DuckDB table function found by inspecting DuckDB 1.5.5's function list
+secret-revealing DuckDB table function found by inspecting DuckDB 1.5.5's function list,
+swept again on 2.0.0 (a diff of `duckdb_functions()`: 225 names new, the 18 new table
+functions refused by the allow-list below, the scalars read one by one)
 — `query`/`query_table`/
 `json_execute_serialized_sql` each evaluate a string argument as SQL/a table reference
 (`json_execute_serialized_sql` takes `json_serialize_sql`'s own output, so a query naming
@@ -2654,10 +2656,22 @@ hidden from the caller. It is blocked together with `current_setting`, `duckdb_s
 error names only the function, never policy text or a path. A new introspection function
 in a DuckDB upgrade needs adding here. **`stats()` is blocked too**: DuckDB reads Parquet
 statistics at bind time, below the rewriter's CTE `WHERE`, so `stats(col)` returned the
-min/max (and on strings a prefix) of rows a row filter hides. This is a reference list confirmed against one
-DuckDB version, not a completeness guarantee — DuckDB adds table functions across
-releases, and a future one in any of these four categories (file-reading, SQL-evaluating,
-secret-revealing, introspecting or statistics-reading) needs adding here as it's found.
+min/max (and on strings a prefix, on 2.0.0 the whole value) of rows a row filter hides.
+**State-changing and name-dispatching functions** came with 2.0.0: `setval` changes a
+sequence, `index_key` reads a catalog index by name, and `to_aggregate_state` picks an
+aggregate by a name given as data (nothing harmful found behind it, but dispatch by a name in
+a string is the class that made `json_execute_serialized_sql` a bypass); all three are listed.
+**DuckDB's internal namespace is refused as a prefix:** any function whose name starts with
+`__` (`__cast`, `__between`, `__internal_barrier`, `__internal_tablefilter_*`, and the
+`__internal_compress_*`/`__internal_decompress_*` 1.5.5 already had) is refused by
+`check_blacklist` without a list entry, so the next release's additions are refused too; the
+error points at the SQL the function stands for (`CAST`, `BETWEEN`). Like every entry, the
+name is compared in lower case after sqlglot has removed quotes and any catalog or schema
+qualifier, so `"SETVAL"(…)`, `main.setval(…)` and the method form `'s'.setval(…)` are refused
+alike. This is a reference list confirmed against DuckDB 2.0.0, not a completeness guarantee — DuckDB adds table functions across
+releases, and a future one in any of these categories (file-reading, SQL-evaluating,
+secret-revealing, introspecting, statistics-reading or state-changing) needs adding here as
+it's found.
 
 **Table functions in `FROM` are allow-listed, not just blacklisted.** `check_blacklist` refuses
 any table function except the generators in `_ALLOWED_TABLE_FUNCTIONS` (`range`,
