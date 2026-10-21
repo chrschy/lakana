@@ -86,7 +86,8 @@ def list_queries(
 ) -> list[QueryListOut]:
     """List the queries of an environment.
 
-    Lists running queries first, then queued ones, then, when asked, ended ones. A holder of
+    Lists running queries first, then queued ones, then, when asked, ended ones.
+    Needs `SUBMIT_QUERY` on the environment. A holder of
     `MANAGE_ENVIRONMENT` sees every query of the environment; everyone else sees the queries
     they submitted. The list never shows SQL text, error messages or results. The cursor of
     the next page is in the `X-Next-Cursor` response header and is absent on the last page;
@@ -230,8 +231,8 @@ def get_query_status(
 ) -> QueryStatusOut:
     """Show a query's status.
 
-    Only the principal that submitted the query can see it; for anyone else the answer is
-    404, as for a query that does not exist.
+    Needs `SUBMIT_QUERY` on the environment. Only the principal that submitted the query can
+    see it; for anyone else the answer is 404, as for a query that does not exist.
 
     Parameters
     ----------
@@ -271,10 +272,10 @@ def cancel_query(
     A queued query becomes `CANCELLED` at once. A running one is asked to stop: the answer
     is `RUNNING` and the worker ends it within a few seconds. A query that has already ended
     is answered with its status, which is not an error. The submitter and a holder of
-    `MANAGE_ENVIRONMENT` may cancel; anyone else gets 404. Answers 422 for the write of a
-    pipeline task (cancel the run instead) and for a maintenance run that has started, and
-    409 when a worker is starting or finishing the query at that moment: ask for the status
-    and cancel again if it still runs.
+    `MANAGE_ENVIRONMENT` may cancel; a caller without `SUBMIT_QUERY` gets 403 and anyone
+    else 404. Answers 422 for the write of a pipeline task (cancel the run instead) and for
+    a maintenance run that has started, and 409 when a worker is starting or finishing the
+    query at that moment: ask for the status and cancel again if it still runs.
 
     Parameters
     ----------
@@ -335,10 +336,10 @@ def get_query_result(
 ) -> Response:
     """Fetch a query's result.
 
-    Streams the rows of a finished read as an Arrow IPC stream. Only the submitter can fetch
-    them; for anyone else the answer is 404. Answers 409 when the query has not finished, or
-    succeeded without being a read (it wrote to a table, created a view or was maintenance):
-    only a read has result rows.
+    Streams the rows of a finished read as an Arrow IPC stream. Needs `SUBMIT_QUERY` on the
+    environment. Only the submitter can fetch them; for anyone else the answer is 404.
+    Answers 409 unless the query has succeeded, or when it succeeded without being a read
+    (it wrote to a table, created a view or was maintenance): only a read has result rows.
 
     Parameters
     ----------

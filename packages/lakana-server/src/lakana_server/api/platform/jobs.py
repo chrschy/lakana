@@ -355,7 +355,7 @@ def get_notification(
     env
         Environment name.
     delivery_id
-        The delivery.
+        The notification delivery's id, as returned when the test was queued.
     principal
         The authenticated caller.
     service

@@ -419,3 +419,14 @@ def test_every_route_that_needs_a_caller_documents_the_refusal_of_a_missing_one(
         if "401" not in operation["responses"]
     ]
     assert missing == []
+
+
+def test_every_parameter_of_every_route_has_a_description() -> None:
+    """Path, query and header parameters say what they are for."""
+    lacking = [
+        f"{method} {path} {parameter['in']} {parameter['name']}"
+        for method, path, operation in _operations()
+        for parameter in operation.get("parameters", [])
+        if not parameter.get("description")
+    ]
+    assert lacking == []

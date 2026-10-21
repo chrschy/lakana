@@ -137,7 +137,7 @@ def create_row_filter(
     return _to_out(created)
 
 
-@router.get("", response_model=list[RowFilterOut], responses=errors(403))
+@router.get("", response_model=list[RowFilterOut], responses=errors(403, 404))
 def list_row_filters(
     principal_name: str | None = None,
     group_name: str | None = None,
@@ -151,8 +151,8 @@ def list_row_filters(
 
     Give exactly one of `principal_name`, `group_name` or `environment` with `namespace` and
     `table`; a row filter always belongs to one table, so there is no list of all of them.
-    Needs `MANAGE_POLICY` on the instance. Answers 422 when none of those combinations is
-    given.
+    Needs `MANAGE_POLICY` on the instance. Answers 404 when no principal or group has the
+    name given and 422 when none of those combinations is given.
 
     Parameters
     ----------

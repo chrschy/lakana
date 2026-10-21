@@ -146,7 +146,7 @@ def create_column_mask(
     return _to_out(created)
 
 
-@router.get("", response_model=list[ColumnMaskOut], responses=errors(403))
+@router.get("", response_model=list[ColumnMaskOut], responses=errors(403, 404))
 def list_column_masks(
     principal_name: str | None = None,
     group_name: str | None = None,
@@ -160,8 +160,8 @@ def list_column_masks(
 
     Give exactly one of `principal_name`, `group_name` or `environment` with `namespace` and
     `table`; a column mask always belongs to one table, so there is no list of all of them.
-    Needs `MANAGE_POLICY` on the instance. Answers 422 when none of those combinations is
-    given.
+    Needs `MANAGE_POLICY` on the instance. Answers 404 when no principal or group has the
+    name given and 422 when none of those combinations is given.
 
     Parameters
     ----------

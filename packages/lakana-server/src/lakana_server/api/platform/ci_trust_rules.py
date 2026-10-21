@@ -160,7 +160,7 @@ def get_ci_trust_rule(
     Parameters
     ----------
     rule_id
-        The rule.
+        The CI trust rule's id.
     principal
         The authenticated caller.
     service
@@ -190,7 +190,7 @@ def update_ci_trust_rule(
     Parameters
     ----------
     rule_id
-        The rule.
+        The CI trust rule's id.
     body
         Only the fields present change.
     principal
@@ -228,7 +228,7 @@ def enable_ci_trust_rule(
     Parameters
     ----------
     rule_id
-        The rule.
+        The CI trust rule's id.
     principal
         The authenticated caller.
     service
@@ -256,7 +256,7 @@ def disable_ci_trust_rule(
     Parameters
     ----------
     rule_id
-        The rule.
+        The CI trust rule's id.
     principal
         The authenticated caller.
     service
@@ -284,7 +284,7 @@ def delete_ci_trust_rule(
     Parameters
     ----------
     rule_id
-        The rule.
+        The CI trust rule's id.
     principal
         The authenticated caller.
     service

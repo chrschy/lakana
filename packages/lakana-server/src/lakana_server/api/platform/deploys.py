@@ -177,7 +177,7 @@ def get_deploy(
     env
         Environment name.
     deploy_id
-        The run's id.
+        The deploy's id, as returned when it was queued.
     principal
         The authenticated caller.
     service
@@ -365,7 +365,7 @@ def get_project_version(
     env
         Environment name.
     project_version_id
-        The project version.
+        The project version's id.
     principal
         The authenticated caller.
     service

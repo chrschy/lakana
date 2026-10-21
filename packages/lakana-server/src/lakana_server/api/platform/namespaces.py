@@ -131,7 +131,7 @@ def list_namespaces(
     """List the namespaces of an environment.
 
     Lists every namespace of the environment at every depth, not only the top level. Needs
-    `READ_ENVIRONMENT`. Answers 404 when the environment does not exist.
+    `READ_NAMESPACE` on the environment. Answers 404 when the environment does not exist.
 
     Parameters
     ----------

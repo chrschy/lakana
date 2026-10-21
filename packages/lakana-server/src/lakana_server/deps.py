@@ -161,7 +161,12 @@ def get_task_token_service(
 
 def get_principal(
     request: Request,
-    authorization: str | None = Header(None),
+    authorization: str | None = Header(
+        None,
+        description=(
+            "The credential: `Bearer <token>` with a personal access token, task token or CI token."
+        ),
+    ),
     session: Session = Depends(get_session),
     pats: PatService = Depends(get_pat_service),
     task_tokens: TaskTokenService = Depends(get_task_token_service),
@@ -378,7 +383,14 @@ def with_break_glass(principal: PrincipalRef, reason: str | None) -> PrincipalRe
 
 def get_write_principal(
     principal: PrincipalRef = Depends(get_principal),
-    break_glass_reason: str | None = Query(default=None, max_length=500),
+    break_glass_reason: str | None = Query(
+        default=None,
+        max_length=500,
+        description=(
+            "Why the protection of a protected environment is broken, up to 500 characters; "
+            "recorded in the audit log. Only a protected environment needs it."
+        ),
+    ),
 ) -> PrincipalRef:
     """Authenticate a write endpoint without a JSON body, honouring `?break_glass_reason=`.
 

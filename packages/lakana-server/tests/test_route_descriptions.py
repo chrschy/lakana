@@ -1,10 +1,14 @@
 """Tests for the user-facing description of a route and for the documented error answers."""
 
 import pytest
-from fastapi import APIRouter, FastAPI
+from fastapi import APIRouter, FastAPI, Query
 
 from lakana_server.api.responses import ERROR_MEANING, ErrorOut, errors
-from lakana_server.api.routing import AuthenticateFirstRoute, split_public_text
+from lakana_server.api.routing import (
+    AuthenticateFirstRoute,
+    parameter_docs,
+    split_public_text,
+)
 
 
 def test_the_public_text_ends_at_the_first_numpydoc_section() -> None:
@@ -119,3 +123,59 @@ def test_an_unknown_status_is_refused() -> None:
     """A code with no shared meaning is a mistake in the route, found at import."""
     with pytest.raises(KeyError):
         errors(418)
+
+
+def test_parameter_docs_read_the_parameters_section() -> None:
+    """Each parameter's text is its indented lines joined, with or without a type."""
+    doc = (
+        "Do it.\n\nParameters\n----------\nenv\n    Environment name.\n"
+        "limit : int\n    How many,\n    at most.\n\nReturns\n-------\nint\n    A number.\n"
+    )
+    assert parameter_docs(doc) == {"env": "Environment name.", "limit": "How many, at most."}
+    assert parameter_docs(None) == {}
+    assert parameter_docs("Do it.") == {}
+
+
+def test_a_request_parameter_takes_its_description_from_the_docstring() -> None:
+    """Path and query parameters show the text of the ``Parameters`` section; a set one wins."""
+    router = APIRouter(route_class=AuthenticateFirstRoute)
+
+    @router.get("/x/{name}")
+    def route(name: str, days: int = 7, own: str = Query(default="", description="Mine.")) -> None:
+        """Show the thing.
+
+        Parameters
+        ----------
+        name
+            The thing's name.
+        days
+            How far back to look.
+        own
+            Not used.
+        """
+
+    parameters = _app_with(router)["paths"]["/x/{name}"]["get"]["parameters"]
+    assert {p["name"]: p["description"] for p in parameters} == {
+        "name": "The thing's name.",
+        "days": "How far back to look.",
+        "own": "Mine.",
+    }
+
+
+def test_a_route_with_a_one_line_text_publishes_that_line_only() -> None:
+    """Without a description FastAPI would fall back to the whole docstring; here it does not."""
+    router = APIRouter(route_class=AuthenticateFirstRoute)
+
+    @router.get("/x")
+    def route() -> None:
+        """Show the thing.
+
+        Raises
+        ------
+        lakana_core.errors.NotFoundError
+            Mapped to 404.
+        """
+
+    operation = _app_with(router)["paths"]["/x"]["get"]
+    assert operation["summary"] == "Show the thing"
+    assert operation["description"] == "Show the thing."

@@ -152,7 +152,7 @@ def create_grant(
     return _to_out(created)
 
 
-@router.get("", response_model=list[GrantOut], responses=errors(403))
+@router.get("", response_model=list[GrantOut], responses=errors(403, 404))
 def list_grants(
     response: Response,
     principal_name: str | None = Query(default=None, max_length=255),
@@ -168,11 +168,13 @@ def list_grants(
 ) -> list[GrantOut]:
     """List grants.
 
-    Lists the active grants, newest first. Every filter is optional, and filters combine
-    with AND. The object filter matches exactly: `table` with `namespace` and `environment`
+    Lists the active grants, newest first. Every filter is optional and narrows the list,
+    except that `principal_name` and `group_name` exclude each other (422 when both are
+    given). The object filter matches exactly: `table` with `namespace` and `environment`
     lists the grants on that table, `namespace` with `environment` those on the namespace,
     `environment` alone those on the environment. Needs the `ADMIN` role on the instance.
-    The cursor of the next page is in the `X-Next-Cursor` response header.
+    Answers 404 when no principal or group has the name given. The cursor of the next page
+    is in the `X-Next-Cursor` response header.
 
     Parameters
     ----------

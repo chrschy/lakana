@@ -28,8 +28,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "requestBody": {
@@ -109,9 +111,11 @@
             "required": false,
             "schema": {
               "type": "boolean",
+              "description": "`true` lists the deleted environments whose files are not deleted yet, oldest deletion first, each with its `purge_after`, instead.",
               "default": false,
               "title": "Deleted"
-            }
+            },
+            "description": "`true` lists the deleted environments whose files are not deleted yet, oldest deletion first, each with its `purge_after`, instead."
           },
           {
             "name": "authorization",
@@ -126,8 +130,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -183,8 +189,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Name"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "authorization",
@@ -199,8 +207,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "requestBody": {
@@ -282,8 +292,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Name"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "authorization",
@@ -298,8 +310,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "requestBody": {
@@ -379,8 +393,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Name"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "authorization",
@@ -395,8 +411,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -466,8 +484,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Name"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "purge",
@@ -475,9 +495,11 @@
             "required": false,
             "schema": {
               "type": "boolean",
+              "description": "`true` makes everything due at once: the worker's next clean-up deletes the tables' files and the environment cannot be restored. Also accepted for an environment that is already deleted.",
               "default": false,
               "title": "Purge"
-            }
+            },
+            "description": "`true` makes everything due at once: the worker's next clean-up deletes the tables' files and the environment cannot be restored. Also accepted for an environment that is already deleted."
           },
           {
             "name": "authorization",
@@ -492,8 +514,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -575,8 +599,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Name"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "authorization",
@@ -591,8 +617,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "requestBody": {
@@ -674,8 +702,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Name"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "authorization",
@@ -690,8 +720,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -773,8 +805,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Name"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "authorization",
@@ -789,8 +823,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -862,8 +898,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name; a deleted environment is accepted.",
               "title": "Name"
-            }
+            },
+            "description": "Environment name; a deleted environment is accepted."
           },
           {
             "name": "older_than_days",
@@ -871,9 +909,11 @@
             "required": false,
             "schema": {
               "type": "integer",
+              "description": "A directory with a file newer than this many days (1 to 3,650) is listed as recent.",
               "default": 30,
               "title": "Older Than Days"
-            }
+            },
+            "description": "A directory with a file newer than this many days (1 to 3,650) is listed as recent."
           },
           {
             "name": "authorization",
@@ -888,8 +928,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -961,8 +1003,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name; a deleted environment is accepted.",
               "title": "Name"
-            }
+            },
+            "description": "Environment name; a deleted environment is accepted."
           },
           {
             "name": "authorization",
@@ -977,8 +1021,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "requestBody": {
@@ -1060,8 +1106,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "authorization",
@@ -1076,8 +1124,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "requestBody": {
@@ -1158,7 +1208,7 @@
           "namespaces"
         ],
         "summary": "List the namespaces of an environment",
-        "description": "Lists every namespace of the environment at every depth, not only the top level. Needs `READ_ENVIRONMENT`. Answers 404 when the environment does not exist.",
+        "description": "Lists every namespace of the environment at every depth, not only the top level. Needs `READ_NAMESPACE` on the environment. Answers 404 when the environment does not exist.",
         "operationId": "list_namespaces_api_v1_environments__env__namespaces_get",
         "parameters": [
           {
@@ -1167,8 +1217,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "authorization",
@@ -1183,8 +1235,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -1260,8 +1314,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "path",
@@ -1269,8 +1325,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Dot-joined namespace path.",
               "title": "Path"
-            }
+            },
+            "description": "Dot-joined namespace path."
           },
           {
             "name": "authorization",
@@ -1285,8 +1343,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -1356,8 +1416,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "path",
@@ -1365,8 +1427,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Dot-joined namespace path.",
               "title": "Path"
-            }
+            },
+            "description": "Dot-joined namespace path."
           },
           {
             "name": "break_glass_reason",
@@ -1382,8 +1446,10 @@
                   "type": "null"
                 }
               ],
+              "description": "Why the protection of a protected environment is broken, up to 500 characters; recorded in the audit log. Only a protected environment needs it.",
               "title": "Break Glass Reason"
-            }
+            },
+            "description": "Why the protection of a protected environment is broken, up to 500 characters; recorded in the audit log. Only a protected environment needs it."
           },
           {
             "name": "authorization",
@@ -1398,8 +1464,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -1465,7 +1533,7 @@
           "queries"
         ],
         "summary": "List the queries of an environment",
-        "description": "Lists running queries first, then queued ones, then, when asked, ended ones. A holder of `MANAGE_ENVIRONMENT` sees every query of the environment; everyone else sees the queries they submitted. The list never shows SQL text, error messages or results. The cursor of the next page is in the `X-Next-Cursor` response header and is absent on the last page; send the same filters with every page. Answers 404 when the environment does not exist. Answers 503 when a manager's page shows someone else's queries and the audit entry for that could not be written; nothing is listed then.",
+        "description": "Lists running queries first, then queued ones, then, when asked, ended ones. Needs `SUBMIT_QUERY` on the environment. A holder of `MANAGE_ENVIRONMENT` sees every query of the environment; everyone else sees the queries they submitted. The list never shows SQL text, error messages or results. The cursor of the next page is in the `X-Next-Cursor` response header and is absent on the last page; send the same filters with every page. Answers 404 when the environment does not exist. Answers 503 when a manager's page shows someone else's queries and the audit entry for that could not be written; nothing is listed then.",
         "operationId": "list_queries_api_v1_environments__env__queries_get",
         "parameters": [
           {
@@ -1474,8 +1542,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "include_ended",
@@ -1483,9 +1553,11 @@
             "required": false,
             "schema": {
               "type": "boolean",
+              "description": "Also list the queries that ended in the last 24 hours.",
               "default": false,
               "title": "Include Ended"
-            }
+            },
+            "description": "Also list the queries that ended in the last 24 hours."
           },
           {
             "name": "status",
@@ -1497,9 +1569,11 @@
                 "type": "string"
               },
               "maxItems": 16,
+              "description": "Only queries in these statuses (`queued`, `running`, `succeeded`, `failed`, `cancelled`; any letter case); repeat the parameter or separate the values with commas. An ended status lists the ended queries of the last 24 hours, with or without `include_ended`.",
               "default": [],
               "title": "Status"
-            }
+            },
+            "description": "Only queries in these statuses (`queued`, `running`, `succeeded`, `failed`, `cancelled`; any letter case); repeat the parameter or separate the values with commas. An ended status lists the ended queries of the last 24 hours, with or without `include_ended`."
           },
           {
             "name": "submitter",
@@ -1515,8 +1589,10 @@
                   "type": "null"
                 }
               ],
+              "description": "Only queries submitted by the principal with this name.",
               "title": "Submitter"
-            }
+            },
+            "description": "Only queries submitted by the principal with this name."
           },
           {
             "name": "limit",
@@ -1526,9 +1602,11 @@
               "type": "integer",
               "maximum": 200,
               "minimum": 1,
+              "description": "Most rows returned (1 to 200).",
               "default": 100,
               "title": "Limit"
-            }
+            },
+            "description": "Most rows returned (1 to 200)."
           },
           {
             "name": "cursor",
@@ -1544,8 +1622,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The `X-Next-Cursor` of the previous page.",
               "title": "Cursor"
-            }
+            },
+            "description": "The `X-Next-Cursor` of the previous page."
           },
           {
             "name": "authorization",
@@ -1560,8 +1640,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -1645,8 +1727,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "authorization",
@@ -1661,8 +1745,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "requestBody": {
@@ -1735,7 +1821,7 @@
           "queries"
         ],
         "summary": "Show a query's status",
-        "description": "Only the principal that submitted the query can see it; for anyone else the answer is 404, as for a query that does not exist.",
+        "description": "Needs `SUBMIT_QUERY` on the environment. Only the principal that submitted the query can see it; for anyone else the answer is 404, as for a query that does not exist.",
         "operationId": "get_query_status_api_v1_environments__env__queries__query_id__get",
         "parameters": [
           {
@@ -1744,8 +1830,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "query_id",
@@ -1754,8 +1842,10 @@
             "schema": {
               "type": "string",
               "format": "uuid",
+              "description": "The query's id.",
               "title": "Query Id"
-            }
+            },
+            "description": "The query's id."
           },
           {
             "name": "authorization",
@@ -1770,8 +1860,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -1834,7 +1926,7 @@
           "queries"
         ],
         "summary": "Cancel a query",
-        "description": "A queued query becomes `CANCELLED` at once. A running one is asked to stop: the answer is `RUNNING` and the worker ends it within a few seconds. A query that has already ended is answered with its status, which is not an error. The submitter and a holder of `MANAGE_ENVIRONMENT` may cancel; anyone else gets 404. Answers 422 for the write of a pipeline task (cancel the run instead) and for a maintenance run that has started, and 409 when a worker is starting or finishing the query at that moment: ask for the status and cancel again if it still runs.",
+        "description": "A queued query becomes `CANCELLED` at once. A running one is asked to stop: the answer is `RUNNING` and the worker ends it within a few seconds. A query that has already ended is answered with its status, which is not an error. The submitter and a holder of `MANAGE_ENVIRONMENT` may cancel; a caller without `SUBMIT_QUERY` gets 403 and anyone else 404. Answers 422 for the write of a pipeline task (cancel the run instead) and for a maintenance run that has started, and 409 when a worker is starting or finishing the query at that moment: ask for the status and cancel again if it still runs.",
         "operationId": "cancel_query_api_v1_environments__env__queries__query_id__cancel_post",
         "parameters": [
           {
@@ -1843,8 +1935,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "query_id",
@@ -1853,8 +1947,10 @@
             "schema": {
               "type": "string",
               "format": "uuid",
+              "description": "The query's id.",
               "title": "Query Id"
-            }
+            },
+            "description": "The query's id."
           },
           {
             "name": "authorization",
@@ -1869,8 +1965,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -1943,7 +2041,7 @@
           "queries"
         ],
         "summary": "Fetch a query's result",
-        "description": "Streams the rows of a finished read as an Arrow IPC stream. Only the submitter can fetch them; for anyone else the answer is 404. Answers 409 when the query has not finished, or succeeded without being a read (it wrote to a table, created a view or was maintenance): only a read has result rows.",
+        "description": "Streams the rows of a finished read as an Arrow IPC stream. Needs `SUBMIT_QUERY` on the environment. Only the submitter can fetch them; for anyone else the answer is 404. Answers 409 unless the query has succeeded, or when it succeeded without being a read (it wrote to a table, created a view or was maintenance): only a read has result rows.",
         "operationId": "get_query_result_api_v1_environments__env__queries__query_id__result_get",
         "parameters": [
           {
@@ -1952,8 +2050,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "query_id",
@@ -1962,8 +2062,10 @@
             "schema": {
               "type": "string",
               "format": "uuid",
+              "description": "The query's id.",
               "title": "Query Id"
-            }
+            },
+            "description": "The query's id."
           },
           {
             "name": "authorization",
@@ -1978,8 +2080,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -2059,8 +2163,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "path",
@@ -2068,8 +2174,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Dot-joined namespace path.",
               "title": "Path"
-            }
+            },
+            "description": "Dot-joined namespace path."
           },
           {
             "name": "authorization",
@@ -2084,8 +2192,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "requestBody": {
@@ -2166,7 +2276,7 @@
           "tables"
         ],
         "summary": "List the tables of a namespace",
-        "description": "Lists the tables of the namespace that the caller may read. Needs `READ_NAMESPACE`.",
+        "description": "Lists the tables of the namespace that the caller may read. Needs `READ_TABLE` on the namespace; tables the caller may not read are left out. Answers 404 when the namespace does not exist and 503 when the environment's storage cannot be reached (try again after `Retry-After`).",
         "operationId": "list_tables_api_v1_environments__env__namespaces__path__tables_get",
         "parameters": [
           {
@@ -2175,8 +2285,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "path",
@@ -2184,8 +2296,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Dot-joined namespace path.",
               "title": "Path"
-            }
+            },
+            "description": "Dot-joined namespace path."
           },
           {
             "name": "authorization",
@@ -2200,8 +2314,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -2249,6 +2365,16 @@
               }
             }
           },
+          "503": {
+            "description": "The server cannot do this right now; ask again after the time in `Retry-After`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -2268,7 +2394,7 @@
           "tables"
         ],
         "summary": "Show a table",
-        "description": "Needs `READ_TABLE`. Answers 404 when the table does not exist.",
+        "description": "Needs `READ_TABLE`. Answers 404 when the table does not exist and 503 when the environment's storage cannot be reached (try again after `Retry-After`).",
         "operationId": "get_table_api_v1_environments__env__namespaces__path__tables__name__get",
         "parameters": [
           {
@@ -2277,8 +2403,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "path",
@@ -2286,8 +2414,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Dot-joined namespace path.",
               "title": "Path"
-            }
+            },
+            "description": "Dot-joined namespace path."
           },
           {
             "name": "name",
@@ -2295,8 +2425,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Table name.",
               "title": "Name"
-            }
+            },
+            "description": "Table name."
           },
           {
             "name": "authorization",
@@ -2311,8 +2443,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -2356,6 +2490,16 @@
               }
             }
           },
+          "503": {
+            "description": "The server cannot do this right now; ask again after the time in `Retry-After`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -2382,8 +2526,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "path",
@@ -2391,8 +2537,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Dot-joined namespace path.",
               "title": "Path"
-            }
+            },
+            "description": "Dot-joined namespace path."
           },
           {
             "name": "name",
@@ -2400,8 +2548,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Table name.",
               "title": "Name"
-            }
+            },
+            "description": "Table name."
           },
           {
             "name": "authorization",
@@ -2416,8 +2566,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "requestBody": {
@@ -2488,7 +2640,7 @@
           "tables"
         ],
         "summary": "Drop a table",
-        "description": "Removes the table from the catalog at once, with its grants, row filters and column masks. A managed table keeps its files for the undo period (7 days unless the operator changed it), during which it can be restored, and then they are deleted; an external table's files and a view are never deleted. Answers 404 when the table does not exist.",
+        "description": "Removes the table from the catalog at once, with its grants, row filters and column masks. Needs `DROP_TABLE`. A managed table keeps its files for the undo period (7 days unless the operator changed it), during which it can be restored, and then they are deleted; an external table's files and a view are never deleted. With `purge` set, the files are due at once, the next clean-up deletes them and the table cannot be restored. Answers 404 when the table does not exist.",
         "operationId": "drop_table_api_v1_environments__env__namespaces__path__tables__name__delete",
         "parameters": [
           {
@@ -2497,8 +2649,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "path",
@@ -2506,8 +2660,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Dot-joined namespace path.",
               "title": "Path"
-            }
+            },
+            "description": "Dot-joined namespace path."
           },
           {
             "name": "name",
@@ -2515,8 +2671,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Table name.",
               "title": "Name"
-            }
+            },
+            "description": "Table name."
           },
           {
             "name": "purge",
@@ -2524,9 +2682,11 @@
             "required": false,
             "schema": {
               "type": "boolean",
+              "description": "`true` makes the files due at once: the next sweep deletes them, and the table cannot be restored.",
               "default": false,
               "title": "Purge"
-            }
+            },
+            "description": "`true` makes the files due at once: the next sweep deletes them, and the table cannot be restored."
           },
           {
             "name": "break_glass_reason",
@@ -2542,8 +2702,10 @@
                   "type": "null"
                 }
               ],
+              "description": "Why the protection of a protected environment is broken, up to 500 characters; recorded in the audit log. Only a protected environment needs it.",
               "title": "Break Glass Reason"
-            }
+            },
+            "description": "Why the protection of a protected environment is broken, up to 500 characters; recorded in the audit log. Only a protected environment needs it."
           },
           {
             "name": "authorization",
@@ -2558,8 +2720,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -2624,8 +2788,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "path",
@@ -2633,8 +2799,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Dot-joined namespace path.",
               "title": "Path"
-            }
+            },
+            "description": "Dot-joined namespace path."
           },
           {
             "name": "name",
@@ -2642,8 +2810,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Table name.",
               "title": "Name"
-            }
+            },
+            "description": "Table name."
           },
           {
             "name": "days",
@@ -2658,8 +2828,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The window of the readers in days, from 1 to the kept period (`LAKANA_TABLE_READS__KEEP_DAYS`, 90 by default); the default window (`LAKANA_TABLE_READS__DEFAULT_DAYS`, 30) when absent.",
               "title": "Days"
-            }
+            },
+            "description": "The window of the readers in days, from 1 to the kept period (`LAKANA_TABLE_READS__KEEP_DAYS`, 90 by default); the default window (`LAKANA_TABLE_READS__DEFAULT_DAYS`, 30) when absent."
           },
           {
             "name": "authorization",
@@ -2674,8 +2846,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -2757,8 +2931,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "path",
@@ -2766,8 +2942,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Dot-joined namespace path.",
               "title": "Path"
-            }
+            },
+            "description": "Dot-joined namespace path."
           },
           {
             "name": "name",
@@ -2775,8 +2953,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Table name.",
               "title": "Name"
-            }
+            },
+            "description": "Table name."
           },
           {
             "name": "column",
@@ -2784,8 +2964,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "The column's name; it must be in the table's schema.",
               "title": "Column"
-            }
+            },
+            "description": "The column's name; it must be in the table's schema."
           },
           {
             "name": "authorization",
@@ -2800,8 +2982,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "requestBody": {
@@ -2883,8 +3067,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "path",
@@ -2892,8 +3078,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Dot-joined namespace path.",
               "title": "Path"
-            }
+            },
+            "description": "Dot-joined namespace path."
           },
           {
             "name": "name",
@@ -2901,8 +3089,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Table name.",
               "title": "Name"
-            }
+            },
+            "description": "Table name."
           },
           {
             "name": "direction",
@@ -2914,9 +3104,11 @@
                 "downstream"
               ],
               "type": "string",
+              "description": "`upstream` (the default) or `downstream`.",
               "default": "upstream",
               "title": "Direction"
-            }
+            },
+            "description": "`upstream` (the default) or `downstream`."
           },
           {
             "name": "depth",
@@ -2926,9 +3118,11 @@
               "type": "integer",
               "maximum": 10,
               "minimum": 1,
+              "description": "Hops to walk, 1 to 10 (default 3).",
               "default": 3,
               "title": "Depth"
-            }
+            },
+            "description": "Hops to walk, 1 to 10 (default 3)."
           },
           {
             "name": "authorization",
@@ -2943,8 +3137,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -3016,8 +3212,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "path",
@@ -3025,8 +3223,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Dot-joined namespace path.",
               "title": "Path"
-            }
+            },
+            "description": "Dot-joined namespace path."
           },
           {
             "name": "name",
@@ -3034,8 +3234,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Table name.",
               "title": "Name"
-            }
+            },
+            "description": "Table name."
           },
           {
             "name": "authorization",
@@ -3050,8 +3252,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "requestBody": {
@@ -3133,8 +3337,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "path",
@@ -3142,8 +3348,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Dot-joined namespace path the table was dropped from.",
               "title": "Path"
-            }
+            },
+            "description": "Dot-joined namespace path the table was dropped from."
           },
           {
             "name": "name",
@@ -3151,8 +3359,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "The name the table had when it was dropped.",
               "title": "Name"
-            }
+            },
+            "description": "The name the table had when it was dropped."
           },
           {
             "name": "authorization",
@@ -3167,8 +3377,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "requestBody": {
@@ -3251,7 +3463,7 @@
           "tables"
         ],
         "summary": "Show a table's retention",
-        "description": "Shows how long the managed table is kept after its last activity, where that setting comes from and when the table expires. Answers 404 when the table does not exist and 422 for a view, an external table or an artifact.",
+        "description": "Shows how long the managed table is kept after its last activity, where that setting comes from and when the table expires. Needs `READ_TABLE`. Answers 404 when the table does not exist and 422 for a view, an external table or an artifact.",
         "operationId": "get_table_retention_api_v1_environments__env__namespaces__path__tables__name__retention_get",
         "parameters": [
           {
@@ -3260,8 +3472,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "path",
@@ -3269,8 +3483,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Dot-joined namespace path.",
               "title": "Path"
-            }
+            },
+            "description": "Dot-joined namespace path."
           },
           {
             "name": "name",
@@ -3278,8 +3494,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Table name.",
               "title": "Name"
-            }
+            },
+            "description": "Table name."
           },
           {
             "name": "authorization",
@@ -3294,8 +3512,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -3365,8 +3585,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "path",
@@ -3374,8 +3596,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Dot-joined namespace path.",
               "title": "Path"
-            }
+            },
+            "description": "Dot-joined namespace path."
           },
           {
             "name": "name",
@@ -3383,8 +3607,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Table name.",
               "title": "Name"
-            }
+            },
+            "description": "Table name."
           },
           {
             "name": "authorization",
@@ -3399,8 +3625,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "requestBody": {
@@ -3482,8 +3710,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "path",
@@ -3491,8 +3721,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Dot-joined namespace path.",
               "title": "Path"
-            }
+            },
+            "description": "Dot-joined namespace path."
           },
           {
             "name": "authorization",
@@ -3507,8 +3739,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "requestBody": {
@@ -3600,8 +3834,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "path",
@@ -3609,8 +3845,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Dot-joined namespace path.",
               "title": "Path"
-            }
+            },
+            "description": "Dot-joined namespace path."
           },
           {
             "name": "name",
@@ -3618,8 +3856,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Table name.",
               "title": "Name"
-            }
+            },
+            "description": "Table name."
           },
           {
             "name": "source",
@@ -3637,8 +3877,10 @@
                   "type": "null"
                 }
               ],
+              "description": "Dotted names of the tables the rows came from.",
               "title": "Source"
-            }
+            },
+            "description": "Dotted names of the tables the rows came from."
           },
           {
             "name": "source_version",
@@ -3656,8 +3898,10 @@
                   "type": "null"
                 }
               ],
+              "description": "``<version>:<dotted name>`` for each source that is an artifact, when the task read a specific version; the edge records it instead of the current one. A malformed value is a 422 before the body is read.",
               "title": "Source Version"
-            }
+            },
+            "description": "``<version>:<dotted name>`` for each source that is an artifact, when the task read a specific version; the edge records it instead of the current one. A malformed value is a 422 before the body is read."
           },
           {
             "name": "expected_snapshot_id",
@@ -3673,8 +3917,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The table's current snapshot as the caller read it, or `none`; the write commits only while that still holds (409 otherwise).",
               "title": "Expected Snapshot Id"
-            }
+            },
+            "description": "The table's current snapshot as the caller read it, or `none`; the write commits only while that still holds (409 otherwise)."
           },
           {
             "name": "break_glass_reason",
@@ -3690,8 +3936,10 @@
                   "type": "null"
                 }
               ],
+              "description": "Why the protection of a protected environment is broken, up to 500 characters; recorded in the audit log. Only a protected environment needs it.",
               "title": "Break Glass Reason"
-            }
+            },
+            "description": "Why the protection of a protected environment is broken, up to 500 characters; recorded in the audit log. Only a protected environment needs it."
           },
           {
             "name": "authorization",
@@ -3706,8 +3954,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -3808,7 +4058,7 @@
           "tables"
         ],
         "summary": "Replace all rows of a table",
-        "description": "Replaces every row of a managed table with the rows of an Arrow IPC stream, sent as the request body, in one snapshot; the table keeps its history. Takes the same `source` and `expected_snapshot_id` as the append. Needs `WRITE_TABLE` on the table. Answers 404 when the table or a source does not exist, 409 when `expected_snapshot_id` no longer matches, 413 for a body over the server's limit, 408 when the body arrives too slowly, 503 when the server is busy with other uploads (try again after `Retry-After`) and 422 when the upload does not fit the table (the message shows the difference).",
+        "description": "Replaces every row of a managed table with the rows of an Arrow IPC stream, sent as the request body, in one snapshot; the table keeps its history. Takes the same `source` and `expected_snapshot_id` as the append. Needs `WRITE_TABLE` on the table, and `CREATE_TABLE` as well to create a missing table with `expected_snapshot_id=none`. Answers 404 when the table or a source does not exist, 409 when `expected_snapshot_id` no longer matches, 413 for a body over the server's limit, 408 when the body arrives too slowly, 503 when the server is busy with other uploads (try again after `Retry-After`) and 422 when the upload does not fit the table (the message shows the difference).",
         "operationId": "replace_table_data_api_v1_environments__env__namespaces__path__tables__name__data_put",
         "parameters": [
           {
@@ -3817,8 +4067,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "path",
@@ -3826,8 +4078,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Dot-joined namespace path.",
               "title": "Path"
-            }
+            },
+            "description": "Dot-joined namespace path."
           },
           {
             "name": "name",
@@ -3835,8 +4089,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Table name.",
               "title": "Name"
-            }
+            },
+            "description": "Table name."
           },
           {
             "name": "evolve_schema",
@@ -3844,9 +4100,11 @@
             "required": false,
             "schema": {
               "type": "boolean",
+              "description": "Let the table adopt the upload's schema.",
               "default": false,
               "title": "Evolve Schema"
-            }
+            },
+            "description": "Let the table adopt the upload's schema."
           },
           {
             "name": "source",
@@ -3864,8 +4122,10 @@
                   "type": "null"
                 }
               ],
+              "description": "Dotted names of the tables the rows came from.",
               "title": "Source"
-            }
+            },
+            "description": "Dotted names of the tables the rows came from."
           },
           {
             "name": "source_version",
@@ -3883,8 +4143,10 @@
                   "type": "null"
                 }
               ],
+              "description": "``<version>:<dotted name>`` for each source that is an artifact, when the task read a specific version; the edge records it instead of the current one. A malformed value is a 422 before the body is read.",
               "title": "Source Version"
-            }
+            },
+            "description": "``<version>:<dotted name>`` for each source that is an artifact, when the task read a specific version; the edge records it instead of the current one. A malformed value is a 422 before the body is read."
           },
           {
             "name": "expected_snapshot_id",
@@ -3900,8 +4162,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The table's current snapshot as the caller read it, or `none`; the write commits only while that still holds (409 otherwise). On replace, `none` also creates a missing table from the upload.",
               "title": "Expected Snapshot Id"
-            }
+            },
+            "description": "The table's current snapshot as the caller read it, or `none`; the write commits only while that still holds (409 otherwise). On replace, `none` also creates a missing table from the upload."
           },
           {
             "name": "break_glass_reason",
@@ -3917,8 +4181,10 @@
                   "type": "null"
                 }
               ],
+              "description": "Why the protection of a protected environment is broken, up to 500 characters; recorded in the audit log. Only a protected environment needs it.",
               "title": "Break Glass Reason"
-            }
+            },
+            "description": "Why the protection of a protected environment is broken, up to 500 characters; recorded in the audit log. Only a protected environment needs it."
           },
           {
             "name": "authorization",
@@ -3933,8 +4199,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -4037,7 +4305,7 @@
           "tables"
         ],
         "summary": "List the dropped tables of a namespace",
-        "description": "Lists the tables dropped from the namespace whose files are not deleted yet and that can therefore still be restored. Answers 404 when the namespace does not exist.",
+        "description": "Lists the tables dropped from the namespace whose files are not deleted yet and that can therefore still be restored. Needs `READ_TABLE` on the namespace. Answers 404 when the namespace does not exist.",
         "operationId": "list_dropped_tables_api_v1_environments__env__namespaces__path__dropped_tables_get",
         "parameters": [
           {
@@ -4046,8 +4314,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "path",
@@ -4055,8 +4325,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Dot-joined namespace path.",
               "title": "Path"
-            }
+            },
+            "description": "Dot-joined namespace path."
           },
           {
             "name": "authorization",
@@ -4071,8 +4343,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -4139,7 +4413,7 @@
           "tables"
         ],
         "summary": "List the tables about to expire",
-        "description": "Lists the managed tables of the environment that expire within `within_days`, soonest first. Answers 404 when the environment does not exist and 422 when `within_days` is out of range.",
+        "description": "Lists the managed tables of the environment that expire within `within_days`, soonest first. Needs `READ_ENVIRONMENT`. Answers 404 when the environment does not exist and 422 when `within_days` is out of range.",
         "operationId": "list_expiring_tables_api_v1_environments__env__expiring_tables_get",
         "parameters": [
           {
@@ -4148,8 +4422,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "within_days",
@@ -4164,8 +4440,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The window, 1 to 3,650 days; the server's warning window (7 days by default), or 1 when that is 0, when absent.",
               "title": "Within Days"
-            }
+            },
+            "description": "The window, 1 to 3,650 days; the server's warning window (7 days by default), or 1 when that is 0, when absent."
           },
           {
             "name": "authorization",
@@ -4180,8 +4458,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -4257,8 +4537,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "q",
@@ -4326,8 +4608,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -4399,8 +4683,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "path",
@@ -4408,8 +4694,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Dot-joined namespace path.",
               "title": "Path"
-            }
+            },
+            "description": "Dot-joined namespace path."
           },
           {
             "name": "name",
@@ -4417,8 +4705,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Artifact name.",
               "title": "Name"
-            }
+            },
+            "description": "Artifact name."
           },
           {
             "name": "break_glass_reason",
@@ -4434,8 +4724,10 @@
                   "type": "null"
                 }
               ],
+              "description": "Why the protection of a protected environment is broken, up to 500 characters; recorded in the audit log. Only a protected environment needs it.",
               "title": "Break Glass Reason"
-            }
+            },
+            "description": "Why the protection of a protected environment is broken, up to 500 characters; recorded in the audit log. Only a protected environment needs it."
           },
           {
             "name": "authorization",
@@ -4450,8 +4742,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -4563,8 +4857,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "path",
@@ -4572,8 +4868,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Dot-joined namespace path.",
               "title": "Path"
-            }
+            },
+            "description": "Dot-joined namespace path."
           },
           {
             "name": "name",
@@ -4581,8 +4879,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Artifact name.",
               "title": "Name"
-            }
+            },
+            "description": "Artifact name."
           },
           {
             "name": "upload_id",
@@ -4591,8 +4891,10 @@
             "schema": {
               "type": "string",
               "format": "uuid",
+              "description": "The upload's id, as returned when it was begun.",
               "title": "Upload Id"
-            }
+            },
+            "description": "The upload's id, as returned when it was begun."
           },
           {
             "name": "sha256",
@@ -4601,8 +4903,10 @@
             "schema": {
               "type": "string",
               "pattern": "^[0-9a-f]{64}$",
+              "description": "The file's SHA-256, 64 lower-case hexadecimal digits.",
               "title": "Sha256"
-            }
+            },
+            "description": "The file's SHA-256, 64 lower-case hexadecimal digits."
           },
           {
             "name": "break_glass_reason",
@@ -4618,8 +4922,10 @@
                   "type": "null"
                 }
               ],
+              "description": "Why the protection of a protected environment is broken, up to 500 characters; recorded in the audit log. Only a protected environment needs it.",
               "title": "Break Glass Reason"
-            }
+            },
+            "description": "Why the protection of a protected environment is broken, up to 500 characters; recorded in the audit log. Only a protected environment needs it."
           },
           {
             "name": "authorization",
@@ -4634,8 +4940,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -4747,8 +5055,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "path",
@@ -4756,8 +5066,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Dot-joined namespace path.",
               "title": "Path"
-            }
+            },
+            "description": "Dot-joined namespace path."
           },
           {
             "name": "name",
@@ -4765,8 +5077,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Artifact name.",
               "title": "Name"
-            }
+            },
+            "description": "Artifact name."
           },
           {
             "name": "upload_id",
@@ -4775,8 +5089,10 @@
             "schema": {
               "type": "string",
               "format": "uuid",
+              "description": "The upload's id, as returned when it was begun.",
               "title": "Upload Id"
-            }
+            },
+            "description": "The upload's id, as returned when it was begun."
           },
           {
             "name": "break_glass_reason",
@@ -4792,8 +5108,10 @@
                   "type": "null"
                 }
               ],
+              "description": "Why the protection of a protected environment is broken, up to 500 characters; recorded in the audit log. Only a protected environment needs it.",
               "title": "Break Glass Reason"
-            }
+            },
+            "description": "Why the protection of a protected environment is broken, up to 500 characters; recorded in the audit log. Only a protected environment needs it."
           },
           {
             "name": "authorization",
@@ -4808,8 +5126,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "requestBody": {
@@ -4901,8 +5221,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "path",
@@ -4910,8 +5232,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Dot-joined namespace path.",
               "title": "Path"
-            }
+            },
+            "description": "Dot-joined namespace path."
           },
           {
             "name": "name",
@@ -4919,8 +5243,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Artifact name.",
               "title": "Name"
-            }
+            },
+            "description": "Artifact name."
           },
           {
             "name": "upload_id",
@@ -4929,8 +5255,10 @@
             "schema": {
               "type": "string",
               "format": "uuid",
+              "description": "The upload's id, as returned when it was begun.",
               "title": "Upload Id"
-            }
+            },
+            "description": "The upload's id, as returned when it was begun."
           },
           {
             "name": "authorization",
@@ -4945,8 +5273,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -5021,8 +5351,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "path",
@@ -5030,8 +5362,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Dot-joined namespace path.",
               "title": "Path"
-            }
+            },
+            "description": "Dot-joined namespace path."
           },
           {
             "name": "name",
@@ -5039,8 +5373,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Artifact name.",
               "title": "Name"
-            }
+            },
+            "description": "Artifact name."
           },
           {
             "name": "version",
@@ -5048,8 +5384,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "The version number: a positive number, not ``current``.",
               "title": "Version"
-            }
+            },
+            "description": "The version number: a positive number, not ``current``."
           },
           {
             "name": "break_glass_reason",
@@ -5065,8 +5403,10 @@
                   "type": "null"
                 }
               ],
+              "description": "Why the protection of a protected environment is broken, up to 500 characters; recorded in the audit log. Only a protected environment needs it.",
               "title": "Break Glass Reason"
-            }
+            },
+            "description": "Why the protection of a protected environment is broken, up to 500 characters; recorded in the audit log. Only a protected environment needs it."
           },
           {
             "name": "authorization",
@@ -5081,8 +5421,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -5162,8 +5504,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "path",
@@ -5171,8 +5515,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Dot-joined namespace path.",
               "title": "Path"
-            }
+            },
+            "description": "Dot-joined namespace path."
           },
           {
             "name": "name",
@@ -5180,8 +5526,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Artifact name.",
               "title": "Name"
-            }
+            },
+            "description": "Artifact name."
           },
           {
             "name": "version",
@@ -5189,8 +5537,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "A positive number, or ``current``.",
               "title": "Version"
-            }
+            },
+            "description": "A positive number, or ``current``."
           },
           {
             "name": "authorization",
@@ -5205,8 +5555,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -5278,8 +5630,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "path",
@@ -5287,8 +5641,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Dot-joined namespace path.",
               "title": "Path"
-            }
+            },
+            "description": "Dot-joined namespace path."
           },
           {
             "name": "name",
@@ -5296,8 +5652,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Artifact name.",
               "title": "Name"
-            }
+            },
+            "description": "Artifact name."
           },
           {
             "name": "break_glass_reason",
@@ -5313,8 +5671,10 @@
                   "type": "null"
                 }
               ],
+              "description": "Why the protection of a protected environment is broken, up to 500 characters; recorded in the audit log. Only a protected environment needs it.",
               "title": "Break Glass Reason"
-            }
+            },
+            "description": "Why the protection of a protected environment is broken, up to 500 characters; recorded in the audit log. Only a protected environment needs it."
           },
           {
             "name": "authorization",
@@ -5329,8 +5689,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -5403,8 +5765,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "path",
@@ -5412,8 +5776,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Dot-joined namespace path.",
               "title": "Path"
-            }
+            },
+            "description": "Dot-joined namespace path."
           },
           {
             "name": "name",
@@ -5421,8 +5787,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Artifact name.",
               "title": "Name"
-            }
+            },
+            "description": "Artifact name."
           },
           {
             "name": "authorization",
@@ -5437,8 +5805,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -5510,8 +5880,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "path",
@@ -5519,8 +5891,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Dot-joined namespace path.",
               "title": "Path"
-            }
+            },
+            "description": "Dot-joined namespace path."
           },
           {
             "name": "name",
@@ -5528,8 +5902,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Artifact name.",
               "title": "Name"
-            }
+            },
+            "description": "Artifact name."
           },
           {
             "name": "authorization",
@@ -5544,8 +5920,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -5621,8 +5999,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "path",
@@ -5630,8 +6010,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Dot-joined namespace path.",
               "title": "Path"
-            }
+            },
+            "description": "Dot-joined namespace path."
           },
           {
             "name": "name",
@@ -5639,8 +6021,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Artifact name.",
               "title": "Name"
-            }
+            },
+            "description": "Artifact name."
           },
           {
             "name": "version",
@@ -5648,8 +6032,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "A positive number (not ``current``).",
               "title": "Version"
-            }
+            },
+            "description": "A positive number (not ``current``)."
           },
           {
             "name": "sha256",
@@ -5658,8 +6044,10 @@
             "schema": {
               "type": "string",
               "pattern": "^[0-9a-f]{64}$",
+              "description": "The file's SHA-256, 64 lower-case hexadecimal digits.",
               "title": "Sha256"
-            }
+            },
+            "description": "The file's SHA-256, 64 lower-case hexadecimal digits."
           },
           {
             "name": "authorization",
@@ -5674,8 +6062,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -5753,8 +6143,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "name",
@@ -5770,8 +6162,10 @@
                   "type": "null"
                 }
               ],
+              "description": "Only this artifact, as ``namespace.name``.",
               "title": "Name"
-            }
+            },
+            "description": "Only this artifact, as ``namespace.name``."
           },
           {
             "name": "limit",
@@ -5781,9 +6175,11 @@
               "type": "integer",
               "maximum": 500,
               "minimum": 1,
+              "description": "Most uploads in the page (1 to 500).",
               "default": 100,
               "title": "Limit"
-            }
+            },
+            "description": "Most uploads in the page (1 to 500)."
           },
           {
             "name": "cursor",
@@ -5799,8 +6195,10 @@
                   "type": "null"
                 }
               ],
+              "description": "A previous page's `next_cursor`, to fetch the page after it. The same `name` must be sent with every page.",
               "title": "Cursor"
-            }
+            },
+            "description": "A previous page's `next_cursor`, to fetch the page after it. The same `name` must be sent with every page."
           },
           {
             "name": "authorization",
@@ -5815,8 +6213,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -5888,8 +6288,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "namespace",
@@ -5905,8 +6307,10 @@
                   "type": "null"
                 }
               ],
+              "description": "Only this dot-joined namespace path.",
               "title": "Namespace"
-            }
+            },
+            "description": "Only this dot-joined namespace path."
           },
           {
             "name": "authorization",
@@ -5921,8 +6325,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -6005,8 +6411,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "requestBody": {
@@ -6094,8 +6502,10 @@
                   "type": "null"
                 }
               ],
+              "description": "Only principals whose name contains this text, in any letter case.",
               "title": "Q"
-            }
+            },
+            "description": "Only principals whose name contains this text, in any letter case."
           },
           {
             "name": "limit",
@@ -6105,9 +6515,11 @@
               "type": "integer",
               "maximum": 200,
               "minimum": 1,
+              "description": "Most principals returned (1 to 200).",
               "default": 100,
               "title": "Limit"
-            }
+            },
+            "description": "Most principals returned (1 to 200)."
           },
           {
             "name": "cursor",
@@ -6123,8 +6535,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The `X-Next-Cursor` of the previous page; send the same `q`.",
               "title": "Cursor"
-            }
+            },
+            "description": "The `X-Next-Cursor` of the previous page; send the same `q`."
           },
           {
             "name": "authorization",
@@ -6139,8 +6553,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -6206,8 +6622,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Principal name.",
               "title": "Name"
-            }
+            },
+            "description": "Principal name."
           },
           {
             "name": "authorization",
@@ -6222,8 +6640,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -6284,7 +6704,7 @@
           "principals"
         ],
         "summary": "Deactivate a principal",
-        "description": "Stops the principal from signing in. The record stays, with every grant, token and audit entry that refers to it. Needs `MANAGE_PRINCIPAL` on the instance. Answers 404 when there is no principal of that name.",
+        "description": "Stops the principal from signing in. The record stays, with every grant, token and audit entry that refers to it. Needs `MANAGE_PRINCIPAL` on the instance. Answers 404 when there is no principal of that name and 409 when it is the last active administrator.",
         "operationId": "deactivate_principal_api_v1_principals__name__delete",
         "parameters": [
           {
@@ -6293,8 +6713,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Principal name.",
               "title": "Name"
-            }
+            },
+            "description": "Principal name."
           },
           {
             "name": "authorization",
@@ -6309,8 +6731,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -6347,6 +6771,16 @@
               }
             }
           },
+          "409": {
+            "description": "The request conflicts with the current state; the message says what to change.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -6375,8 +6809,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "The principal asked about.",
               "title": "Name"
-            }
+            },
+            "description": "The principal asked about."
           },
           {
             "name": "environment",
@@ -6392,8 +6828,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The object's environment.",
               "title": "Environment"
-            }
+            },
+            "description": "The object's environment."
           },
           {
             "name": "namespace",
@@ -6409,8 +6847,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The object's dot-joined namespace.",
               "title": "Namespace"
-            }
+            },
+            "description": "The object's dot-joined namespace."
           },
           {
             "name": "table",
@@ -6426,8 +6866,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The object's table.",
               "title": "Table"
-            }
+            },
+            "description": "The object's table."
           },
           {
             "name": "authorization",
@@ -6442,8 +6884,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -6522,8 +6966,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "requestBody": {
@@ -6611,8 +7057,10 @@
                   "type": "null"
                 }
               ],
+              "description": "Only groups whose name contains this text, in any letter case.",
               "title": "Q"
-            }
+            },
+            "description": "Only groups whose name contains this text, in any letter case."
           },
           {
             "name": "limit",
@@ -6622,9 +7070,11 @@
               "type": "integer",
               "maximum": 200,
               "minimum": 1,
+              "description": "Most groups returned (1 to 200).",
               "default": 100,
               "title": "Limit"
-            }
+            },
+            "description": "Most groups returned (1 to 200)."
           },
           {
             "name": "cursor",
@@ -6640,8 +7090,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The `X-Next-Cursor` of the previous page; send the same `q`.",
               "title": "Cursor"
-            }
+            },
+            "description": "The `X-Next-Cursor` of the previous page; send the same `q`."
           },
           {
             "name": "authorization",
@@ -6656,8 +7108,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -6723,8 +7177,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Group name.",
               "title": "Name"
-            }
+            },
+            "description": "Group name."
           },
           {
             "name": "authorization",
@@ -6739,8 +7195,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -6815,8 +7273,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "The group's name.",
               "title": "Name"
-            }
+            },
+            "description": "The group's name."
           },
           {
             "name": "authorization",
@@ -6831,8 +7291,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -6908,8 +7370,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Group name.",
               "title": "Name"
-            }
+            },
+            "description": "Group name."
           },
           {
             "name": "principal_name",
@@ -6917,8 +7381,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Principal to add.",
               "title": "Principal Name"
-            }
+            },
+            "description": "Principal to add."
           },
           {
             "name": "authorization",
@@ -6933,8 +7399,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -6997,8 +7465,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Group name.",
               "title": "Name"
-            }
+            },
+            "description": "Group name."
           },
           {
             "name": "principal_name",
@@ -7006,8 +7476,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Principal to remove.",
               "title": "Principal Name"
-            }
+            },
+            "description": "Principal to remove."
           },
           {
             "name": "authorization",
@@ -7022,8 +7494,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -7088,8 +7562,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "The principal the PAT authenticates as.",
               "title": "Name"
-            }
+            },
+            "description": "The principal the PAT authenticates as."
           },
           {
             "name": "authorization",
@@ -7104,8 +7580,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "requestBody": {
@@ -7185,8 +7663,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "The principal whose PATs to list.",
               "title": "Name"
-            }
+            },
+            "description": "The principal whose PATs to list."
           },
           {
             "name": "authorization",
@@ -7201,8 +7681,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -7278,8 +7760,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "The principal the PAT belongs to.",
               "title": "Name"
-            }
+            },
+            "description": "The principal the PAT belongs to."
           },
           {
             "name": "key_id",
@@ -7287,8 +7771,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "The PAT's key_id.",
               "title": "Key Id"
-            }
+            },
+            "description": "The PAT's key_id."
           },
           {
             "name": "authorization",
@@ -7303,8 +7789,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -7376,8 +7864,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "requestBody": {
@@ -7459,8 +7949,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "The task token's key_id.",
               "title": "Key Id"
-            }
+            },
+            "description": "The task token's key_id."
           },
           {
             "name": "authorization",
@@ -7475,8 +7967,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -7548,8 +8042,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "requestBody": {
@@ -7620,7 +8116,7 @@
           "grants"
         ],
         "summary": "List grants",
-        "description": "Lists the active grants, newest first. Every filter is optional, and filters combine with AND. The object filter matches exactly: `table` with `namespace` and `environment` lists the grants on that table, `namespace` with `environment` those on the namespace, `environment` alone those on the environment. Needs the `ADMIN` role on the instance. The cursor of the next page is in the `X-Next-Cursor` response header.",
+        "description": "Lists the active grants, newest first. Every filter is optional and narrows the list, except that `principal_name` and `group_name` exclude each other (422 when both are given). The object filter matches exactly: `table` with `namespace` and `environment` lists the grants on that table, `namespace` with `environment` those on the namespace, `environment` alone those on the environment. Needs the `ADMIN` role on the instance. Answers 404 when no principal or group has the name given. The cursor of the next page is in the `X-Next-Cursor` response header.",
         "operationId": "list_grants_api_v1_grants_get",
         "parameters": [
           {
@@ -7637,8 +8133,10 @@
                   "type": "null"
                 }
               ],
+              "description": "Only grants made to this principal.",
               "title": "Principal Name"
-            }
+            },
+            "description": "Only grants made to this principal."
           },
           {
             "name": "group_name",
@@ -7654,8 +8152,10 @@
                   "type": "null"
                 }
               ],
+              "description": "Only grants made to this group.",
               "title": "Group Name"
-            }
+            },
+            "description": "Only grants made to this group."
           },
           {
             "name": "action",
@@ -7671,8 +8171,10 @@
                   "type": "null"
                 }
               ],
+              "description": "Only grants that give this action (in any letter case): the action, or a role that carries it.",
               "title": "Action"
-            }
+            },
+            "description": "Only grants that give this action (in any letter case): the action, or a role that carries it."
           },
           {
             "name": "environment",
@@ -7688,8 +8190,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The environment of the object filter.",
               "title": "Environment"
-            }
+            },
+            "description": "The environment of the object filter."
           },
           {
             "name": "namespace",
@@ -7705,8 +8209,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The dot-joined namespace of the object filter.",
               "title": "Namespace"
-            }
+            },
+            "description": "The dot-joined namespace of the object filter."
           },
           {
             "name": "table",
@@ -7722,8 +8228,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The table of the object filter.",
               "title": "Table"
-            }
+            },
+            "description": "The table of the object filter."
           },
           {
             "name": "limit",
@@ -7733,9 +8241,11 @@
               "type": "integer",
               "maximum": 200,
               "minimum": 1,
+              "description": "Most grants returned (1 to 200).",
               "default": 100,
               "title": "Limit"
-            }
+            },
+            "description": "Most grants returned (1 to 200)."
           },
           {
             "name": "cursor",
@@ -7751,8 +8261,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The `X-Next-Cursor` of the previous page; send the same filters.",
               "title": "Cursor"
-            }
+            },
+            "description": "The `X-Next-Cursor` of the previous page; send the same filters."
           },
           {
             "name": "authorization",
@@ -7767,8 +8279,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -7806,6 +8320,16 @@
               }
             }
           },
+          "404": {
+            "description": "What the request names does not exist, or the caller may not know that it does.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -7835,8 +8359,10 @@
             "schema": {
               "type": "string",
               "format": "uuid",
+              "description": "The grant's id.",
               "title": "Grant Id"
-            }
+            },
+            "description": "The grant's id."
           },
           {
             "name": "authorization",
@@ -7851,8 +8377,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -7934,8 +8462,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "requestBody": {
@@ -8006,7 +8536,7 @@
           "row-filters"
         ],
         "summary": "List the row filters of a principal, group or table",
-        "description": "Give exactly one of `principal_name`, `group_name` or `environment` with `namespace` and `table`; a row filter always belongs to one table, so there is no list of all of them. Needs `MANAGE_POLICY` on the instance. Answers 422 when none of those combinations is given.",
+        "description": "Give exactly one of `principal_name`, `group_name` or `environment` with `namespace` and `table`; a row filter always belongs to one table, so there is no list of all of them. Needs `MANAGE_POLICY` on the instance. Answers 404 when no principal or group has the name given and 422 when none of those combinations is given.",
         "operationId": "list_row_filters_api_v1_row_filters_get",
         "parameters": [
           {
@@ -8022,8 +8552,10 @@
                   "type": "null"
                 }
               ],
+              "description": "List this principal's own direct filters.",
               "title": "Principal Name"
-            }
+            },
+            "description": "List this principal's own direct filters."
           },
           {
             "name": "group_name",
@@ -8038,8 +8570,10 @@
                   "type": "null"
                 }
               ],
+              "description": "List this group's own direct filters.",
               "title": "Group Name"
-            }
+            },
+            "description": "List this group's own direct filters."
           },
           {
             "name": "environment",
@@ -8054,8 +8588,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The environment to match, for a table-scoped listing.",
               "title": "Environment"
-            }
+            },
+            "description": "The environment to match, for a table-scoped listing."
           },
           {
             "name": "namespace",
@@ -8070,8 +8606,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The dot-joined namespace to match, for a table-scoped listing.",
               "title": "Namespace"
-            }
+            },
+            "description": "The dot-joined namespace to match, for a table-scoped listing."
           },
           {
             "name": "table",
@@ -8086,8 +8624,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The table to match, for a table-scoped listing.",
               "title": "Table"
-            }
+            },
+            "description": "The table to match, for a table-scoped listing."
           },
           {
             "name": "authorization",
@@ -8102,8 +8642,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -8141,6 +8683,16 @@
               }
             }
           },
+          "404": {
+            "description": "What the request names does not exist, or the caller may not know that it does.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -8170,8 +8722,10 @@
             "schema": {
               "type": "string",
               "format": "uuid",
+              "description": "The row filter's id.",
               "title": "Row Filter Id"
-            }
+            },
+            "description": "The row filter's id."
           },
           {
             "name": "authorization",
@@ -8186,8 +8740,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -8259,8 +8815,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "requestBody": {
@@ -8331,7 +8889,7 @@
           "column-masks"
         ],
         "summary": "List the column masks of a principal, group or table",
-        "description": "Give exactly one of `principal_name`, `group_name` or `environment` with `namespace` and `table`; a column mask always belongs to one table, so there is no list of all of them. Needs `MANAGE_POLICY` on the instance. Answers 422 when none of those combinations is given.",
+        "description": "Give exactly one of `principal_name`, `group_name` or `environment` with `namespace` and `table`; a column mask always belongs to one table, so there is no list of all of them. Needs `MANAGE_POLICY` on the instance. Answers 404 when no principal or group has the name given and 422 when none of those combinations is given.",
         "operationId": "list_column_masks_api_v1_column_masks_get",
         "parameters": [
           {
@@ -8347,8 +8905,10 @@
                   "type": "null"
                 }
               ],
+              "description": "List this principal's own direct masks.",
               "title": "Principal Name"
-            }
+            },
+            "description": "List this principal's own direct masks."
           },
           {
             "name": "group_name",
@@ -8363,8 +8923,10 @@
                   "type": "null"
                 }
               ],
+              "description": "List this group's own direct masks.",
               "title": "Group Name"
-            }
+            },
+            "description": "List this group's own direct masks."
           },
           {
             "name": "environment",
@@ -8379,8 +8941,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The environment to match, for a table-scoped listing.",
               "title": "Environment"
-            }
+            },
+            "description": "The environment to match, for a table-scoped listing."
           },
           {
             "name": "namespace",
@@ -8395,8 +8959,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The dot-joined namespace to match, for a table-scoped listing.",
               "title": "Namespace"
-            }
+            },
+            "description": "The dot-joined namespace to match, for a table-scoped listing."
           },
           {
             "name": "table",
@@ -8411,8 +8977,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The table to match, for a table-scoped listing.",
               "title": "Table"
-            }
+            },
+            "description": "The table to match, for a table-scoped listing."
           },
           {
             "name": "authorization",
@@ -8427,8 +8995,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -8466,6 +9036,16 @@
               }
             }
           },
+          "404": {
+            "description": "What the request names does not exist, or the caller may not know that it does.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -8495,8 +9075,10 @@
             "schema": {
               "type": "string",
               "format": "uuid",
+              "description": "The column mask's id.",
               "title": "Column Mask Id"
-            }
+            },
+            "description": "The column mask's id."
           },
           {
             "name": "authorization",
@@ -8511,8 +9093,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -8577,8 +9161,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "The environment this secret is scoped to.",
               "title": "Environment Name"
-            }
+            },
+            "description": "The environment this secret is scoped to."
           },
           {
             "name": "authorization",
@@ -8593,8 +9179,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "requestBody": {
@@ -8684,8 +9272,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "The environment whose secrets to list.",
               "title": "Environment Name"
-            }
+            },
+            "description": "The environment whose secrets to list."
           },
           {
             "name": "authorization",
@@ -8700,8 +9290,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -8768,7 +9360,7 @@
           "secrets"
         ],
         "summary": "Rotate a secret",
-        "description": "Replaces the secret's value; what uses it picks the new value up. Needs `MANAGE_SECRET` in the environment. Answers 404 when the environment or secret does not exist, 422 for a revoked secret, and 500 when the instance has no secrets master key.",
+        "description": "Replaces the secret's value; what uses it picks the new value up. Needs `MANAGE_SECRET` in the environment. Answers 404 when the environment does not exist or has no active secret of that name (a revoked secret counts as missing), and 500 when the instance has no secrets master key.",
         "operationId": "rotate_secret_api_v1_environments__environment_name__secrets__secret_name__patch",
         "parameters": [
           {
@@ -8777,8 +9369,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "The environment the secret is scoped to.",
               "title": "Environment Name"
-            }
+            },
+            "description": "The environment the secret is scoped to."
           },
           {
             "name": "secret_name",
@@ -8786,8 +9380,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "The secret's name.",
               "title": "Secret Name"
-            }
+            },
+            "description": "The secret's name."
           },
           {
             "name": "authorization",
@@ -8802,8 +9398,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "requestBody": {
@@ -8883,8 +9481,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "The environment the secret is scoped to.",
               "title": "Environment Name"
-            }
+            },
+            "description": "The environment the secret is scoped to."
           },
           {
             "name": "secret_name",
@@ -8892,8 +9492,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "The secret's name.",
               "title": "Secret Name"
-            }
+            },
+            "description": "The secret's name."
           },
           {
             "name": "authorization",
@@ -8908,8 +9510,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -8965,7 +9569,7 @@
           "secrets"
         ],
         "summary": "Bind a secret to a package index, repository or environment",
-        "description": "Chooses what uses the secret: a package index or repository by name, or the environment itself. Needs `MANAGE_SECRET` in the environment. Answers 404 when the environment, secret or target does not exist and 422 for a revoked secret, a name given for the environment use, or none for an index or repository.",
+        "description": "Chooses what uses the secret: a package index or repository by name, or the environment itself. Needs `MANAGE_SECRET` in the environment. Answers 404 when the environment, the active secret (a revoked secret counts as missing) or the target does not exist and 422 for a name given for the environment use, none for an index or repository, or the environment's storage secret bound to an index or repository.",
         "operationId": "bind_secret_api_v1_environments__environment_name__secrets__secret_name__use_put",
         "parameters": [
           {
@@ -8974,8 +9578,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "The environment the secret is scoped to.",
               "title": "Environment Name"
-            }
+            },
+            "description": "The environment the secret is scoped to."
           },
           {
             "name": "secret_name",
@@ -8983,8 +9589,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "The secret's name.",
               "title": "Secret Name"
-            }
+            },
+            "description": "The secret's name."
           },
           {
             "name": "authorization",
@@ -8999,8 +9607,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "requestBody": {
@@ -9089,8 +9699,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "requestBody": {
@@ -9177,8 +9789,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -9244,8 +9858,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "The repository's registered name.",
               "title": "Name"
-            }
+            },
+            "description": "The repository's registered name."
           },
           {
             "name": "authorization",
@@ -9260,8 +9876,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -9331,8 +9949,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "The repository's registered name.",
               "title": "Name"
-            }
+            },
+            "description": "The repository's registered name."
           },
           {
             "name": "authorization",
@@ -9347,8 +9967,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "requestBody": {
@@ -9428,8 +10050,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "The repository's registered name.",
               "title": "Name"
-            }
+            },
+            "description": "The repository's registered name."
           },
           {
             "name": "authorization",
@@ -9444,8 +10068,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -9527,8 +10153,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "requestBody": {
@@ -9615,8 +10243,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -9682,8 +10312,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "The package index's registered name.",
               "title": "Name"
-            }
+            },
+            "description": "The package index's registered name."
           },
           {
             "name": "authorization",
@@ -9698,8 +10330,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -9769,8 +10403,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "The package index's registered name.",
               "title": "Name"
-            }
+            },
+            "description": "The package index's registered name."
           },
           {
             "name": "authorization",
@@ -9785,8 +10421,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "requestBody": {
@@ -9876,8 +10514,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "The package index's registered name.",
               "title": "Name"
-            }
+            },
+            "description": "The package index's registered name."
           },
           {
             "name": "authorization",
@@ -9892,8 +10532,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -9958,8 +10600,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "authorization",
@@ -9974,8 +10618,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "requestBody": {
@@ -10055,8 +10701,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "repository",
@@ -10072,8 +10720,10 @@
                   "type": "null"
                 }
               ],
+              "description": "Only this repository's deploys.",
               "title": "Repository"
-            }
+            },
+            "description": "Only this repository's deploys."
           },
           {
             "name": "limit",
@@ -10083,9 +10733,11 @@
               "type": "integer",
               "maximum": 200,
               "minimum": 1,
+              "description": "Most deploys returned (1 to 200).",
               "default": 100,
               "title": "Limit"
-            }
+            },
+            "description": "Most deploys returned (1 to 200)."
           },
           {
             "name": "cursor",
@@ -10101,8 +10753,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The `X-Next-Cursor` of the previous page.",
               "title": "Cursor"
-            }
+            },
+            "description": "The `X-Next-Cursor` of the previous page."
           },
           {
             "name": "authorization",
@@ -10117,8 +10771,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -10194,8 +10850,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "deploy_id",
@@ -10204,8 +10862,10 @@
             "schema": {
               "type": "string",
               "format": "uuid",
+              "description": "The deploy's id, as returned when it was queued.",
               "title": "Deploy Id"
-            }
+            },
+            "description": "The deploy's id, as returned when it was queued."
           },
           {
             "name": "authorization",
@@ -10220,8 +10880,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -10293,8 +10955,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "authorization",
@@ -10309,8 +10973,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -10386,8 +11052,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "repo",
@@ -10395,8 +11063,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Repository name.",
               "title": "Repo"
-            }
+            },
+            "description": "Repository name."
           },
           {
             "name": "authorization",
@@ -10411,8 +11081,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "requestBody": {
@@ -10492,8 +11164,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "repo",
@@ -10501,8 +11175,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Repository name.",
               "title": "Repo"
-            }
+            },
+            "description": "Repository name."
           },
           {
             "name": "authorization",
@@ -10517,8 +11193,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -10590,8 +11268,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "repo",
@@ -10599,8 +11279,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Repository name.",
               "title": "Repo"
-            }
+            },
+            "description": "Repository name."
           },
           {
             "name": "authorization",
@@ -10615,8 +11297,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -10691,8 +11375,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "project_version_id",
@@ -10701,8 +11387,10 @@
             "schema": {
               "type": "string",
               "format": "uuid",
+              "description": "The project version's id.",
               "title": "Project Version Id"
-            }
+            },
+            "description": "The project version's id."
           },
           {
             "name": "authorization",
@@ -10717,8 +11405,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -10790,8 +11480,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "authorization",
@@ -10806,8 +11498,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -10879,8 +11573,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "authorization",
@@ -10895,8 +11591,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "requestBody": {
@@ -10986,8 +11684,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "repository",
@@ -11003,8 +11703,10 @@
                   "type": "null"
                 }
               ],
+              "description": "Only this repository's runs.",
               "title": "Repository"
-            }
+            },
+            "description": "Only this repository's runs."
           },
           {
             "name": "status",
@@ -11016,9 +11718,11 @@
                 "type": "string"
               },
               "maxItems": 16,
+              "description": "Only runs in these statuses (`queued`, `running`, `succeeded`, `failed`, `cancelled`); repeat the parameter or separate the values with commas.",
               "default": [],
               "title": "Status"
-            }
+            },
+            "description": "Only runs in these statuses (`queued`, `running`, `succeeded`, `failed`, `cancelled`); repeat the parameter or separate the values with commas."
           },
           {
             "name": "trigger",
@@ -11030,9 +11734,11 @@
                 "type": "string"
               },
               "maxItems": 16,
+              "description": "Only runs started this way (`schedule`, `api`, `manual`); repeat or separate with commas.",
               "default": [],
               "title": "Trigger"
-            }
+            },
+            "description": "Only runs started this way (`schedule`, `api`, `manual`); repeat or separate with commas."
           },
           {
             "name": "job",
@@ -11048,8 +11754,10 @@
                   "type": "null"
                 }
               ],
+              "description": "Only runs of this job.",
               "title": "Job"
-            }
+            },
+            "description": "Only runs of this job."
           },
           {
             "name": "since",
@@ -11065,8 +11773,10 @@
                   "type": "null"
                 }
               ],
+              "description": "Only runs created at or after this ISO 8601 time, with a time zone (`2026-10-18T00:00:00Z`).",
               "title": "Since"
-            }
+            },
+            "description": "Only runs created at or after this ISO 8601 time, with a time zone (`2026-10-18T00:00:00Z`)."
           },
           {
             "name": "limit",
@@ -11076,9 +11786,11 @@
               "type": "integer",
               "maximum": 200,
               "minimum": 1,
+              "description": "Most runs returned (1 to 200).",
               "default": 100,
               "title": "Limit"
-            }
+            },
+            "description": "Most runs returned (1 to 200)."
           },
           {
             "name": "cursor",
@@ -11094,8 +11806,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The `X-Next-Cursor` of the previous page.",
               "title": "Cursor"
-            }
+            },
+            "description": "The `X-Next-Cursor` of the previous page."
           },
           {
             "name": "authorization",
@@ -11110,8 +11824,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -11187,8 +11903,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "run_id",
@@ -11197,8 +11915,10 @@
             "schema": {
               "type": "string",
               "format": "uuid",
+              "description": "The run's id.",
               "title": "Run Id"
-            }
+            },
+            "description": "The run's id."
           },
           {
             "name": "authorization",
@@ -11213,8 +11933,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -11286,8 +12008,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "run_id",
@@ -11296,8 +12020,10 @@
             "schema": {
               "type": "string",
               "format": "uuid",
+              "description": "The run's id.",
               "title": "Run Id"
-            }
+            },
+            "description": "The run's id."
           },
           {
             "name": "authorization",
@@ -11312,8 +12038,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -11389,8 +12117,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "run_id",
@@ -11399,8 +12129,10 @@
             "schema": {
               "type": "string",
               "format": "uuid",
+              "description": "The run's id.",
               "title": "Run Id"
-            }
+            },
+            "description": "The run's id."
           },
           {
             "name": "authorization",
@@ -11415,8 +12147,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "requestBody": {
@@ -11508,8 +12242,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "table",
@@ -11525,8 +12261,10 @@
                   "type": "null"
                 }
               ],
+              "description": "Only this table's results (dotted name).",
               "title": "Table"
-            }
+            },
+            "description": "Only this table's results (dotted name)."
           },
           {
             "name": "limit",
@@ -11536,9 +12274,11 @@
               "type": "integer",
               "maximum": 200,
               "minimum": 1,
+              "description": "Most results returned (1 to 200).",
               "default": 50,
               "title": "Limit"
-            }
+            },
+            "description": "Most results returned (1 to 200)."
           },
           {
             "name": "cursor",
@@ -11554,8 +12294,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The `next_cursor` of the previous page; send the same `table` with every page.",
               "title": "Cursor"
-            }
+            },
+            "description": "The `next_cursor` of the previous page; send the same `table` with every page."
           },
           {
             "name": "authorization",
@@ -11570,8 +12312,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -11643,8 +12387,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "run_id",
@@ -11653,8 +12399,10 @@
             "schema": {
               "type": "string",
               "format": "uuid",
+              "description": "The run's id.",
               "title": "Run Id"
-            }
+            },
+            "description": "The run's id."
           },
           {
             "name": "authorization",
@@ -11669,8 +12417,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -11752,8 +12502,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "run_id",
@@ -11762,8 +12514,10 @@
             "schema": {
               "type": "string",
               "format": "uuid",
+              "description": "The run to resume.",
               "title": "Run Id"
-            }
+            },
+            "description": "The run to resume."
           },
           {
             "name": "authorization",
@@ -11778,8 +12532,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -11861,8 +12617,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "run_id",
@@ -11871,8 +12629,10 @@
             "schema": {
               "type": "string",
               "format": "uuid",
+              "description": "The run's id.",
               "title": "Run Id"
-            }
+            },
+            "description": "The run's id."
           },
           {
             "name": "asset",
@@ -11880,8 +12640,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "The task's dotted table name.",
               "title": "Asset"
-            }
+            },
+            "description": "The task's dotted table name."
           },
           {
             "name": "offset",
@@ -11915,8 +12677,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -11988,8 +12752,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "repository",
@@ -12005,8 +12771,10 @@
                   "type": "null"
                 }
               ],
+              "description": "Only this repository's jobs.",
               "title": "Repository"
-            }
+            },
+            "description": "Only this repository's jobs."
           },
           {
             "name": "authorization",
@@ -12021,8 +12789,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -12098,8 +12868,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "job",
@@ -12107,10 +12879,10 @@
             "required": true,
             "schema": {
               "type": "string",
-              "minLength": 1,
-              "maxLength": 255,
+              "description": "The job's name.",
               "title": "Job"
-            }
+            },
+            "description": "The job's name."
           },
           {
             "name": "repository",
@@ -12126,8 +12898,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The repository; needed only when several repositories declare the job.",
               "title": "Repository"
-            }
+            },
+            "description": "The repository; needed only when several repositories declare the job."
           },
           {
             "name": "authorization",
@@ -12142,8 +12916,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -12225,8 +13001,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "job",
@@ -12234,10 +13012,10 @@
             "required": true,
             "schema": {
               "type": "string",
-              "minLength": 1,
-              "maxLength": 255,
+              "description": "The job's name.",
               "title": "Job"
-            }
+            },
+            "description": "The job's name."
           },
           {
             "name": "authorization",
@@ -12252,8 +13030,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "requestBody": {
@@ -12355,8 +13135,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "job",
@@ -12364,10 +13146,10 @@
             "required": true,
             "schema": {
               "type": "string",
-              "minLength": 1,
-              "maxLength": 255,
+              "description": "The job's name.",
               "title": "Job"
-            }
+            },
+            "description": "The job's name."
           },
           {
             "name": "authorization",
@@ -12382,8 +13164,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "requestBody": {
@@ -12475,8 +13259,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "job",
@@ -12484,10 +13270,10 @@
             "required": true,
             "schema": {
               "type": "string",
-              "minLength": 1,
-              "maxLength": 255,
+              "description": "The job's name.",
               "title": "Job"
-            }
+            },
+            "description": "The job's name."
           },
           {
             "name": "authorization",
@@ -12502,8 +13288,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "requestBody": {
@@ -12585,8 +13373,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "job",
@@ -12594,10 +13384,10 @@
             "required": true,
             "schema": {
               "type": "string",
-              "minLength": 1,
-              "maxLength": 255,
+              "description": "The job's name.",
               "title": "Job"
-            }
+            },
+            "description": "The job's name."
           },
           {
             "name": "authorization",
@@ -12612,8 +13402,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "requestBody": {
@@ -12705,8 +13497,10 @@
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Environment name.",
               "title": "Env"
-            }
+            },
+            "description": "Environment name."
           },
           {
             "name": "delivery_id",
@@ -12715,8 +13509,10 @@
             "schema": {
               "type": "string",
               "format": "uuid",
+              "description": "The notification delivery's id, as returned when the test was queued.",
               "title": "Delivery Id"
-            }
+            },
+            "description": "The notification delivery's id, as returned when the test was queued."
           },
           {
             "name": "authorization",
@@ -12731,8 +13527,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -12811,8 +13609,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -12881,8 +13681,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -12955,8 +13757,10 @@
                   "type": "null"
                 }
               ],
+              "description": "Only return events of this type, if given.",
               "title": "Event Type"
-            }
+            },
+            "description": "Only return events of this type, if given."
           },
           {
             "name": "environment",
@@ -12971,8 +13775,10 @@
                   "type": "null"
                 }
               ],
+              "description": "Only return events whose securable environment matches, if given.",
               "title": "Environment"
-            }
+            },
+            "description": "Only return events whose securable environment matches, if given."
           },
           {
             "name": "principal_id",
@@ -12988,8 +13794,10 @@
                   "type": "null"
                 }
               ],
+              "description": "Only return events attributed to this principal, if given.",
               "title": "Principal Id"
-            }
+            },
+            "description": "Only return events attributed to this principal, if given."
           },
           {
             "name": "since",
@@ -13005,8 +13813,10 @@
                   "type": "null"
                 }
               ],
+              "description": "Only return events at or after this time, if given.",
               "title": "Since"
-            }
+            },
+            "description": "Only return events at or after this time, if given."
           },
           {
             "name": "until",
@@ -13022,8 +13832,10 @@
                   "type": "null"
                 }
               ],
+              "description": "Only return events at or before this time, if given.",
               "title": "Until"
-            }
+            },
+            "description": "Only return events at or before this time, if given."
           },
           {
             "name": "limit",
@@ -13033,9 +13845,11 @@
               "type": "integer",
               "maximum": 500,
               "minimum": 1,
+              "description": "The maximum number of events to return. Defaults to 100, must be between 1 and 500 inclusive; an out-of-range value is rejected with a 422 rather than silently clamped or ignored.",
               "default": 100,
               "title": "Limit"
-            }
+            },
+            "description": "The maximum number of events to return. Defaults to 100, must be between 1 and 500 inclusive; an out-of-range value is rejected with a 422 rather than silently clamped or ignored."
           },
           {
             "name": "cursor",
@@ -13051,8 +13865,10 @@
                   "type": "null"
                 }
               ],
+              "description": "A previous page's `next_cursor`, to fetch the page after it.",
               "title": "Cursor"
-            }
+            },
+            "description": "A previous page's `next_cursor`, to fetch the page after it."
           },
           {
             "name": "authorization",
@@ -13067,8 +13883,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -13147,8 +13965,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "requestBody": {
@@ -13235,8 +14055,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -13309,8 +14131,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "requestBody": {
@@ -13383,8 +14207,10 @@
             "schema": {
               "type": "string",
               "format": "uuid",
+              "description": "The CI trust rule's id.",
               "title": "Rule Id"
-            }
+            },
+            "description": "The CI trust rule's id."
           },
           {
             "name": "authorization",
@@ -13399,8 +14225,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -13471,8 +14299,10 @@
             "schema": {
               "type": "string",
               "format": "uuid",
+              "description": "The CI trust rule's id.",
               "title": "Rule Id"
-            }
+            },
+            "description": "The CI trust rule's id."
           },
           {
             "name": "authorization",
@@ -13487,8 +14317,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "requestBody": {
@@ -13569,8 +14401,10 @@
             "schema": {
               "type": "string",
               "format": "uuid",
+              "description": "The CI trust rule's id.",
               "title": "Rule Id"
-            }
+            },
+            "description": "The CI trust rule's id."
           },
           {
             "name": "authorization",
@@ -13585,8 +14419,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -13652,8 +14488,10 @@
             "schema": {
               "type": "string",
               "format": "uuid",
+              "description": "The CI trust rule's id.",
               "title": "Rule Id"
-            }
+            },
+            "description": "The CI trust rule's id."
           },
           {
             "name": "authorization",
@@ -13668,8 +14506,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -13742,8 +14582,10 @@
             "schema": {
               "type": "string",
               "format": "uuid",
+              "description": "The CI trust rule's id.",
               "title": "Rule Id"
-            }
+            },
+            "description": "The CI trust rule's id."
           },
           {
             "name": "authorization",
@@ -13758,8 +14600,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -13922,8 +14766,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {
@@ -13982,8 +14828,10 @@
                   "type": "null"
                 }
               ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
               "title": "Authorization"
-            }
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
           }
         ],
         "responses": {

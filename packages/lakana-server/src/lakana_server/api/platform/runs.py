@@ -251,7 +251,7 @@ def get_run(
     env
         Environment name.
     run_id
-        The run.
+        The run's id.
     principal
         The authenticated caller.
     service
@@ -284,7 +284,7 @@ def get_run_checks(
     env
         Environment name.
     run_id
-        The run.
+        The run's id.
     principal
         The authenticated caller.
     service
@@ -327,7 +327,7 @@ def show_check_rows(
     env
         Environment name.
     run_id
-        The run.
+        The run's id.
     body
         The check, ``<namespace>.<table>/<check>``.
     principal
@@ -416,7 +416,7 @@ def cancel_run(
     env
         Environment name.
     run_id
-        The run.
+        The run's id.
     principal
         The authenticated caller.
     service
@@ -491,7 +491,7 @@ def task_log(
     env
         Environment name.
     run_id
-        The run.
+        The run's id.
     asset
         The task's dotted table name.
     offset

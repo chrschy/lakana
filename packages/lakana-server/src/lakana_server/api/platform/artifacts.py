@@ -715,7 +715,7 @@ async def put_blob(
     name
         Artifact name.
     upload_id
-        The upload.
+        The upload's id, as returned when it was begun.
     sha256
         The file's SHA-256, 64 lower-case hexadecimal digits.
     principal
@@ -805,7 +805,7 @@ def commit_upload(
     name
         Artifact name.
     upload_id
-        The upload.
+        The upload's id, as returned when it was begun.
     body
         What the version was made from, for lineage.
     principal
@@ -866,7 +866,7 @@ def abort_upload(
     name
         Artifact name.
     upload_id
-        The upload.
+        The upload's id, as returned when it was begun.
     principal
         The authenticated caller.
     service

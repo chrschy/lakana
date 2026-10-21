@@ -909,7 +909,7 @@ def create_table(
     return _to_out(path, loaded)
 
 
-@router.get("", response_model=list[TableOut], responses=errors(403, 404))
+@router.get("", response_model=list[TableOut], responses=errors(403, 404, 503))
 def list_tables(
     env: str,
     path: str,
@@ -918,7 +918,10 @@ def list_tables(
 ) -> list[TableOut]:
     """List the tables of a namespace.
 
-    Lists the tables of the namespace that the caller may read. Needs `READ_NAMESPACE`.
+    Lists the tables of the namespace that the caller may read. Needs `READ_TABLE` on the
+    namespace; tables the caller may not read are left out. Answers 404 when the namespace
+    does not exist and 503 when the environment's storage cannot be reached (try again after
+    `Retry-After`).
 
     Parameters
     ----------
@@ -949,7 +952,7 @@ def list_tables(
     ]
 
 
-@router.get("/{name}", response_model=TableOut, responses=errors(403, 404))
+@router.get("/{name}", response_model=TableOut, responses=errors(403, 404, 503))
 def get_table(
     env: str,
     path: str,
@@ -959,7 +962,8 @@ def get_table(
 ) -> TableOut:
     """Show a table.
 
-    Needs `READ_TABLE`. Answers 404 when the table does not exist.
+    Needs `READ_TABLE`. Answers 404 when the table does not exist and 503 when the
+    environment's storage cannot be reached (try again after `Retry-After`).
 
     Parameters
     ----------
@@ -1308,9 +1312,11 @@ def drop_table(
     """Drop a table.
 
     Removes the table from the catalog at once, with its grants, row filters and column
-    masks. A managed table keeps its files for the undo period (7 days unless the operator
-    changed it), during which it can be restored, and then they are deleted; an external
-    table's files and a view are never deleted. Answers 404 when the table does not exist.
+    masks. Needs `DROP_TABLE`. A managed table keeps its files for the undo period (7 days
+    unless the operator changed it), during which it can be restored, and then they are
+    deleted; an external table's files and a view are never deleted. With `purge` set, the
+    files are due at once, the next clean-up deletes them and the table cannot be restored.
+    Answers 404 when the table does not exist.
 
     Parameters
     ----------
@@ -1361,7 +1367,7 @@ def undrop_table(
     path
         Dot-joined namespace path the table was dropped from.
     name
-        The name it had.
+        The name the table had when it was dropped.
     body
         A new name, if its own is taken, and a break-glass reason.
     principal
@@ -1405,8 +1411,8 @@ def get_table_retention(
     """Show a table's retention.
 
     Shows how long the managed table is kept after its last activity, where that setting
-    comes from and when the table expires. Answers 404 when the table does not exist and 422
-    for a view, an external table or an artifact.
+    comes from and when the table expires. Needs `READ_TABLE`. Answers 404 when the table
+    does not exist and 422 for a view, an external table or an artifact.
 
     Parameters
     ----------
@@ -1503,8 +1509,8 @@ def list_expiring_tables(
     """List the tables about to expire.
 
     Lists the managed tables of the environment that expire within `within_days`, soonest
-    first. Answers 404 when the environment does not exist and 422 when `within_days` is out
-    of range.
+    first. Needs `READ_ENVIRONMENT`. Answers 404 when the environment does not exist and 422
+    when `within_days` is out of range.
 
     Parameters
     ----------
@@ -1550,7 +1556,8 @@ def list_dropped_tables(
     """List the dropped tables of a namespace.
 
     Lists the tables dropped from the namespace whose files are not deleted yet and that can
-    therefore still be restored. Answers 404 when the namespace does not exist.
+    therefore still be restored. Needs `READ_TABLE` on the namespace. Answers 404 when the
+    namespace does not exist.
 
     Parameters
     ----------
@@ -1779,11 +1786,12 @@ async def replace_table_data(
 
     Replaces every row of a managed table with the rows of an Arrow IPC stream, sent as the
     request body, in one snapshot; the table keeps its history. Takes the same `source` and
-    `expected_snapshot_id` as the append. Needs `WRITE_TABLE` on the table. Answers 404 when
-    the table or a source does not exist, 409 when `expected_snapshot_id` no longer matches,
-    413 for a body over the server's limit, 408 when the body arrives too slowly, 503 when
-    the server is busy with other uploads (try again after `Retry-After`) and 422 when the
-    upload does not fit the table (the message shows the difference).
+    `expected_snapshot_id` as the append. Needs `WRITE_TABLE` on the table, and
+    `CREATE_TABLE` as well to create a missing table with `expected_snapshot_id=none`.
+    Answers 404 when the table or a source does not exist, 409 when `expected_snapshot_id`
+    no longer matches, 413 for a body over the server's limit, 408 when the body arrives too
+    slowly, 503 when the server is busy with other uploads (try again after `Retry-After`)
+    and 422 when the upload does not fit the table (the message shows the difference).
 
     Parameters
     ----------

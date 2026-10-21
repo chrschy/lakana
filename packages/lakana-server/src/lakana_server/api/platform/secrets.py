@@ -197,8 +197,9 @@ def rotate_secret(
     """Rotate a secret.
 
     Replaces the secret's value; what uses it picks the new value up. Needs `MANAGE_SECRET`
-    in the environment. Answers 404 when the environment or secret does not exist, 422 for a
-    revoked secret, and 500 when the instance has no secrets master key.
+    in the environment. Answers 404 when the environment does not exist or has no active
+    secret of that name (a revoked secret counts as missing), and 500 when the instance has
+    no secrets master key.
 
     Parameters
     ----------
@@ -244,9 +245,10 @@ def bind_secret(
     """Bind a secret to a package index, repository or environment.
 
     Chooses what uses the secret: a package index or repository by name, or the environment
-    itself. Needs `MANAGE_SECRET` in the environment. Answers 404 when the environment,
-    secret or target does not exist and 422 for a revoked secret, a name given for the
-    environment use, or none for an index or repository.
+    itself. Needs `MANAGE_SECRET` in the environment. Answers 404 when the environment, the
+    active secret (a revoked secret counts as missing) or the target does not exist and 422
+    for a name given for the environment use, none for an index or repository, or the
+    environment's storage secret bound to an index or repository.
 
     Parameters
     ----------

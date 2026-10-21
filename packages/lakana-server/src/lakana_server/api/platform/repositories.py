@@ -130,7 +130,7 @@ def get_repository(
     Parameters
     ----------
     name
-        Its name.
+        The repository's registered name.
     principal
         The authenticated caller.
     service
@@ -161,7 +161,7 @@ def update_repository(
     Parameters
     ----------
     name
-        Its name.
+        The repository's registered name.
     body
         Only the fields present change; `null` clears.
     principal
@@ -191,7 +191,7 @@ def delete_repository(
     Parameters
     ----------
     name
-        Its name.
+        The repository's registered name.
     principal
         The authenticated caller.
     service

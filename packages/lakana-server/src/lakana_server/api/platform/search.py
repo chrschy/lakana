@@ -46,7 +46,7 @@ def search(
         The text to find in names and descriptions, in run ids (four characters or more), jobs
         and repositories, and in principal names. Trimmed, 1 to 200 characters.
     kind
-        Only this kind of hit.
+        Only hits of this kind.
     limit
         Hits per page, 1 to 100.
     offset

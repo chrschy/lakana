@@ -178,7 +178,7 @@ def list_principals(
     return [PrincipalOut.model_validate(row) for row in page.items]
 
 
-@router.delete("/{name}", status_code=204, responses=errors(403, 404))
+@router.delete("/{name}", status_code=204, responses=errors(403, 404, 409))
 def deactivate_principal(
     name: str,
     principal: PrincipalRef = Depends(get_principal),
@@ -188,7 +188,7 @@ def deactivate_principal(
 
     Stops the principal from signing in. The record stays, with every grant, token and audit
     entry that refers to it. Needs `MANAGE_PRINCIPAL` on the instance. Answers 404 when
-    there is no principal of that name.
+    there is no principal of that name and 409 when it is the last active administrator.
 
     Parameters
     ----------

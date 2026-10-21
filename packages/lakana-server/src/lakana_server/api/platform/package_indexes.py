@@ -122,7 +122,7 @@ def get_package_index(
     Parameters
     ----------
     name
-        Its name.
+        The package index's registered name.
     principal
         The authenticated caller.
     service
@@ -152,7 +152,7 @@ def update_package_index(
     Parameters
     ----------
     name
-        Its name.
+        The package index's registered name.
     body
         Only the fields present change; `null` clears the secret.
     principal
@@ -183,7 +183,7 @@ def delete_package_index(
     Parameters
     ----------
     name
-        Its name.
+        The package index's registered name.
     principal
         The authenticated caller.
     service
