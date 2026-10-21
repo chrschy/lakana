@@ -26,7 +26,12 @@ from lakana_core.secrets.crypto import decrypt_secret_row
 from lakana_core.secrets.keys import KeyProvider
 from lakana_core.secrets.uses import SecretUse, require_use
 from lakana_core.storage.base import Storage
-from lakana_core.storage.fsspec_storage import build_file_io, build_storage
+from lakana_core.storage.fsspec_storage import (
+    FSSPEC_CHAIN,
+    ROOT_CHAIN_MESSAGE,
+    build_file_io,
+    build_storage,
+)
 
 MANAGED_PREFIX = "managed"
 """Zone holding Iceberg tables, as opposed to the raw landing zone."""
@@ -287,7 +292,9 @@ def check_storage_root(root: str) -> None:
     Raises
     ------
     ValidationError
-        If a ``file`` root is the root of the disk in any spelling (``file:///``, ``file://``,
+        If the root contains ``::`` anywhere (`ROOT_CHAIN_MESSAGE`: fsspec would read it as a
+        chain, the part before ``::`` alone, so ``file:///a/managed::memory:/dev`` would be
+        ``/a/managed``), if a ``file`` root is the root of the disk in any spelling (``file:///``, ``file://``,
         ``file://localhost/``, ``file:////``; `ROOT_DISK_MESSAGE`: the storage backend would
         resolve it against the working directory), relative or has a host
         (`ROOT_RELATIVE_MESSAGE`; ``localhost``
@@ -298,6 +305,8 @@ def check_storage_root(root: str) -> None:
         ``s3:///data`` is bucket ``data``), or its canonical spelling differs
         (`ROOT_SPELLING_MESSAGE`, which names that spelling).
     """
+    if FSSPEC_CHAIN in root:
+        raise ValidationError(ROOT_CHAIN_MESSAGE.format(root=root))
     scheme, sep, rest = root.partition("://")
     lowered = scheme.lower()
     if lowered == "file" and sep:

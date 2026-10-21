@@ -186,7 +186,9 @@ process's memory, and a `file://` root sent as `s3` was quietly a local director
 must also start with a bucket or container: `s3://`, `s3:///data` and `abfs:///x` are refused
 (422) with the shape to use, such as `s3://bucket/lakana`, because the storage took the first
 directory, or `managed/` itself, for the bucket. Existing environments on such a root are not
-changed.
+changed. A root may not contain `::` (an fsspec chain such as `file:///data/lake::memory:/x`),
+which the storage read as only the part before it; an environment created earlier with one is
+refused at every use: create it again on a plain root.
 
 - **Existing environments are not changed.** One whose root has a scheme Lakana does not support
   (`local://`, `memory://`, `gs://` and the like) could never be used: every query, deploy and

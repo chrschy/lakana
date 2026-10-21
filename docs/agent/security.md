@@ -1585,12 +1585,24 @@ age, is `recent` and never deleted. The listing writes nothing and records no ev
 `create_environment` before `check_storage_root`, refuses a root whose scheme, lower-cased and
 mapped through `SCHEME_ALIASES` (`s3a`/`s3n` → `s3`, `abfss` → `abfs`), is not
 `StorageConfig.scheme` (`ROOT_SCHEME_MESSAGE`, 422, names the root, both schemes and a root from
-`ROOT_SCHEME_EXAMPLES`). The rule is total: `StorageConfig.scheme` is one of `file`, `s3`, `abfs`
-(the REST schema has the same `Literal`); a root's scheme is anything before `://`, and every value
-but the storage's own (and its aliases) is refused, so `local://`, `local:///`, `local:///data`,
-`asynclocal://`, `memory://`, a chained `simplecache::file://` and every other fsspec protocol
-(`gs`, `az`, `hdfs`, `https`, ...) are refused for every storage scheme, and so are `s3://` for
-`file` and `file://` for `s3`. A root without `://` (`local:`, `/data`) has no scheme to compare and
+`ROOT_SCHEME_EXAMPLES`). The scheme comparison is total over the text before the first `://`:
+`StorageConfig.scheme` is one of `file`, `s3`, `abfs` (the REST schema has the same `Literal`),
+and every value but the storage's own (and its aliases) is refused, so `local://`, `local:///`,
+`local:///data`, `asynclocal://`, `memory://` and every other fsspec protocol (`gs`, `az`, `hdfs`,
+`https`, ...) are refused for every storage scheme, and so are `s3://` for `file` and `file://`
+for `s3`. The scheme alone does not judge a root: fsspec reads `a::b` as filesystem `a` over `b`,
+and `url_to_fs` keeps only the part before the first `::`, so a chain *after* the scheme
+(`file:///data/a/managed::memory:/dev` is `/data/a/managed`; `s3://bucket/x::file:/etc` is S3
+`bucket/x`) passed both checks and let a new root reach into another environment's `managed/`
+(found in the review of #262: writing through it overwrote prod's files). `check_storage_root`
+therefore refuses `::` anywhere in a root, first, whatever the scheme (`ROOT_CHAIN_MESSAGE`, 422,
+"cannot be an fsspec chain"; a chain before the scheme, `simplecache::file:///…`, meets
+`check_root_scheme` first and gets the scheme message). `FsspecStorage.__init__` refuses `::` too,
+so a chained root stored earlier fails closed at every `for_environment` before `url_to_fs` reads
+it. `url_to_fs` on the root is Lakana's only fsspec call that parses a URL: table, metadata and
+external locations reach pyiceberg's `FileIO` (`PyArrowFileIO`/`FsspecFileIO` take `::` literally,
+probed) or DuckDB, and artifact and code paths go through `FsspecStorage._full` and the
+filesystem object's own methods, which take `::` as part of a name. A root without `://` (`local:`, `/data`) has no scheme to compare and
 is refused by `check_storage_root` (`ROOT_UNJUDGEABLE_MESSAGE`). An alias of the storage's scheme
 passes this check and gets the spelling to use from `check_storage_root`. Why: the stored row has no
 scheme column; `StorageResolver.for_environment` derives the scheme from the root

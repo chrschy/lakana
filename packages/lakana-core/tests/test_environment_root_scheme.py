@@ -7,6 +7,7 @@ a root reaches the storage of its own scheme, whatever scheme the environment wa
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -247,3 +248,66 @@ def test_an_object_store_root_without_a_bucket_or_container_is_refused_with_the_
     assert "no bucket or container" in message
     assert shape in message
     assert catalog.list_environments(principal) == []
+
+
+@pytest.mark.parametrize(
+    ("scheme", "root"),
+    [
+        ("file", "file:///data/a/managed::memory:/dev"),
+        ("file", "file:///data/lake::"),
+        ("file", "file:///data/lake/::memory://x"),
+        ("file", "FILE:///data/lake::memory:/dev"),
+        ("file", "file:///data::file:///etc"),
+        ("s3", "s3://bucket/x::file:/etc"),
+        ("s3", "s3://b::s3://c"),
+        ("s3", "S3://bucket/x::"),
+        ("s3", "s3a://bucket/x::memory://"),
+        ("abfs", "abfs://container/x::file:///etc"),
+    ],
+)
+def test_an_fsspec_chain_in_a_root_is_refused(
+    catalog: CatalogService, principal: PrincipalRef, scheme: Scheme, root: str
+) -> None:
+    """``::`` after the scheme chains another filesystem: fsspec reads only the part before it."""
+    with pytest.raises(ValidationError) as refused:
+        catalog.create_environment(
+            principal, name="dev", storage=StorageConfig(scheme=scheme, root=root, options={})
+        )
+    message = str(refused.value)
+    assert repr(root) in message
+    assert "'::'" in message
+    assert "chain" in message
+    assert catalog.list_environments(principal) == []
+
+
+def test_a_chained_root_cannot_reach_into_another_environments_managed_files(
+    catalog: CatalogService, principal: PrincipalRef, tmp_path: Path
+) -> None:
+    """The plain root inside prod's ``managed/`` is refused, and so is its chained spelling."""
+    catalog.create_environment(
+        principal,
+        name="prod",
+        storage=StorageConfig(scheme="file", root=f"file://{tmp_path}/a", options={}),
+    )
+    for root, cause in (
+        (f"file://{tmp_path}/a/managed", "inside managed/ of environment 'prod'"),
+        (f"file://{tmp_path}/a/managed::memory:/dev", "fsspec chain"),
+    ):
+        with pytest.raises(ValidationError, match=re.escape(cause)):
+            catalog.create_environment(
+                principal, name="dev", storage=StorageConfig(scheme="file", root=root, options={})
+            )
+    assert [e.name for e in catalog.list_environments(principal)] == ["prod"]
+
+
+def test_an_existing_chained_root_fails_closed_before_fsspec_reads_it(
+    session: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A row stored before the refusal reaches no storage: `FsspecStorage` refuses ``::`` too."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "a" / "managed").mkdir(parents=True)
+    _existing_environment(session, "old", f"file://{tmp_path}/a/managed::memory:/dev")
+
+    with pytest.raises(ValidationError, match="'::'"):
+        StorageResolver(session).for_environment("old")
+    assert list((tmp_path / "a" / "managed").iterdir()) == []
