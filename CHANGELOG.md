@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.18.0](https://github.com/lakana-labs/lakana/compare/v0.17.0...v0.18.0) (2026-10-21)
+
+
+### Features
+
+* **sdk:** deploy from GitHub Actions and GitLab CI without a stored secret ([#258](https://github.com/lakana-labs/lakana/issues/258)) ([0552501](https://github.com/lakana-labs/lakana/commit/0552501407f1876bf2d2adf944d72f9b94f61b1a)), closes [#15](https://github.com/lakana-labs/lakana/issues/15)
+* **security:** exchange a CI OIDC ID token for a one-deploy Lakana token ([#247](https://github.com/lakana-labs/lakana/issues/247)) ([b890a9c](https://github.com/lakana-labs/lakana/commit/b890a9c94c0958b916e3061c8dcfb95c86972e0a))
+* **server:** a readiness check, a worker healthcheck and stable codes for alerts ([#263](https://github.com/lakana-labs/lakana/issues/263)) ([f4deec1](https://github.com/lakana-labs/lakana/commit/f4deec1f47309f9e4374ec886370491c4a902833)), closes [#205](https://github.com/lakana-labs/lakana/issues/205) [#207](https://github.com/lakana-labs/lakana/issues/207)
+* **server:** show how much disk an instance uses, and trim the worker's package cache ([#264](https://github.com/lakana-labs/lakana/issues/264)) ([b01c623](https://github.com/lakana-labs/lakana/commit/b01c6238b9be5ccc599059fac7f8aaca5754e5a9)), closes [#206](https://github.com/lakana-labs/lakana/issues/206)
+
+
+### Bug Fixes
+
+* **catalog:** refuse a storage root in another scheme or without a bucket ([#262](https://github.com/lakana-labs/lakana/issues/262)) ([3f032be](https://github.com/lakana-labs/lakana/commit/3f032be373e54cafb42d4219603cf5607dc27681)), closes [#260](https://github.com/lakana-labs/lakana/issues/260)
+* **security:** keep environment roots apart and webhook hosts away from loopback and metadata ([#259](https://github.com/lakana-labs/lakana/issues/259)) ([f98927e](https://github.com/lakana-labs/lakana/commit/f98927ecca8ffb8445e3faf40c0e17bd2b41ba46)), closes [#231](https://github.com/lakana-labs/lakana/issues/231) [#243](https://github.com/lakana-labs/lakana/issues/243)
+
+
+### Documentation
+
+* a guide and a tutorial for moving SQL transformations to Lakana ([#267](https://github.com/lakana-labs/lakana/issues/267)) ([ceb0172](https://github.com/lakana-labs/lakana/commit/ceb0172b3f1f945623b8730027a4a146a092d7bd)), closes [#61](https://github.com/lakana-labs/lakana/issues/61)
+* declare the REST API a versioned contract, and check its schema in CI ([#269](https://github.com/lakana-labs/lakana/issues/269)) ([36b45be](https://github.com/lakana-labs/lakana/commit/36b45be05842f4c28f7b6824ab7550d4ee0d334d)), closes [#7](https://github.com/lakana-labs/lakana/issues/7)
+* name the 0.17.0 upgrade notes and add their row ([#245](https://github.com/lakana-labs/lakana/issues/245)) ([5988b33](https://github.com/lakana-labs/lakana/commit/5988b3314d590f6d6a1c3299f8ff38ae65b67550))
+* name the 0.18.0 upgrade notes and add their row ([#272](https://github.com/lakana-labs/lakana/issues/272)) ([932cf57](https://github.com/lakana-labs/lakana/commit/932cf57f7667d56d0ddd9a3469e5252b7d1cda11))
+* record what 0.17.0 shipped in the scope and roadmap pages ([#248](https://github.com/lakana-labs/lakana/issues/248)) ([7a60dc8](https://github.com/lakana-labs/lakana/commit/7a60dc89f5e0208d82f8894b3c08753973501c69))
+* **server:** give every REST route a user-facing summary and description ([#271](https://github.com/lakana-labs/lakana/issues/271)) ([678ecde](https://github.com/lakana-labs/lakana/commit/678ecde2e41e163af82b5dd42f7a571dfe618ba6)), closes [#268](https://github.com/lakana-labs/lakana/issues/268)
+
+
+### Dependencies
+
+* bump certifi from 2026.7.22 to 2026.10.19 ([#256](https://github.com/lakana-labs/lakana/issues/256)) ([e86d2e4](https://github.com/lakana-labs/lakana/commit/e86d2e496b5df9972b6be564406f77620235e339))
+
 ## [0.17.0](https://github.com/lakana-labs/lakana/compare/v0.16.0...v0.17.0) (2026-10-20)
 
 
