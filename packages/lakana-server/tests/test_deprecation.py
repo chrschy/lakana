@@ -173,3 +173,24 @@ def test_every_deprecated_route_says_since_when() -> None:
         and "x-deprecated-since" not in (getattr(route, "openapi_extra", None) or {})
     ]
     assert undated == []
+
+
+def test_an_unexpected_error_answers_500_without_the_headers() -> None:
+    """Starlette's outermost error handler writes the 500, outside the middleware; documented."""
+    app = FastAPI()
+
+    @app.get("/broken", **deprecated(since=date(2027, 3, 1)))
+    def broken() -> None:
+        """Fail with an error no handler knows.
+
+        Raises
+        ------
+        RuntimeError
+            Always.
+        """
+        raise RuntimeError("boom")
+
+    app.add_middleware(DeprecationHeaders)
+    response = TestClient(app, raise_server_exceptions=False).get("/broken")
+    assert response.status_code == 500
+    assert "deprecation" not in response.headers

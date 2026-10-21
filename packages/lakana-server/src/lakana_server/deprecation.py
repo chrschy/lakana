@@ -5,9 +5,11 @@ A route is deprecated with `deprecated`, which marks it in the OpenAPI document
 
     @router.get("/old", **deprecated(since=date(2027, 3, 1), sunset=date(2027, 9, 1)))
 
-`DeprecationHeaders` then adds to every answer of that route, a refusal included, the
+`DeprecationHeaders` then adds to every answer of that route, a refusal (4xx) included, the
 `Deprecation` header of RFC 9745 (`@` and the Unix time of the day it was deprecated) and, when a
-removal date is known, the `Sunset` header of RFC 8594 (an HTTP date). The policy that decides
+removal date is known, the `Sunset` header of RFC 8594 (an HTTP date). A 500 from an
+unexpected error does not carry them: Starlette's outermost error handler writes it, outside
+every middleware an application adds. The policy that decides
 when a route may be deprecated and removed is the user documentation's "The REST API as a
 contract" page.
 """
@@ -87,7 +89,7 @@ def deprecation_headers(route: object) -> list[tuple[bytes, bytes]]:
 
 
 class DeprecationHeaders:
-    """Add the deprecation headers to every answer of a deprecated route.
+    """Add the deprecation headers to the answers of a deprecated route (not to an unexpected 500).
 
     Parameters
     ----------

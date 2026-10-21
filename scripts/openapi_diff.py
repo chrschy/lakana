@@ -23,7 +23,10 @@ Everything else that changes the contract is **additive**: a new route, method, 
 parameter or field, response field, status code or allowed value, a request value that accepts
 more, a deprecation. Text (summaries, descriptions, titles, operation ids, tags) does not
 count, and neither does the name of a component schema: references are resolved and compared
-by shape, and a path parameter is matched by its place in the path, not its name.
+by shape, the alternatives of a union are paired by component name and then by kind (so
+``Model`` and ``Model | None`` differ only by null, and a renamed component inside a union is
+compared by its shape), an ``allOf`` is compared as the merge of its members, and a path
+parameter is matched by its place in the path, not its name.
 
 Usage: ``python3 scripts/openapi_diff.py BASE HEAD [--require-breaking-title]``; the title is
 read from ``PR_TITLE``. A missing BASE (a branch that predates the snapshot) is not an error.
@@ -55,6 +58,8 @@ _MINIMA = ("minLength", "minimum", "exclusiveMinimum", "minItems", "minPropertie
 _ANY = "any"
 
 Schema = dict[str, Any]
+_Alternative = tuple[str | None, str, Schema]
+"""One alternative of a union: its component name (or ``None``), its kind, its schema."""
 
 
 @dataclass(frozen=True)
@@ -148,6 +153,27 @@ def _covers(wide: str, narrow: str) -> bool:
         or (wide == "number" and narrow == "integer")
         or (wide == "string" and narrow.startswith("string ("))
     )
+
+
+def _covers_alternative(wide: str, narrow: str) -> bool:
+    """Tell whether one alternative of a union takes every value of another one left unpaired.
+
+    Parameters
+    ----------
+    wide
+        The kind of the alternative that may be wider.
+    narrow
+        The kind of the unpaired alternative.
+
+    Returns
+    -------
+    bool
+        As `_covers`, except that an unpaired object or array is covered only by ``any``: it was
+        left over because no alternative of its kind was free to compare it with.
+    """
+    if narrow in ("object", "array"):
+        return wide == _ANY
+    return _covers(wide, narrow)
 
 
 def _allowed(schema: Schema) -> list[Any] | None:
@@ -294,19 +320,35 @@ class _Comparison:
         Returns
         -------
         tuple
-            The schema (the wrapper's own keys kept over the wrapped ones; ``{}`` for the boolean
-            schema ``true``) and its component name.
+            The schema and its component name. An ``allOf`` of one schema is that schema, of
+            several their merge (properties and required fields of all members); the wrapper's
+            own keys win. The boolean schema ``true`` is ``{}``.
         """
         resolved, name = self._resolve(doc, schema)
         if not isinstance(resolved, dict):
             return {}, name
-        while isinstance(resolved.get("allOf"), list) and len(resolved["allOf"]) == 1:
-            inner, inner_name = self._resolve(doc, resolved["allOf"][0])
-            outer = {key: value for key, value in resolved.items() if key != "allOf"}
-            resolved, name = {**inner, **outer}, inner_name or name
-        return resolved, name
+        members = resolved.get("allOf")
+        if not isinstance(members, list) or not members:
+            return resolved, name
+        outer = {key: value for key, value in resolved.items() if key != "allOf"}
+        if len(members) == 1:
+            inner, inner_name = self._unwrap(doc, members[0])
+            return {**inner, **outer}, inner_name or name
+        merged: Schema = {}
+        for member in members:
+            inner, _ = self._unwrap(doc, member)
+            properties = {**merged.get("properties", {}), **inner.get("properties", {})}
+            required = [*merged.get("required", ()), *inner.get("required", ())]
+            merged = {**inner, **merged}
+            if properties:
+                merged["properties"] = properties
+            if required:
+                merged["required"] = list(dict.fromkeys(required))
+        return {**merged, **outer}, name
 
-    def _alternatives(self, doc: Mapping[str, Any], schema: Schema) -> list[tuple[str, Schema]]:
+    def _alternatives(
+        self, doc: Mapping[str, Any], schema: Schema, name: str | None
+    ) -> list[_Alternative]:
         """Split a schema into the alternatives a value may match.
 
         Parameters
@@ -315,25 +357,25 @@ class _Comparison:
             The document the schema belongs to.
         schema
             A resolved, unwrapped schema.
+        name
+            The component the schema came from, if any.
 
         Returns
         -------
         list of tuple
-            ``(key, schema)`` per alternative: the key is its component name, or its kind.
+            ``(name, kind, schema)`` per alternative: its component name (``None`` for an
+            inline schema), its kind, and the schema.
         """
-        found: list[tuple[str, Schema]] = []
+        found: list[_Alternative] = []
         for union in ("anyOf", "oneOf"):
             for option in schema.get(union, ()):
-                inner, name = self._unwrap(doc, option)
-                found.extend(
-                    (name, alternative) if name else (key, alternative)
-                    for key, alternative in self._alternatives(doc, inner)
-                )
+                inner, inner_name = self._unwrap(doc, option)
+                found.extend(self._alternatives(doc, inner, inner_name))
         if found:
             return found
         if isinstance(schema.get("type"), list):
-            return [(kind, {**schema, "type": kind}) for kind in schema["type"]]
-        return [(_kind(schema), schema)]
+            return [(None, kind, {**schema, "type": kind}) for kind in schema["type"]]
+        return [(name, _kind(schema), schema)]
 
     def schema(self, base: object, head: object, where: str, *, request: bool) -> None:
         """Compare two schemas.
@@ -364,22 +406,57 @@ class _Comparison:
                 where,
                 f"default changed from {_shown(old['default'])} to {_shown(new['default'])}",
             )
-        olds = self._alternatives(self.base, old)
-        news = self._alternatives(self.head, new)
+        olds = self._alternatives(self.base, old, old_name)
+        news = self._alternatives(self.head, new, new_name)
         if len(olds) == 1 and len(news) == 1:
-            self._single(olds[0][1], news[0][1], where, request=request)
+            self._single(olds[0][2], news[0][2], where, request=request)
             return
         self._union(olds, news, where, request=request)
 
+    @staticmethod
+    def _pair(
+        olds: list[_Alternative], news: list[_Alternative]
+    ) -> tuple[list[tuple[Schema, Schema]], list[_Alternative], list[_Alternative]]:
+        """Pair the alternatives of two unions.
+
+        First by component name, then what is left by kind, in order: a renamed component, or
+        an inline schema that became a component, is still compared by its shape.
+
+        Parameters
+        ----------
+        olds
+            The earlier alternatives.
+        news
+            The later alternatives.
+
+        Returns
+        -------
+        tuple
+            The paired schemas, the earlier alternatives left over, the later ones left over.
+        """
+        pairs: list[tuple[Schema, Schema]] = []
+        olds, news = list(olds), list(news)
+        for same in (
+            lambda a, b: a[0] is not None and a[0] == b[0],
+            lambda a, b: a[1] == b[1],
+        ):
+            for old in list(olds):
+                match = next((new for new in news if same(old, new)), None)
+                if match is not None:
+                    pairs.append((old[2], match[2]))
+                    olds.remove(old)
+                    news.remove(match)
+        return pairs, olds, news
+
     def _union(
         self,
-        olds: list[tuple[str, Schema]],
-        news: list[tuple[str, Schema]],
+        olds: list[_Alternative],
+        news: list[_Alternative],
         where: str,
         *,
         request: bool,
     ) -> None:
-        """Compare two lists of alternatives, matched by key.
+        """Compare two lists of alternatives.
 
         Parameters
         ----------
@@ -392,22 +469,21 @@ class _Comparison:
         request
             True for a value the client sends, False for one it reads.
         """
-        old_keys = dict(olds)
-        new_keys = dict(news)
-        for key, schema in olds:
-            if key in new_keys:
-                self._single(schema, new_keys[key], where, request=request)
-            elif not request:
-                self._add(False, where, f"no longer {_label(key)}")
-            elif not any(_covers(other, key) for other in new_keys):
-                self._add(True, where, f"no longer accepts {_label(key)}")
-        for key in new_keys:
-            if key in old_keys:
-                continue
+        pairs, removed, added = self._pair(olds, news)
+        for old, new in pairs:
+            self._single(old, new, where, request=request)
+        for name, kind, _ in removed:
+            label = _label(name or kind)
+            if not request:
+                self._add(False, where, f"no longer {label}")
+            elif not any(_covers_alternative(other, kind) for _, other, _ in news):
+                self._add(True, where, f"no longer accepts {label}")
+        for name, kind, _ in added:
+            label = _label(name or kind)
             if request:
-                self._add(False, where, f"also accepts {_label(key)}")
-            elif not any(_covers(other, key) for other in old_keys):
-                self._add(True, where, f"may now be {_label(key)}")
+                self._add(False, where, f"also accepts {label}")
+            elif not any(_covers_alternative(other, kind) for _, other, _ in olds):
+                self._add(True, where, f"may now be {label}")
 
     def _single(self, old: Schema, new: Schema, where: str, *, request: bool) -> None:
         """Compare two schemas of one kind each.

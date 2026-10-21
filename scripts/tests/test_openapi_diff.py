@@ -889,3 +889,180 @@ def test_the_boolean_schema_true_accepts_anything() -> None:
     base = _api(body=_obj({"a": True}))
     head = _api(body=_obj({"a": {}}))
     assert compare(base, head) == []
+
+
+# A reference and the same reference or null (pydantic's ``Model | None``)
+
+_T = {"T": _obj({"x": STRING}, ("x",))}
+_REF = {"$ref": "#/components/schemas/T"}
+_NULLABLE = {"anyOf": [_REF, {"type": "null"}]}
+
+
+def test_a_request_reference_that_becomes_nullable_is_additive() -> None:
+    """``T`` to ``T | None``: every value that was accepted still is."""
+    base = _api(body=_obj({"a": _REF}, ("a",)), schemas=_T)
+    head = _api(body=_obj({"a": _NULLABLE}, ("a",)), schemas=_T)
+    assert _breaking(base, head) == []
+    assert _additive(base, head) == ["POST /api/v1/things: request body `a`: also accepts null"]
+
+
+def test_a_request_reference_that_stops_being_nullable_is_breaking() -> None:
+    """``T | None`` to ``T``: a null that was accepted is refused."""
+    base = _api(body=_obj({"a": _NULLABLE}, ("a",)), schemas=_T)
+    head = _api(body=_obj({"a": _REF}, ("a",)), schemas=_T)
+    assert _breaking(base, head) == [
+        "POST /api/v1/things: request body `a`: no longer accepts null"
+    ]
+
+
+def test_a_response_reference_that_stops_being_nullable_is_additive() -> None:
+    """``T | None`` to ``T``: the client gets fewer kinds of value."""
+    base = _api(response=_obj({"a": _NULLABLE}, ("a",)), schemas=_T)
+    head = _api(response=_obj({"a": _REF}, ("a",)), schemas=_T)
+    assert _breaking(base, head) == []
+    assert _additive(base, head) == ["POST /api/v1/things: response 200 `a`: no longer null"]
+
+
+def test_a_response_reference_that_becomes_nullable_is_breaking() -> None:
+    """``T`` to ``T | None``: a client that reads a ``T`` may now get null."""
+    base = _api(response=_obj({"a": _REF}, ("a",)), schemas=_T)
+    head = _api(response=_obj({"a": _NULLABLE}, ("a",)), schemas=_T)
+    assert _breaking(base, head) == ["POST /api/v1/things: response 200 `a`: may now be null"]
+
+
+def test_renaming_a_component_inside_a_union_is_not_a_change() -> None:
+    """``Old | None`` to ``New | None`` with the same shape: the name is not on the wire."""
+    old = {"anyOf": [{"$ref": "#/components/schemas/Old"}, {"type": "null"}]}
+    new = {"anyOf": [{"$ref": "#/components/schemas/New"}, {"type": "null"}]}
+    base = _api(response=_obj({"a": old}, ("a",)), schemas={"Old": _obj({"x": STRING})})
+    head = _api(response=_obj({"a": new}, ("a",)), schemas={"New": _obj({"x": STRING})})
+    assert compare(base, head) == []
+
+
+def test_a_renamed_component_inside_a_union_is_still_compared_by_shape() -> None:
+    """Paired by kind, the renamed alternative's fields are compared."""
+    old = {"anyOf": [{"$ref": "#/components/schemas/Old"}, {"type": "null"}]}
+    new = {"anyOf": [{"$ref": "#/components/schemas/New"}, {"type": "null"}]}
+    base = _api(response=_obj({"a": old}, ("a",)), schemas={"Old": _obj({"x": STRING}, ("x",))})
+    head = _api(response=_obj({"a": new}, ("a",)), schemas={"New": _obj({})})
+    assert _breaking(base, head) == ["POST /api/v1/things: response 200 `a.x`: removed"]
+
+
+# allOf with several members
+
+
+def test_an_all_of_of_several_schemas_is_compared_as_their_merge() -> None:
+    """A field required by one member of the ``allOf`` is a field of the whole."""
+    schemas = {"A": _obj({"x": STRING}, ("x",)), "B": _obj({"y": STRING}, ("y",))}
+    both = {"allOf": [{"$ref": "#/components/schemas/A"}, {"$ref": "#/components/schemas/B"}]}
+    base = _api(response=both, schemas=schemas)
+    head_schemas = {"A": _obj({"x": STRING}, ("x",)), "B": _obj({})}
+    head = _api(response=both, schemas=head_schemas)
+    assert _breaking(base, head) == ["POST /api/v1/things: response 200 `y`: removed"]
+    assert compare(base, copy.deepcopy(base)) == []
+
+
+# The same cases on the real snapshot
+
+_SNAPSHOT = Path(__file__).resolve().parents[2] / "docs" / "site" / "reference" / "openapi.json"
+
+
+def _snapshot() -> dict[str, Any]:
+    """Read the committed OpenAPI document of the platform API.
+
+    Returns
+    -------
+    dict
+        The document.
+    """
+    return json.loads(_SNAPSHOT.read_text(encoding="utf-8"))
+
+
+def _nullable(doc: dict[str, Any], schema: str, field: str) -> dict[str, Any]:
+    """Make a reference field of a component nullable, as pydantic writes ``Model | None``.
+
+    Parameters
+    ----------
+    doc
+        The document, changed in place.
+    schema
+        The component.
+    field
+        The field, a plain ``$ref``.
+
+    Returns
+    -------
+    dict
+        The document.
+    """
+    properties = doc["components"]["schemas"][schema]["properties"]
+    assert "$ref" in properties[field]
+    properties[field] = {"anyOf": [properties[field], {"type": "null"}]}
+    return doc
+
+
+def _not_nullable(doc: dict[str, Any], schema: str, field: str) -> dict[str, Any]:
+    """Turn a ``Model | None`` field of a component into ``Model``.
+
+    Parameters
+    ----------
+    doc
+        The document, changed in place.
+    schema
+        The component.
+    field
+        The field, an ``anyOf`` of a ``$ref`` and null.
+
+    Returns
+    -------
+    dict
+        The document.
+    """
+    properties = doc["components"]["schemas"][schema]["properties"]
+    (ref,) = [option for option in properties[field]["anyOf"] if "$ref" in option]
+    properties[field] = ref
+    return doc
+
+
+def test_the_real_snapshot_has_no_difference_with_itself() -> None:
+    """The baseline for the cases below."""
+    assert compare(_snapshot(), _snapshot()) == []
+
+
+def test_a_real_request_reference_that_becomes_nullable_is_additive() -> None:
+    """``storage`` of ``POST /api/v1/environments`` becomes ``StorageConfigIn | None``."""
+    changed = _nullable(_snapshot(), "EnvironmentCreate", "storage")
+    assert _breaking(_snapshot(), changed) == []
+    assert "POST /api/v1/environments: request body `storage`: also accepts null" in _additive(
+        _snapshot(), changed
+    )
+    assert _breaking(changed, _snapshot())
+    assert all("no longer accepts null" in item for item in _breaking(changed, _snapshot()))
+
+
+def test_a_real_response_reference_that_stops_being_nullable_is_additive() -> None:
+    """``last_maintenance`` of the table health becomes ``LastMaintenanceOut``."""
+    changed = _not_nullable(_snapshot(), "TableHealthOut", "last_maintenance")
+    assert _breaking(_snapshot(), changed) == []
+    assert _breaking(changed, _snapshot())
+    assert all("may now be null" in item for item in _breaking(changed, _snapshot()))
+
+
+def test_renaming_a_real_component_inside_a_union_is_not_a_change() -> None:
+    """``LastMaintenanceOut | None`` keeps its shape under another name."""
+    changed = _snapshot()
+    schemas = changed["components"]["schemas"]
+    schemas["Renamed"] = schemas.pop("LastMaintenanceOut")
+    text = json.dumps(changed).replace(
+        "#/components/schemas/LastMaintenanceOut", "#/components/schemas/Renamed"
+    )
+    assert compare(_snapshot(), json.loads(text)) == []
+
+
+def test_an_all_of_of_constraints_is_merged_without_becoming_an_object() -> None:
+    """``allOf: [{type: string}, {maxLength: 5}]`` is a string of at most five characters."""
+    base = _api(body=_obj({"a": {"allOf": [STRING, {"maxLength": 10}]}}))
+    head = _api(body=_obj({"a": {"allOf": [STRING, {"maxLength": 5}]}}))
+    assert _breaking(base, head) == [
+        "POST /api/v1/things: request body `a`: maxLength changed from 10 to 5"
+    ]

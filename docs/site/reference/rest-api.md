@@ -91,7 +91,8 @@ From v1.0.0, a route, a field or a parameter that is to be removed is deprecated
   longer, and it is removed only in a major release.
 - **It is marked** with `deprecated: true` in the OpenAPI document, on the route, the field or the
   parameter, and on its page in this documentation.
-- **A deprecated route says so in every answer**, a refusal included: the `Deprecation` header
+- **A deprecated route says so in its answers**, a refusal included (an internal server error
+  is the exception): the `Deprecation` header
   (RFC 9745) carries the day it was deprecated, as `@` and the Unix time (for example
   `Deprecation: @1803859200` for 1 March 2027), and when the day of its removal is known, the
   `Sunset` header (RFC 8594) carries it as an HTTP date (`Sunset: Wed, 01 Sep 2027 00:00:00
