@@ -65,15 +65,21 @@ cat > "$tracer" <<'TRACER'
 if [ "$0" = "${DOCS_RUN_SCRIPT:-}" ]; then
   set -E
   trap 'echo "run.sh line ${LINENO}: ${BASH_COMMAND}" >&2' ERR
+  # Both leave $? as they found it, so `status=$?` right after a region reads the status of the
+  # region's last command; `return` runs no ERR trap of its own beyond the one that status caused.
   __docs_begin() {
+    local saved=$?
     echo "$1" > "$DOCS_CAPTURE_DIR/.open"
     __docs_file="$DOCS_CAPTURE_DIR/$1.txt"
     exec {__docs_out}>&1 {__docs_err}>&2 >"$__docs_file" 2>&1
+    return "$saved"
   }
   __docs_end() {
+    local saved=$?
     exec >&"$__docs_out" 2>&"$__docs_err" {__docs_out}>&- {__docs_err}>&-
     rm -f "$DOCS_CAPTURE_DIR/.open"
     cat "$__docs_file"
+    return "$saved"
   }
 fi
 TRACER

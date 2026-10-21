@@ -5,6 +5,8 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from scripts.docs_blocks import read_source
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -362,3 +364,64 @@ def test_the_failure_trace_still_names_the_line_of_the_original_script(tmp_path:
     )
     assert result.returncode != 0
     assert "run.sh line 5: false" in result.stderr
+
+
+_STATUS = """set +e
+# docs:start r
+echo out
+{command}
+# docs:end r
+status=$?
+echo "status=$status"
+exit "$status"
+"""
+
+
+@pytest.mark.parametrize("command", ["true", "(exit 3)", "false"])
+def test_a_region_leaves_the_status_of_its_last_command_for_the_next_line(
+    tmp_path: Path, command: str
+) -> None:
+    """`status=$?` after `docs:end` reads the region's status, captured or not."""
+    script = _STATUS.format(command=command)
+    plain = _run_with_budget_file(tmp_path / "a", None, script)
+    captured = _run_with_budget_file(
+        tmp_path / "b", None, script, LAKANA_DOCS_CAPTURE=str(tmp_path / "caps")
+    )
+    assert captured.returncode == plain.returncode
+    found = [re.search(r"status=\d+", r.stdout) for r in (plain, captured)]
+    assert found[0] is not None and found[1] is not None
+    assert found[0][0] == found[1][0]
+
+
+def test_the_status_before_a_region_is_still_there_inside_it(tmp_path: Path) -> None:
+    """`docs:start` changes no status either."""
+    script = 'set +e\n(exit 4)\n# docs:start r\nstatus=$?\n# docs:end r\necho "status=$status"\n'
+    result = _run_with_budget_file(
+        tmp_path, None, script, LAKANA_DOCS_CAPTURE=str(tmp_path / "caps")
+    )
+    assert "status=4" in result.stdout
+
+
+def test_a_failing_region_under_set_e_stops_with_the_same_status(tmp_path: Path) -> None:
+    """The capture neither hides a failure nor lets the script go on."""
+    script = "set -euo pipefail\n# docs:start r\n(exit 3)\n# docs:end r\necho NOT-REACHED\n"
+    plain = _run_with_budget_file(tmp_path / "a", None, script)
+    captured = _run_with_budget_file(
+        tmp_path / "b", None, script, LAKANA_DOCS_CAPTURE=str(tmp_path / "caps")
+    )
+    assert plain.returncode == captured.returncode != 0
+    assert "NOT-REACHED" not in captured.stdout
+
+
+def test_a_pipeline_status_survives_a_region(tmp_path: Path) -> None:
+    """The examples' `set -o pipefail` and exit codes of pipelines are those of the region."""
+    script = (
+        'set +e\n# docs:start r\nfalse | true\n# docs:end r\nstatus=$?\necho "status=$status"\n'
+        "set -o pipefail\n# docs:start s\nfalse | true\n# docs:end s\n"
+        'status=$?\necho "again=$status"\n'
+    )
+    result = _run_with_budget_file(
+        tmp_path, None, script, LAKANA_DOCS_CAPTURE=str(tmp_path / "caps")
+    )
+    assert "status=0" in result.stdout
+    assert "again=1" in result.stdout
