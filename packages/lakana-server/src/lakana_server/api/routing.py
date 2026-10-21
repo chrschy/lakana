@@ -9,10 +9,11 @@ import re
 from collections.abc import Callable, Coroutine
 from typing import Annotated, Any
 
-from fastapi import Path, Query, Request, Response
+from fastapi import Request, Response
 from fastapi.dependencies.models import Dependant
 from fastapi.routing import APIRoute
 from pydantic.fields import FieldInfo
+from pydantic_core import PydanticUndefined
 from starlette.concurrency import run_in_threadpool
 
 from lakana_server.deps import authenticate_before_body, get_principal
@@ -136,10 +137,11 @@ def describe_parameters(
             described.description = docs[field.name]
             changed[field.name] = param.replace(default=described)
         else:
-            kind = Path if field in dependant.path_params else Query
-            annotated = operator.getitem(
-                Annotated, (info.annotation, kind(description=docs[field.name]))
-            )
+            # The field's own FieldInfo, so every constraint declared in `Annotated` stays.
+            described = copy.copy(info)
+            described.description = docs[field.name]
+            described.default = PydanticUndefined
+            annotated = operator.getitem(Annotated, (info.annotation, described))
             changed[field.name] = param.replace(annotation=annotated)
     if changed:
         endpoint.__signature__ = signature.replace(  # ty: ignore[unresolved-attribute]

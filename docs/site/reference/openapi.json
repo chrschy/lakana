@@ -1533,7 +1533,7 @@
           "queries"
         ],
         "summary": "List the queries of an environment",
-        "description": "Lists running queries first, then queued ones, then, when asked, ended ones. Needs `SUBMIT_QUERY` on the environment. A holder of `MANAGE_ENVIRONMENT` sees every query of the environment; everyone else sees the queries they submitted. The list never shows SQL text, error messages or results. The cursor of the next page is in the `X-Next-Cursor` response header and is absent on the last page; send the same filters with every page. Answers 404 when the environment does not exist. Answers 503 when a manager's page shows someone else's queries and the audit entry for that could not be written; nothing is listed then.",
+        "description": "Lists running queries first, then queued ones, then, when asked, ended ones. Needs `SUBMIT_QUERY` on the environment, or `MANAGE_ENVIRONMENT`. A holder of `MANAGE_ENVIRONMENT` sees every query of the environment; everyone else sees the queries they submitted. The list never shows SQL text, error messages or results. The cursor of the next page is in the `X-Next-Cursor` response header and is absent on the last page; send the same filters with every page. Answers 404 when the environment does not exist. Answers 503 when a manager's page shows someone else's queries and the audit entry for that could not be written; nothing is listed then.",
         "operationId": "list_queries_api_v1_environments__env__queries_get",
         "parameters": [
           {
@@ -1926,7 +1926,7 @@
           "queries"
         ],
         "summary": "Cancel a query",
-        "description": "A queued query becomes `CANCELLED` at once. A running one is asked to stop: the answer is `RUNNING` and the worker ends it within a few seconds. A query that has already ended is answered with its status, which is not an error. The submitter and a holder of `MANAGE_ENVIRONMENT` may cancel; a caller without `SUBMIT_QUERY` gets 403 and anyone else 404. Answers 422 for the write of a pipeline task (cancel the run instead) and for a maintenance run that has started, and 409 when a worker is starting or finishing the query at that moment: ask for the status and cancel again if it still runs.",
+        "description": "A queued query becomes `CANCELLED` at once. A running one is asked to stop: the answer is `RUNNING` and the worker ends it within a few seconds. A query that has already ended is answered with its status, which is not an error. The submitter and a holder of `MANAGE_ENVIRONMENT` may cancel; anyone else gets 404, and a caller with neither `SUBMIT_QUERY` nor `MANAGE_ENVIRONMENT` gets 403. Answers 422 for the write of a pipeline task (cancel the run instead) and for a maintenance run that has started, and 409 when a worker is starting or finishing the query at that moment: ask for the status and cancel again if it still runs.",
         "operationId": "cancel_query_api_v1_environments__env__queries__query_id__cancel_post",
         "parameters": [
           {
@@ -7848,7 +7848,7 @@
           "task-tokens"
         ],
         "summary": "Mint a task token",
-        "description": "Mints a short-lived token that acts for a principal in one environment, limited to the assets named in the request. The answer holds the token's value, shown this once. Needs `MINT_TASK_TOKEN` on the instance. Answers 404 when the principal or environment does not exist.",
+        "description": "Mints a short-lived token that acts for a principal in one environment, limited to the assets named in the request. The answer holds the token's value, shown this once. Needs `MINT_TASK_TOKEN` on the instance; minting a token for a principal other than yourself also needs the `ADMIN` role (403 otherwise). Answers 404 when the principal or environment does not exist.",
         "operationId": "mint_task_token_api_v1_task_tokens_post",
         "parameters": [
           {
@@ -7940,7 +7940,7 @@
           "task-tokens"
         ],
         "summary": "Revoke a task token",
-        "description": "Ends the token before it expires. Revoking a token that is revoked already changes nothing. Needs `MINT_TASK_TOKEN` on the instance. Answers 404 when there is no such token.",
+        "description": "Ends the token before it expires. Revoking a token that is revoked already changes nothing. Needs `MINT_TASK_TOKEN` on the instance. An administrator may revoke any token and gets 404 for an unknown key id; anyone else may revoke only a token minted for themselves over REST and gets 403 otherwise, also for an unknown key id, so that key ids cannot be probed.",
         "operationId": "revoke_task_token_api_v1_task_tokens__key_id__delete",
         "parameters": [
           {
@@ -12879,6 +12879,8 @@
             "required": true,
             "schema": {
               "type": "string",
+              "minLength": 1,
+              "maxLength": 255,
               "description": "The job's name.",
               "title": "Job"
             },
@@ -13012,6 +13014,8 @@
             "required": true,
             "schema": {
               "type": "string",
+              "minLength": 1,
+              "maxLength": 255,
               "description": "The job's name.",
               "title": "Job"
             },
@@ -13146,6 +13150,8 @@
             "required": true,
             "schema": {
               "type": "string",
+              "minLength": 1,
+              "maxLength": 255,
               "description": "The job's name.",
               "title": "Job"
             },
@@ -13270,6 +13276,8 @@
             "required": true,
             "schema": {
               "type": "string",
+              "minLength": 1,
+              "maxLength": 255,
               "description": "The job's name.",
               "title": "Job"
             },
@@ -13384,6 +13392,8 @@
             "required": true,
             "schema": {
               "type": "string",
+              "minLength": 1,
+              "maxLength": 255,
               "description": "The job's name.",
               "title": "Job"
             },

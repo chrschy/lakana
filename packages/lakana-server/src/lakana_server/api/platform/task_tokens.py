@@ -29,8 +29,9 @@ def mint_task_token(
 
     Mints a short-lived token that acts for a principal in one environment, limited to the
     assets named in the request. The answer holds the token's value, shown this once. Needs
-    `MINT_TASK_TOKEN` on the instance. Answers 404 when the principal or environment does
-    not exist.
+    `MINT_TASK_TOKEN` on the instance; minting a token for a principal other than yourself
+    also needs the `ADMIN` role (403 otherwise). Answers 404 when the principal or
+    environment does not exist.
 
     Parameters
     ----------
@@ -70,8 +71,10 @@ def revoke_task_token(
     """Revoke a task token.
 
     Ends the token before it expires. Revoking a token that is revoked already changes
-    nothing. Needs `MINT_TASK_TOKEN` on the instance. Answers 404 when there is no such
-    token.
+    nothing. Needs `MINT_TASK_TOKEN` on the instance. An administrator may revoke any token
+    and gets 404 for an unknown key id; anyone else may revoke only a token minted for
+    themselves over REST and gets 403 otherwise, also for an unknown key id, so that key ids
+    cannot be probed.
 
     Parameters
     ----------

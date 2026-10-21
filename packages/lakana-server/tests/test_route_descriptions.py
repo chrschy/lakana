@@ -1,7 +1,14 @@
 """Tests for the user-facing description of a route and for the documented error answers."""
 
+import importlib
+import inspect
+import pkgutil
+from typing import Annotated
+
 import pytest
-from fastapi import APIRouter, FastAPI, Query
+from fastapi import APIRouter, FastAPI, Path, Query, params
+from fastapi.routing import APIRoute
+from fastapi.testclient import TestClient
 
 from lakana_server.api.responses import ERROR_MEANING, ErrorOut, errors
 from lakana_server.api.routing import (
@@ -185,3 +192,133 @@ def test_a_route_with_a_one_line_text_publishes_that_line_only() -> None:
     operation = _app_with(router)["paths"]["/x"]["get"]
     assert operation["summary"] == "Show the thing"
     assert operation["description"] == "Show the thing."
+
+
+def test_describing_a_parameter_keeps_the_constraints_declared_in_annotated() -> None:
+    """A length or range set inside ``Annotated`` still rejects a value that breaks it."""
+    router = APIRouter(route_class=AuthenticateFirstRoute)
+    job = Annotated[str, Path(min_length=1, max_length=5)]
+    count = Annotated[int, Query(ge=1, le=10)]
+
+    @router.get("/x/{name}")
+    def route(name: job, n: count = 3) -> None:
+        """Show the thing.
+
+        Parameters
+        ----------
+        name
+            The thing's name.
+        n
+            How many.
+        """
+
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+    assert client.get("/x/abcde").status_code == 200
+    assert client.get("/x/abcdef").status_code == 422
+    assert client.get("/x/abc?n=11").status_code == 422
+    assert client.get("/x/abc?n=0").status_code == 422
+    described = {
+        p["name"]: p["description"]
+        for p in app.openapi()["paths"]["/x/{name}"]["get"]["parameters"]
+    }
+    assert described == {"name": "The thing's name.", "n": "How many."}
+
+
+def _platform_endpoints() -> list:
+    """List the function of every route of the platform routers.
+
+    Returns
+    -------
+    list
+        The endpoints.
+    """
+    from lakana_server.app import ROUTERS
+
+    return [r.endpoint for router in ROUTERS for r in router.routes if isinstance(r, APIRoute)]
+
+
+def _parameters_of(document: dict) -> dict:
+    """Collect every parameter of a document without its description.
+
+    Parameters
+    ----------
+    document
+        An OpenAPI document.
+
+    Returns
+    -------
+    dict
+        The parameters by method, path and name, each without ``description``.
+    """
+
+    def bare(value: object) -> object:
+        """Drop every ``description`` key, however deep.
+
+        Parameters
+        ----------
+        value
+            A JSON value.
+
+        Returns
+        -------
+        object
+            The value without descriptions.
+        """
+        if isinstance(value, dict):
+            return {k: bare(v) for k, v in value.items() if k != "description"}
+        if isinstance(value, list):
+            return [bare(v) for v in value]
+        return value
+
+    return {
+        (method, path, p["in"], p["name"]): bare(p)
+        for path, item in document["paths"].items()
+        for method, operation in item.items()
+        for p in operation.get("parameters", [])
+    }
+
+
+def test_describing_parameters_changes_nothing_but_their_descriptions() -> None:
+    """Every parameter schema of the platform API is the same with and without the texts."""
+    from lakana_server.app import ROUTERS
+
+    def document() -> dict:
+        app = FastAPI()
+        for router in ROUTERS:
+            app.include_router(router)
+        return app.openapi()
+
+    with_texts = document()
+    endpoints = _platform_endpoints()
+    saved = {id(e): e.__dict__.pop("__signature__", None) for e in endpoints}
+    try:
+        without = document()
+    finally:
+        for endpoint in endpoints:
+            if saved[id(endpoint)] is not None:
+                endpoint.__signature__ = saved[id(endpoint)]
+    assert _parameters_of(with_texts) == _parameters_of(without)
+    assert any(saved.values())
+
+
+def test_every_platform_function_with_a_dependency_is_a_route() -> None:
+    """A route function that lost its decorator would silently leave the API."""
+    import lakana_server.api.platform as package
+
+    routes = set(_platform_endpoints())
+    orphans = []
+    for info in pkgutil.iter_modules(package.__path__):
+        module = importlib.import_module(f"{package.__name__}.{info.name}")
+        for name, function in inspect.getmembers(module, inspect.isfunction):
+            if function.__module__ != module.__name__:
+                continue
+            depends = [
+                p
+                for p in inspect.signature(function).parameters.values()
+                if isinstance(p.default, params.Depends)
+            ]
+            if depends and function not in routes:
+                orphans.append(f"{info.name}.{name}")
+    assert orphans == []
