@@ -117,6 +117,7 @@ Each cell is a summary. The page named in the last column has the detail. The ch
 
 | Release | What it asks | Where |
 |---|---|---|
+| 0.18.0 | Migrations `0047` and `0048`. A new environment's storage root must be in the environment's scheme, name a bucket or container, and may not be `file:///`, contain `::`, or lie in another environment's files (422 with a root to use; existing environments are not changed). An allowed webhook host may no longer reach loopback or cloud metadata addresses, except the entry `localhost`. Log lines worth an alert end with `event=<code>`. Copy the new healthchecks from a fresh `compose.yaml`. The workers trim uv's package cache above 10 GiB (`0` keeps it untrimmed). `lakana init` writes CI files that deploy without a stored secret; `--ci-auth pat` for the old ones. | [Notes for 0.18.0](#notes-for-0180) |
 | 0.17.0 | Migrations `0042` to `0046`. **Breaking:** a dropped table's files, and those of the tables of a deleted environment, are deleted after `LAKANA_TABLES__UNDO_DAYS` (7 days; restore with `lakana table undrop` or `lakana env restore`), and `DELETE /api/v1/environments/{name}` answers 200 with the environment; the first administrator's token is written to `LAKANA_BOOTSTRAP_TOKEN_FILE`, never to the log; ADMINs no longer see other people's SQL text or column values in the audit log until granted `READ_QUERY_TEXT`. Set `LAKANA_TABLES__UNDO_DAYS` the same on the server and the workers. A new storage root must be written canonically. Nothing expires unless retention is set. Sign-in events are written once per token every 15 minutes. | [Notes for 0.17.0](#notes-for-0170) |
 | 0.16.0 | Migrations `0036` to `0041`. `GET /api/v1/grants` without a filter now returns every grant, in pages of 100 (follow `X-Next-Cursor`), and the principal and group lists come newest first, paged the same way. Filters and masks that exist are not checked again; a new one is type-checked when it is created. Descriptions appear after the next deploy; table readers count from the upgrade on; search finds the columns of existing tables once the sweep has filled them in (1,000 tables take about 20 hours). Upgrade the workers together with the server, so that every task failure gets its code. | [Notes for 0.16.0](#notes-for-0160) |
 | 0.15.0 | Migration `0035` (a database check on a secret's use; it stops and names any inconsistent secret). While an environment has a storage secret, changing its storage options needs `MANAGE_SECRET` there as well as `MANAGE_ENVIRONMENT`; the Compose set-up attaches its storage secret to `dev` only together with the bundle's own options. A commit through the Iceberg REST catalog is refused when one of its manifest files is over 64 MiB. | [Notes for 0.15.0](#notes-for-0150) |
@@ -129,6 +130,10 @@ Each cell is a summary. The page named in the last column has the detail. The ch
 | 0.9.0 | Upgrade every worker before you deploy Python assets; rewrite `asset(deps=...)` as `asset(inputs=...)`; move helper modules out of `assets/`; an older bundle needs three additions. | [Upgrading](../how-to/deploy-with-compose.md#upgrading), [Projects and deploys](../how-to/projects.md) |
 
 ## Notes for the next release
+
+Nothing yet.
+
+## Notes for 0.18.0
 
 ### How much disk an instance uses, and a package cache that trims itself
 
