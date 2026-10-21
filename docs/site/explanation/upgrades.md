@@ -182,7 +182,11 @@ and a root to use, such as `file:///data/lakana`. A root reaches the storage of 
 the one the request named: `local://` is each process's working directory and `memory://` the
 process's memory, and a `file://` root sent as `s3` was quietly a local directory. `s3a://`,
 `s3n://` and `abfss://` count as `s3` and `abfs`; the message names the spelling to use, as before.
-`lakana env create` is not affected: it takes the scheme from the root.
+`lakana env create` is not affected: it takes the scheme from the root. An `s3` or `abfs` root
+must also start with a bucket or container: `s3://`, `s3:///data` and `abfs:///x` are refused
+(422) with the shape to use, such as `s3://bucket/lakana`, because the storage took the first
+directory, or `managed/` itself, for the bucket. Existing environments on such a root are not
+changed.
 
 - **Existing environments are not changed.** One whose root has a scheme Lakana does not support
   (`local://`, `memory://`, `gs://` and the like) could never be used: every query, deploy and

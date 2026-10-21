@@ -190,6 +190,13 @@ ROOT_SPELLING_MESSAGE = (
     "The storage root {root!r} is written differently from the way Lakana compares locations, "
     "so the files of one environment could be taken for another's. Use {canonical!r} instead."
 )
+ROOT_BUCKET_MESSAGE = (
+    "The storage root {root!r} names no bucket or container: an object-store root starts with "
+    "one, such as {example!r}. Without it the storage would take the first directory, or "
+    "managed/ itself, for the bucket, while Lakana compares locations as written."
+)
+_BUCKET_SCHEMES = frozenset({"s3", "abfs"})
+"""Schemes whose root starts with a bucket or container (`ROOT_BUCKET_MESSAGE`)."""
 ROOT_SCHEME_MESSAGE = (
     "The storage root {root!r} is in the scheme {root_scheme!r}, but the environment's storage "
     "scheme is {scheme!r}: a root reaches the storage of its own scheme, so the environment's "
@@ -285,7 +292,10 @@ def check_storage_root(root: str) -> None:
         resolve it against the working directory), relative or has a host
         (`ROOT_RELATIVE_MESSAGE`; ``localhost``
         is named with the spelling to use), it cannot be normalised exactly
-        (`ROOT_UNJUDGEABLE_MESSAGE`), or its canonical spelling differs
+        (`ROOT_UNJUDGEABLE_MESSAGE`), an ``s3`` or ``abfs`` root (aliases and case
+        included) names no bucket or container (``s3://``, ``s3:///data``, ``abfs:///x``;
+        `ROOT_BUCKET_MESSAGE`, which shows the shape to use: s3fs drops leading slashes, so
+        ``s3:///data`` is bucket ``data``), or its canonical spelling differs
         (`ROOT_SPELLING_MESSAGE`, which names that spelling).
     """
     scheme, sep, rest = root.partition("://")
@@ -311,7 +321,12 @@ def check_storage_root(root: str) -> None:
         or any(char in rest for char in _GLOB_METACHARACTERS)
     ):
         raise ValidationError(ROOT_UNJUDGEABLE_MESSAGE.format(root=root))
-    canonical = f"{SCHEME_ALIASES.get(lowered, lowered)}://{path}"
+    canonical_scheme = SCHEME_ALIASES.get(lowered, lowered)
+    if canonical_scheme in _BUCKET_SCHEMES and (not path or path.startswith("/")):
+        raise ValidationError(
+            ROOT_BUCKET_MESSAGE.format(root=root, example=ROOT_SCHEME_EXAMPLES[canonical_scheme])
+        )
+    canonical = f"{canonical_scheme}://{path}"
     if root not in {canonical, canonical + "/"}:
         raise ValidationError(ROOT_SPELLING_MESSAGE.format(root=root, canonical=canonical))
 

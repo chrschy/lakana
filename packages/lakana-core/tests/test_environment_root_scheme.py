@@ -212,3 +212,38 @@ def test_a_deleted_environment_in_an_unsupported_scheme_is_never_purged(
 
     assert (report.failed_environments, report.environments_purged) == (1, 0)
     assert session.query(Environment).filter_by(name="old").count() == 1
+
+
+@pytest.mark.parametrize(
+    ("scheme", "root", "shape"),
+    [
+        ("s3", "s3://", "'s3://bucket/lakana'"),
+        ("s3", "s3:///", "'s3://bucket/lakana'"),
+        ("s3", "s3:///data", "'s3://bucket/lakana'"),
+        ("s3", "s3:////data", "'s3://bucket/lakana'"),
+        ("s3", "s3://.", "'s3://bucket/lakana'"),
+        ("s3", "s3a:///data", "'s3://bucket/lakana'"),
+        ("s3", "S3://", "'s3://bucket/lakana'"),
+        ("abfs", "abfs://", "'abfs://container/lakana'"),
+        ("abfs", "abfs:///x", "'abfs://container/lakana'"),
+        ("abfs", "abfss:///x", "'abfs://container/lakana'"),
+        ("abfs", "ABFS://", "'abfs://container/lakana'"),
+    ],
+)
+def test_an_object_store_root_without_a_bucket_or_container_is_refused_with_the_shape(
+    catalog: CatalogService, principal: PrincipalRef, scheme: Scheme, root: str, shape: str
+) -> None:
+    """s3fs drops leading slashes, so ``s3:///data`` would be bucket ``data``.
+
+    ``s3://`` would put ``managed/`` in a bucket of that name, while every location check
+    compares the spelling as written.
+    """
+    with pytest.raises(ValidationError) as refused:
+        catalog.create_environment(
+            principal, name="dev", storage=StorageConfig(scheme=scheme, root=root, options={})
+        )
+    message = str(refused.value)
+    assert repr(root) in message
+    assert "no bucket or container" in message
+    assert shape in message
+    assert catalog.list_environments(principal) == []

@@ -1605,8 +1605,13 @@ as a failed environment and touch nothing, `lakana env orphaned-locations` (with
 such an environment works, but its purge never comes (the sweep skips it, `ValidationError`, each
 run), so the row and its name stay. One created as `s3` with a
 `file://` root (or the other way round) cannot be told apart from a correct one, since the sent
-scheme was never stored: it has always been, and stays, an environment of its root's scheme. Pins:
-`test_environment_root_scheme.py`.
+scheme was never stored: it has always been, and stays, an environment of its root's scheme.
+`check_storage_root` also refuses an `s3`/`abfs` root (aliases and case included) whose normalised
+path is empty or starts with `/` (`s3://`, `s3:///data`, `s3://.`, `abfs:///x`;
+`ROOT_BUCKET_MESSAGE`, 422, shows `s3://bucket/lakana` / `abfs://container/lakana`): s3fs drops
+leading slashes, so `s3:///data` is bucket `data` and an `s3://` root puts tables in bucket
+`managed`, while the location checks compare the spelling as written. Existing rows are left alone
+and keep that behaviour. Pins: `test_environment_root_scheme.py`.
 
 **How it deletes.** Per directory: measure the age again, `_eligible` again, then insert and commit
 an `ABANDONED` record (`purge_after = now`) for the location. `location` is unique, so a create
