@@ -12,15 +12,24 @@ from fastapi import APIRouter, Depends
 
 from lakana_core.auth import PrincipalRef
 from lakana_server.api.platform.schemas import CiTokenScopeOut, TaskTokenScopeOut, WhoamiOut
+from lakana_server.api.responses import errors
 from lakana_server.api.routing import AuthenticateFirstRoute
 from lakana_server.deps import get_principal
 
-router = APIRouter(route_class=AuthenticateFirstRoute, prefix="/api/v1/whoami", tags=["whoami"])
+router = APIRouter(
+    route_class=AuthenticateFirstRoute,
+    prefix="/api/v1/whoami",
+    tags=["whoami"],
+    responses=errors(401),
+)
 
 
 @router.get("", response_model=WhoamiOut)
 def whoami(principal: PrincipalRef = Depends(get_principal)) -> WhoamiOut:
-    """Describe the authenticated caller.
+    """Show who is calling.
+
+    Answers with the name and type of the principal the credential signs in as and, for a
+    task or CI token, the scope of that token. Any valid credential may ask.
 
     Parameters
     ----------

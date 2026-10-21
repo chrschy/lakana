@@ -26,11 +26,15 @@ from lakana_core.errors import ValidationError
 from lakana_core.identifiers import NamespacePath
 from lakana_core.models import AuditEventType
 from lakana_server.api.platform.schemas import AuditEventOut, AuditEventPage
+from lakana_server.api.responses import errors
 from lakana_server.api.routing import AuthenticateFirstRoute
 from lakana_server.deps import get_audit_service, get_principal
 
 router = APIRouter(
-    route_class=AuthenticateFirstRoute, prefix="/api/v1/audit-events", tags=["audit"]
+    route_class=AuthenticateFirstRoute,
+    prefix="/api/v1/audit-events",
+    tags=["audit"],
+    responses=errors(401),
 )
 
 _BAD_CURSOR = (
@@ -146,7 +150,7 @@ def _to_out(event: ShownAuditEvent) -> AuditEventOut:
     )
 
 
-@router.get("", response_model=AuditEventPage)
+@router.get("", response_model=AuditEventPage, responses=errors(403, 503))
 def list_audit_events(
     event_type: AuditEventType | None = None,
     environment: str | None = None,
@@ -158,7 +162,13 @@ def list_audit_events(
     p: PrincipalRef = Depends(get_principal),
     audit: AuditService = Depends(get_audit_service),
 ) -> AuditEventPage:
-    """List one page of audit events, newest first, optionally filtered.
+    """List audit events.
+
+    Lists one page of audit events, newest first, with optional filters. The cursor of the
+    next page is in the `X-Next-Cursor` response header. Needs `READ_AUDIT_LOG` on the
+    instance. Another principal's query text and column values are hidden unless the caller
+    also has `READ_QUERY_TEXT`. Answers 422 for a malformed cursor, and 503 when the read
+    had to be recorded in the audit log and could not be; no events are returned then.
 
     Parameters
     ----------

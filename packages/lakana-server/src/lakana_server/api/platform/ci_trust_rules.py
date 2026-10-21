@@ -19,11 +19,15 @@ from lakana_server.api.platform.schemas import (
     CiTrustRuleOut,
     CiTrustRuleUpdate,
 )
+from lakana_server.api.responses import errors
 from lakana_server.api.routing import AuthenticateFirstRoute
 from lakana_server.deps import get_ci_trust_rule_service, get_principal
 
 router = APIRouter(
-    route_class=AuthenticateFirstRoute, prefix="/api/v1/ci-trust-rules", tags=["ci-trust-rules"]
+    route_class=AuthenticateFirstRoute,
+    prefix="/api/v1/ci-trust-rules",
+    tags=["ci-trust-rules"],
+    responses=errors(401),
 )
 
 
@@ -43,13 +47,18 @@ def _out(view: CiTrustRuleView) -> CiTrustRuleOut:
     return CiTrustRuleOut.model_validate(view)
 
 
-@router.post("", response_model=CiTrustRuleOut, status_code=201)
+@router.post("", response_model=CiTrustRuleOut, status_code=201, responses=errors(403, 404))
 def create_ci_trust_rule(
     body: CiTrustRuleCreate,
     principal: PrincipalRef = Depends(get_principal),
     service: CiTrustRuleService = Depends(get_ci_trust_rule_service),
 ) -> CiTrustRuleOut:
-    """Create an enabled CI trust rule.
+    """Create a CI trust rule.
+
+    Creates an enabled rule that lets CI jobs whose ID-token claims match its conditions
+    exchange them for a token that acts as a service account. Needs the `ADMIN` role on the
+    instance. Answers 404 when the principal, environment or repository does not exist and
+    422 when a field breaks the rules of a trust rule.
 
     Parameters
     ----------
@@ -78,12 +87,14 @@ def create_ci_trust_rule(
     )
 
 
-@router.get("", response_model=list[CiTrustRuleOut])
+@router.get("", response_model=list[CiTrustRuleOut], responses=errors(403))
 def list_ci_trust_rules(
     principal: PrincipalRef = Depends(get_principal),
     service: CiTrustRuleService = Depends(get_ci_trust_rule_service),
 ) -> list[CiTrustRuleOut]:
-    """List every CI trust rule, oldest first.
+    """List CI trust rules.
+
+    Lists every rule, oldest first. Needs the `ADMIN` role on the instance.
 
     Parameters
     ----------
@@ -100,13 +111,17 @@ def list_ci_trust_rules(
     return [_out(view) for view in service.list(principal)]
 
 
-@router.post("/explain", response_model=CiTrustExplainOut)
+@router.post("/explain", response_model=CiTrustExplainOut, responses=errors(403))
 def explain_ci_trust_rules(
     body: CiTrustExplainIn,
     principal: PrincipalRef = Depends(get_principal),
     service: CiTrustRuleService = Depends(get_ci_trust_rule_service),
 ) -> CiTrustExplainOut:
-    """Say which rule an exchange with these claims would match, and why not the others.
+    """Explain which CI trust rule matches claims.
+
+    Says which rule an exchange with the given ID-token claims would match, and why the
+    others do not. Needs the `ADMIN` role on the instance. Answers 422 when no issuer is
+    given and the claims have no `iss` text.
 
     Parameters
     ----------
@@ -132,18 +147,20 @@ def explain_ci_trust_rules(
     return CiTrustExplainOut.model_validate(report)
 
 
-@router.get("/{rule_id}", response_model=CiTrustRuleOut)
+@router.get("/{rule_id}", response_model=CiTrustRuleOut, responses=errors(403, 404))
 def get_ci_trust_rule(
     rule_id: uuid.UUID,
     principal: PrincipalRef = Depends(get_principal),
     service: CiTrustRuleService = Depends(get_ci_trust_rule_service),
 ) -> CiTrustRuleOut:
-    """Show one CI trust rule.
+    """Show a CI trust rule.
+
+    Needs the `ADMIN` role on the instance. Answers 404 when there is no such rule.
 
     Parameters
     ----------
     rule_id
-        The rule.
+        The CI trust rule's id.
     principal
         The authenticated caller.
     service
@@ -157,19 +174,23 @@ def get_ci_trust_rule(
     return _out(service.get(principal, rule_id))
 
 
-@router.patch("/{rule_id}", response_model=CiTrustRuleOut)
+@router.patch("/{rule_id}", response_model=CiTrustRuleOut, responses=errors(403, 404))
 def update_ci_trust_rule(
     rule_id: uuid.UUID,
     body: CiTrustRuleUpdate,
     principal: PrincipalRef = Depends(get_principal),
     service: CiTrustRuleService = Depends(get_ci_trust_rule_service),
 ) -> CiTrustRuleOut:
-    """Change a rule's principal, kinds or conditions; the tokens issued under it end.
+    """Change a CI trust rule.
+
+    Changes the rule's principal, kinds or conditions. The tokens issued under it end. Needs
+    the `ADMIN` role on the instance. Answers 404 when there is no such rule or principal
+    and 422 when nothing is given or a field breaks the rules of a trust rule.
 
     Parameters
     ----------
     rule_id
-        The rule.
+        The CI trust rule's id.
     body
         Only the fields present change.
     principal
@@ -193,18 +214,21 @@ def update_ci_trust_rule(
     )
 
 
-@router.post("/{rule_id}/enable", response_model=CiTrustRuleOut)
+@router.post("/{rule_id}/enable", response_model=CiTrustRuleOut, responses=errors(403, 404))
 def enable_ci_trust_rule(
     rule_id: uuid.UUID,
     principal: PrincipalRef = Depends(get_principal),
     service: CiTrustRuleService = Depends(get_ci_trust_rule_service),
 ) -> CiTrustRuleOut:
-    """Enable a rule.
+    """Enable a CI trust rule.
+
+    Needs the `ADMIN` role on the instance. Answers 404 when there is no such rule and 422
+    when its conditions no longer meet the requirements of a new rule.
 
     Parameters
     ----------
     rule_id
-        The rule.
+        The CI trust rule's id.
     principal
         The authenticated caller.
     service
@@ -218,18 +242,21 @@ def enable_ci_trust_rule(
     return _out(service.enable(principal, rule_id))
 
 
-@router.post("/{rule_id}/disable", response_model=CiTrustRuleOut)
+@router.post("/{rule_id}/disable", response_model=CiTrustRuleOut, responses=errors(403, 404))
 def disable_ci_trust_rule(
     rule_id: uuid.UUID,
     principal: PrincipalRef = Depends(get_principal),
     service: CiTrustRuleService = Depends(get_ci_trust_rule_service),
 ) -> CiTrustRuleOut:
-    """Disable a rule: it matches no exchange, and the tokens issued under it end.
+    """Disable a CI trust rule.
+
+    A disabled rule matches no exchange, and the tokens issued under it end. Needs the
+    `ADMIN` role on the instance. Answers 404 when there is no such rule.
 
     Parameters
     ----------
     rule_id
-        The rule.
+        The CI trust rule's id.
     principal
         The authenticated caller.
     service
@@ -243,18 +270,21 @@ def disable_ci_trust_rule(
     return _out(service.disable(principal, rule_id))
 
 
-@router.delete("/{rule_id}", status_code=204)
+@router.delete("/{rule_id}", status_code=204, responses=errors(403, 404))
 def delete_ci_trust_rule(
     rule_id: uuid.UUID,
     principal: PrincipalRef = Depends(get_principal),
     service: CiTrustRuleService = Depends(get_ci_trust_rule_service),
 ) -> None:
-    """Delete a rule; the tokens issued under it end.
+    """Delete a CI trust rule.
+
+    The tokens issued under the rule end. Needs the `ADMIN` role on the instance. Answers
+    404 when there is no such rule.
 
     Parameters
     ----------
     rule_id
-        The rule.
+        The CI trust rule's id.
     principal
         The authenticated caller.
     service

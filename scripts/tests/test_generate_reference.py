@@ -362,3 +362,71 @@ def test_no_setting_description_names_internal_code() -> None:
     assert rows
     bad = [row.split("|")[1].strip() for row in rows if _INTERNAL.search(row.split("|", 5)[5])]
     assert bad == [], f"describe these for a user, not a maintainer: {bad}"
+
+
+_MAINTAINER_TEXT = re.compile(
+    r"lakana_(?:core|server|worker)|\bRaises\b|\bPermissionDenied\b|\bNotFoundError\b"
+    r"|\bConflictError\b|\bValidationError\b|install_exception_handlers|\bprincipal\b: "
+    r"|`(?:principal|catalog|session|service|settings|request|p)`|\bMapped to\b"
+    r"|\bthe authenticated caller\b|\bfor this request\b",
+)
+"""Words of a maintainer's docstring that have no place in the published contract."""
+
+
+def _operations() -> list[tuple[str, str, dict]]:
+    """List the operations of the committed document.
+
+    Returns
+    -------
+    list of tuple
+        The method, the path and the operation object of each route.
+    """
+    doc = json.loads(real_pages()[OPENAPI_PAGE])
+    return [
+        (method.upper(), path, operation)
+        for path, item in doc["paths"].items()
+        for method, operation in item.items()
+    ]
+
+
+def test_every_route_has_a_summary_and_a_description_for_a_user() -> None:
+    """Each operation has a summary and a description that says more than the summary."""
+    lacking = []
+    for method, path, operation in _operations():
+        summary = operation.get("summary", "")
+        description = operation.get("description", "")
+        if not summary or not description or description.startswith(summary):
+            lacking.append(f"{method} {path}")
+    assert lacking == []
+
+
+def test_no_route_description_shows_maintainer_text() -> None:
+    """Internal parameter names and ``Raises`` lines stay in the code, out of the contract."""
+    leaks = []
+    for method, path, operation in _operations():
+        for field in ("summary", "description"):
+            found = _MAINTAINER_TEXT.search(operation.get(field, ""))
+            if found:
+                leaks.append(f"{method} {path} {field}: {found.group(0)!r}")
+    assert leaks == []
+
+
+def test_every_route_that_needs_a_caller_documents_the_refusal_of_a_missing_one() -> None:
+    """Every route answers 401 for a missing or wrong credential, and says so."""
+    missing = [
+        f"{method} {path}"
+        for method, path, operation in _operations()
+        if "401" not in operation["responses"]
+    ]
+    assert missing == []
+
+
+def test_every_parameter_of_every_route_has_a_description() -> None:
+    """Path, query and header parameters say what they are for."""
+    lacking = [
+        f"{method} {path} {parameter['in']} {parameter['name']}"
+        for method, path, operation in _operations()
+        for parameter in operation.get("parameters", [])
+        if not parameter.get("description")
+    ]
+    assert lacking == []

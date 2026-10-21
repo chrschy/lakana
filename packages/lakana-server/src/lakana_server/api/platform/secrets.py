@@ -20,6 +20,7 @@ from lakana_server.api.platform.schemas import (
     SecretOut,
     SecretRotate,
 )
+from lakana_server.api.responses import errors
 from lakana_server.api.routing import AuthenticateFirstRoute
 from lakana_server.deps import get_principal, get_secret_service
 
@@ -27,6 +28,7 @@ router = APIRouter(
     route_class=AuthenticateFirstRoute,
     prefix="/api/v1/environments/{environment_name}/secrets",
     tags=["secrets"],
+    responses=errors(401),
 )
 
 
@@ -89,7 +91,7 @@ def _find_by_name(secrets: list[Secret], name: str) -> Secret:
     raise NotFoundError(f"No secret named {name!r}.")
 
 
-@router.post("", response_model=SecretOut, status_code=201)
+@router.post("", response_model=SecretOut, status_code=201, responses=errors(403, 404, 409))
 def create_secret(
     environment_name: str,
     body: SecretCreate,
@@ -97,6 +99,13 @@ def create_secret(
     service: SecretService = Depends(get_secret_service),
 ) -> SecretOut:
     """Create a secret.
+
+    Stores a secret value encrypted, for the environment's storage, a webhook, a package
+    index or a repository. The value is never shown again. Needs `MANAGE_SECRET` in the
+    environment. Answers 404 when the environment does not exist, 409 when a secret of that
+    name exists, and 422 when the use names no target, or names one it must not. Answers 500
+    when the instance has no secrets master key; that is a deployment fault the operator
+    fixes.
 
     Parameters
     ----------
@@ -141,13 +150,16 @@ def create_secret(
     return _to_out(created, environment_name, service)
 
 
-@router.get("", response_model=list[SecretOut])
+@router.get("", response_model=list[SecretOut], responses=errors(403, 404))
 def list_secrets(
     environment_name: str,
     principal: PrincipalRef = Depends(get_principal),
     service: SecretService = Depends(get_secret_service),
 ) -> list[SecretOut]:
-    """List an environment's active secrets.
+    """List the secrets of an environment.
+
+    Lists the active secrets by name and use. Values are never included. Needs
+    `MANAGE_SECRET` in the environment. Answers 404 when the environment does not exist.
 
     Parameters
     ----------
@@ -174,7 +186,7 @@ def list_secrets(
     ]
 
 
-@router.patch("/{secret_name}", response_model=SecretOut)
+@router.patch("/{secret_name}", response_model=SecretOut, responses=errors(403, 404))
 def rotate_secret(
     environment_name: str,
     secret_name: str,
@@ -182,7 +194,12 @@ def rotate_secret(
     principal: PrincipalRef = Depends(get_principal),
     service: SecretService = Depends(get_secret_service),
 ) -> SecretOut:
-    """Rotate a secret's value.
+    """Rotate a secret.
+
+    Replaces the secret's value; what uses it picks the new value up. Needs `MANAGE_SECRET`
+    in the environment. Answers 404 when the environment does not exist or has no active
+    secret of that name (a revoked secret counts as missing), and 500 when the instance has
+    no secrets master key.
 
     Parameters
     ----------
@@ -217,7 +234,7 @@ def rotate_secret(
     return _to_out(rotated, environment_name, service)
 
 
-@router.put("/{secret_name}/use", response_model=SecretOut)
+@router.put("/{secret_name}/use", response_model=SecretOut, responses=errors(403, 404))
 def bind_secret(
     environment_name: str,
     secret_name: str,
@@ -225,7 +242,13 @@ def bind_secret(
     principal: PrincipalRef = Depends(get_principal),
     service: SecretService = Depends(get_secret_service),
 ) -> SecretOut:
-    """Bind a secret to a package index, a repository or its environment.
+    """Bind a secret to a package index, repository or environment.
+
+    Chooses what uses the secret: a package index or repository by name, or the environment
+    itself. Needs `MANAGE_SECRET` in the environment. Answers 404 when the environment, the
+    active secret (a revoked secret counts as missing) or the target does not exist and 422
+    for a name given for the environment use, none for an index or repository, or the
+    environment's storage secret bound to an index or repository.
 
     Parameters
     ----------
@@ -260,7 +283,7 @@ def bind_secret(
     return _to_out(bound, environment_name, service)
 
 
-@router.delete("/{secret_name}", status_code=204)
+@router.delete("/{secret_name}", status_code=204, responses=errors(403, 404))
 def revoke_secret(
     environment_name: str,
     secret_name: str,
@@ -268,6 +291,9 @@ def revoke_secret(
     service: SecretService = Depends(get_secret_service),
 ) -> None:
     """Revoke a secret.
+
+    Needs `MANAGE_SECRET` in the environment. Answers 404 when the environment or secret
+    does not exist.
 
     Parameters
     ----------

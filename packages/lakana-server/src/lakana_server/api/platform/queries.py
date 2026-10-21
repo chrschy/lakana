@@ -21,6 +21,7 @@ from lakana_server.api.platform.schemas import (
     QuerySubmit,
     QuerySubmitOut,
 )
+from lakana_server.api.responses import errors
 from lakana_server.api.routing import AuthenticateFirstRoute
 from lakana_server.deps import (
     check_statement,
@@ -35,6 +36,7 @@ router = APIRouter(
     route_class=AuthenticateFirstRoute,
     prefix="/api/v1/environments/{env}/queries",
     tags=["queries"],
+    responses=errors(401),
 )
 
 
@@ -70,7 +72,7 @@ def _status_out(run: QueryRun, waiting: WaitReason | None) -> QueryStatusOut:
     )
 
 
-@router.get("", response_model=list[QueryListOut])
+@router.get("", response_model=list[QueryListOut], responses=errors(403, 404, 503))
 def list_queries(
     env: str,
     response: Response,
@@ -82,16 +84,16 @@ def list_queries(
     principal: PrincipalRef = Depends(get_principal),
     queries: QueryService = Depends(get_query_service),
 ) -> list[QueryListOut]:
-    """List the queries of an environment: running, then queued, then (optionally) ended.
+    """List the queries of an environment.
 
-    A holder of `MANAGE_ENVIRONMENT` (personal token) sees every query of the environment;
-    everyone else sees the queries their principal submitted (a task token: its own). Never
-    the SQL text, an error message or a result.
-
-    The cursor of the next page is in the `X-Next-Cursor` response header; it is absent on the
-    last page. Send the same filters with every page. The filters only narrow what the caller
-    may see: `submitter` never shows another principal's query to a caller who is not a
-    manager.
+    Lists running queries first, then queued ones, then, when asked, ended ones. Needs
+    `SUBMIT_QUERY` on the environment, or `MANAGE_ENVIRONMENT`. A holder of
+    `MANAGE_ENVIRONMENT` sees every query of the environment; everyone else sees the queries
+    they submitted. The list never shows SQL text, error messages or results. The cursor of
+    the next page is in the `X-Next-Cursor` response header and is absent on the last page;
+    send the same filters with every page. Answers 404 when the environment does not exist.
+    Answers 503 when a manager's page shows someone else's queries and the audit entry for
+    that could not be written; nothing is listed then.
 
     Parameters
     ----------
@@ -161,7 +163,7 @@ def list_queries(
     ]
 
 
-@router.post("", response_model=QuerySubmitOut, status_code=202)
+@router.post("", response_model=QuerySubmitOut, status_code=202, responses=errors(403, 404))
 def submit_query(
     env: str,
     body: QuerySubmit,
@@ -169,7 +171,12 @@ def submit_query(
     principal: PrincipalRef = Depends(get_principal),
     queries: QueryService = Depends(get_query_service),
 ) -> QuerySubmitOut:
-    """Enqueue a query for execution.
+    """Submit a query.
+
+    Queues SQL for a worker to run and answers 202 with the query's id; poll its status,
+    then fetch its result. Needs `SUBMIT_QUERY` on the environment. Answers 404 when the
+    environment does not exist and 422 when the SQL is longer than the server's statement
+    limit.
 
     Parameters
     ----------
@@ -215,14 +222,17 @@ def submit_query(
     return QuerySubmitOut(query_id=str(run.id))
 
 
-@router.get("/{query_id}", response_model=QueryStatusOut)
+@router.get("/{query_id}", response_model=QueryStatusOut, responses=errors(403, 404))
 def get_query_status(
     env: str,
     query_id: uuid.UUID,
     principal: PrincipalRef = Depends(get_principal),
     queries: QueryService = Depends(get_query_service),
 ) -> QueryStatusOut:
-    """Fetch a query's current status.
+    """Show a query's status.
+
+    Needs `SUBMIT_QUERY` on the environment. Only the principal that submitted the query can
+    see it; for anyone else the answer is 404, as for a query that does not exist.
 
     Parameters
     ----------
@@ -250,19 +260,23 @@ def get_query_status(
     return _status_out(run, queries.waiting_for(run))
 
 
-@router.post("/{query_id}/cancel", response_model=QueryStatusOut)
+@router.post("/{query_id}/cancel", response_model=QueryStatusOut, responses=errors(403, 404, 409))
 def cancel_query(
     env: str,
     query_id: uuid.UUID,
     principal: PrincipalRef = Depends(get_principal),
     queries: QueryService = Depends(get_query_service),
 ) -> QueryStatusOut:
-    """Cancel a queued query, or ask the worker to stop a running one.
+    """Cancel a query.
 
-    A queued query becomes `CANCELLED` at once. A running one is only asked to stop: the
-    answer is `RUNNING` and the worker ends it (`CANCELLED`) within a few seconds. A query
-    that has already ended is answered with its status; that is not an error. The submitter
-    and a holder of `MANAGE_ENVIRONMENT` may cancel.
+    A queued query becomes `CANCELLED` at once. A running one is asked to stop: the answer
+    is `RUNNING` and the worker ends it within a few seconds. A query that has already ended
+    is answered with its status, which is not an error. The submitter and a holder of
+    `MANAGE_ENVIRONMENT` may cancel; anyone else gets 404, and a caller with neither
+    `SUBMIT_QUERY` nor `MANAGE_ENVIRONMENT` gets 403. Answers 422 for the write of a
+    pipeline task (cancel the run instead) and for a maintenance run that has started, and
+    409 when a worker is starting or finishing the query at that moment: ask for the status
+    and cancel again if it still runs.
 
     Parameters
     ----------
@@ -312,7 +326,7 @@ _NO_RESULT_CLAUSES: dict[WriteMode | None, str] = {
 }
 
 
-@router.get("/{query_id}/result")
+@router.get("/{query_id}/result", responses=errors(403, 404, 409))
 def get_query_result(
     env: str,
     query_id: uuid.UUID,
@@ -321,7 +335,12 @@ def get_query_result(
     session: Session = Depends(get_session),
     key_provider: KeyProvider = Depends(get_key_provider),
 ) -> Response:
-    """Stream a finished query's Arrow IPC result.
+    """Fetch a query's result.
+
+    Streams the rows of a finished read as an Arrow IPC stream. Needs `SUBMIT_QUERY` on the
+    environment. Only the submitter can fetch them; for anyone else the answer is 404.
+    Answers 409 unless the query has succeeded, or when it succeeded without being a read
+    (it wrote to a table, created a view or was maintenance): only a read has result rows.
 
     Parameters
     ----------

@@ -24,13 +24,20 @@ from lakana_core.ci_oidc.exchange import CiExchangeRefused, CiTokenService
 from lakana_core.errors import AuthenticationError, PermissionDenied, ValidationError
 from lakana_core.models import AuditEventType
 from lakana_server.api.platform.schemas import CiTokenExchangeIn, CiTokenOut
+from lakana_server.api.responses import errors
+from lakana_server.api.routing import AuthenticateFirstRoute
 from lakana_server.body_limit import streams_its_own_body
 from lakana_server.errors import PayloadTooLargeError
 
 MAX_EXCHANGE_BODY_BYTES = 16 * 1024
 """The largest exchange request read; an ID token is at most 16 KiB too."""
 
-router = APIRouter(prefix="/api/v1/auth/oidc", tags=["auth"])
+router = APIRouter(
+    route_class=AuthenticateFirstRoute,
+    prefix="/api/v1/auth/oidc",
+    tags=["auth"],
+    responses=errors(401),
+)
 
 
 async def _read_body(request: Request) -> bytes:
@@ -182,15 +189,20 @@ def _exchange(request: Request, body: CiTokenExchangeIn) -> CiTokenOut:
             "content": {"application/json": {"schema": CiTokenExchangeIn.model_json_schema()}},
         }
     },
+    responses=errors(403, 413),
 )
 @streams_its_own_body
 async def exchange_ci_id_token(request: Request) -> CiTokenOut:
-    """Exchange a CI job's OIDC ID token for a Lakana CI token; no credential needed.
+    """Exchange a CI job's ID token for a Lakana token.
 
-    The token acts as the service account of the one enabled CI trust rule whose conditions
-    the ID token's claims match, for the environment and repository asked for. It may queue one
-    deploy (of the ID token's ``sha`` only) or dry run there, then read that run, and expires
-    after `LAKANA_CI_OIDC__TOKEN_TTL_SECONDS` (one hour by default).
+    Needs no credential: the ID token is the proof. The Lakana token acts as the service
+    account of the one enabled CI trust rule whose conditions the ID token's claims match,
+    for the environment and repository asked for. It may queue one deploy (of the ID token's
+    commit only) or dry run there, then read that run, and it expires after the server's CI
+    token lifetime (one hour by default). Answers 401 when the ID token is refused or was
+    exchanged before, 403 when it is valid but no single enabled rule accepts it, 413 for a
+    request over 16 KiB and 422 unless the body is a JSON object of `id_token`,
+    `environment` and `repository` only.
 
     Parameters
     ----------

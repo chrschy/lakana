@@ -54,6 +54,7 @@ from lakana_server.api.platform.tables import router as tables_router
 from lakana_server.api.platform.task_tokens import router as task_tokens_router
 from lakana_server.api.platform.tokens import router as tokens_router
 from lakana_server.api.platform.whoami import router as whoami_router
+from lakana_server.api.routing import describe_openapi
 from lakana_server.auth_rate_limit import AuthAuditLimiter
 from lakana_server.body_limit import BodyLimitMiddleware, streaming_routes
 from lakana_server.concurrency import AppendConcurrencyLimiter
@@ -300,4 +301,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         iceberg=iceberg_router.routes,
     )
     app.add_middleware(DeprecationHeaders)
+    describe_openapi(app, ROUTERS)
     return app

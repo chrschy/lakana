@@ -7,22 +7,30 @@ from fastapi import APIRouter, Depends
 from lakana_core.auth import PrincipalRef
 from lakana_core.identity.pats import PatService
 from lakana_server.api.platform.schemas import TokenIssueIn, TokenIssueOut, TokenOut
+from lakana_server.api.responses import errors
 from lakana_server.api.routing import AuthenticateFirstRoute
 from lakana_server.deps import get_pat_service, get_principal
 
 router = APIRouter(
-    route_class=AuthenticateFirstRoute, prefix="/api/v1/principals/{name}/tokens", tags=["tokens"]
+    route_class=AuthenticateFirstRoute,
+    prefix="/api/v1/principals/{name}/tokens",
+    tags=["tokens"],
+    responses=errors(401),
 )
 
 
-@router.post("", response_model=TokenIssueOut, status_code=201)
+@router.post("", response_model=TokenIssueOut, status_code=201, responses=errors(403, 404))
 def issue_token(
     name: str,
     body: TokenIssueIn,
     principal: PrincipalRef = Depends(get_principal),
     service: PatService = Depends(get_pat_service),
 ) -> TokenIssueOut:
-    """Issue a PAT for a principal.
+    """Issue a personal access token.
+
+    Issues a token that signs in as the principal. The answer holds the token's full value,
+    which is shown this once and cannot be read again. Needs the `ADMIN` role on the
+    instance. Answers 404 when there is no such principal.
 
     Parameters
     ----------
@@ -49,13 +57,16 @@ def issue_token(
     return TokenIssueOut(key_id=issued.key_id, name=issued.name, token=issued.token)
 
 
-@router.get("", response_model=list[TokenOut])
+@router.get("", response_model=list[TokenOut], responses=errors(403, 404))
 def list_tokens(
     name: str,
     principal: PrincipalRef = Depends(get_principal),
     service: PatService = Depends(get_pat_service),
 ) -> list[TokenOut]:
-    """List every PAT issued to a principal. Never includes a secret.
+    """List the tokens of a principal.
+
+    Lists the principal's personal access tokens. The token values are never included. Needs
+    the `ADMIN` role on the instance. Answers 404 when there is no such principal.
 
     Parameters
     ----------
@@ -79,14 +90,17 @@ def list_tokens(
     return [TokenOut.model_validate(row) for row in service.list(principal, name)]
 
 
-@router.delete("/{key_id}", status_code=204)
+@router.delete("/{key_id}", status_code=204, responses=errors(403, 404))
 def revoke_token(
     name: str,
     key_id: str,
     principal: PrincipalRef = Depends(get_principal),
     service: PatService = Depends(get_pat_service),
 ) -> None:
-    """Revoke a PAT.
+    """Revoke a personal access token.
+
+    The token stops working at once. Needs the `ADMIN` role on the instance. Answers 404
+    when the principal or the token does not exist.
 
     Parameters
     ----------

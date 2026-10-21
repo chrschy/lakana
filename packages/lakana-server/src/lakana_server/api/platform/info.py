@@ -16,10 +16,13 @@ from fastapi import APIRouter, Depends, Request
 
 from lakana_core.auth import PrincipalRef
 from lakana_server.api.platform.schemas import ArtifactLimitsOut, InfoOut
+from lakana_server.api.responses import errors
 from lakana_server.api.routing import AuthenticateFirstRoute
 from lakana_server.deps import get_principal
 
-router = APIRouter(route_class=AuthenticateFirstRoute, prefix="/api/v1/info", tags=["info"])
+router = APIRouter(
+    route_class=AuthenticateFirstRoute, prefix="/api/v1/info", tags=["info"], responses=errors(401)
+)
 
 
 def platform_version() -> str:
@@ -40,7 +43,10 @@ def platform_version() -> str:
 
 @router.get("", response_model=InfoOut)
 def info(request: Request, principal: PrincipalRef = Depends(get_principal)) -> InfoOut:
-    """Describe this instance to an authenticated caller.
+    """Describe the instance.
+
+    Shows the platform version of the running server and the limits it applies to artifacts.
+    Any authenticated caller may ask, a task token included.
 
     Parameters
     ----------

@@ -570,6 +570,8 @@ def render_openapi(routers: Sequence[APIRouter]) -> str:
         The document as indented JSON with a final newline. Its ``info.version`` is
         ``OPENAPI_VERSION``, so the snapshot changes only when the API does.
     """
+    from lakana_server.api.routing import describe_openapi
+
     app = FastAPI(
         title=OPENAPI_TITLE,
         version=OPENAPI_VERSION,
@@ -581,6 +583,7 @@ def render_openapi(routers: Sequence[APIRouter]) -> str:
     )
     for router in routers:
         app.include_router(router)
+    describe_openapi(app, routers)
     return json.dumps(app.openapi(), indent=2, ensure_ascii=False) + "\n"
 
 

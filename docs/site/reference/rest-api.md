@@ -114,8 +114,12 @@ The OpenAPI 3.1 document of the platform API is in three places:
   same document as pages at `/docs`. That document also lists the Iceberg REST catalog's routes,
   and has no version of its own.
 
-Each route's description in the document is written for the people who maintain Lakana; the
-reference pages of this site ([Reference](index.md)) describe the routes for a user.
+Every route in the document has a short summary and a description written for the people who
+call it: who may call it, what it does and the main refusals with their status codes. The error
+answers (`401`, `403`, `404`, `409` and others) are listed with the routes that return them, each
+with the body `{"detail": "...", "type": "..."}`. A change of that wording is not a change of the
+contract. The reference pages of this site ([Reference](index.md)) describe the routes in more
+depth.
 
 ## How Lakana keeps the promise
 

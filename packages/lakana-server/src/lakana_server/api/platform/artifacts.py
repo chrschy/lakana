@@ -93,6 +93,7 @@ from lakana_server.api.platform.schemas import (
     ArtifactVersionDeletedOut,
     ArtifactVersionOut,
 )
+from lakana_server.api.responses import errors
 from lakana_server.api.routing import AuthenticateFirstRoute
 from lakana_server.body_limit import streams_its_own_body
 from lakana_server.concurrency import AppendConcurrencyLimiter
@@ -111,11 +112,13 @@ router = APIRouter(
     route_class=AuthenticateFirstRoute,
     prefix="/api/v1/environments/{env}/namespaces/{path}/artifacts",
     tags=["artifacts"],
+    responses=errors(401),
 )
 environment_router = APIRouter(
     route_class=AuthenticateFirstRoute,
     prefix="/api/v1/environments/{env}/artifacts",
     tags=["artifacts"],
+    responses=errors(401),
 )
 
 _MAX_VERSION = 2**31 - 1
@@ -599,7 +602,12 @@ def _decode_document(body: bytes) -> dict[str, object]:
     return document
 
 
-@router.post("/{name}/uploads", response_model=ArtifactUploadOut, status_code=201)
+@router.post(
+    "/{name}/uploads",
+    response_model=ArtifactUploadOut,
+    status_code=201,
+    responses=errors(403, 404, 409, 408, 413, 503),
+)
 @streams_its_own_body
 async def begin_upload(
     request: Request,
@@ -609,10 +617,16 @@ async def begin_upload(
     principal: PrincipalRef = Depends(get_write_principal),
     service: ArtifactService = Depends(get_artifact_service),
 ) -> ArtifactUploadOut:
-    """Validate a manifest and open an upload for a new version of an artifact.
+    """Begin an artifact upload.
 
-    The artifact is created on first use. The response names the files the store does not have
-    yet; send those, then commit.
+    Checks a manifest of files and opens an upload for the next version of an artifact; the
+    artifact is created on first use. The answer names the files the store does not have
+    yet: send those with the blob route, then commit. Needs `WRITE_TABLE` on the name, and
+    `CREATE_TABLE` as well to create the artifact. Answers 404 when the namespace does
+    not exist, 409 when the artifact has too many open uploads, 413 for a manifest over the
+    server's limit, 408 when the body arrives too slowly, 503 when the server is busy (try
+    again after `Retry-After`) and 422 when the body is not a manifest or breaks one of its
+    rules.
 
     Parameters
     ----------
@@ -665,7 +679,11 @@ async def begin_upload(
     )
 
 
-@router.put("/{name}/uploads/{upload_id}/blobs/{sha256}", response_model=ArtifactBlobOut)
+@router.put(
+    "/{name}/uploads/{upload_id}/blobs/{sha256}",
+    response_model=ArtifactBlobOut,
+    responses=errors(403, 404, 409, 400, 408, 503),
+)
 @streams_its_own_body
 async def put_blob(
     request: Request,
@@ -677,7 +695,14 @@ async def put_blob(
     principal: PrincipalRef = Depends(get_write_principal),
     service: ArtifactService = Depends(get_artifact_service),
 ) -> ArtifactBlobOut:
-    """Receive one file of an upload, streamed, verified against its manifest.
+    """Upload one file of an artifact.
+
+    Receives one file of an open upload as the request body and checks it against the
+    manifest's size and SHA-256. Needs `WRITE_TABLE`. Answers 409 when the upload has
+    expired, was committed or does not exist, 422 when the file is longer or shorter than
+    declared, its hash differs, or the manifest names no file with this hash, 400 when the
+    client closed the connection part-way, 408 when the body arrives too slowly and 503 when
+    the server is busy (try again after `Retry-After`).
 
     Parameters
     ----------
@@ -690,7 +715,7 @@ async def put_blob(
     name
         Artifact name.
     upload_id
-        The upload.
+        The upload's id, as returned when it was begun.
     sha256
         The file's SHA-256, 64 lower-case hexadecimal digits.
     principal
@@ -750,7 +775,10 @@ async def put_blob(
 
 
 @router.post(
-    "/{name}/uploads/{upload_id}/commit", response_model=ArtifactVersionOut, status_code=201
+    "/{name}/uploads/{upload_id}/commit",
+    response_model=ArtifactVersionOut,
+    status_code=201,
+    responses=errors(403, 404, 409),
 )
 def commit_upload(
     env: str,
@@ -761,7 +789,12 @@ def commit_upload(
     principal: PrincipalRef = Depends(get_write_principal),
     service: ArtifactService = Depends(get_artifact_service),
 ) -> ArtifactVersionOut:
-    """Turn a complete upload into the artifact's next version.
+    """Commit an artifact upload.
+
+    Turns a complete upload into the artifact's next version. Needs `WRITE_TABLE`. Answers
+    409 when the upload expired, was committed already or does not exist, or files of it are
+    not stored yet; 404 when a source the version names does not exist; 422 when a source is
+    malformed.
 
     Parameters
     ----------
@@ -772,7 +805,7 @@ def commit_upload(
     name
         Artifact name.
     upload_id
-        The upload.
+        The upload's id, as returned when it was begun.
     body
         What the version was made from, for lineage.
     principal
@@ -806,7 +839,7 @@ def commit_upload(
     return version_out(result.version, result.deleted_versions)
 
 
-@router.delete("/{name}/uploads/{upload_id}", status_code=204)
+@router.delete("/{name}/uploads/{upload_id}", status_code=204, responses=errors(403, 404, 409))
 def abort_upload(
     env: str,
     path: str,
@@ -815,12 +848,14 @@ def abort_upload(
     principal: PrincipalRef = Depends(get_principal),
     service: ArtifactService = Depends(get_artifact_service),
 ) -> None:
-    """Withdraw an upload that was begun and will not be finished.
+    """Withdraw an upload.
 
-    The caller must be the one that began it (for a task, the same attempt) and it must still
-    be open. Nothing is deleted from storage; the files it stored stay for the periodic
-    clean-up. A protected environment does not need a break-glass reason for this: it writes
-    nothing into a version.
+    Withdraws an upload that was begun and will not be finished. Only the caller that began
+    it (for a task, the same attempt) can, and only while it is open. Files it stored stay
+    until the periodic clean-up. Answers 403 with one text whether or not the artifact or
+    upload exists, 404 when the caller may write the name and no artifact has it, 409 for an
+    upload that does not exist, is another caller's, expired or was committed, and 422 when
+    the name belongs to a table or a view.
 
     Parameters
     ----------
@@ -831,7 +866,7 @@ def abort_upload(
     name
         Artifact name.
     upload_id
-        The upload.
+        The upload's id, as returned when it was begun.
     principal
         The authenticated caller.
     service
@@ -852,7 +887,11 @@ def abort_upload(
     service.abort_upload(principal, artifact_ref(env, path, name), upload_id)
 
 
-@router.delete("/{name}/versions/{version}", response_model=ArtifactVersionDeletedOut)
+@router.delete(
+    "/{name}/versions/{version}",
+    response_model=ArtifactVersionDeletedOut,
+    responses=errors(403, 404, 409),
+)
 def delete_version(
     env: str,
     path: str,
@@ -861,18 +900,17 @@ def delete_version(
     principal: PrincipalRef = Depends(get_write_principal),
     service: ArtifactService = Depends(get_artifact_service),
 ) -> ArtifactVersionDeletedOut:
-    """Delete one version's bytes; its record and its lineage stay.
+    """Delete one version of an artifact.
 
-    The service authorizes `DROP_TABLE` first, refuses every task token and every caller with a
-    run context, and in a protected environment needs a break-glass reason. The version is gone
-    for every reader when this answers. Its bytes are removed before the answer unless the
-    version is large: the request removes up to a budget and the server's periodic clean-up
-    removes the rest, as it does after a failed removal, which never fails the request.
-
-    The answer says how many files and bytes this request freed and how many stayed, each
-    group of the ones that stayed with its reason (`ArtifactKeptOut`); it still has every field
-    it had before, so an older client works unchanged. A version number is named in a kept
-    group only when the caller may also read the artifact.
+    Deletes the bytes of one version; its record and its lineage stay. Needs `DROP_TABLE` on
+    the name; a task token is always refused, and in a protected environment a reason for
+    breaking the protection is needed. The version is gone for every reader when this
+    answers. Large versions are removed in part by this request and in part by the server's
+    periodic clean-up. The answer says how many files and bytes were freed and how many
+    stayed, with the reason. Answers 403 with one text whether or not the artifact or
+    version exists, 404 when the caller may drop the name and the artifact or version is
+    absent, 409 when the version is deleted already and 422 when the version is not a
+    positive number or the name is not an artifact.
 
     Parameters
     ----------
@@ -913,7 +951,7 @@ def delete_version(
     return deleted_out(service.delete_version(principal, artifact_ref(env, path, name), number))
 
 
-@router.delete("/{name}", status_code=204)
+@router.delete("/{name}", status_code=204, responses=errors(403, 404, 409))
 def drop_artifact(
     env: str,
     path: str,
@@ -921,10 +959,15 @@ def drop_artifact(
     principal: PrincipalRef = Depends(get_write_principal),
     service: ArtifactService = Depends(get_artifact_service),
 ) -> None:
-    """Drop an artifact: its versions' bytes, its rows and its grants. This cannot be undone.
+    """Drop an artifact.
 
-    A drop of an artifact with thousands of files removes them inside this request, so the
-    request may take a while; if the server fails part-way, its periodic clean-up finishes it.
+    Removes the artifact with all its versions' bytes, its rows and its grants. This cannot
+    be undone. Needs `DROP_TABLE` on the name; a task token is always refused, and in a
+    protected environment a reason for breaking the protection is needed. An artifact with
+    thousands of files takes a while; if the server fails part-way, its periodic clean-up
+    finishes the job. Answers 403 with one text whether or not the artifact exists, 404 when
+    the caller may drop the name and no artifact has it, 409 when the storage could not be
+    written (nothing was deleted) and 422 when the name belongs to a table or a view.
 
     Parameters
     ----------
@@ -1010,7 +1053,7 @@ def _decode_cursor(text: str) -> UploadCursor:
     return UploadCursor(created_at, upload_id)
 
 
-@environment_router.get("/uploads", response_model=ArtifactUploadPage)
+@environment_router.get("/uploads", response_model=ArtifactUploadPage, responses=errors(403, 404))
 def list_uploads(
     env: str,
     name: str | None = Query(default=None, max_length=1400),
@@ -1019,13 +1062,14 @@ def list_uploads(
     principal: PrincipalRef = Depends(get_principal),
     service: ArtifactService = Depends(get_artifact_service),
 ) -> ArtifactUploadPage:
-    """List the caller's own open uploads in an environment, newest first.
+    """List your open uploads.
 
-    Only uploads the caller began are listed (for a task, only those of the same attempt), never
-    another principal's, and nothing says that others exist. An upload begun and never finished,
-    after a killed process for example, holds one of its artifact's 16 upload places until it
-    expires; the answer gives the id that `DELETE .../uploads/{upload_id}` needs. No manifest is
-    read, so the list says nothing about how many files were sent.
+    Lists the open uploads the caller began in the environment, newest first; for a task,
+    those of its own attempt. Other principals' uploads are never listed and nothing says
+    they exist. An upload that was begun and never finished holds one of its artifact's
+    upload places until it expires; the answer gives the id that the withdraw route needs.
+    Needs `READ_ENVIRONMENT`. Answers 404 when the environment does not exist and 422 for a
+    `name` that is not `namespace.name` or a `cursor` this server did not issue.
 
     Parameters
     ----------
@@ -1074,17 +1118,19 @@ def list_uploads(
     )
 
 
-@environment_router.get("", response_model=list[ArtifactOut])
+@environment_router.get("", response_model=list[ArtifactOut], responses=errors(403, 404))
 def list_artifacts(
     env: str,
     namespace: str | None = Query(default=None, max_length=1024),
     principal: PrincipalRef = Depends(get_principal),
     service: ArtifactService = Depends(get_artifact_service),
 ) -> list[ArtifactOut]:
-    """List the artifacts of an environment that the caller may read.
+    """List the artifacts of an environment.
 
-    A caller who may read the environment but no artifact gets an empty list, whatever exists and
-    whichever namespace is asked for: nothing is revealed by an empty list against an error.
+    Lists the artifacts of the environment that the caller may read. A caller who may read
+    the environment but no artifact gets an empty list, so that an empty list reveals
+    nothing. Needs `READ_ENVIRONMENT`. Answers 404 when the environment does not exist and
+    422 when the namespace path is malformed.
 
     Parameters
     ----------
@@ -1115,7 +1161,7 @@ def list_artifacts(
     return [artifact_out(view) for view in service.list_artifacts(principal, env, parsed)]
 
 
-@router.get("/{name}", response_model=ArtifactOut)
+@router.get("/{name}", response_model=ArtifactOut, responses=errors(403, 404))
 def get_artifact(
     env: str,
     path: str,
@@ -1123,7 +1169,11 @@ def get_artifact(
     principal: PrincipalRef = Depends(get_principal),
     service: ArtifactService = Depends(get_artifact_service),
 ) -> ArtifactOut:
-    """Show one artifact.
+    """Show an artifact.
+
+    Needs `READ_TABLE` on the name. Answers 403 with one text whether or not the artifact
+    exists, 404 when the caller may read the name and no artifact has it, and 422 when the
+    name belongs to a table or a view.
 
     Parameters
     ----------
@@ -1155,7 +1205,7 @@ def get_artifact(
     return artifact_out(service.get_artifact(principal, artifact_ref(env, path, name)))
 
 
-@router.get("/{name}/versions", response_model=list[ArtifactVersionOut])
+@router.get("/{name}/versions", response_model=list[ArtifactVersionOut], responses=errors(403, 404))
 def list_versions(
     env: str,
     path: str,
@@ -1163,9 +1213,12 @@ def list_versions(
     principal: PrincipalRef = Depends(get_principal),
     service: ArtifactService = Depends(get_artifact_service),
 ) -> list[ArtifactVersionOut]:
-    """List an artifact's versions, newest first, deleted ones included, without their files.
+    """List the versions of an artifact.
 
-    A task token gets no run identifiers (`version_out`).
+    Lists the versions newest first, deleted ones included, without their files. A task
+    token sees no run identifiers. Needs `READ_TABLE` on the name. Answers 403 with one text
+    whether or not the artifact exists and 404 when the caller may read the name and no
+    artifact has it.
 
     Parameters
     ----------
@@ -1199,7 +1252,9 @@ def list_versions(
     ]
 
 
-@router.get("/{name}/versions/{version}", response_model=ArtifactVersionOut)
+@router.get(
+    "/{name}/versions/{version}", response_model=ArtifactVersionOut, responses=errors(403, 404)
+)
 def get_version(
     env: str,
     path: str,
@@ -1208,7 +1263,12 @@ def get_version(
     principal: PrincipalRef = Depends(get_principal),
     service: ArtifactService = Depends(get_artifact_service),
 ) -> ArtifactVersionOut:
-    """Show one version with its files.
+    """Show one version of an artifact.
+
+    Shows the version with its files. `version` is a positive number or `current`. Needs
+    `READ_TABLE` on the name. Answers 403 with one text whether or not the artifact or
+    version exists, 404 when the caller may read the name and the artifact or version is
+    absent, and 422 for a version that is not a bounded positive number or `current`.
 
     Parameters
     ----------
@@ -1442,7 +1502,7 @@ class DownloadResponse(StreamingResponse):
 @router.get(
     "/{name}/versions/{version}/blobs/{sha256}",
     response_class=StreamingResponse,
-    responses={200: {"content": {"application/octet-stream": {}}}},
+    responses={200: {"content": {"application/octet-stream": {}}}, **errors(403, 404, 503)},
 )
 async def get_blob(
     request: Request,
@@ -1454,11 +1514,14 @@ async def get_blob(
     principal: PrincipalRef = Depends(get_principal),
     service: ArtifactService = Depends(get_artifact_service),
 ) -> StreamingResponse:
-    """Stream one file of a version.
+    """Download one file of an artifact version.
 
-    Authorizes, finds the file and opens it, in that order; then the body is sent from storage
-    with the manifest's size as `Content-Length`, no database transaction open and a deadline of
-    `download_deadline(size)`. The service audits the download.
+    Streams the file as `application/octet-stream` with its size as `Content-Length`; the
+    download is audited. Needs `READ_TABLE` on the name. Answers 403 with one text whether
+    or not the artifact, version or file exists, 404 when the caller may read the name and
+    the version, file or its bytes are absent or the version was deleted, 422 for a
+    malformed version or hash, and 503 when too many files are being sent or storage could
+    not be opened (try again after `Retry-After`).
 
     Parameters
     ----------

@@ -33,13 +33,19 @@ from lakana_server.api.platform.schemas import (
     WorkerCachesOut,
     WorkerOut,
 )
+from lakana_server.api.responses import errors
 from lakana_server.api.routing import AuthenticateFirstRoute
 from lakana_server.deps import get_grant_authorization, get_principal, get_run_service, get_session
 
 router = APIRouter(
-    route_class=AuthenticateFirstRoute, prefix="/api/v1/environments/{env}", tags=["runs"]
+    route_class=AuthenticateFirstRoute,
+    prefix="/api/v1/environments/{env}",
+    tags=["runs"],
+    responses=errors(401),
 )
-scheduler_router = APIRouter(route_class=AuthenticateFirstRoute, prefix="/api/v1", tags=["runs"])
+scheduler_router = APIRouter(
+    route_class=AuthenticateFirstRoute, prefix="/api/v1", tags=["runs"], responses=errors(401)
+)
 
 
 def _task_out(task: TaskRunView) -> TaskRunOut:
@@ -122,14 +128,20 @@ def _check_out(view: CheckResultView) -> CheckResultOut:
     return CheckResultOut(**dataclasses.asdict(view))
 
 
-@router.post("/runs", response_model=RunOut, status_code=202)
+@router.post("/runs", response_model=RunOut, status_code=202, responses=errors(403, 404, 409))
 def start_run(
     env: str,
     body: RunCreate,
     principal: PrincipalRef = Depends(get_principal),
     service: RunService = Depends(get_run_service),
 ) -> RunOut:
-    """Start a run of a repository's deployed project version (needs `RUN`).
+    """Start a run.
+
+    Starts a run of the repository's deployed project version and answers 202. Needs `RUN`
+    on the environment. Answers 404 when the environment or repository does not exist or is
+    not deployed, 409 when another run of the deployment is active, there is no run service
+    account in a protected environment, or the one bound is inactive, and 422 when the
+    selection is malformed or matches nothing.
 
     Parameters
     ----------
@@ -153,7 +165,7 @@ def start_run(
     return run_out(service.start(principal, env, body.repository, selection))
 
 
-@router.get("/runs", response_model=list[RunOut])
+@router.get("/runs", response_model=list[RunOut], responses=errors(403, 404))
 def list_runs(
     env: str,
     response: Response,
@@ -167,10 +179,13 @@ def list_runs(
     principal: PrincipalRef = Depends(get_principal),
     service: RunService = Depends(get_run_service),
 ) -> list[RunOut]:
-    """List runs, newest first, one page at a time (needs `READ_ENVIRONMENT`).
+    """List runs.
 
-    The cursor of the next page is in the `X-Next-Cursor` response header; it is absent on the
-    last page. Send the same filters with every page.
+    Lists runs, newest first, one page at a time. The cursor of the next page is in the
+    `X-Next-Cursor` response header and is absent on the last page; send the same filters
+    with every page. Needs `READ_ENVIRONMENT`. Answers 404 when the environment or
+    repository does not exist and 422 for a `limit` below 1, an unknown status or trigger, a
+    `since` without a time zone, or a `cursor` this server did not issue.
 
     Parameters
     ----------
@@ -219,21 +234,24 @@ def list_runs(
     return [run_out(v) for v in views]
 
 
-@router.get("/runs/{run_id}", response_model=RunOut)
+@router.get("/runs/{run_id}", response_model=RunOut, responses=errors(403, 404))
 def get_run(
     env: str,
     run_id: uuid.UUID,
     principal: PrincipalRef = Depends(get_principal),
     service: RunService = Depends(get_run_service),
 ) -> RunOut:
-    """Show one run with its tasks (needs `READ_ENVIRONMENT` or `RUN`).
+    """Show a run.
+
+    Shows the run with its tasks. Needs `RUN` or `READ_ENVIRONMENT`. Answers 404 when the
+    run does not exist in the environment.
 
     Parameters
     ----------
     env
         Environment name.
     run_id
-        The run.
+        The run's id.
     principal
         The authenticated caller.
     service
@@ -247,21 +265,26 @@ def get_run(
     return run_out(service.get(principal, env, run_id))
 
 
-@router.get("/runs/{run_id}/checks", response_model=list[CheckResultOut])
+@router.get(
+    "/runs/{run_id}/checks", response_model=list[CheckResultOut], responses=errors(403, 404)
+)
 def get_run_checks(
     env: str,
     run_id: uuid.UUID,
     principal: PrincipalRef = Depends(get_principal),
     service: RunService = Depends(get_run_service),
 ) -> list[CheckResultOut]:
-    """List the check results of one run (needs `READ_ENVIRONMENT` or `RUN`).
+    """List the check results of a run.
+
+    Needs `RUN` or `READ_ENVIRONMENT`. Answers 404 when the run does not exist in the
+    environment.
 
     Parameters
     ----------
     env
         Environment name.
     run_id
-        The run.
+        The run's id.
     principal
         The authenticated caller.
     service
@@ -275,7 +298,12 @@ def get_run_checks(
     return [_check_out(v) for v in service.checks(principal, env, run_id)]
 
 
-@router.post("/runs/{run_id}/checks/rows", response_model=QuerySubmitOut, status_code=202)
+@router.post(
+    "/runs/{run_id}/checks/rows",
+    response_model=QuerySubmitOut,
+    status_code=202,
+    responses=errors(403, 404, 409),
+)
 def show_check_rows(
     env: str,
     run_id: uuid.UUID,
@@ -284,20 +312,22 @@ def show_check_rows(
     session: Session = Depends(get_session),
     authorization: AuthorizationService = Depends(get_grant_authorization),
 ) -> QuerySubmitOut:
-    """Queue the caller's own query that shows the rows a check found in a run.
+    """Queue a query for the rows a check found.
 
-    The query is an ordinary ad-hoc query of the caller, answered like `POST .../queries`: it
-    runs the check's SQL under the caller's own grants, row filters and column masks, and reads
-    the checked table at the snapshot the check read. Needs the right to read the run
-    (`RUN` or `READ_ENVIRONMENT`) and `SUBMIT_QUERY`. The body names the check only; the
-    server finds the stored result and its snapshot, so no request can name either.
+    Queues an ordinary query of the caller that shows the rows a check found in a run, and
+    answers 202 like the query submit route. It runs the check's SQL under the caller's own
+    grants, row filters and column masks, and reads the table at the snapshot the check
+    read. The body names the check only. Needs `RUN` or `READ_ENVIRONMENT`, and
+    `SUBMIT_QUERY`; a task is refused. Answers 404 when the environment or run does not
+    exist or the run has no result for the check, and 409 when the check read no snapshot or
+    the run's project version no longer holds its SQL.
 
     Parameters
     ----------
     env
         Environment name.
     run_id
-        The run.
+        The run's id.
     body
         The check, ``<namespace>.<table>/<check>``.
     principal
@@ -328,7 +358,7 @@ def show_check_rows(
     return QuerySubmitOut(query_id=str(run.id))
 
 
-@router.get("/checks", response_model=CheckResultPage)
+@router.get("/checks", response_model=CheckResultPage, responses=errors(403, 404))
 def list_checks(
     env: str,
     table: str | None = Query(default=None, max_length=1024),
@@ -337,7 +367,11 @@ def list_checks(
     principal: PrincipalRef = Depends(get_principal),
     service: RunService = Depends(get_run_service),
 ) -> CheckResultPage:
-    """List the check results of an environment, newest first (needs `READ_ENVIRONMENT`).
+    """List the check results of an environment.
+
+    Lists check results, newest first, one page at a time. Needs `READ_ENVIRONMENT`. Answers
+    404 when the environment does not exist and 422 for a `limit` below 1 or a `cursor` this
+    server did not issue.
 
     Parameters
     ----------
@@ -365,21 +399,24 @@ def list_checks(
     return CheckResultPage(items=[_check_out(v) for v in items], next_cursor=next_cursor)
 
 
-@router.post("/runs/{run_id}/cancel", response_model=RunOut)
+@router.post("/runs/{run_id}/cancel", response_model=RunOut, responses=errors(403, 404, 409))
 def cancel_run(
     env: str,
     run_id: uuid.UUID,
     principal: PrincipalRef = Depends(get_principal),
     service: RunService = Depends(get_run_service),
 ) -> RunOut:
-    """Request cancellation (needs `RUN`).
+    """Cancel a run.
+
+    Asks for the run to stop. Needs `RUN`. Answers 404 when the run does not exist in the
+    environment and 409 when it has finished.
 
     Parameters
     ----------
     env
         Environment name.
     run_id
-        The run.
+        The run's id.
     principal
         The authenticated caller.
     service
@@ -393,14 +430,22 @@ def cancel_run(
     return run_out(service.cancel(principal, env, run_id))
 
 
-@router.post("/runs/{run_id}/resume", response_model=RunOut, status_code=202)
+@router.post(
+    "/runs/{run_id}/resume", response_model=RunOut, status_code=202, responses=errors(403, 404, 409)
+)
 def resume_run(
     env: str,
     run_id: uuid.UUID,
     principal: PrincipalRef = Depends(get_principal),
     service: RunService = Depends(get_run_service),
 ) -> RunOut:
-    """Resume a finished run's failed part (needs `RUN`).
+    """Resume a run.
+
+    Starts the failed, upstream-failed or cancelled part of a finished run again, and
+    answers 202. Needs `RUN`. Answers 404 when the run does not exist or its repository is
+    no longer deployed, 409 when the run is still active, the current project version
+    changed, or as for starting a run, and 422 when no task failed, was upstream failed or
+    was cancelled.
 
     Parameters
     ----------
@@ -421,7 +466,9 @@ def resume_run(
     return run_out(service.resume(principal, env, run_id))
 
 
-@router.get("/runs/{run_id}/tasks/{asset}/log", response_model=TaskLogOut)
+@router.get(
+    "/runs/{run_id}/tasks/{asset}/log", response_model=TaskLogOut, responses=errors(403, 404)
+)
 def task_log(
     env: str,
     run_id: uuid.UUID,
@@ -432,17 +479,19 @@ def task_log(
     principal: PrincipalRef = Depends(get_principal),
     service: RunService = Depends(get_run_service),
 ) -> TaskLogOut:
-    """Return a task's free-text log and attempts (needs `READ_ENVIRONMENT` or `RUN`).
+    """Show a task's log.
 
-    With `offset`, only the text from that byte on (at most 1 MiB, ending before a half
-    character) and `next_offset` to continue from.
+    Returns the task's log text and its attempts. With `offset`, only the text from that
+    byte on (at most 1 MiB, ending before a half character), and the `next_offset` to
+    continue from. Needs `RUN` or `READ_ENVIRONMENT`. Answers 404 when the run or task does
+    not exist.
 
     Parameters
     ----------
     env
         Environment name.
     run_id
-        The run.
+        The run's id.
     asset
         The task's dotted table name.
     offset
@@ -460,12 +509,15 @@ def task_log(
     return _log_out(service.task_log(principal, env, run_id, asset, offset))
 
 
-@scheduler_router.get("/scheduler", response_model=SchedulerOut)
+@scheduler_router.get("/scheduler", response_model=SchedulerOut, responses=errors(403))
 def scheduler_status(
     principal: PrincipalRef = Depends(get_principal),
     service: RunService = Depends(get_run_service),
 ) -> SchedulerOut:
-    """Report the scheduler holder and queue lengths (admin).
+    """Show the scheduler.
+
+    Reports which server holds the scheduler and how long the queues are. Needs
+    `MANAGE_ENVIRONMENT` on the instance.
 
     Parameters
     ----------
@@ -482,12 +534,15 @@ def scheduler_status(
     return SchedulerOut(**dataclasses.asdict(service.scheduler_status(principal)))
 
 
-@scheduler_router.get("/workers", response_model=list[WorkerOut])
+@scheduler_router.get("/workers", response_model=list[WorkerOut], responses=errors(403))
 def list_workers(
     principal: PrincipalRef = Depends(get_principal),
     service: RunService = Depends(get_run_service),
 ) -> list[WorkerOut]:
-    """List the registered workers and what each is doing (admin, as the scheduler status).
+    """List the workers.
+
+    Lists the registered workers and what each is doing. Needs `MANAGE_ENVIRONMENT` on the
+    instance.
 
     Parameters
     ----------
