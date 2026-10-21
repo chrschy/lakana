@@ -635,3 +635,18 @@ def test_a_storage_root_inside_another_environments_managed_files_is_422_naming_
     assert "'prod'" in response.json()["detail"]
     assert f"'file://{tmp_path}/dev'" in response.json()["detail"]
     assert client.get("/api/v1/environments/dev", headers=AUTH_HEADER).status_code == 404
+
+
+def test_a_storage_root_in_another_scheme_is_422_naming_both_schemes(client: TestClient) -> None:
+    """``local://`` on a ``file`` environment is each process's working directory: refused."""
+    response = client.post(
+        "/api/v1/environments",
+        headers=AUTH_HEADER,
+        json={"name": "dev", "storage": {"scheme": "file", "root": "local:///data", "options": {}}},
+    )
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert "'local'" in detail
+    assert "storage scheme is 'file'" in detail
+    assert "'file:///data/lakana'" in detail
+    assert client.get("/api/v1/environments/dev", headers=AUTH_HEADER).status_code == 404

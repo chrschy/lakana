@@ -909,9 +909,10 @@ def test_a_storage_root_written_another_way_is_refused_with_the_canonical_one(
     catalog: CatalogService, principal: PrincipalRef, root: str, canonical: str
 ) -> None:
     """Two spellings of one place would hide each other's files from every location check."""
+    scheme = "s3" if canonical.startswith("s3:") else "file"
     with pytest.raises(ValidationError) as refused:
         catalog.create_environment(
-            principal, name="dev", storage=StorageConfig(scheme="file", root=root, options={})
+            principal, name="dev", storage=StorageConfig(scheme=scheme, root=root, options={})
         )
     assert repr(canonical) in str(refused.value)
     assert catalog.list_environments(principal) == []

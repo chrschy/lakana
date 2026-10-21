@@ -190,6 +190,57 @@ ROOT_SPELLING_MESSAGE = (
     "The storage root {root!r} is written differently from the way Lakana compares locations, "
     "so the files of one environment could be taken for another's. Use {canonical!r} instead."
 )
+ROOT_SCHEME_MESSAGE = (
+    "The storage root {root!r} is in the scheme {root_scheme!r}, but the environment's storage "
+    "scheme is {scheme!r}: a root reaches the storage of its own scheme, so the environment's "
+    "files would land somewhere other than its storage ('local://' is each process's working "
+    "directory, 'memory://' its memory). Write the root in the {scheme!r} scheme, such as "
+    "{example!r}, or give the environment the storage scheme of its root if Lakana supports it "
+    "('file', 's3' or 'abfs')."
+)
+
+ROOT_SCHEME_EXAMPLES = {
+    "file": "file:///data/lakana",
+    "s3": "s3://bucket/lakana",
+    "abfs": "abfs://container/lakana",
+}
+"""A root to suggest for each scheme `StorageConfig.scheme` can take."""
+
+
+def check_root_scheme(root: str, scheme: str) -> None:
+    """Refuse a storage root whose scheme is not the environment's storage scheme.
+
+    A root reaches the storage of its own scheme whatever the environment's storage scheme says:
+    fsspec reads ``local://``, ``local:///`` and ``local:`` as the working directory and
+    ``memory://`` as the process's memory, and a ``file`` root on an ``s3`` environment would
+    use the local disk. The root's scheme is compared after `SCHEME_ALIASES` and case, so
+    ``s3a://`` is an ``s3`` root (and `check_storage_root` then names its spelling). A root
+    without ``scheme://`` has no scheme to compare; `check_storage_root` refuses it.
+
+    Parameters
+    ----------
+    root
+        The root, ``scheme://path``.
+    scheme
+        The environment's storage scheme, one of `ROOT_SCHEME_EXAMPLES`.
+
+    Raises
+    ------
+    ValidationError
+        If the root's scheme differs (`ROOT_SCHEME_MESSAGE`, which names both schemes and a
+        root in the storage's scheme).
+    """
+    root_scheme, sep, _ = root.partition("://")
+    lowered = root_scheme.lower()
+    if sep and SCHEME_ALIASES.get(lowered, lowered) != scheme:
+        raise ValidationError(
+            ROOT_SCHEME_MESSAGE.format(
+                root=root,
+                root_scheme=root_scheme,
+                scheme=scheme,
+                example=ROOT_SCHEME_EXAMPLES[scheme],
+            )
+        )
 
 
 def root_base(root: str) -> str:

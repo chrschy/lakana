@@ -173,6 +173,26 @@ cleaned up relative to wherever the server and the workers were started, not at 
   move the tables there (deploy the projects to it, or load the data again), and then delete the
   old environment.
 
+### A storage root must be in the environment's storage scheme
+
+`POST /api/v1/environments` (and `Client.environments.create`) now refuses a storage root whose
+scheme is not the environment's storage scheme: a `file` environment needs a `file://` root, an
+`s3` one an `s3://` root and an `abfs` one an `abfs://` root. The refusal (422) names both schemes
+and a root to use, such as `file:///data/lakana`. A root reaches the storage of its own scheme, not
+the one the request named: `local://` is each process's working directory and `memory://` the
+process's memory, and a `file://` root sent as `s3` was quietly a local directory. `s3a://`,
+`s3n://` and `abfss://` count as `s3` and `abfs`; the message names the spelling to use, as before.
+`lakana env create` is not affected: it takes the scheme from the root.
+
+- **Existing environments are not changed.** One whose root has a scheme Lakana does not support
+  (`local://`, `memory://`, `gs://` and the like) could never be used: every query, deploy and
+  clean-up of it fails with `Unsupported storage scheme`, and nothing of it was written. Create a
+  new environment under another name on a supported root, and delete the old one with
+  `lakana env delete`. The deleted one keeps its name and stays in the database: its storage
+  cannot be reached to purge it, so the clean-up logs that it skipped it on each run.
+- **Scripts that create environments** with a root in another scheme fail at that step: send the
+  scheme of the root, or a root in the scheme you meant.
+
 ### An allowed webhook host can no longer reach loopback or cloud metadata addresses
 
 A host on `LAKANA_WEBHOOK__ALLOW_HOSTS` used to skip every address check of the worker's webhook
