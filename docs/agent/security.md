@@ -1581,6 +1581,50 @@ are taken literally (storage names are literal). A directory whose
 newest file is younger than `older_than_days` (1 to 3,650, default 30), or has a file of unknown
 age, is `recent` and never deleted. The listing writes nothing and records no event.
 
+**A root in another scheme (#260).** `check_root_scheme` (`resolver.py`), called by
+`create_environment` before `check_storage_root`, refuses a root whose scheme, lower-cased and
+mapped through `SCHEME_ALIASES` (`s3a`/`s3n` → `s3`, `abfss` → `abfs`), is not
+`StorageConfig.scheme` (`ROOT_SCHEME_MESSAGE`, 422, names the root, both schemes and a root from
+`ROOT_SCHEME_EXAMPLES`). The scheme comparison is total over the text before the first `://`:
+`StorageConfig.scheme` is one of `file`, `s3`, `abfs` (the REST schema has the same `Literal`),
+and every value but the storage's own (and its aliases) is refused, so `local://`, `local:///`,
+`local:///data`, `asynclocal://`, `memory://` and every other fsspec protocol (`gs`, `az`, `hdfs`,
+`https`, ...) are refused for every storage scheme, and so are `s3://` for `file` and `file://`
+for `s3`. The scheme alone does not judge a root: fsspec reads `a::b` as filesystem `a` over `b`,
+and `url_to_fs` keeps only the part before the first `::`, so a chain *after* the scheme
+(`file:///data/a/managed::memory:/dev` is `/data/a/managed`; `s3://bucket/x::file:/etc` is S3
+`bucket/x`) passed both checks and let a new root reach into another environment's `managed/`
+(found in the review of #262: writing through it overwrote prod's files). `check_storage_root`
+therefore refuses `::` anywhere in a root, first, whatever the scheme (`ROOT_CHAIN_MESSAGE`, 422,
+"cannot be an fsspec chain"; a chain before the scheme, `simplecache::file:///…`, meets
+`check_root_scheme` first and gets the scheme message). `FsspecStorage.__init__` refuses `::` too,
+so a chained root stored earlier fails closed at every `for_environment` before `url_to_fs` reads
+it. `url_to_fs` on the root is Lakana's only fsspec call that parses a URL: table, metadata and
+external locations reach pyiceberg's `FileIO` (`PyArrowFileIO`/`FsspecFileIO` take `::` literally,
+probed) or DuckDB, and artifact and code paths go through `FsspecStorage._full` and the
+filesystem object's own methods, which take `::` as part of a name. A root without `://` (`local:`, `/data`) has no scheme to compare and
+is refused by `check_storage_root` (`ROOT_UNJUDGEABLE_MESSAGE`). An alias of the storage's scheme
+passes this check and gets the spelling to use from `check_storage_root`. Why: the stored row has no
+scheme column; `StorageResolver.for_environment` derives the scheme from the root
+(`_parse_scheme`), so the scheme a client sent was dropped, and fsspec reads `local:` /
+`local://` as the working directory (the hazard of "The root of the disk") and `memory://` as the
+process's memory. `lakana env create` already sent the root's own scheme (`urlsplit`) and refused
+anything but `file`, `s3`, `abfs`; the REST API and the SDK did not. **Existing rows** are left
+alone: one in a scheme `_parse_scheme` does not know fails closed at every `for_environment`
+(`Unsupported storage scheme`, 422): the table-location, artifact and code-archive sweeps count it
+as a failed environment and touch nothing, `lakana env orphaned-locations` (with and without
+`--delete`) is refused, so nothing of it lands in the working directory. **Residual:** deleting
+such an environment works, but its purge never comes (the sweep skips it, `ValidationError`, each
+run), so the row and its name stay. One created as `s3` with a
+`file://` root (or the other way round) cannot be told apart from a correct one, since the sent
+scheme was never stored: it has always been, and stays, an environment of its root's scheme.
+`check_storage_root` also refuses an `s3`/`abfs` root (aliases and case included) whose normalised
+path is empty or starts with `/` (`s3://`, `s3:///data`, `s3://.`, `abfs:///x`;
+`ROOT_BUCKET_MESSAGE`, 422, shows `s3://bucket/lakana` / `abfs://container/lakana`): s3fs drops
+leading slashes, so `s3:///data` is bucket `data` and an `s3://` root puts tables in bucket
+`managed`, while the location checks compare the spelling as written. Existing rows are left alone
+and keep that behaviour. Pins: `test_environment_root_scheme.py`.
+
 **How it deletes.** Per directory: measure the age again, `_eligible` again, then insert and commit
 an `ABANDONED` record (`purge_after = now`) for the location. `location` is unique, so a create
 that claimed it first wins (the insert fails: kept) and one that tries later is refused. Then

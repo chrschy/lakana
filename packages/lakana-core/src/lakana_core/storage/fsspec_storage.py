@@ -222,6 +222,16 @@ def _chunks(handle: Any, chunk_bytes: int) -> Iterator[bytes]:  # ruff: ignore[a
         handle.close()
 
 
+FSSPEC_CHAIN = "::"
+"""The separator of an fsspec URL chain: ``a::b`` is filesystem ``a`` layered over ``b``."""
+ROOT_CHAIN_MESSAGE = (
+    "The storage root {root!r} contains '::', which chains fsspec filesystems: the storage would "
+    "read only the part before it, while Lakana compares locations with all of it. A storage "
+    "root cannot be an fsspec chain; write it as a plain scheme://path, such as "
+    "'file:///data/lakana' or 's3://bucket/lakana'."
+)
+
+
 class FsspecStorage:
     """Storage backed by any filesystem fsspec can open.
 
@@ -231,9 +241,18 @@ class FsspecStorage:
         Root URI, such as ``file:///var/lakana/dev`` or ``s3://bucket/prefix``.
     options
         Backend-specific options forwarded to fsspec.
+
+    Raises
+    ------
+    ValidationError
+        If `root` contains ``::`` (`ROOT_CHAIN_MESSAGE`): `fsspec.core.url_to_fs` would read
+        only the part before it, so a root stored before `check_storage_root` refused it fails
+        closed here.
     """
 
     def __init__(self, root: str, options: Mapping[str, str]) -> None:
+        if FSSPEC_CHAIN in root:
+            raise ValidationError(ROOT_CHAIN_MESSAGE.format(root=root))
         self._root = root.rstrip("/")
         fs_options = _translate_s3_options(options) if root.startswith("s3://") else dict(options)
         self._fs, self._base = fsspec.core.url_to_fs(self._root, **fs_options)

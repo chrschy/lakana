@@ -114,7 +114,9 @@ class Environments:
         name
             The environment's unique name.
         storage
-            Storage configuration: `{"scheme", "root", "options"}`.
+            Storage configuration: `{"scheme", "root", "options"}`. The root is in the
+            scheme `scheme` names: `file:///data/lakana` for `file`, `s3://bucket/lakana`
+            for `s3`, `abfs://container/lakana` for `abfs`.
 
         Returns
         -------
@@ -125,6 +127,9 @@ class Environments:
         ------
         lakana.errors.Conflict
             If an environment of this name already exists.
+        lakana.errors.ValidationError
+            If the root is in another scheme than `scheme`, or is refused for another reason;
+            the message names the root to use.
         """
         response = self._transport.request(
             ROUTES["environments.create"], json={"name": name, "storage": storage}

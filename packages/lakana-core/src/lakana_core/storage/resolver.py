@@ -26,7 +26,12 @@ from lakana_core.secrets.crypto import decrypt_secret_row
 from lakana_core.secrets.keys import KeyProvider
 from lakana_core.secrets.uses import SecretUse, require_use
 from lakana_core.storage.base import Storage
-from lakana_core.storage.fsspec_storage import build_file_io, build_storage
+from lakana_core.storage.fsspec_storage import (
+    FSSPEC_CHAIN,
+    ROOT_CHAIN_MESSAGE,
+    build_file_io,
+    build_storage,
+)
 
 MANAGED_PREFIX = "managed"
 """Zone holding Iceberg tables, as opposed to the raw landing zone."""
@@ -190,6 +195,64 @@ ROOT_SPELLING_MESSAGE = (
     "The storage root {root!r} is written differently from the way Lakana compares locations, "
     "so the files of one environment could be taken for another's. Use {canonical!r} instead."
 )
+ROOT_BUCKET_MESSAGE = (
+    "The storage root {root!r} names no bucket or container: an object-store root starts with "
+    "one, such as {example!r}. Without it the storage would take the first directory, or "
+    "managed/ itself, for the bucket, while Lakana compares locations as written."
+)
+_BUCKET_SCHEMES = frozenset({"s3", "abfs"})
+"""Schemes whose root starts with a bucket or container (`ROOT_BUCKET_MESSAGE`)."""
+ROOT_SCHEME_MESSAGE = (
+    "The storage root {root!r} is in the scheme {root_scheme!r}, but the environment's storage "
+    "scheme is {scheme!r}: a root reaches the storage of its own scheme, so the environment's "
+    "files would land somewhere other than its storage ('local://' is each process's working "
+    "directory, 'memory://' its memory). Write the root in the {scheme!r} scheme, such as "
+    "{example!r}, or give the environment the storage scheme of its root if Lakana supports it "
+    "('file', 's3' or 'abfs')."
+)
+
+ROOT_SCHEME_EXAMPLES = {
+    "file": "file:///data/lakana",
+    "s3": "s3://bucket/lakana",
+    "abfs": "abfs://container/lakana",
+}
+"""A root to suggest for each scheme `StorageConfig.scheme` can take."""
+
+
+def check_root_scheme(root: str, scheme: str) -> None:
+    """Refuse a storage root whose scheme is not the environment's storage scheme.
+
+    A root reaches the storage of its own scheme whatever the environment's storage scheme says:
+    fsspec reads ``local://``, ``local:///`` and ``local:`` as the working directory and
+    ``memory://`` as the process's memory, and a ``file`` root on an ``s3`` environment would
+    use the local disk. The root's scheme is compared after `SCHEME_ALIASES` and case, so
+    ``s3a://`` is an ``s3`` root (and `check_storage_root` then names its spelling). A root
+    without ``scheme://`` has no scheme to compare; `check_storage_root` refuses it.
+
+    Parameters
+    ----------
+    root
+        The root, ``scheme://path``.
+    scheme
+        The environment's storage scheme, one of `ROOT_SCHEME_EXAMPLES`.
+
+    Raises
+    ------
+    ValidationError
+        If the root's scheme differs (`ROOT_SCHEME_MESSAGE`, which names both schemes and a
+        root in the storage's scheme).
+    """
+    root_scheme, sep, _ = root.partition("://")
+    lowered = root_scheme.lower()
+    if sep and SCHEME_ALIASES.get(lowered, lowered) != scheme:
+        raise ValidationError(
+            ROOT_SCHEME_MESSAGE.format(
+                root=root,
+                root_scheme=root_scheme,
+                scheme=scheme,
+                example=ROOT_SCHEME_EXAMPLES[scheme],
+            )
+        )
 
 
 def root_base(root: str) -> str:
@@ -229,14 +292,21 @@ def check_storage_root(root: str) -> None:
     Raises
     ------
     ValidationError
-        If a ``file`` root is the root of the disk in any spelling (``file:///``, ``file://``,
+        If the root contains ``::`` anywhere (`ROOT_CHAIN_MESSAGE`: fsspec would read it as a
+        chain, the part before ``::`` alone, so ``file:///a/managed::memory:/dev`` would be
+        ``/a/managed``), if a ``file`` root is the root of the disk in any spelling (``file:///``, ``file://``,
         ``file://localhost/``, ``file:////``; `ROOT_DISK_MESSAGE`: the storage backend would
         resolve it against the working directory), relative or has a host
         (`ROOT_RELATIVE_MESSAGE`; ``localhost``
         is named with the spelling to use), it cannot be normalised exactly
-        (`ROOT_UNJUDGEABLE_MESSAGE`), or its canonical spelling differs
+        (`ROOT_UNJUDGEABLE_MESSAGE`), an ``s3`` or ``abfs`` root (aliases and case
+        included) names no bucket or container (``s3://``, ``s3:///data``, ``abfs:///x``;
+        `ROOT_BUCKET_MESSAGE`, which shows the shape to use: s3fs drops leading slashes, so
+        ``s3:///data`` is bucket ``data``), or its canonical spelling differs
         (`ROOT_SPELLING_MESSAGE`, which names that spelling).
     """
+    if FSSPEC_CHAIN in root:
+        raise ValidationError(ROOT_CHAIN_MESSAGE.format(root=root))
     scheme, sep, rest = root.partition("://")
     lowered = scheme.lower()
     if lowered == "file" and sep:
@@ -260,7 +330,12 @@ def check_storage_root(root: str) -> None:
         or any(char in rest for char in _GLOB_METACHARACTERS)
     ):
         raise ValidationError(ROOT_UNJUDGEABLE_MESSAGE.format(root=root))
-    canonical = f"{SCHEME_ALIASES.get(lowered, lowered)}://{path}"
+    canonical_scheme = SCHEME_ALIASES.get(lowered, lowered)
+    if canonical_scheme in _BUCKET_SCHEMES and (not path or path.startswith("/")):
+        raise ValidationError(
+            ROOT_BUCKET_MESSAGE.format(root=root, example=ROOT_SCHEME_EXAMPLES[canonical_scheme])
+        )
+    canonical = f"{canonical_scheme}://{path}"
     if root not in {canonical, canonical + "/"}:
         raise ValidationError(ROOT_SPELLING_MESSAGE.format(root=root, canonical=canonical))
 

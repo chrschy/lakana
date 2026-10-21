@@ -267,6 +267,7 @@ from lakana_core.storage.base import StoredObject
 from lakana_core.storage.resolver import (
     ResolvedStorage,
     StorageResolver,
+    check_root_scheme,
     check_storage_root,
     is_id_suffixed_location,
     is_within_location,
@@ -1118,7 +1119,9 @@ class CatalogService:
             If an environment with that name already exists, also a deleted one whose files
             are kept (`NAME_HELD_MESSAGE` names the restore and the early purge).
         ValidationError
-            If the storage root is not written canonically (`check_storage_root`; the message
+            If the storage root is in another scheme than `storage.scheme`, aliases such as
+            ``s3a`` mapped (`check_root_scheme`; the message names both schemes and a root to
+            use), not written canonically (`check_storage_root`; the message
             names the spelling to use), or it lies at or inside another environment's
             ``managed/``, ``raw/``, ``artifacts/`` or ``_artifacts/``, deleted environments
             included, or one of its own such directories holds another environment's root
@@ -1136,6 +1139,7 @@ class CatalogService:
         root of — an environment nobody meant to delegate to them.
         """
         self._authz.authorize(p, Action.MANAGE_ENVIRONMENT, Securable.instance_scope())
+        check_root_scheme(storage.root, storage.scheme)
         check_storage_root(storage.root)
         existing = self._session.execute(
             select(Environment).where(Environment.name == name)

@@ -37,10 +37,11 @@ def _create(catalog: CatalogService, principal: PrincipalRef, name: str, root: s
     name
         The environment's name.
     root
-        Its storage root.
+        Its storage root; the storage scheme is the root's own.
     """
+    scheme = "s3" if root.startswith("s3://") else "file"
     catalog.create_environment(
-        principal, name=name, storage=StorageConfig(scheme="file", root=root, options={})
+        principal, name=name, storage=StorageConfig(scheme=scheme, root=root, options={})
     )
 
 

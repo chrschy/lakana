@@ -1001,7 +1001,8 @@ def test_a_worker_with_a_stale_heartbeat_is_not_counted(
     stale = with_work(session, alive_workers(session, db_now(session), 60))
     assert stale.for_query("interactive") == WorkerCounts(0, 0, 0)
     assert stale.for_task() == WorkerCounts(0, 0, 0)
-    _worker(session, "z", 59)
+    # Well inside the 60 s window: on a loaded machine a second can pass before the count is taken.
+    _worker(session, "z", 30)
     fresh = with_work(session, alive_workers(session, db_now(session), 60))
     assert fresh.for_query("interactive") == WorkerCounts(1, 1, 1)
     assert fresh.for_task() == WorkerCounts(1, 1, 1)
