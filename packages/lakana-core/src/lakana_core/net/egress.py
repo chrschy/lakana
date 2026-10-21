@@ -18,6 +18,10 @@ what is sent:
 - `http_libraries_silenced` drops every log record of `httpx` and `httpcore` while a request
   runs, because they log URLs and host names.
 
+- `is_never_reachable` is the stricter rule for a host an operator listed: it may resolve to a
+  private address, never to loopback, link-local, unspecified, multicast, reserved or a known
+  metadata address, nor to an IPv6 form that carries one.
+
 The worker's webhook client (`lakana_worker.egress`) and the JSON fetcher of the CI OIDC
 verification (`lakana_core.net.https_json`) are built on these.
 """
@@ -141,6 +145,8 @@ _REFUSED_NETWORKS = tuple(
         "2001:db8::/32",
         "fc00::/7",
         "fe80::/10",
+        # Site-local, deprecated (RFC 3879): the standard library calls it global.
+        "fec0::/10",
         "ff00::/8",
     )
 )
@@ -203,8 +209,9 @@ def is_internal(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     -------
     bool
         `True` for private, loopback, link-local, multicast, reserved, unspecified, CGNAT,
-        documentation and benchmarking addresses, unique-local IPv6, anything the standard
-        library does not call global, and any IPv6 address that carries such an IPv4 address.
+        documentation and benchmarking addresses, unique-local and site-local IPv6, anything the
+        standard library does not call global, and any IPv6 address that carries such an IPv4
+        address.
     """
     embedded = _embedded_ipv4(address)
     if any(is_internal(inner) for inner in embedded):
@@ -276,7 +283,9 @@ def is_never_reachable(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -
     bool
         `True` for loopback, link-local (the cloud metadata address 169.254.169.254 among them),
         unspecified, multicast and reserved IPv4 addresses, the known metadata addresses inside
-        private ranges, and any IPv6 address that carries such an IPv4 address.
+        private ranges, and any IPv6 address that carries such an IPv4 address. Private ranges
+        themselves, site-local IPv6 (``fec0::/10``) among them, are not: an operator may list a
+        host on an internal network.
     """
     if any(is_never_reachable(inner) for inner in _embedded_ipv4(address)):
         return True

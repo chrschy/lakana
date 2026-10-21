@@ -754,8 +754,10 @@ class WebhookConfig(ProxyAndCaBundleChecks):
     ----------
     allow_hosts
         Comma-separated host names, or ``*.domain`` for every subdomain of a domain (not the
-        domain itself), that skip the address check and may use ``http`` and any port. Matching
-        ignores case and a trailing dot. For an internal chat server.
+        domain itself), that may resolve to private addresses and use ``http`` and any port.
+        Loopback, link-local and cloud metadata addresses stay refused, except loopback for the
+        entry ``localhost`` itself. Matching ignores case and a trailing dot. For an internal
+        chat server.
     proxy
         URL of the proxy that webhooks go through, for example `http://user:password@host:3128`.
         The worker checks the destination name, but the proxy looks it up again, so the proxy must

@@ -5,7 +5,10 @@ it as hostile: an attacker who can name a secret could otherwise point the worke
 metadata service or at an internal admin interface.
 
 - `check_destination` parses the URL, requires ``https`` and port 443, resolves the name **once**,
-  checks **every** address, and returns the address to connect to.
+  checks **every** address, and returns the address to connect to. A host the operator allowed
+  may use ``http``, another port and private addresses, but never loopback, link-local or cloud
+  metadata addresses (`lakana_core.net.egress.is_never_reachable`); only the entry ``localhost``
+  itself may reach loopback.
 - `post` connects to that address, not to the name, so DNS cannot answer differently between the
   check and the connection (rebinding). It asks for TLS with the name as the server name, so the
   certificate is verified against the name, not the address.
@@ -46,12 +49,14 @@ from lakana_core.net.egress import (
     http_libraries_silenced,
     is_internal,
     is_ip_literal,
+    is_never_reachable,
 )
 
 __all__ = [
     "CONNECTION_LOST",
     "FAILED",
     "INVALID",
+    "NEVER_REACHABLE",
     "NOT_443",
     "NOT_HTTPS",
     "NO_CONNECTION",
@@ -85,6 +90,13 @@ NOT_HTTPS = f"the webhook address must use https {_ALLOW_HINT}"
 NOT_443 = f"the webhook address must use port 443 {_ALLOW_HINT}"
 UNRESOLVED = "the webhook host name does not resolve"
 PRIVATE = f"the webhook host is a private or internal address {_ALLOW_HINT}"
+NEVER_REACHABLE = (
+    "the webhook host is a loopback, link-local or cloud metadata address, which is refused even "
+    "for a host in LAKANA_WEBHOOK__ALLOW_HOSTS: point the name at the chat server's own address "
+    "(only the entry 'localhost' itself may reach loopback)"
+)
+_LOCALHOST = "localhost"
+"""The one allow-list entry that admits loopback addresses, for its own name only."""
 
 # Seconds a name lookup may take; inside the 10 s budget of one delivery attempt.
 RESOLVE_TIMEOUT: float = 5.0
@@ -200,8 +212,10 @@ def check_destination(url: str, settings: WebhookConfig) -> Destination:
     ------
     EgressRefused
         If the URL is malformed, is not ``https`` on port 443, does not resolve, or any address
-        of its host is internal. A host on the allow-list is exempt from the scheme, port and
-        address rules. The reason names the rule, never the URL.
+        of its host is internal. A host on the allow-list is exempt from the scheme and port
+        rules and may resolve to a private address, but never to one that `is_never_reachable`
+        (loopback, link-local, metadata; `NEVER_REACHABLE`), except a loopback address for the
+        entry ``localhost`` itself. The reason names the rule, never the URL.
     """
     scheme, host, explicit_port, target = net.parse_url(url, INVALID)
     exempt = net.host_matches(host, settings.allowed_hosts())
@@ -217,8 +231,17 @@ def check_destination(url: str, settings: WebhookConfig) -> Destination:
         addresses = _lookup(host, port, RESOLVE_TIMED_OUT, UNRESOLVED)
     _resolve_proxy(settings)
     parsed = [ipaddress.ip_address(address.split("%")[0]) for address in addresses]
-    if not exempt:
-        loopback = _TEST_ALLOW_LOOPBACK and all(address.is_loopback for address in parsed)
+    loopback = _TEST_ALLOW_LOOPBACK and all(address.is_loopback for address in parsed)
+    if exempt:
+        # An operator who lists `localhost` itself asks for loopback; a listed name that merely
+        # resolves there (its DNS changed) does not get it.
+        own_loopback = _TEST_ALLOW_LOOPBACK or host == _LOCALHOST
+        if any(
+            is_never_reachable(address) and not (own_loopback and address.is_loopback)
+            for address in parsed
+        ):
+            raise EgressRefused(NEVER_REACHABLE)
+    else:
         if not loopback and any(is_internal(address) for address in parsed):
             raise EgressRefused(PRIVATE)
         if port != 443 and not loopback:

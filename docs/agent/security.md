@@ -3717,7 +3717,8 @@ pins each line.
   check to prove no second resolution happens.
 - **Refused:** everything the standard library does not call global, plus explicit lists:
   private, loopback, link-local (`169.254.0.0/16`, `fe80::/10`), `100.64.0.0/10`, `0.0.0.0/8`,
-  documentation and benchmarking ranges, multicast, `240.0.0.0/4`, `fc00::/7`, the unspecified
+  documentation and benchmarking ranges, multicast, `240.0.0.0/4`, `fc00::/7`, `fec0::/10`
+  (deprecated site-local, which `ipaddress` calls global on 3.11 and 3.14; #243), the unspecified
   address, and any IPv6 form that embeds such an IPv4 (mapped, compatible, 6to4, Teredo,
   NAT64). All of 6to4 is refused. A shorthand IPv4 spelling (`127.1`, `2130706433`, a last label
   of digits) is refused before any lookup. Userinfo in the URL is refused.
@@ -3725,8 +3726,18 @@ pins each line.
   `HTTPS_PROXY`, `SSL_CERT_FILE` and the like change nothing. `LAKANA_WEBHOOK__PROXY` is the
   only proxy; with it the destination name is still checked but cannot be pinned (the proxy
   resolves it), so the proxy is trusted. `LAKANA_WEBHOOK__CA_BUNDLE` replaces trust and never
-  disables verification. `LAKANA_WEBHOOK__ALLOW_HOSTS` exempts named hosts from the scheme, port
-  and address rules, nothing else.
+  disables verification. `LAKANA_WEBHOOK__ALLOW_HOSTS` exempts named hosts from the scheme and
+  port rules and from the private-address check, nothing else: a listed host is still refused
+  (`NEVER_REACHABLE`) when any of its addresses `is_never_reachable` (loopback, link-local,
+  unspecified, multicast, reserved, `fd00:ec2::254`, `100.100.100.200`, or an IPv6 form that
+  carries such an IPv4), the rule of `LAKANA_CI_OIDC__ALLOW_HOSTS` (#243). One exception: the
+  entry `localhost`, for the URL host `localhost` only, may reach loopback addresses (never the
+  rest of the set), so that a receiver on the worker's own machine still works (the get-told
+  documentation example); any other listed name whose DNS points at loopback is refused. The
+  scheme and port exemption stays: an internal chat server on `http` or another port is the
+  setting's purpose, and with the address rule the exemption reaches no address the rule
+  refuses. Pins: `test_an_allowed_host_never_reaches_loopback_link_local_or_metadata`,
+  `test_a_listed_localhost_may_reach_loopback_and_nothing_else_never_reachable`.
 - **No URL in any text.** Every exception is reduced to a fixed reason
   (`lakana_core.net.egress.classify`); `str(exc)`
   of an `httpx` error embeds the URL and is never read. Refusals are raised outside `except`
@@ -3865,9 +3876,9 @@ and a fake fetcher; no test reaches the network.
   be public. Even a listed host is refused when any of its addresses is loopback, link-local
   (`169.254.0.0/16`, `fe80::/10`, so 169.254.169.254), unspecified, multicast or reserved, a
   known metadata address inside a private range (`fd00:ec2::254`, `100.100.100.200`), or an
-  IPv6 form that carries such an IPv4 address (`is_never_reachable`). This is stricter than
-  `LAKANA_WEBHOOK__ALLOW_HOSTS`, which exempts a listed host from every address check, the
-  scheme and the port. Pinning, `https` on 443, no redirects, the 64 KiB cap and the deadlines
+  IPv6 form that carries such an IPv4 address (`is_never_reachable`). Since #243
+  `LAKANA_WEBHOOK__ALLOW_HOSTS` applies the same rule (with a loopback exception for the entry
+  `localhost`), and it still exempts the scheme and the port. Pinning, `https` on 443, no redirects, the 64 KiB cap and the deadlines
   still apply. As with the webhooks, list only names whose DNS you control: whoever controls
   a listed name's DNS can point it at any private address.
 - **Residuals:** the `typ` header is not checked; `aud` and the issuer's own key set keep other

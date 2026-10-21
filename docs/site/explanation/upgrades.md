@@ -159,6 +159,24 @@ at `s3://bucket`, dev at `s3://bucket/dev`).
 - **Scripts that create environments** at such a root fail at that step: give the environment a
   root of its own, such as the one the message names.
 
+### An allowed webhook host can no longer reach loopback or cloud metadata addresses
+
+A host on `LAKANA_WEBHOOK__ALLOW_HOSTS` used to skip every address check of the worker's webhook
+client. It still may use `http`, any port and a private address (`10.0.0.0/8` and the like), but a
+name that resolves to a loopback, link-local or cloud metadata address (`127.0.0.1`, `::1`,
+`169.254.169.254`, `fd00:ec2::254`, `100.100.100.200`, or an IPv6 address that carries one) is now
+refused, so a listed name whose DNS changes cannot point the worker at them. The deprecated IPv6
+site-local range `fec0::/10` is now treated as private everywhere: a webhook URL or a CI OIDC
+issuer's host that resolves there needs its name in `LAKANA_WEBHOOK__ALLOW_HOSTS` or
+`LAKANA_CI_OIDC__ALLOW_HOSTS`.
+
+- **Who is affected.** Only an instance whose `LAKANA_WEBHOOK__ALLOW_HOSTS` lists a name that
+  resolves to such an address. Its notifications fail with `the webhook host is a loopback,
+  link-local or cloud metadata address, which is refused even for a host in
+  LAKANA_WEBHOOK__ALLOW_HOSTS …`; point the name at the chat server's own address instead.
+- **A receiver on the worker's own machine** keeps working when the setting lists `localhost`
+  itself and the webhook URL names `localhost`: that entry, and only it, may reach loopback.
+
 ## Notes for 0.17.0
 
 ### Fewer sign-in events in the audit log

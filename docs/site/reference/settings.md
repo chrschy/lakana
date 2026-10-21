@@ -177,7 +177,7 @@ Compose](../how-to/deploy-with-compose.md).
 
 | Variable | Type | Default | Read by | Description |
 |---|---|---|---|---|
-| `LAKANA_WEBHOOK__ALLOW_HOSTS` | text | not set | worker | Comma-separated host names, or ``*.domain`` for every subdomain of a domain (not the domain itself), that skip the address check and may use ``http`` and any port. Matching ignores case and a trailing dot. For an internal chat server. |
+| `LAKANA_WEBHOOK__ALLOW_HOSTS` | text | not set | worker | Comma-separated host names, or ``*.domain`` for every subdomain of a domain (not the domain itself), that may resolve to private addresses and use ``http`` and any port. Loopback, link-local and cloud metadata addresses stay refused, except loopback for the entry ``localhost`` itself. Matching ignores case and a trailing dot. For an internal chat server. |
 | `LAKANA_WEBHOOK__PROXY` | secret text | not set | worker | URL of the proxy that webhooks go through, for example `http://user:password@host:3128`. The worker checks the destination name, but the proxy looks it up again, so the proxy must refuse internal addresses itself. A password is hidden in logs and error messages. |
 | `LAKANA_WEBHOOK__CA_BUNDLE` | path | not set | worker | Absolute path of a PEM file of certificate authorities that webhooks trust; it replaces the built-in store and never turns verification off. The file must exist and be readable on the worker. |
 
