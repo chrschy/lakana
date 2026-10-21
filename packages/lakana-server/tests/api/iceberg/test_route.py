@@ -274,8 +274,25 @@ def test_an_unreachable_storage_is_a_503_with_the_message() -> None:
     response = client.get("/table")
 
     assert response.status_code == 503
+    assert response.headers["Retry-After"] == "5"
     assert response.json()["error"] == {
         "message": message,
         "type": "StorageUnavailableError",
         "code": 503,
     }
+
+
+def test_other_errors_send_no_retry_after() -> None:
+    from lakana_core.errors import ConflictError
+
+    router = APIRouter(route_class=IcebergRoute)
+
+    @router.get("/conflict")
+    def conflict() -> dict:
+        raise ConflictError("simulated")
+
+    app = FastAPI()
+    app.include_router(router)
+    response = TestClient(app, raise_server_exceptions=False).get("/conflict")
+
+    assert "Retry-After" not in response.headers

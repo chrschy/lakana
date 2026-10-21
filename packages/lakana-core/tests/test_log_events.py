@@ -100,3 +100,36 @@ def test_every_code_is_lowercase_words_and_has_a_process() -> None:
         assert code.value.replace("_", "").isalpha() and code.value == code.value.lower()
     assert set(WHERE) == set(LogEvent)
     assert set(WHERE.values()) <= {"server", "worker", "server, worker"}
+
+
+def test_a_multi_line_message_has_the_code_on_its_first_line(captured: _Captured) -> None:
+    """A driver error's text has a second line; the code must not land on it."""
+    logger, stream, _ = captured
+
+    logger.warning(
+        "The worker's heartbeat is still failing (%d in a row): %s",
+        2,
+        "connection refused\n(Background on this error at: https://sqlalche.me/e/20/e3q8)",
+        extra=log_event(LogEvent.DATABASE_UNREACHABLE),
+    )
+
+    first, second, *_ = stream.getvalue().split("\n")
+    assert first.endswith("(2 in a row): connection refused event=database_unreachable")
+    assert "event=" not in second and "Background on this error" in second
+
+
+def test_an_exception_text_with_line_breaks_keeps_the_code_on_the_first_line(
+    captured: _Captured,
+) -> None:
+    logger, stream, _ = captured
+
+    try:
+        raise RuntimeError("first\nsecond")
+    except RuntimeError:
+        logger.exception(
+            "Scheduler step failed; continuing.", extra=log_event(LogEvent.SCHEDULER_STEP_FAILED)
+        )
+
+    lines = stream.getvalue().split("\n")
+    assert lines[0].endswith("Scheduler step failed; continuing. event=scheduler_step_failed")
+    assert sum("event=" in line for line in lines) == 1
