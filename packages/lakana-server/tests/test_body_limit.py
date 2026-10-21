@@ -204,9 +204,10 @@ def test_the_streaming_routes_are_exactly_the_ones_listed() -> None:
     assert found == STREAMING_ROUTES
 
 
-_OPEN_ROUTES = {"/healthz", "/v1/config", "/api/v1/auth/oidc/token"}
+_OPEN_ROUTES = {"/healthz", "/readyz", "/v1/config", "/api/v1/auth/oidc/token"}
 """The routes that answer without a credential, by design: the CI token exchange takes an ID
-token, not a credential, and reads at most 16 KiB of body."""
+token, not a credential, and reads at most 16 KiB of body; `/readyz` has no body and answers
+with check names only, from a cache (`lakana_server.readiness`)."""
 
 _DOCS_ROUTES = {"/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"}
 """FastAPI's own documentation routes: not `APIRoute`s, no body."""

@@ -201,6 +201,7 @@ from lakana_core.errors import (
     NotFoundError,
     NotPublishedError,
     PermissionDenied,
+    StorageUnavailableError,
     UnsupportedTableError,
     ValidationError,
     WriteOutcomeUnknownError,
@@ -274,6 +275,7 @@ from lakana_core.storage.resolver import (
     nested_locations_within,
     table_root_from_metadata_location,
 )
+from lakana_core.storage.unavailable import TABLE_STORAGE_UNREACHABLE, is_storage_unavailable
 
 logger = logging.getLogger(__name__)
 
@@ -3920,15 +3922,30 @@ class CatalogService:
         ------
         NotFoundError
             If the row has no metadata pointer.
+        StorageUnavailableError
+            If the environment's storage did not answer while the metadata was read
+            (`TABLE_STORAGE_UNREACHABLE`, which names the environment and the next step). The
+            log line has the error's class, never its text, which can name a host or a path.
         """
         if row.metadata_location is None:
             raise NotFoundError(f"Table {ref.name!r} has no metadata yet.")
         resolved = self._storage.for_environment(ref.environment)
+        try:
+            metadata = read_metadata(resolved.file_io, row.metadata_location)
+        except Exception as exc:
+            if not is_storage_unavailable(exc):
+                raise
+            logger.warning(
+                "The storage of environment %s could not be reached while table %s was read (%s).",
+                shown(ref.environment),
+                shown(ref.name),
+                type(exc).__name__,
+            )
+            raise StorageUnavailableError(
+                TABLE_STORAGE_UNREACHABLE.format(environment=shown(ref.environment))
+            ) from None
         return LoadedTable(
-            ref=ref,
-            uuid=row.id,
-            metadata_location=row.metadata_location,
-            metadata=read_metadata(resolved.file_io, row.metadata_location),
+            ref=ref, uuid=row.id, metadata_location=row.metadata_location, metadata=metadata
         )
 
     def commit_table(

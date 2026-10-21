@@ -174,8 +174,9 @@ server starts, and read the changelog.
 Look at three things regularly: whether the instance answers, what the logs say, and what people
 did.
 
-**Is it healthy?** `docker compose ps` shows whether each service runs and is healthy. Two
-commands show whether workers are registered and which one holds the scheduler role; they need the
+**Is it healthy?** `docker compose ps` shows whether each service runs and is healthy, and the
+address `/readyz` answers `{"status":"ready"}` when the database, the storage and a worker all
+work; point your monitoring at it. Two commands show whether workers are registered and which one holds the scheduler role; they need the
 right to manage environments on the instance, which an administrator has:
 
 <!-- source: docs/examples/getting-started/run.sh#worker-list -->

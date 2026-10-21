@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -27,6 +28,7 @@ from lakana_core.models import (
     TableRead,
 )
 from lakana_core.storage.resolver import StorageResolver
+from lakana_core.storage.unavailable import TABLE_STORAGE_UNREACHABLE
 from lakana_worker.pipeline import run_one
 
 
@@ -173,4 +175,45 @@ def test_a_query_that_names_no_table_counts_nothing(
     run_one(session, run.id, AllowAllAuthorization())
     session.refresh(run)
     assert run.status is QueryRunStatus.SUCCEEDED, run.error_message
+    assert _counts(session) == []
+
+
+def _raise_unreachable(*args: object, **kwargs: object) -> None:
+    """Fail as a read of a storage that does not answer does.
+
+    Parameters
+    ----------
+    *args
+        Ignored.
+    **kwargs
+        Ignored.
+
+    Raises
+    ------
+    OSError
+        Always, with a text that names a host, as a storage client's does.
+    """
+    raise OSError(errno.EIO, "AWS Error NETWORK_CONNECTION: seaweedfs:8333 did not answer")
+
+
+@pytest.mark.parametrize(
+    "where", ["lakana_core.catalog.service.read_metadata", "lakana_worker.pipeline.list_data_files"]
+)
+def test_a_read_of_an_unreachable_storage_names_the_environment_and_the_next_step(
+    session: Session,
+    principal: PrincipalRef,
+    sales: QueryService,
+    monkeypatch: pytest.MonkeyPatch,
+    where: str,
+) -> None:
+    """Whether the table's metadata or its file list fails, the message is the same."""
+    monkeypatch.setattr(where, _raise_unreachable)
+
+    run = sales.submit_query(principal, "dev", "SELECT id FROM gold.sales")
+    run_one(session, run.id, AllowAllAuthorization())
+    session.refresh(run)
+
+    assert run.status is QueryRunStatus.FAILED
+    assert run.error_message == TABLE_STORAGE_UNREACHABLE.format(environment="dev")
+    assert "seaweedfs" not in (run.error_message or "")
     assert _counts(session) == []

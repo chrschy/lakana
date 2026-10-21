@@ -90,6 +90,14 @@ check() {
   python3 -c 'import json,sys; assert json.loads(sys.argv[1]) == [{"id":1,"name":"alpha"},{"id":2,"name":"beta"}], sys.argv[1]' "$out"
 }
 check
+# The readiness route proves the database, the storage of `dev` and a worker. `up --wait` returned
+# once each worker's own healthcheck saw its heartbeat, so it answers 200 within a few tries (an
+# answer is reused for 5 s).
+ready() {
+  python3 -c 'import json,sys,urllib.request; r=urllib.request.urlopen(sys.argv[1], timeout=10); assert json.load(r) == {"status": "ready"}' "http://127.0.0.1:$port/readyz" 2>/dev/null
+}
+for _ in $(seq 1 15); do ready && break; sleep 2; done
+ready || { echo "/readyz did not answer 200: $(curl -s "http://127.0.0.1:$port/readyz")" >&2; exit 1; }
 # The documentation's commands use the default profile, not `--profile team`.
 export LAKANA_PROFILE=team
 # Add an environment to the bundle (how-to "Add an environment to a Compose instance").

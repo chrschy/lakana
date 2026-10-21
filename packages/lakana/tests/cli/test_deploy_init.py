@@ -327,33 +327,50 @@ def test_healthcheck_disabled_on_non_http_services(tmp_path: Path, released: Non
     """The one-shots (migrate, setup) disable the image's inherited HEALTHCHECK.
 
     Neither serves `/healthz`, so the image's HEALTHCHECK would otherwise
-    leave them "unhealthy" under `docker compose up --wait`. `server` keeps
-    the image's own healthcheck (no override, or an explicit one).
+    leave them "unhealthy" under `docker compose up --wait`.
     """
     state = make_state(tmp_path, FakeApi())
     invoke(state, "bundle", "init", str(tmp_path / "b"))
     s = yaml.safe_load((tmp_path / "b" / "compose.yaml").read_text())["services"]
     for svc in ("migrate", "setup"):
         assert s[svc]["healthcheck"]["disable"] is True
-    server_healthcheck = s["server"].get("healthcheck")
-    if server_healthcheck is not None:
-        assert "/healthz" in str(server_healthcheck.get("test", ""))
 
 
-def test_worker_has_a_process_healthcheck_not_a_disabled_one(
+def test_the_server_healthcheck_asks_healthz_not_readyz(tmp_path: Path, released: None) -> None:
+    """`setup` waits for a healthy server and the workers wait for `setup`.
+
+    A server healthy only when `/readyz` passes would never be: no worker can start before
+    `setup` has run. So its own healthcheck asks `/healthz`, set in the bundle rather than left
+    to the image.
+    """
+    state = make_state(tmp_path, FakeApi())
+    invoke(state, "bundle", "init", str(tmp_path / "b"))
+    s = yaml.safe_load((tmp_path / "b" / "compose.yaml").read_text())["services"]
+    test = " ".join(s["server"]["healthcheck"]["test"])
+    assert "/healthz" in test and "/readyz" not in test
+    assert s["setup"]["depends_on"]["server"] == {"condition": "service_healthy"}
+
+
+def test_the_worker_healthcheck_asks_the_database_for_its_own_heartbeat(
     tmp_path: Path, released: None
 ) -> None:
     """`up --wait` needs a healthcheck on every long-running service.
 
     Older Compose v2 releases (GitHub's runners) fail `up --wait` with "has no
     healthcheck configured" for a running service whose healthcheck is
-    disabled; the worker serves no HTTP, so it checks its own process instead.
+    disabled. The worker serves no HTTP; `lakana-worker healthcheck` fails when the worker of
+    the container has not written a heartbeat within the lease, which it does only while it
+    reaches the database. Its own limit (3 s) is below the timeout.
     """
     state = make_state(tmp_path, FakeApi())
     invoke(state, "bundle", "init", str(tmp_path / "b"))
-    worker = yaml.safe_load((tmp_path / "b" / "compose.yaml").read_text())["services"]["worker"]
-    assert "disable" not in worker["healthcheck"]
-    assert "lakana-worker" in " ".join(worker["healthcheck"]["test"])
+    services = yaml.safe_load((tmp_path / "b" / "compose.yaml").read_text())["services"]
+    for name in ("worker", "worker-interactive", "worker-pipeline"):
+        healthcheck = services[name]["healthcheck"]
+        assert "disable" not in healthcheck
+        assert healthcheck["test"] == ["CMD", "lakana-worker", "healthcheck"]
+        assert healthcheck["timeout"] == "5s"
+        assert healthcheck["start_period"] == "30s"
 
 
 def test_cli_version_reads_the_installed_package_version() -> None:

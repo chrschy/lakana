@@ -37,6 +37,25 @@ the workers, with its type and default, is in the [settings reference](settings.
 | `worker-pipeline` | `${LAKANA_IMAGE}` | The same worker with `LAKANA_WORKER__TAKES=pipeline`, scaled to `LAKANA_WORKERS_PIPELINE` replicas (`0` by default). | `migrate` completed |
 | `setup` | `${LAKANA_IMAGE}` | One-shot: creates the `dev` environment, its storage secret, and the binding between them, entirely over the REST API (see [`setup`](../how-to/deploy-with-compose.md#setup)). | `server` healthy and `bucket` completed |
 
+## Healthchecks
+
+What `healthy` in `docker compose ps` means for each long-running service. The one-off services
+(`bucket`, `migrate`, `setup`) have none; `Exited (0)` is their healthy state.
+
+| Service | Its healthcheck | Healthy proves |
+|---|---|---|
+| `postgres` | `pg_isready` on its network address, every 5 s. | The database accepts connections. |
+| `seaweedfs-core` | The master answers and the filer accepts connections, every 5 s. | The storage's internal services run. |
+| `seaweedfs` | The S3 gateway answers HTTP, every 5 s. | The gateway listens; not that the credentials work. |
+| `server` | `GET /healthz` from inside the container, every 10 s. | The server process answers HTTP. |
+| `worker`, `worker-interactive`, `worker-pipeline` | `lakana-worker healthcheck`, every 10 s, after a start period of 30 s; unhealthy after 3 failures in a row. | The worker of the container wrote its heartbeat to the database within `LAKANA_RUN__LEASE_SECONDS` (60 s), so it reaches the database. |
+
+The server's healthcheck asks `/healthz`, not `/readyz`, on purpose: `setup` waits for a healthy
+server and the workers wait for `setup`, so a server that is healthy only once a worker is alive
+would never start. To know whether the instance can do work (the database, the storage of each
+environment and a live worker), ask `/readyz`:
+[The health routes](../how-to/instance-health.md#the-health-routes).
+
 ## Secrets settings
 
 | Variable | Default | Meaning |

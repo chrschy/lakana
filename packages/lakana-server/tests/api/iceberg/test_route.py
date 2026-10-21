@@ -253,3 +253,29 @@ def test_kept_after_check_is_a_404_with_the_reason_in_the_iceberg_error_shape() 
             "code": 404,
         }
     }
+
+
+def test_an_unreachable_storage_is_a_503_with_the_message() -> None:
+    """An engine reads 503 as "try again"; the message names the environment, not the storage."""
+    from lakana_core.errors import StorageUnavailableError
+    from lakana_core.storage.unavailable import TABLE_STORAGE_UNREACHABLE
+
+    router = APIRouter(route_class=IcebergRoute)
+    message = TABLE_STORAGE_UNREACHABLE.format(environment="dev")
+
+    @router.get("/table")
+    def table() -> dict:
+        raise StorageUnavailableError(message)
+
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app, raise_server_exceptions=False)
+
+    response = client.get("/table")
+
+    assert response.status_code == 503
+    assert response.json()["error"] == {
+        "message": message,
+        "type": "StorageUnavailableError",
+        "code": 503,
+    }

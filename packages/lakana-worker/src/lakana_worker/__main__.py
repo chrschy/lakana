@@ -1,4 +1,4 @@
-"""Entry point: `python -m lakana_worker`."""
+"""Entry point: `python -m lakana_worker`, and the worker that `lakana-worker` runs."""
 
 from __future__ import annotations
 
@@ -606,4 +606,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":  # pragma: no cover — exercised only by `python -m lakana_worker`
-    main()
+    from lakana_worker.command import cli
+
+    cli()

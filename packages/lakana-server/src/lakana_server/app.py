@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -19,7 +21,9 @@ from lakana_core.ci_oidc.verification import IdTokenVerifier
 from lakana_core.config import warn_about_tokens_in_url_paths
 from lakana_core.db import create_engine
 from lakana_core.grants.admin import ineffective_grants_warning
+from lakana_core.readiness import probe_storage, read_database
 from lakana_core.secrets.crypto import ACCEPT_FORMAT_1_WARNING
+from lakana_core.secrets.keys import EnvKeyProvider
 from lakana_server.api.iceberg.router import router as iceberg_router
 from lakana_server.api.platform.artifacts import MANIFEST_DECODE_SLOTS, MAX_CONCURRENT_DOWNLOADS
 from lakana_server.api.platform.artifacts import environment_router as artifacts_environment_router
@@ -54,6 +58,7 @@ from lakana_server.auth_rate_limit import AuthAuditLimiter
 from lakana_server.body_limit import BodyLimitMiddleware, streaming_routes
 from lakana_server.concurrency import AppendConcurrencyLimiter
 from lakana_server.errors import install_exception_handlers
+from lakana_server.readiness import ReadinessCheck
 from lakana_server.settings import Settings
 from lakana_server.sign_in_audit import SignInAuditLimiter
 
@@ -167,6 +172,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.manifest_decode_slots = asyncio.Semaphore(MANIFEST_DECODE_SLOTS)
         app.state.manifest_principals = set()
         app.state.download_slots = AppendConcurrencyLimiter(MAX_CONCURRENT_DOWNLOADS)
+        readiness = resolved_settings.readiness
+        app.state.readiness = ReadinessCheck(
+            read=functools.partial(
+                read_database,
+                engine,
+                lease_seconds=resolved_settings.run.lease_seconds,
+                environments=readiness.environments,
+                key_provider=EnvKeyProvider(
+                    resolved_settings.secrets.master_key,
+                    accept_format_1=resolved_settings.secrets.accept_format_1,
+                ),
+            ),
+            probe=probe_storage,
+            timeout_seconds=readiness.timeout_seconds,
+            cache_seconds=readiness.cache_seconds,
+        )
 
         try:
             with Session(engine) as session:
@@ -239,6 +260,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             `{"status": "ok"}`.
         """
         return {"status": "ok"}
+
+    @app.get("/readyz", include_in_schema=False)
+    async def readyz(request: Request) -> JSONResponse:
+        """Report whether the instance can do work, with no authentication.
+
+        Ready means the catalog database answers, every checked environment's storage answers
+        (`LAKANA_READINESS__ENVIRONMENTS`), and at least one worker has written a heartbeat
+        within `LAKANA_RUN__LEASE_SECONDS`. The answer names the failed checks and nothing
+        else, and is reused for `LAKANA_READINESS__CACHE_SECONDS`
+        (`lakana_server.readiness`).
+
+        Parameters
+        ----------
+        request
+            The current request, used to reach `app.state.readiness`.
+
+        Returns
+        -------
+        JSONResponse
+            200 `{"status": "ready"}`, or 503 `{"status": "not_ready", "failed": [...]}` with
+            `database`, `storage` or `worker`; never cached by a proxy.
+        """
+        failed = await request.app.state.readiness.failed()
+        headers = {"Cache-Control": "no-store"}
+        if not failed:
+            return JSONResponse({"status": "ready"}, headers=headers)
+        return JSONResponse(
+            {"status": "not_ready", "failed": list(failed)}, status_code=503, headers=headers
+        )
 
     for router in ROUTERS:
         app.include_router(router)

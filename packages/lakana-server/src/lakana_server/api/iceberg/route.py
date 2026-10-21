@@ -30,6 +30,7 @@ from lakana_core.errors import (
     NotFoundError,
     NotPublishedError,
     PermissionDenied,
+    StorageUnavailableError,
     ValidationError,
 )
 from lakana_server.api.routing import AuthenticateFirstRoute
@@ -53,6 +54,7 @@ _STATUS_CODES: dict[type[Exception], int] = {
     ConflictError: 409,
     ValidationError: 422,
     PermissionDenied: 403,
+    StorageUnavailableError: 503,
     pydantic.ValidationError: 422,
     RequestValidationError: 422,
 }
@@ -62,7 +64,8 @@ _STATUS_CODES: dict[type[Exception], int] = {
 Iceberg REST catalog's 404 as "no such table", which is what a table with no published
 snapshot is to it, and the message says why. `KeptAfterCheckError` (a task refused a table
 that was kept after a failed check) is a 404 for the same reason: to the task's engine
-the table is not there to read. The lookup is by exact type, so a subclass of
+the table is not there to read. `StorageUnavailableError` (the environment's storage did not
+answer) is a 503, which an engine may try again. The lookup is by exact type, so a subclass of
 a mapped error needs its own entry.
 
 `pydantic.ValidationError` is listed explicitly and is distinct from

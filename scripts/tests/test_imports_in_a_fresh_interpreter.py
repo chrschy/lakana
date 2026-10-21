@@ -24,7 +24,7 @@ PACKAGES = Path(__file__).resolve().parents[2] / "packages"
 
 # Modules started with `python -m` by the Compose bundle (`lakana/cli/deploy/compose.yaml`,
 # the `setup` service) and by the task harness (`LocalProcessRunner`).
-_PYTHON_M_MODULES = ["lakana.cli.deploy.setup", "lakana.runner"]
+_PYTHON_M_MODULES = ["lakana.cli.deploy.setup", "lakana.runner", "lakana_worker.__main__"]
 
 # Run in one process: purge `lakana*` before each module so each import is a first import.
 _EVERY_MODULE_SCRIPT = """
@@ -148,6 +148,7 @@ def test_the_entry_points_are_found() -> None:
         "lakana.cli.app",
         "lakana_server.__main__",
         "lakana_worker.__main__",
+        "lakana_worker.command",
         "lakana.runner",
         "lakana.cli.deploy.setup",
     } <= set(_entry_point_modules())

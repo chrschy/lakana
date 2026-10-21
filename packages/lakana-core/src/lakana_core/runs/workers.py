@@ -172,6 +172,57 @@ def alive_ids(session: Session, now: datetime, lease_seconds: int) -> set[str]:
     return set(session.scalars(select(Worker.id).where(_heartbeat_is_younger_than(cutoff))))
 
 
+def any_alive(session: Session, now: datetime, lease_seconds: int) -> bool:
+    """Say whether at least one worker's heartbeat is younger than the lease.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    now
+        The database's current time.
+    lease_seconds
+        The lease length (`LAKANA_RUN__LEASE_SECONDS`).
+
+    Returns
+    -------
+    bool
+        Whether a worker is alive; one indexed statement that reads at most one row.
+    """
+    cutoff = now - timedelta(seconds=lease_seconds)
+    found = session.scalars(select(Worker.id).where(_heartbeat_is_younger_than(cutoff)).limit(1))
+    return found.first() is not None
+
+
+def alive_on_host(session: Session, host: str, now: datetime, lease_seconds: int) -> bool:
+    """Say whether a worker that registered from this host is alive.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    host
+        The host name, as the worker passed it to `register` (cut to 255 characters the same
+        way).
+    now
+        The database's current time.
+    lease_seconds
+        The lease length (`LAKANA_RUN__LEASE_SECONDS`).
+
+    Returns
+    -------
+    bool
+        Whether a worker of that host has a heartbeat younger than the lease.
+    """
+    cutoff = now - timedelta(seconds=lease_seconds)
+    found = session.scalars(
+        select(Worker.id)
+        .where(Worker.host == host[:255], _heartbeat_is_younger_than(cutoff))
+        .limit(1)
+    )
+    return found.first() is not None
+
+
 def alive_takes(session: Session, now: datetime, lease_seconds: int) -> dict[str, str]:
     """Return what each alive worker takes, by worker id, in one statement.
 
