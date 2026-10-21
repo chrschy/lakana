@@ -684,6 +684,175 @@ def test_blacklist_allows_every_query_shape(sql: str) -> None:
     check_blacklist(sql)
 
 
+_NEW_REFUSED_FUNCTIONS = (
+    "setval",
+    "nextval",
+    "currval",
+    "index_key",
+    "to_aggregate_state",
+    "__cast",
+    "__between",
+    "__internal_barrier",
+    "__internal_tablefilter_dynamic",
+    "__internal_compress_string_ubigint",
+    "__internal_decompress_string",
+    "__internal_not_yet_released",
+)
+"""Functions refused since DuckDB 2.0.0: five named ones and samples of the `__` namespace.
+
+`__internal_compress_string_ubigint` and `__internal_decompress_string` already exist on
+1.5.5; `__internal_not_yet_released` stands for a name a later release adds, which the
+prefix rule must catch without a list entry.
+"""
+
+_FUNCTION_CALL_FORMS = {
+    "lower": "SELECT {f}(1, 2)",
+    "upper": "SELECT {F}(1, 2)",
+    "quoted": 'SELECT "{f}"(1, 2)',
+    "quoted_upper": 'SELECT "{F}"(1, 2)',
+    "qualified": "SELECT main.{f}(1, 2)",
+    "fully_qualified": "SELECT system.main.{f}(1, 2)",
+    "quoted_qualified": 'SELECT "main"."{f}"(1, 2)',
+    "method_call": "SELECT 's'.{f}(1)",
+    "method_call_on_column": "SELECT x.{f}(1) FROM range(1) AS t(x)",
+    "lambda": "SELECT list_transform([1], x -> {f}(x, 2))",
+    "cte": "WITH c AS (SELECT {f}(1, 2) AS v) SELECT v FROM c",
+    "subquery": "SELECT (SELECT {f}(1, 2))",
+    "derived_table": "SELECT v FROM (SELECT {f}(1, 2) AS v) AS d",
+    "lateral": "SELECT * FROM range(1) AS r(x), LATERAL (SELECT {f}(r.x, 2) AS v)",
+    "where": "SELECT x FROM range(1) AS t(x) WHERE {f}(x, 2) > 0",
+    "order_by": "SELECT x FROM range(1) AS t(x) ORDER BY {f}(x, 2)",
+    "filter": "SELECT sum(x) FILTER (WHERE {f}(x, 2) > 0) FROM range(1) AS t(x)",
+    "window": "SELECT {f}(x, 2) OVER () FROM range(1) AS t(x)",
+    "values": "VALUES ({f}(1, 2))",
+    "generator_argument": "SELECT * FROM range({f}(1, 2))",
+}
+"""Every way a query can spell a scalar call, each parsed by sqlglot to an `exp.Anonymous`.
+
+`{f}` is the lowercase name and `{F}` the uppercase one; DuckDB resolves a function name
+case-insensitively, quoted or not, and through any catalog or schema qualifier.
+"""
+
+
+@pytest.mark.parametrize("form", sorted(_FUNCTION_CALL_FORMS))
+@pytest.mark.parametrize("function_name", _NEW_REFUSED_FUNCTIONS)
+def test_blacklist_refuses_duckdb_internal_and_state_changing_functions_in_every_form(
+    function_name: str, form: str
+) -> None:
+    """A refused function is refused however the query spells or nests the call.
+
+    `setval` and `nextval` change a sequence and `currval` reads one, `index_key` reads a
+    catalog index by name, `to_aggregate_state` picks an aggregate by a name given as data,
+    and a name starting with `__` belongs to DuckDB's internal namespace.
+
+    Parameters
+    ----------
+    function_name
+        The function the query calls.
+    form
+        The key of the call's spelling in `_FUNCTION_CALL_FORMS`.
+    """
+    sql = _FUNCTION_CALL_FORMS[form].format(f=function_name, F=function_name.upper())
+
+    with pytest.raises(ValidationError, match=re.escape(function_name)):
+        check_blacklist(sql)
+
+
+def test_blacklist_tells_the_user_what_to_write_instead_of_an_internal_function() -> None:
+    """The refusal of a `__` function names it and points at the SQL it stands for."""
+    with pytest.raises(ValidationError) as caught:
+        check_blacklist("SELECT __cast(1)")
+
+    message = str(caught.value)
+    assert "__cast" in message
+    assert "internal to DuckDB" in message
+    assert "CAST" in message.replace("__cast", "")
+
+
+@pytest.mark.parametrize("sql", ["SELECT 1 AS a__b", "SELECT my__func(1)", "SELECT x__ FROM t"])
+def test_blacklist_allows_double_underscores_that_do_not_start_a_function_name(sql: str) -> None:
+    """Only a function name that starts with `__` is internal; other names stay allowed.
+
+    Parameters
+    ----------
+    sql
+        A query with `__` inside a name.
+    """
+    check_blacklist(sql)
+
+
+@pytest.mark.parametrize(
+    "function_name",
+    [
+        "create_external_resource",
+        "deregister_external_resource",
+        "destroy_external_resource",
+        "duckdb_available_metrics",
+        "duckdb_dialects",
+        "duckdb_eviction_queues",
+        "duckdb_extension_repositories",
+        "duckdb_external_resource_types",
+        "duckdb_external_resources",
+        "duckdb_grammar_extensions",
+        "duckdb_secret_type_parameters",
+        "duckdb_triggers",
+        "python_arrow_scan",
+        "read_single_csv_file",
+        "read_single_json_file",
+        "read_single_parquet_file",
+        "register_external_resource",
+        "register_external_resource_type",
+    ],
+)
+def test_blacklist_refuses_every_table_function_new_in_duckdb_2(function_name: str) -> None:
+    """The 18 table functions DuckDB 2.0.0 adds are outside the generator allow-list.
+
+    Each is refused in `FROM` and inside a scalar subquery, by the allow-list rather than a
+    list entry of its own.
+
+    Parameters
+    ----------
+    function_name
+        The table function the query calls.
+    """
+    for sql in (
+        f"SELECT * FROM {function_name}('x')",
+        f"SELECT (SELECT count(*) FROM {function_name}('x'))",
+    ):
+        with pytest.raises(ValidationError, match=f"table function {function_name} is not"):
+            check_blacklist(sql)
+
+
+@pytest.mark.parametrize(
+    ("statement", "message"),
+    [
+        ("SELECT $v_0_files", "placeholders are not allowed"),
+        ("SELECT getvariable('v_0_files')", "getvariable may not be called"),
+        ("CONNECT other", "Only a single query"),
+        ("CREATE EXTENSION REPOSITORY r AS 'https://example.com'", "CREATE is not permitted"),
+        ("SELECT stats(id) FROM bronze.weather", "stats may not be called"),
+    ],
+)
+def test_blacklist_refuses_the_new_duckdb_2_statements(statement: str, message: str) -> None:
+    """Statements and functions DuckDB 2.0.0 adds or changes stay refused.
+
+    Parameters
+    ----------
+    statement
+        SQL a DuckDB 2.0.0 connection would accept or treat differently.
+    message
+        Text the refusal must contain.
+    """
+    with pytest.raises(ValidationError, match=message):
+        check_blacklist(statement)
+
+
+def test_blacklist_refuses_install_and_load_as_unparseable() -> None:
+    """DuckDB 2.0.0's `INSTALL x AND LOAD` does not parse, and an unparseable query is refused."""
+    with pytest.raises(sqlglot.errors.ParseError):
+        check_blacklist("INSTALL httpfs AND LOAD")
+
+
 _SECRET = '"/tmp/secret.csv"'
 """A quoted path DuckDB resolves to a real file by replacement scan.
 

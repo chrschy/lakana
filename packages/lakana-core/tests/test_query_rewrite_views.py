@@ -308,3 +308,22 @@ def test_a_stored_view_calling_current_query_is_refused_at_expansion(stored: str
         expand_views("SELECT q FROM gold.v", _lookup({"gold.v": stored}))
 
     assert "bronze.orders" not in str(caught.value)
+
+
+@pytest.mark.parametrize("function_name", ["setval", "__internal_barrier"])
+def test_a_stored_view_calling_a_refused_duckdb_2_function_is_refused_at_expansion(
+    function_name: str,
+) -> None:
+    """A view's stored SQL may not call a state-changing or DuckDB-internal function either.
+
+    Parameters
+    ----------
+    function_name
+        The refused function the stored SQL calls.
+    """
+    stored = f"SELECT id, {function_name}(id, 1) AS v FROM bronze.orders"
+
+    with pytest.raises(ValidationError, match=function_name) as caught:
+        expand_views("SELECT v FROM gold.v", _lookup({"gold.v": stored}))
+
+    assert "bronze.orders" not in str(caught.value)

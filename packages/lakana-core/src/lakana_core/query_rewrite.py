@@ -128,6 +128,11 @@ _BLACKLISTED_FUNCTIONS = frozenset(
         "pg_get_constraintdef",
         "pg_get_expr",
         "get_block_size",
+        "index_key",
+        "setval",
+        "nextval",
+        "currval",
+        "to_aggregate_state",
     }
 )
 """Function calls a user's own SQL must never make directly.
@@ -148,7 +153,7 @@ DuckDB database file directly (its own catalog, not this connection's).
 Everything from `query` onward is a second family, added as a hardening step (the full list came
 from running `SELECT
 function_name FROM duckdb_functions() WHERE function_type = 'table'`
-against DuckDB 1.5.5 and picking out every function that reads or evaluates
+against DuckDB 1.5.5, swept again on 2.0.0, and picking out every function that reads or evaluates
 something other than the rows this module's own rewrite hands it):
 `query`/`query_table`/`json_execute_serialized_sql` each evaluate a
 *string argument* as SQL/a table reference — the AST-blacklist's whole
@@ -192,13 +197,22 @@ under names anyone can predict, so it is refused like `duckdb_variables`.
 None has a use
 in a governed query.
 
+The last three entries came from the 2.0.0 sweep. `index_key` reads a catalog index by
+name, the introspection class again. `setval` changes a sequence: the first scalar that
+writes, where every other function a query may call only reads. `to_aggregate_state`
+picks an aggregate function by a name given as *data*; nothing harmful was found behind
+it, but dispatch by a name in a string is the class that made `json_execute_serialized_sql`
+a bypass, and a governed query has no use for it. `nextval` (which advances a sequence)
+and `currval` (which reads its state) predate 2.0.0 and are refused with `setval` for the
+same reason: sequence state is connection state, not data, and no governed read needs it.
+
 `stats` is the odd one out: it is a *scalar* that reads column statistics.
 DuckDB takes Parquet statistics at bind time, below the rewriter's CTE
 `WHERE`, so `stats(col)` reports the min and max of every row in the file,
 including rows a row filter hides, and on a string column a prefix of the
-hidden value; a user `WHERE` does not narrow it. Swept against 1.5.5's
-`duckdb_functions()`: no other function reads statistics or file metadata
-(the Parquet metadata readers are in the second family above). Table
+hidden value (on 2.0.0 the whole hidden value); a user `WHERE` does not narrow it. Swept
+against 1.5.5's and 2.0.0's `duckdb_functions()`: no other function reads statistics or
+file metadata (the Parquet metadata readers are in the second family above). Table
 functions and table macros that take a table *name* as a string
 (`histogram`, `duckdb_table_sample`, `summary`) cannot see the rewriter's
 CTEs, and `check_blacklist` refuses every table function outside
@@ -210,11 +224,14 @@ static *scalar* facts: `typeof`, `pg_typeof`, `version`, `current_database`,
 function, so it is refused like any other outside the allow-list.
 
 **This list's criterion, not a completeness claim.** Every entry above is a
-file-reading, SQL-evaluating, secret-revealing, introspecting or
-statistics-reading DuckDB function (table, scalar or macro) as of
-DuckDB 1.5.5 — a *reference* list confirmed against that one version's
-`duckdb_functions()` output, not a permanent enumeration: DuckDB adds table
-functions across releases, and a future one in any of these four
+file-reading, SQL-evaluating, secret-revealing, introspecting,
+statistics-reading or state-changing DuckDB function (table, scalar or macro) as of
+DuckDB 2.0.0 — a *reference* list confirmed against that version's
+`duckdb_functions()` output, not a permanent enumeration (the 2.0.0 sweep diffed
+`duckdb_functions()` of 1.5.5 against 2.0.0, both with `httpfs` loaded: 225 names new, of
+them 198 scalar, 18 table, 5 macro and 4 aggregate; the 18 table functions are refused by
+`_ALLOWED_TABLE_FUNCTIONS`, and the scalars that pass were read one by one): DuckDB adds table
+functions across releases, and a future one in any of these
 categories needs adding here as it's found, the same way this residual
 round found two the initial pass missed. This blacklist is deliberately
 never the primary control for that reason — see this module's own
@@ -237,6 +254,22 @@ The `GLOB` *operator* (`WHERE path GLOB '*.csv'`) parses to `exp.Glob`,
 which is a binary predicate and not an `exp.Func` at all, so listing the
 `glob()` table function here does not reject it. Verified against sqlglot
 30.18.0.
+
+Beside this list, `check_blacklist` refuses every function whose name starts with
+`_INTERNAL_FUNCTION_PREFIX` — see there.
+"""
+
+_INTERNAL_FUNCTION_PREFIX = "__"
+"""The prefix of DuckDB's internal function namespace, refused as a whole.
+
+DuckDB 1.5.5 already registers `__internal_compress_*`/`__internal_decompress_*`, and 2.0.0
+adds `__cast`, `__between`, `__internal_barrier`, the `__internal_tablefilter_*` family and
+more: functions the planner inserts into its own plans, callable by name all the same. No
+governed query needs one, each has a documented SQL form (`CAST`, `BETWEEN`) or none at
+all, and a prefix rule refuses the next release's additions without a list entry. DuckDB
+registers no function whose name starts with a single `_`, so the rule is exactly this
+namespace. A name is compared in lower case, after sqlglot has taken off quotes and any
+catalog or schema qualifier, like the entries of `_BLACKLISTED_FUNCTIONS`.
 """
 
 _BLACKLISTED_COMMANDS = frozenset({"load", "create"})
@@ -1962,7 +1995,8 @@ def check_blacklist(sql: str, dialect: str = "duckdb") -> None:
     ------
     ValidationError
         If `sql` uses a table function other than the generators in
-        `_ALLOWED_TABLE_FUNCTIONS`; if it calls a blacklisted function; if it contains an
+        `_ALLOWED_TABLE_FUNCTIONS`; if it calls a blacklisted function or one whose name
+        starts with `_INTERNAL_FUNCTION_PREFIX`; if it contains an
         `ATTACH`, `COPY`, or `INSTALL` statement (each parses to sqlglot's
         own dedicated expression class — `exp.Attach`, `exp.Copy`,
         `exp.Install` — rather than a generic command node, confirmed against
@@ -1986,6 +2020,11 @@ def check_blacklist(sql: str, dialect: str = "duckdb") -> None:
         name = func.name.lower() if isinstance(func, exp.Anonymous) else func.sql_name().lower()
         if name in _BLACKLISTED_FUNCTIONS:
             raise ValidationError(f"{name} may not be called directly; query the catalog instead.")
+        if name.startswith(_INTERNAL_FUNCTION_PREFIX):
+            raise ValidationError(
+                f"{name} is internal to DuckDB and may not be called directly; "
+                "write the SQL it stands for instead, such as CAST or BETWEEN."
+            )
     for node_type, label in ((exp.Attach, "ATTACH"), (exp.Copy, "COPY"), (exp.Install, "INSTALL")):
         if parsed.find(node_type) is not None:
             raise ValidationError(f"{label} is not permitted in a submitted query.")
