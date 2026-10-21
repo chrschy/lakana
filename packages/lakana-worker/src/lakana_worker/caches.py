@@ -357,11 +357,13 @@ class PackageCacheTrim:
             self._uv(["prune"], deadline, stop)
             sizes = self._measure()
             while sizes.packages_bytes > limit:
-                batch = self._oldest(tried)
+                batch, left = self._oldest(tried)
                 if not batch:
                     reason = (
                         "every package left was downloaded within "
                         "LAKANA_WORKER__PACKAGE_CACHE_MIN_AGE_HOURS"
+                        if left
+                        else "no package is left to remove; what remains is uv's own data"
                     )
                     break
                 tried.update(batch)
@@ -400,7 +402,7 @@ class PackageCacheTrim:
             )
         return sizes
 
-    def _oldest(self, tried: set[str]) -> list[str]:
+    def _oldest(self, tried: set[str]) -> tuple[list[str], bool]:
         """Choose the next packages to remove.
 
         Parameters
@@ -410,16 +412,18 @@ class PackageCacheTrim:
 
         Returns
         -------
-        list of str
-            Up to `CLEAN_BATCH` names, oldest change first, none changed within the minimum age.
+        tuple of list of str and bool
+            Up to `CLEAN_BATCH` names, oldest change first, none changed within the minimum age;
+            and whether any package not removed yet is left at all, young or old.
         """
         cutoff = self._wall_clock() - self._settings.min_age_seconds
-        old = [
-            (changed, name)
+        left = {
+            name: changed
             for name, changed in _package_directories(self._paths.packages).items()
-            if changed <= cutoff and name not in tried
-        ]
-        return [name for _, name in sorted(old)[:CLEAN_BATCH]]
+            if name not in tried
+        }
+        old = sorted((changed, name) for name, changed in left.items() if changed <= cutoff)
+        return [name for _, name in old[:CLEAN_BATCH]], bool(left)
 
     def _uv(self, arguments: Sequence[str], deadline: float, stop: threading.Event | None) -> None:
         """Run one ``uv cache`` command, giving up as soon as the cache turns out to be in use.
@@ -453,7 +457,9 @@ class PackageCacheTrim:
         argv = [self._settings.uv, "cache", command, "--no-config", "--cache-dir", str(cache)]
         env = {
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-            "HOME": str(cache),
+            # uv refuses every command started inside its own cache ("The project directory is
+            # inside the cache directory"), so it runs from the root, which no cache contains.
+            "HOME": os.sep,
             "UV_NO_PROGRESS": "1",
             "UV_OFFLINE": "1",
             "UV_PYTHON_DOWNLOADS": "never",
@@ -461,7 +467,7 @@ class PackageCacheTrim:
         try:
             process = subprocess.Popen(  # nosec B603 -- fixed argv, no shell, minimal env
                 [sys.executable, "-I", "-c", UV_LAUNCHER, str(os.getpid()), *argv, *rest],
-                cwd=cache,
+                cwd=os.sep,
                 env=env,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,

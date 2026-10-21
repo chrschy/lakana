@@ -6,12 +6,17 @@ network and no real cache is touched.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import logging
 import os
+import shutil
+import subprocess  # nosec B404 -- the real uv with fixed argv, offline
 import sys
 import threading
 import time
+import zipfile
 from collections.abc import Iterator
 from pathlib import Path
 from typing import cast
@@ -38,6 +43,12 @@ behaviour = json.loads((here / "behaviour.json").read_text())
 with (here / "calls.jsonl").open("a") as handle:
     handle.write(json.dumps({{"argv": sys.argv[1:], "env": dict(os.environ)}}) + "\\n")
 command = sys.argv[2]
+cache = Path(sys.argv[sys.argv.index("--cache-dir") + 1]).resolve()
+here_now = Path.cwd().resolve()
+if here_now == cache or cache in here_now.parents:
+    # What a real uv does for any command started inside its own cache.
+    print("error: The project directory '.' is inside the cache directory '.'", flush=True)
+    sys.exit(2)
 mode = behaviour.get(command, "ok")
 if mode == "in-use":
     print("Cache is currently in-use, waiting for other uv processes to finish", flush=True)
@@ -46,7 +57,6 @@ if mode == "sleep":
     time.sleep(60)
 if mode == "fail":
     sys.exit(2)
-cache = Path(sys.argv[sys.argv.index("--cache-dir") + 1])
 for name in sys.argv[sys.argv.index("--cache-dir") + 2:]:
     shutil.rmtree(cache / "wheels-v6" / "pypi" / name, ignore_errors=True)
 print("Removed 3 files", flush=True)
@@ -430,6 +440,25 @@ def test_everything_left_being_young_is_a_warning_with_the_reason(
     assert "Raise the limit" in record.getMessage()
 
 
+def test_a_cache_with_no_package_left_says_so_and_not_that_they_are_young(
+    paths: CachePaths, uv: FakeUv, caplog: pytest.LogCaptureFixture
+) -> None:
+    (paths.packages / "archive-v0").mkdir(parents=True)
+    with caplog.at_level(logging.WARNING, logger=caches_module.__name__):
+        _trim(paths, uv, [150], min_age_days=0).trim(_sizes(200))
+    [record] = caplog.records
+    assert "no package is left to remove" in record.getMessage()
+    assert "downloaded within" not in record.getMessage()
+
+
+def test_uv_runs_from_outside_its_cache(paths: CachePaths, uv: FakeUv) -> None:
+    """A real uv refuses every command started inside its own cache; the fake does the same."""
+    _trim(paths, uv, [80]).trim(_sizes(150))
+    [call] = uv.calls()
+    assert call["env"]["HOME"] == os.sep
+    assert call["argv"][:2] == ["cache", "prune"]
+
+
 def test_more_old_packages_than_one_batch_are_removed_a_batch_at_a_time(
     paths: CachePaths, uv: FakeUv
 ) -> None:
@@ -650,3 +679,78 @@ def test_a_failed_or_cut_off_measurement_is_logged(
     assert getattr(failure, "event", None) == "sweep_failed"
     assert cut.latest() == _sizes(3, complete=False)
     assert "the figures shown are a floor" in caplog.text
+
+
+def _wheel(directory: Path) -> None:
+    """Write a tiny pure-Python wheel, ``demo-pkg`` 1.0, into `directory`.
+
+    Parameters
+    ----------
+    directory
+        Where the wheel goes.
+    """
+    files = {
+        "demo_pkg/__init__.py": b"X = 1\n",
+        "demo_pkg-1.0.dist-info/METADATA": b"Metadata-Version: 2.1\nName: demo-pkg\nVersion: 1.0\n",
+        "demo_pkg-1.0.dist-info/WHEEL": (
+            b"Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
+        ),
+    }
+    record = [
+        f"{name},sha256={base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b'=').decode()},{len(data)}"
+        for name, data in files.items()
+    ]
+    record.append("demo_pkg-1.0.dist-info/RECORD,,")
+    files["demo_pkg-1.0.dist-info/RECORD"] = ("\n".join(record) + "\n").encode()
+    with zipfile.ZipFile(directory / "demo_pkg-1.0-py3-none-any.whl", "w") as archive:
+        for name, data in files.items():
+            archive.writestr(name, data)
+
+
+@pytest.mark.skipif(shutil.which("uv") is None, reason="needs a real uv on the PATH")
+def test_a_real_uv_trims_a_tiny_cache_offline_and_the_environment_still_works(
+    paths: CachePaths, tmp_path: Path
+) -> None:
+    uv = shutil.which("uv")
+    assert uv is not None
+    wheels = tmp_path / "wheels"
+    wheels.mkdir()
+    _wheel(wheels)
+    venv = paths.environments / "demo"
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": str(tmp_path),
+        "UV_CACHE_DIR": str(paths.packages),
+        "UV_OFFLINE": "1",
+        "UV_PYTHON_DOWNLOADS": "never",
+        "UV_NO_CONFIG": "1",
+    }
+    for argv in (
+        [uv, "venv", "-q", "--python", sys.executable, str(venv)],
+        [
+            uv,
+            "pip",
+            "install",
+            "-q",
+            "--python",
+            str(venv / "bin" / "python"),
+            "--find-links",
+            str(wheels),
+            "demo-pkg",
+        ],
+    ):
+        subprocess.run(argv, env=env, cwd=tmp_path, check=True, timeout=60)  # nosec B603
+    names = caches_module._package_directories(paths.packages)
+    assert "demo-pkg" in names
+    trim = PackageCacheTrim(
+        paths, TrimSettings(uv=uv, max_bytes=1, min_age_seconds=0, max_seconds=60)
+    )
+    trim.trim(measure(paths))
+    assert caches_module._package_directories(paths.packages) == {}
+    imported = subprocess.run(  # nosec B603
+        [str(venv / "bin" / "python"), "-c", "import demo_pkg; print(demo_pkg.X)"],
+        capture_output=True,
+        timeout=30,
+        check=True,
+    )
+    assert imported.stdout.strip() == b"1"
