@@ -18,21 +18,28 @@ from lakana_server.api.platform.schemas import (
     OrphanedLocationsDeleteIn,
     OrphanedLocationsOut,
 )
+from lakana_server.api.responses import errors
 from lakana_server.api.routing import AuthenticateFirstRoute
 from lakana_server.deps import get_catalog, get_principal
 
 router = APIRouter(
-    route_class=AuthenticateFirstRoute, prefix="/api/v1/environments", tags=["environments"]
+    route_class=AuthenticateFirstRoute,
+    prefix="/api/v1/environments",
+    tags=["environments"],
+    responses=errors(401),
 )
 
 
-@router.post("", response_model=EnvironmentOut, status_code=201)
+@router.post("", response_model=EnvironmentOut, status_code=201, responses=errors(403, 409))
 def create_environment(
     body: EnvironmentCreate,
     principal: PrincipalRef = Depends(get_principal),
     catalog: CatalogService = Depends(get_catalog),
 ) -> EnvironmentOut:
     """Create an environment.
+
+    Needs `MANAGE_ENVIRONMENT` on the instance. Answers 409 when an environment of that name
+    exists.
 
     Parameters
     ----------
@@ -65,14 +72,19 @@ def create_environment(
     return EnvironmentOut.model_validate(env)
 
 
-@router.patch("/{name}/storage", response_model=EnvironmentOut)
+@router.patch("/{name}/storage", response_model=EnvironmentOut, responses=errors(403, 404))
 def update_environment_storage(
     name: str,
     body: EnvironmentStorageUpdate,
     principal: PrincipalRef = Depends(get_principal),
     catalog: CatalogService = Depends(get_catalog),
 ) -> EnvironmentOut:
-    """Update an environment's storage options and/or secret reference.
+    """Change an environment's storage.
+
+    Replaces the environment's storage options and the secret that holds its storage
+    credential. Needs `MANAGE_ENVIRONMENT` on the instance; while the environment has a
+    storage secret, changing the options also needs `MANAGE_SECRET` in it. Answers 404 when
+    there is no such environment.
 
     Parameters
     ----------
@@ -101,14 +113,19 @@ def update_environment_storage(
     return EnvironmentOut.model_validate(env)
 
 
-@router.patch("/{name}", response_model=EnvironmentOut)
+@router.patch("/{name}", response_model=EnvironmentOut, responses=errors(403, 404))
 def set_environment_protection(
     name: str,
     body: EnvironmentPatch,
     principal: PrincipalRef = Depends(get_principal),
     catalog: CatalogService = Depends(get_catalog),
 ) -> EnvironmentOut:
-    """Toggle an environment's protected flag.
+    """Protect or unprotect an environment.
+
+    Sets the environment's protected flag. A protected environment refuses changes that
+    would lose data (deleting it, a retention that expires tables) until the flag is
+    cleared. Needs `MANAGE_ENVIRONMENT` on the instance. Answers 404 when there is no such
+    environment.
 
     Parameters
     ----------
@@ -135,14 +152,18 @@ def set_environment_protection(
     return EnvironmentOut.model_validate(env)
 
 
-@router.put("/{name}/retention", response_model=EnvironmentOut)
+@router.put("/{name}/retention", response_model=EnvironmentOut, responses=errors(403, 404))
 def set_environment_retention(
     name: str,
     body: EnvironmentRetentionIn,
     principal: PrincipalRef = Depends(get_principal),
     catalog: CatalogService = Depends(get_catalog),
 ) -> EnvironmentOut:
-    """Set the retention of an environment's tables that set none of their own, or turn it off.
+    """Set the default retention of an environment's tables.
+
+    Sets, or turns off, the retention of the environment's tables that set none of their
+    own. Needs `MANAGE_ENVIRONMENT`. Answers 404 when there is no such environment and 422
+    when the days are out of range or the environment is protected.
 
     Parameters
     ----------
@@ -171,13 +192,15 @@ def set_environment_retention(
     return EnvironmentOut.model_validate(env)
 
 
-@router.get("/{name}", response_model=EnvironmentOut)
+@router.get("/{name}", response_model=EnvironmentOut, responses=errors(403, 404))
 def get_environment(
     name: str,
     principal: PrincipalRef = Depends(get_principal),
     catalog: CatalogService = Depends(get_catalog),
 ) -> EnvironmentOut:
-    """Fetch an environment by name.
+    """Show an environment.
+
+    Needs `READ_ENVIRONMENT`. Answers 404 when there is no such environment.
 
     Parameters
     ----------
@@ -207,10 +230,11 @@ def list_environments(
     principal: PrincipalRef = Depends(get_principal),
     catalog: CatalogService = Depends(get_catalog),
 ) -> list[EnvironmentOut]:
-    """List every environment, or every deleted one.
+    """List environments.
 
-    Filtered to the environments the caller may read — see
-    `CatalogService.list_environments`.
+    Lists the environments the caller may read. With `deleted` set, lists instead the
+    deleted environments whose files are not deleted yet, oldest deletion first, each with
+    its `purge_after`. A caller who may read none gets an empty list.
 
     Parameters
     ----------
@@ -226,6 +250,10 @@ def list_environments(
     -------
     list of EnvironmentOut
         Every environment the caller may read.
+
+    Notes
+    -----
+    The list is filtered by `CatalogService.list_environments`.
     """
     found = (
         catalog.list_deleted_environments(principal)
@@ -235,14 +263,19 @@ def list_environments(
     return [EnvironmentOut.model_validate(env) for env in found]
 
 
-@router.delete("/{name}", response_model=EnvironmentOut)
+@router.delete("/{name}", response_model=EnvironmentOut, responses=errors(403, 404, 409))
 def delete_environment(
     name: str,
     purge: bool = False,
     principal: PrincipalRef = Depends(get_principal),
     catalog: CatalogService = Depends(get_catalog),
 ) -> EnvironmentOut:
-    """Delete an environment: its tables can be restored until `purge_after`.
+    """Delete an environment.
+
+    Deletes the environment. Its tables can be restored until the `purge_after` time in the
+    answer. Needs `MANAGE_ENVIRONMENT`. Answers 404 when there is no such environment (or it
+    is already deleted and `purge` is not set), 409 while a repository is still deployed in
+    it and 422 when it is protected.
 
     Parameters
     ----------
@@ -275,13 +308,17 @@ def delete_environment(
     return EnvironmentOut.model_validate(catalog.delete_environment(principal, name, purge=purge))
 
 
-@router.post("/{name}/restore", response_model=EnvironmentOut)
+@router.post("/{name}/restore", response_model=EnvironmentOut, responses=errors(403, 404, 409))
 def restore_environment(
     name: str,
     principal: PrincipalRef = Depends(get_principal),
     catalog: CatalogService = Depends(get_catalog),
 ) -> EnvironmentOut:
-    """Restore a deleted environment within its undo period, with the tables it dropped.
+    """Restore a deleted environment.
+
+    Brings back an environment within its undo period, with the tables it dropped. Needs
+    `MANAGE_ENVIRONMENT`. Answers 404 when there is no such environment and 409 when it is
+    not deleted, its undo period has ended or the clean-up has started deleting its files.
 
     Parameters
     ----------
@@ -308,13 +345,16 @@ def restore_environment(
     return EnvironmentOut.model_validate(catalog.restore_environment(principal, name))
 
 
-@router.get("/{name}/usage", response_model=EnvironmentUsageOut)
+@router.get("/{name}/usage", response_model=EnvironmentUsageOut, responses=errors(403, 404))
 def environment_usage(
     name: str,
     principal: PrincipalRef = Depends(get_principal),
     catalog: CatalogService = Depends(get_catalog),
 ) -> EnvironmentUsageOut:
-    """Report how much storage an environment uses; reads the catalog database only.
+    """Show how much storage an environment uses.
+
+    Reports the size of the environment's tables from the catalog, without reading storage.
+    Needs `MANAGE_ENVIRONMENT`. Answers 404 when there is no such environment.
 
     Parameters
     ----------
@@ -339,14 +379,20 @@ def environment_usage(
     return EnvironmentUsageOut.model_validate(catalog.environment_usage(principal, name))
 
 
-@router.get("/{name}/orphaned-locations", response_model=OrphanedLocationsOut)
+@router.get(
+    "/{name}/orphaned-locations", response_model=OrphanedLocationsOut, responses=errors(403, 404)
+)
 def list_orphaned_locations(
     name: str,
     older_than_days: int = DEFAULT_OLDER_THAN_DAYS,
     principal: PrincipalRef = Depends(get_principal),
     catalog: CatalogService = Depends(get_catalog),
 ) -> OrphanedLocationsOut:
-    """List the table directories older releases left without a location record; delete nothing.
+    """List table directories without a location record.
+
+    Lists the directories that older releases left under the environment's storage with no
+    table to own them. Deletes nothing. Needs `MANAGE_ENVIRONMENT` on the instance. Answers
+    404 when there is no such environment and 422 when `older_than_days` is out of range.
 
     Parameters
     ----------
@@ -375,14 +421,23 @@ def list_orphaned_locations(
     return OrphanedLocationsOut.model_validate(found)
 
 
-@router.post("/{name}/orphaned-locations/delete", response_model=OrphanedLocationsOut)
+@router.post(
+    "/{name}/orphaned-locations/delete",
+    response_model=OrphanedLocationsOut,
+    responses=errors(403, 404),
+)
 def delete_orphaned_locations(
     name: str,
     body: OrphanedLocationsDeleteIn,
     principal: PrincipalRef = Depends(get_principal),
     catalog: CatalogService = Depends(get_catalog),
 ) -> OrphanedLocationsOut:
-    """Delete the table directories without a location record whose files are old enough.
+    """Delete table directories without a location record.
+
+    Deletes the directories that older releases left under the environment's storage and
+    whose files are older than `older_than_days`. Needs `MANAGE_ENVIRONMENT` on the
+    instance. Answers 404 when there is no such environment and 422 when `older_than_days`
+    is out of range.
 
     Parameters
     ----------

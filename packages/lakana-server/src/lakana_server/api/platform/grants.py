@@ -27,10 +27,16 @@ from lakana_server.api.platform.schemas import (
     ScopeOut,
     ViaOut,
 )
+from lakana_server.api.responses import errors
 from lakana_server.api.routing import AuthenticateFirstRoute
 from lakana_server.deps import get_grant_service, get_principal
 
-router = APIRouter(route_class=AuthenticateFirstRoute, prefix="/api/v1/grants", tags=["grants"])
+router = APIRouter(
+    route_class=AuthenticateFirstRoute,
+    prefix="/api/v1/grants",
+    tags=["grants"],
+    responses=errors(401),
+)
 
 
 def _dotted_to_joined(namespace: str | None) -> str | None:
@@ -98,13 +104,18 @@ def _to_out(grant: Grant) -> GrantOut:
     )
 
 
-@router.post("", response_model=GrantOut, status_code=201)
+@router.post("", response_model=GrantOut, status_code=201, responses=errors(403, 404))
 def create_grant(
     body: GrantCreate,
     principal: PrincipalRef = Depends(get_principal),
     service: GrantService = Depends(get_grant_service),
 ) -> GrantOut:
-    """Create a grant.
+    """Grant a role or an action.
+
+    Gives a principal or a group a role or a single action on the instance, an environment,
+    a namespace or a table. Needs the `ADMIN` role on the instance. Answers 404 when the
+    principal, group or object does not exist and 422 when the grant is not valid for that
+    object.
 
     Parameters
     ----------
@@ -141,7 +152,7 @@ def create_grant(
     return _to_out(created)
 
 
-@router.get("", response_model=list[GrantOut])
+@router.get("", response_model=list[GrantOut], responses=errors(403))
 def list_grants(
     response: Response,
     principal_name: str | None = Query(default=None, max_length=255),
@@ -155,11 +166,13 @@ def list_grants(
     principal: PrincipalRef = Depends(get_principal),
     service: GrantService = Depends(get_grant_service),
 ) -> list[GrantOut]:
-    """List active grants, newest first; every filter is optional and they combine.
+    """List grants.
 
-    The object filter is an exact match: `table` with `namespace` and `environment` lists the
-    grants on that table, `namespace` with `environment` those on that namespace, `environment`
-    alone those on that environment. The cursor of the next page is in `X-Next-Cursor`.
+    Lists the active grants, newest first. Every filter is optional, and filters combine
+    with AND. The object filter matches exactly: `table` with `namespace` and `environment`
+    lists the grants on that table, `namespace` with `environment` those on the namespace,
+    `environment` alone those on the environment. Needs the `ADMIN` role on the instance.
+    The cursor of the next page is in the `X-Next-Cursor` response header.
 
     Parameters
     ----------
@@ -266,13 +279,16 @@ def permissions_out(report: PermissionReport) -> PermissionsOut:
     )
 
 
-@router.delete("/{grant_id}", status_code=204)
+@router.delete("/{grant_id}", status_code=204, responses=errors(403, 404, 409))
 def revoke_grant(
     grant_id: uuid.UUID,
     principal: PrincipalRef = Depends(get_principal),
     service: GrantService = Depends(get_grant_service),
 ) -> None:
     """Revoke a grant.
+
+    Needs the `ADMIN` role on the instance. Answers 404 when there is no such grant and 409
+    when revoking it would leave the instance without an active administrator.
 
     Parameters
     ----------

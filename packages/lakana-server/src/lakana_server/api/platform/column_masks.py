@@ -1,8 +1,8 @@
 """The column-masks resource of the platform API.
 
-`namespace` crosses this boundary dot-joined (`gold.sales`), converted to
-and from the unit-separator storage form here — matching `grants.py`'s
-existing convention for the same underlying value.
+A mask's `namespace` is dot-joined (`gold.sales`) in requests and answers and
+converted to and from the storage form in this module, as `grants.py` does for a
+grant.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from lakana_core.identifiers import NamespacePath
 from lakana_core.models import ColumnMask
 from lakana_core.policy.column_masks import ColumnMaskService
 from lakana_server.api.platform.schemas import ColumnMaskCreate, ColumnMaskOut
+from lakana_server.api.responses import errors
 from lakana_server.api.routing import AuthenticateFirstRoute
 from lakana_server.deps import (
     check_statement,
@@ -25,7 +26,10 @@ from lakana_server.deps import (
 )
 
 router = APIRouter(
-    route_class=AuthenticateFirstRoute, prefix="/api/v1/column-masks", tags=["column-masks"]
+    route_class=AuthenticateFirstRoute,
+    prefix="/api/v1/column-masks",
+    tags=["column-masks"],
+    responses=errors(401),
 )
 
 
@@ -88,7 +92,7 @@ def _to_out(row: ColumnMask) -> ColumnMaskOut:
     )
 
 
-@router.post("", response_model=ColumnMaskOut, status_code=201)
+@router.post("", response_model=ColumnMaskOut, status_code=201, responses=errors(403, 404))
 def create_column_mask(
     body: ColumnMaskCreate,
     request: Request,
@@ -96,6 +100,12 @@ def create_column_mask(
     service: ColumnMaskService = Depends(get_column_mask_service),
 ) -> ColumnMaskOut:
     """Create a column mask.
+
+    Hides or rewrites a column of a table for a principal or group, by a SQL expression. The
+    mask binds to the table, not its name. Needs `MANAGE_POLICY` on the instance. Answers
+    404 when the principal, group or table does not exist and 422 for a column the table
+    does not have, an expression that is not valid, or one longer than the server's
+    statement limit.
 
     Parameters
     ----------
@@ -136,7 +146,7 @@ def create_column_mask(
     return _to_out(created)
 
 
-@router.get("", response_model=list[ColumnMaskOut])
+@router.get("", response_model=list[ColumnMaskOut], responses=errors(403))
 def list_column_masks(
     principal_name: str | None = None,
     group_name: str | None = None,
@@ -146,11 +156,12 @@ def list_column_masks(
     principal: PrincipalRef = Depends(get_principal),
     service: ColumnMaskService = Depends(get_column_mask_service),
 ) -> list[ColumnMaskOut]:
-    """List column masks for a principal, a group, or a specific table.
+    """List the column masks of a principal, group or table.
 
-    Exactly one of `principal_name`/`group_name`/(`environment`+`namespace`+
-    `table` together) must be given — unlike grants, there is no
-    instance-wide default, since a column mask is always table-scoped.
+    Give exactly one of `principal_name`, `group_name` or `environment` with `namespace` and
+    `table`; a column mask always belongs to one table, so there is no list of all of them.
+    Needs `MANAGE_POLICY` on the instance. Answers 422 when none of those combinations is
+    given.
 
     Parameters
     ----------
@@ -194,13 +205,15 @@ def list_column_masks(
     return [_to_out(row) for row in rows]
 
 
-@router.delete("/{column_mask_id}", status_code=204)
+@router.delete("/{column_mask_id}", status_code=204, responses=errors(403, 404))
 def revoke_column_mask(
     column_mask_id: uuid.UUID,
     principal: PrincipalRef = Depends(get_principal),
     service: ColumnMaskService = Depends(get_column_mask_service),
 ) -> None:
     """Revoke a column mask.
+
+    Needs `MANAGE_POLICY` on the instance. Answers 404 when there is no such column mask.
 
     Parameters
     ----------

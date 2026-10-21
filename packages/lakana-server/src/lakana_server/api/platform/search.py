@@ -7,15 +7,19 @@ from fastapi import APIRouter, Depends, Query
 from lakana_core.auth import PrincipalRef
 from lakana_core.catalog.search import CatalogSearch, SearchKind
 from lakana_server.api.platform.schemas import SearchOut
+from lakana_server.api.responses import errors
 from lakana_server.api.routing import AuthenticateFirstRoute
 from lakana_server.deps import get_catalog_search, get_principal
 
 router = APIRouter(
-    route_class=AuthenticateFirstRoute, prefix="/api/v1/environments/{env}", tags=["search"]
+    route_class=AuthenticateFirstRoute,
+    prefix="/api/v1/environments/{env}",
+    tags=["search"],
+    responses=errors(401),
 )
 
 
-@router.get("/search", response_model=SearchOut)
+@router.get("/search", response_model=SearchOut, responses=errors(403, 404))
 def search(
     env: str,
     q: str = Query(description="The text to find; 1 to 200 characters, case-insensitive."),
@@ -25,7 +29,14 @@ def search(
     principal: PrincipalRef = Depends(get_principal),
     service: CatalogSearch = Depends(get_catalog_search),
 ) -> SearchOut:
-    """Search an environment, showing the caller only what they may read.
+    """Search an environment.
+
+    Finds tables, columns, runs, jobs, repositories and principals whose names or
+    descriptions contain `q` (1 to 200 characters, case-insensitive; run ids need four
+    characters or more), one page at a time. What the caller may not read is left out of the
+    hits, not refused: tables and columns need `READ_TABLE`, runs `READ_ENVIRONMENT`,
+    principals the right to list them. Needs `READ_ENVIRONMENT`. Answers 404 when the
+    environment does not exist and 422 for a `q` or paging value out of range.
 
     Parameters
     ----------

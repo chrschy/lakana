@@ -66,6 +66,7 @@ from lakana_server.api.platform.schemas import (
     TableRetentionOut,
     UndropIn,
 )
+from lakana_server.api.responses import errors
 from lakana_server.api.routing import AuthenticateFirstRoute
 from lakana_server.body_limit import streams_its_own_body
 from lakana_server.concurrency import AppendConcurrencyLimiter
@@ -89,17 +90,20 @@ router = APIRouter(
     route_class=AuthenticateFirstRoute,
     prefix="/api/v1/environments/{env}/namespaces/{path}/tables",
     tags=["tables"],
+    responses=errors(401),
 )
 dropped_router = APIRouter(
     route_class=AuthenticateFirstRoute,
     prefix="/api/v1/environments/{env}/namespaces/{path}/dropped-tables",
     tags=["tables"],
+    responses=errors(401),
 )
 """The dropped tables of a namespace: a path of its own, so no table name can shadow it."""
 expiring_router = APIRouter(
     route_class=AuthenticateFirstRoute,
     prefix="/api/v1/environments/{env}/expiring-tables",
     tags=["tables"],
+    responses=errors(401),
 )
 """The managed tables of an environment that their retention makes expire soon."""
 
@@ -850,7 +854,7 @@ async def _governed_arrow_write(
         limiter.release()
 
 
-@router.post("", response_model=TableOut, status_code=201)
+@router.post("", response_model=TableOut, status_code=201, responses=errors(403, 404, 409))
 def create_table(
     env: str,
     path: str,
@@ -858,7 +862,12 @@ def create_table(
     principal: PrincipalRef = Depends(get_principal),
     catalog: CatalogService = Depends(get_catalog),
 ) -> TableOut:
-    """Create a managed (Iceberg) table from a caller-declared JSON schema.
+    """Create a table.
+
+    Creates a managed Iceberg table from the columns in the request. Needs `CREATE_TABLE` on
+    the namespace. Answers 404 when the environment or namespace does not exist, 409 when a
+    table of that name exists and 422 for an unknown column type, an empty or duplicate
+    column name, or a namespace not rooted at `bronze`, `silver` or `gold`.
 
     Parameters
     ----------
@@ -900,14 +909,16 @@ def create_table(
     return _to_out(path, loaded)
 
 
-@router.get("", response_model=list[TableOut])
+@router.get("", response_model=list[TableOut], responses=errors(403, 404))
 def list_tables(
     env: str,
     path: str,
     principal: PrincipalRef = Depends(get_principal),
     catalog: CatalogService = Depends(get_catalog),
 ) -> list[TableOut]:
-    """List the tables in a namespace.
+    """List the tables of a namespace.
+
+    Lists the tables of the namespace that the caller may read. Needs `READ_NAMESPACE`.
 
     Parameters
     ----------
@@ -938,7 +949,7 @@ def list_tables(
     ]
 
 
-@router.get("/{name}", response_model=TableOut)
+@router.get("/{name}", response_model=TableOut, responses=errors(403, 404))
 def get_table(
     env: str,
     path: str,
@@ -946,7 +957,9 @@ def get_table(
     principal: PrincipalRef = Depends(get_principal),
     catalog: CatalogService = Depends(get_catalog),
 ) -> TableOut:
-    """Fetch a table by name.
+    """Show a table.
+
+    Needs `READ_TABLE`. Answers 404 when the table does not exist.
 
     Parameters
     ----------
@@ -976,7 +989,7 @@ def get_table(
     return _describe_out(path, catalog.describe_table(principal, ref))
 
 
-@router.get("/{name}/health", response_model=TableHealthOut)
+@router.get("/{name}/health", response_model=TableHealthOut, responses=errors(403, 404, 503))
 def get_table_health(
     env: str,
     path: str,
@@ -986,7 +999,13 @@ def get_table_health(
     principal: PrincipalRef = Depends(get_principal),
     catalog: CatalogService = Depends(get_catalog),
 ) -> TableHealthOut:
-    """Show a table's last maintenance, the newest result of each of its checks and its readers.
+    """Show a table's health.
+
+    Shows the table's last maintenance, the newest result of each of its checks and, when
+    asked, who read it. Needs `READ_TABLE`. Answers 404 when the table does not exist and
+    422 when `days` is outside 1 to the period the server keeps. Answers 503 when `readers`
+    names someone other than the caller and the audit entry for that could not be written;
+    nothing is returned then.
 
     Parameters
     ----------
@@ -1038,7 +1057,7 @@ def get_table_health(
     return TableHealthOut.model_validate(health, from_attributes=True)
 
 
-@router.patch("/{name}", response_model=TableOut)
+@router.patch("/{name}", response_model=TableOut, responses=errors(403, 404))
 def describe_table(
     env: str,
     path: str,
@@ -1047,10 +1066,12 @@ def describe_table(
     principal: PrincipalRef = Depends(get_principal),
     catalog: CatalogService = Depends(get_catalog),
 ) -> TableOut:
-    """Set a table's description, or reset it to the project's text.
+    """Set a table's description.
 
-    The text set here is shown instead of the one a deploy publishes from the asset header, and
-    a deploy never replaces it. `null` removes it.
+    Sets the text shown for the table, or with `null` removes it so that the text of the
+    project shows again. A deploy never replaces a text set here. The table's owner or a
+    holder of `DROP_TABLE` may do this. Answers 404 when the table does not exist and 422
+    for a blank text or one over 4,000 characters.
 
     Parameters
     ----------
@@ -1086,7 +1107,9 @@ def describe_table(
     return _describe_out(path, catalog.describe_table(principal, ref))
 
 
-@router.put("/{name}/columns/{column}/description", response_model=TableOut)
+@router.put(
+    "/{name}/columns/{column}/description", response_model=TableOut, responses=errors(403, 404)
+)
 def describe_column(
     env: str,
     path: str,
@@ -1096,7 +1119,12 @@ def describe_column(
     principal: PrincipalRef = Depends(get_principal),
     catalog: CatalogService = Depends(get_catalog),
 ) -> TableOut:
-    """Set a column's description, or reset it to the project's text.
+    """Set a column's description.
+
+    Sets the text shown for a column, or with `null` removes it so that the text of the
+    project shows again. The table's owner or a holder of `DROP_TABLE` may do this, and must
+    be able to read the table. Answers 404 when the table or column does not exist and 422
+    for a blank text or one over 4,000 characters.
 
     Parameters
     ----------
@@ -1135,7 +1163,7 @@ def describe_column(
     return _describe_out(path, catalog.describe_table(principal, ref))
 
 
-@router.get("/{name}/lineage", response_model=LineageOut)
+@router.get("/{name}/lineage", response_model=LineageOut, responses=errors(403, 404))
 def get_table_lineage(
     env: str,
     path: str,
@@ -1145,7 +1173,11 @@ def get_table_lineage(
     principal: PrincipalRef = Depends(get_principal),
     lineage: LineageService = Depends(get_lineage_service),
 ) -> LineageOut:
-    """Walk a table's persisted lineage.
+    """Show a table's lineage.
+
+    Walks the recorded lineage of the table: the tables it was derived from and the tables
+    derived from it. Needs `READ_TABLE` on the table itself. Answers 404 when the table does
+    not exist.
 
     Parameters
     ----------
@@ -1202,7 +1234,12 @@ def get_table_lineage(
     )
 
 
-@router.post("/{name}/maintenance", response_model=QuerySubmitOut, status_code=202)
+@router.post(
+    "/{name}/maintenance",
+    response_model=QuerySubmitOut,
+    status_code=202,
+    responses=errors(403, 404),
+)
 def maintain_table(
     env: str,
     path: str,
@@ -1211,11 +1248,13 @@ def maintain_table(
     principal: PrincipalRef = Depends(get_principal),
     queries: QueryService = Depends(get_query_service),
 ) -> QuerySubmitOut:
-    """Queue maintenance for a table: expire old snapshots, delete orphaned files.
+    """Queue maintenance for a table.
 
-    The run is executed by a worker and polled through the queries API. Its
-    finished status carries `maintenance.report`, whose `note` says why part
-    of the run was skipped, if it was.
+    Queues expiring the table's old snapshots and deleting its orphaned files, and answers
+    202 with a query id to poll. A worker does the work; the finished status carries a
+    `maintenance.report` whose `note` says why part of the run was skipped, if it was. Needs
+    `MAINTAIN_TABLE` on the table and `SUBMIT_QUERY` on the environment. Answers 404 when
+    the table does not exist.
 
     Parameters
     ----------
@@ -1257,7 +1296,7 @@ def maintain_table(
     return QuerySubmitOut(query_id=str(run.id))
 
 
-@router.delete("/{name}", status_code=204)
+@router.delete("/{name}", status_code=204, responses=errors(403, 404))
 def drop_table(
     env: str,
     path: str,
@@ -1266,12 +1305,12 @@ def drop_table(
     principal: PrincipalRef = Depends(get_write_principal),
     catalog: CatalogService = Depends(get_catalog),
 ) -> None:
-    """Drop a table. A managed table keeps its files for the undo period, then they are deleted.
+    """Drop a table.
 
-    The catalog entry goes at once, with the table's grants, row filters and column masks.
-    A managed table's files stay for `LAKANA_TABLES__UNDO_DAYS` (7 by default), during which
-    `POST .../tables/{name}/undrop` restores it; then the worker's sweep deletes them. An
-    external table's files and a view are never deleted.
+    Removes the table from the catalog at once, with its grants, row filters and column
+    masks. A managed table keeps its files for the undo period (7 days unless the operator
+    changed it), during which it can be restored, and then they are deleted; an external
+    table's files and a view are never deleted. Answers 404 when the table does not exist.
 
     Parameters
     ----------
@@ -1298,7 +1337,7 @@ def drop_table(
     catalog.drop_table(principal, TableRef(environment=env, namespace=ns, name=name), purge=purge)
 
 
-@router.post("/{name}/undrop", response_model=TableOut)
+@router.post("/{name}/undrop", response_model=TableOut, responses=errors(403, 404, 409))
 def undrop_table(
     env: str,
     path: str,
@@ -1307,7 +1346,13 @@ def undrop_table(
     principal: PrincipalRef = Depends(get_principal),
     catalog: CatalogService = Depends(get_catalog),
 ) -> TableOut:
-    """Restore a dropped table within its undo period: the same table, data and policies.
+    """Restore a dropped table.
+
+    Brings a dropped table back within its undo period, with its data and policies. Needs
+    `DROP_TABLE` and `CREATE_TABLE` on the namespace. Answers 404 when no dropped table of
+    that name can be restored or its namespace is gone, and 409 when a table of the name
+    exists (send `new_name`), the undo period has ended or the clean-up has started deleting
+    the files.
 
     Parameters
     ----------
@@ -1349,7 +1394,7 @@ def undrop_table(
     return _to_out(path, loaded)
 
 
-@router.get("/{name}/retention", response_model=TableRetentionOut)
+@router.get("/{name}/retention", response_model=TableRetentionOut, responses=errors(403, 404))
 def get_table_retention(
     env: str,
     path: str,
@@ -1357,7 +1402,11 @@ def get_table_retention(
     principal: PrincipalRef = Depends(get_principal),
     catalog: CatalogService = Depends(get_catalog),
 ) -> TableRetentionOut:
-    """Show a managed table's retention, where it comes from and when the table expires.
+    """Show a table's retention.
+
+    Shows how long the managed table is kept after its last activity, where that setting
+    comes from and when the table expires. Answers 404 when the table does not exist and 422
+    for a view, an external table or an artifact.
 
     Parameters
     ----------
@@ -1388,7 +1437,7 @@ def get_table_retention(
     return _retention_out(catalog.table_retention(principal, ref))
 
 
-@router.put("/{name}/retention", response_model=TableRetentionOut)
+@router.put("/{name}/retention", response_model=TableRetentionOut, responses=errors(403, 404))
 def set_table_retention(
     env: str,
     path: str,
@@ -1397,11 +1446,14 @@ def set_table_retention(
     principal: PrincipalRef = Depends(get_principal),
     catalog: CatalogService = Depends(get_catalog),
 ) -> TableRetentionOut:
-    """Set when a managed table expires: `days` after its last activity, `on` a day, or `never`.
+    """Set a table's retention.
 
-    The table's owner may always. Anyone else needs `DROP_TABLE` for a retention that makes the
-    table expire earlier than now (or at all), and `WRITE_TABLE` to make it expire later or
-    never.
+    Sets when a managed table expires: `days` after its last activity, `on` a given day, or
+    `never`. The table's owner may always. Anyone else needs `DROP_TABLE` for a setting that
+    makes the table expire earlier than now, or at all, and `WRITE_TABLE` to make it expire
+    later or never; a refusal is audited. Answers 404 when the table does not exist and 422
+    unless exactly one valid rule is given, the table is managed, and, for `days` or `on`,
+    the environment is not protected.
 
     Parameters
     ----------
@@ -1440,7 +1492,7 @@ def set_table_retention(
     return _retention_out(retention)
 
 
-@expiring_router.get("", response_model=list[TableRetentionOut])
+@expiring_router.get("", response_model=list[TableRetentionOut], responses=errors(403, 404))
 def list_expiring_tables(
     env: str,
     request: Request,
@@ -1448,7 +1500,11 @@ def list_expiring_tables(
     principal: PrincipalRef = Depends(get_principal),
     catalog: CatalogService = Depends(get_catalog),
 ) -> list[TableRetentionOut]:
-    """List the managed tables of an environment that expire within some days, soonest first.
+    """List the tables about to expire.
+
+    Lists the managed tables of the environment that expire within `within_days`, soonest
+    first. Answers 404 when the environment does not exist and 422 when `within_days` is out
+    of range.
 
     Parameters
     ----------
@@ -1484,14 +1540,17 @@ def list_expiring_tables(
     ]
 
 
-@dropped_router.get("", response_model=list[DroppedTableOut])
+@dropped_router.get("", response_model=list[DroppedTableOut], responses=errors(403, 404))
 def list_dropped_tables(
     env: str,
     path: str,
     principal: PrincipalRef = Depends(get_principal),
     catalog: CatalogService = Depends(get_catalog),
 ) -> list[DroppedTableOut]:
-    """List the dropped tables of a namespace whose files are not deleted yet.
+    """List the dropped tables of a namespace.
+
+    Lists the tables dropped from the namespace whose files are not deleted yet and that can
+    therefore still be restored. Answers 404 when the namespace does not exist.
 
     Parameters
     ----------
@@ -1529,7 +1588,9 @@ def list_dropped_tables(
     ]
 
 
-@router.post("/external", response_model=ExternalTableOut, status_code=201)
+@router.post(
+    "/external", response_model=ExternalTableOut, status_code=201, responses=errors(403, 404, 409)
+)
 def create_external_table(
     env: str,
     path: str,
@@ -1537,7 +1598,13 @@ def create_external_table(
     principal: PrincipalRef = Depends(get_principal),
     catalog: CatalogService = Depends(get_catalog),
 ) -> ExternalTableOut:
-    """Register a raw-zone table backed by files already on storage.
+    """Register an external table.
+
+    Registers a raw-zone table backed by files that are already in storage. Needs
+    `CREATE_TABLE`. Answers 404 when the environment or namespace does not exist and 422
+    when `location_pattern` is not shaped `raw/<directory>/<file-glob>`, claims files
+    another external table in the environment claims, leaves the storage root, or the
+    `format` is not supported.
 
     Parameters
     ----------
@@ -1598,7 +1665,9 @@ def create_external_table(
     )
 
 
-@router.post("/{name}/data", response_model=AppendOut)
+@router.post(
+    "/{name}/data", response_model=AppendOut, responses=errors(403, 404, 409, 408, 413, 503)
+)
 @streams_its_own_body
 async def append_table_data(
     env: str,
@@ -1612,11 +1681,15 @@ async def append_table_data(
     catalog: CatalogService = Depends(get_catalog),
     session: Session = Depends(get_session),
 ) -> AppendOut:
-    """Append an Arrow IPC stream's rows to a managed table.
+    """Append rows to a table.
 
-    Every body control is `_governed_arrow_write`'s. `source` (repeatable)
-    names the tables the rows were derived from; each must
-    exist and be READ-able, and each gets a lineage edge.
+    Adds the rows of an Arrow IPC stream, sent as the request body, to a managed table. Each
+    `source` (repeatable) names a table the rows were derived from; it must exist and be
+    readable by the caller, and records a lineage edge. Needs `WRITE_TABLE` on the table.
+    Answers 404 when the table or a source does not exist, 409 when `expected_snapshot_id`
+    no longer matches, 413 for a body over the server's limit, 408 when the body arrives too
+    slowly and 503 when the server is busy with other uploads (try again after
+    `Retry-After`).
 
     Parameters
     ----------
@@ -1657,6 +1730,10 @@ async def append_table_data(
         Mapped to 403: the caller may not write the table or read a source.
     lakana_core.errors.ConflictError
         Mapped to 409: `expected_snapshot_id` no longer matches.
+
+    Notes
+    -----
+    The body controls are shared with `replace_table_data` through `_governed_arrow_write`.
     """
     expected = _expected_snapshot(request, expected_snapshot_id)
     check_sources(source or [])
@@ -1681,7 +1758,9 @@ async def append_table_data(
     return AppendOut(rows=result.rows, files=result.files, snapshot_id=result.snapshot_id)
 
 
-@router.put("/{name}/data", response_model=ReplaceOut)
+@router.put(
+    "/{name}/data", response_model=ReplaceOut, responses=errors(403, 404, 409, 408, 413, 503)
+)
 @streams_its_own_body
 async def replace_table_data(
     env: str,
@@ -1696,10 +1775,15 @@ async def replace_table_data(
     catalog: CatalogService = Depends(get_catalog),
     session: Session = Depends(get_session),
 ) -> ReplaceOut:
-    """Replace every row of a managed table with an Arrow IPC stream.
+    """Replace all rows of a table.
 
-    One `OVERWRITE` snapshot through the same governed path as a SQL
-    `replace`; every body control is `_governed_arrow_write`'s.
+    Replaces every row of a managed table with the rows of an Arrow IPC stream, sent as the
+    request body, in one snapshot; the table keeps its history. Takes the same `source` and
+    `expected_snapshot_id` as the append. Needs `WRITE_TABLE` on the table. Answers 404 when
+    the table or a source does not exist, 409 when `expected_snapshot_id` no longer matches,
+    413 for a body over the server's limit, 408 when the body arrives too slowly, 503 when
+    the server is busy with other uploads (try again after `Retry-After`) and 422 when the
+    upload does not fit the table (the message shows the difference).
 
     Parameters
     ----------
@@ -1746,6 +1830,10 @@ async def replace_table_data(
         Mapped to 403.
     lakana_core.errors.ConflictError
         Mapped to 409: `expected_snapshot_id` no longer matches.
+
+    Notes
+    -----
+    The body controls are shared with `append_table_data` through `_governed_arrow_write`.
     """
     expected = _expected_snapshot(request, expected_snapshot_id)
     check_sources(source or [])

@@ -1,8 +1,7 @@
 """The row-filters resource of the platform API.
 
-`namespace` crosses this boundary dot-joined (`gold.sales`), converted to
-and from the unit-separator storage form here — matching `grants.py`'s
-existing convention for the same underlying value.
+A filter's `namespace` is dot-joined (`gold.sales`) in requests and answers; this
+module converts it to and from the form the database stores, like `grants.py`.
 """
 
 from __future__ import annotations
@@ -17,11 +16,15 @@ from lakana_core.identifiers import NamespacePath
 from lakana_core.models import RowFilter
 from lakana_core.policy.row_filters import RowFilterService
 from lakana_server.api.platform.schemas import RowFilterCreate, RowFilterOut
+from lakana_server.api.responses import errors
 from lakana_server.api.routing import AuthenticateFirstRoute
 from lakana_server.deps import check_statement, get_principal, get_row_filter_service
 
 router = APIRouter(
-    route_class=AuthenticateFirstRoute, prefix="/api/v1/row-filters", tags=["row-filters"]
+    route_class=AuthenticateFirstRoute,
+    prefix="/api/v1/row-filters",
+    tags=["row-filters"],
+    responses=errors(401),
 )
 
 
@@ -83,7 +86,7 @@ def _to_out(row: RowFilter) -> RowFilterOut:
     )
 
 
-@router.post("", response_model=RowFilterOut, status_code=201)
+@router.post("", response_model=RowFilterOut, status_code=201, responses=errors(403, 404))
 def create_row_filter(
     body: RowFilterCreate,
     request: Request,
@@ -91,6 +94,11 @@ def create_row_filter(
     service: RowFilterService = Depends(get_row_filter_service),
 ) -> RowFilterOut:
     """Create a row filter.
+
+    Restricts which rows of a table a principal or group sees, by a SQL condition. The
+    filter binds to the table, not its name. Needs `MANAGE_POLICY` on the instance. Answers
+    404 when the principal, group or table does not exist and 422 for a condition that is
+    not valid or is longer than the server's statement limit.
 
     Parameters
     ----------
@@ -129,7 +137,7 @@ def create_row_filter(
     return _to_out(created)
 
 
-@router.get("", response_model=list[RowFilterOut])
+@router.get("", response_model=list[RowFilterOut], responses=errors(403))
 def list_row_filters(
     principal_name: str | None = None,
     group_name: str | None = None,
@@ -139,11 +147,12 @@ def list_row_filters(
     principal: PrincipalRef = Depends(get_principal),
     service: RowFilterService = Depends(get_row_filter_service),
 ) -> list[RowFilterOut]:
-    """List row filters for a principal, a group, or a specific table.
+    """List the row filters of a principal, group or table.
 
-    Exactly one of `principal_name`/`group_name`/(`environment`+`namespace`+
-    `table` together) must be given — unlike grants, there is no
-    instance-wide default, since a row filter is always table-scoped.
+    Give exactly one of `principal_name`, `group_name` or `environment` with `namespace` and
+    `table`; a row filter always belongs to one table, so there is no list of all of them.
+    Needs `MANAGE_POLICY` on the instance. Answers 422 when none of those combinations is
+    given.
 
     Parameters
     ----------
@@ -187,13 +196,15 @@ def list_row_filters(
     return [_to_out(row) for row in rows]
 
 
-@router.delete("/{row_filter_id}", status_code=204)
+@router.delete("/{row_filter_id}", status_code=204, responses=errors(403, 404))
 def revoke_row_filter(
     row_filter_id: uuid.UUID,
     principal: PrincipalRef = Depends(get_principal),
     service: RowFilterService = Depends(get_row_filter_service),
 ) -> None:
     """Revoke a row filter.
+
+    Needs `MANAGE_POLICY` on the instance. Answers 404 when there is no such row filter.
 
     Parameters
     ----------

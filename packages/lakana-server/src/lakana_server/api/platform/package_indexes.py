@@ -15,6 +15,7 @@ from lakana_server.api.platform.schemas import (
     PackageIndexOut,
     PackageIndexUpdate,
 )
+from lakana_server.api.responses import errors
 from lakana_server.api.routing import AuthenticateFirstRoute
 from lakana_server.deps import get_package_index_service, get_principal
 
@@ -22,6 +23,7 @@ router = APIRouter(
     route_class=AuthenticateFirstRoute,
     prefix="/api/v1/package-indexes",
     tags=["package-indexes"],
+    responses=errors(401),
 )
 
 
@@ -49,13 +51,18 @@ def _to_out(index: PackageIndex) -> PackageIndexOut:
     )
 
 
-@router.post("", response_model=PackageIndexOut, status_code=201)
+@router.post("", response_model=PackageIndexOut, status_code=201, responses=errors(403, 409))
 def create_package_index(
     body: PackageIndexCreate,
     principal: PrincipalRef = Depends(get_principal),
     service: PackageIndexService = Depends(get_package_index_service),
 ) -> PackageIndexOut:
     """Register a package index.
+
+    Registers an index that projects may install packages from, by name and URL, optionally
+    with a credential secret. Only a registered URL is accepted. Needs
+    `MANAGE_PACKAGE_INDEX` on the instance. Answers 409 when the name or URL is taken and
+    422 for a name, URL or secret name that is not valid.
 
     Parameters
     ----------
@@ -77,12 +84,14 @@ def create_package_index(
     return _to_out(index)
 
 
-@router.get("", response_model=list[PackageIndexOut])
+@router.get("", response_model=list[PackageIndexOut], responses=errors(403))
 def list_package_indexes(
     principal: PrincipalRef = Depends(get_principal),
     service: PackageIndexService = Depends(get_package_index_service),
 ) -> list[PackageIndexOut]:
     """List package indexes.
+
+    Needs `MANAGE_PACKAGE_INDEX` on the instance, or `READ_ENVIRONMENT` on any environment.
 
     Parameters
     ----------
@@ -99,13 +108,16 @@ def list_package_indexes(
     return [_to_out(index) for index in service.list_indexes(principal)]
 
 
-@router.get("/{name}", response_model=PackageIndexOut)
+@router.get("/{name}", response_model=PackageIndexOut, responses=errors(403, 404))
 def get_package_index(
     name: str,
     principal: PrincipalRef = Depends(get_principal),
     service: PackageIndexService = Depends(get_package_index_service),
 ) -> PackageIndexOut:
     """Show a package index.
+
+    Needs `MANAGE_PACKAGE_INDEX` on the instance, or `READ_ENVIRONMENT` on any environment.
+    Answers 404 when no index has that name.
 
     Parameters
     ----------
@@ -124,14 +136,18 @@ def get_package_index(
     return _to_out(service.get(principal, name))
 
 
-@router.patch("/{name}", response_model=PackageIndexOut)
+@router.patch("/{name}", response_model=PackageIndexOut, responses=errors(403, 404, 409))
 def update_package_index(
     name: str,
     body: PackageIndexUpdate,
     principal: PrincipalRef = Depends(get_principal),
     service: PackageIndexService = Depends(get_package_index_service),
 ) -> PackageIndexOut:
-    """Change a package index's URL or credential secret.
+    """Change a package index.
+
+    Changes its URL or credential secret. Needs `MANAGE_PACKAGE_INDEX` on the instance.
+    Answers 404 when no index has that name, 409 when the new URL belongs to another index,
+    and 422 when nothing is given or a field cannot be changed.
 
     Parameters
     ----------
@@ -152,7 +168,7 @@ def update_package_index(
     return _to_out(service.update(principal, name, body.model_dump(exclude_unset=True)))
 
 
-@router.delete("/{name}", status_code=204)
+@router.delete("/{name}", status_code=204, responses=errors(403, 404))
 def delete_package_index(
     name: str,
     principal: PrincipalRef = Depends(get_principal),
@@ -160,8 +176,9 @@ def delete_package_index(
 ) -> None:
     """Delete a package index.
 
-    Deployed projects whose lock names it fail their next execution until it is registered
-    again.
+    Projects whose lock file names the index fail their next execution until it is
+    registered again. Needs `MANAGE_PACKAGE_INDEX` on the instance. Answers 404 when no
+    index has that name.
 
     Parameters
     ----------

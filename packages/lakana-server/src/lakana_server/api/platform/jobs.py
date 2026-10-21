@@ -27,11 +27,15 @@ from lakana_server.api.platform.schemas import (
     ScheduleTriggerOut,
     WaitingStartOut,
 )
+from lakana_server.api.responses import errors
 from lakana_server.api.routing import AuthenticateFirstRoute
 from lakana_server.deps import get_job_service, get_principal
 
 router = APIRouter(
-    route_class=AuthenticateFirstRoute, prefix="/api/v1/environments/{env}", tags=["jobs"]
+    route_class=AuthenticateFirstRoute,
+    prefix="/api/v1/environments/{env}",
+    tags=["jobs"],
+    responses=errors(401),
 )
 
 _JOB = Annotated[str, Path(min_length=1, max_length=255)]
@@ -102,14 +106,18 @@ def _start_out(result: StartResult) -> JobStartOut:
     )
 
 
-@router.get("/jobs", response_model=list[JobOut])
+@router.get("/jobs", response_model=list[JobOut], responses=errors(403, 404))
 def list_jobs(
     env: str,
     repository: str | None = Query(default=None, max_length=255),
     principal: PrincipalRef = Depends(get_principal),
     service: JobService = Depends(get_job_service),
 ) -> list[JobOut]:
-    """List the jobs of the deployed repositories (needs `READ_ENVIRONMENT`).
+    """List jobs.
+
+    Lists the jobs of the repositories deployed in the environment. Needs
+    `READ_ENVIRONMENT`. Answers 404 when the environment or the repository asked for does
+    not exist.
 
     Parameters
     ----------
@@ -130,7 +138,7 @@ def list_jobs(
     return [_job_out(view) for view in service.list(principal, env, repository)]
 
 
-@router.get("/jobs/{job}", response_model=JobOut)
+@router.get("/jobs/{job}", response_model=JobOut, responses=errors(403, 404, 409))
 def get_job(
     env: str,
     job: _JOB,
@@ -138,7 +146,12 @@ def get_job(
     principal: PrincipalRef = Depends(get_principal),
     service: JobService = Depends(get_job_service),
 ) -> JobOut:
-    """Show one job, with its triggers (needs `READ_ENVIRONMENT`).
+    """Show a job.
+
+    Shows the job with its triggers. Needs `READ_ENVIRONMENT`. Answers 404 when the
+    environment or repository does not exist or no deployed repository declares the job (the
+    message lists the jobs that exist), and 409 when several repositories declare it and
+    none was named.
 
     Parameters
     ----------
@@ -165,7 +178,10 @@ def get_job(
     "/jobs/{job}/runs",
     response_model=JobStartOut,
     status_code=201,
-    responses={202: {"model": JobStartOut, "description": "The project is busy: the start waits."}},
+    responses={
+        202: {"model": JobStartOut, "description": "The project is busy: the start waits."},
+        **errors(403, 404, 409),
+    },
 )
 def start_job(
     env: str,
@@ -175,10 +191,14 @@ def start_job(
     principal: PrincipalRef = Depends(get_principal),
     service: JobService = Depends(get_job_service),
 ) -> JobStartOut:
-    """Start a job, or let the start wait for the active run (needs `RUN`).
+    """Start a job.
 
-    Answers 201 with the queued run, or 202 with the waiting start and the run it waits for. A
-    paused job can be started.
+    Starts a run of the job. Answers 201 with the queued run, or 202 with the waiting start
+    and the run it waits for when the project is busy. A paused job can be started. Needs
+    `RUN` on the environment. Answers 404 when the environment, repository or job does not
+    exist or is not deployed (the message lists the jobs that exist), 409 when there is no
+    run service account in a protected environment or it is inactive, and 422 when the job's
+    selection matches nothing.
 
     Parameters
     ----------
@@ -206,7 +226,7 @@ def start_job(
     return _start_out(result)
 
 
-@router.post("/jobs/{job}/pause", response_model=JobOut)
+@router.post("/jobs/{job}/pause", response_model=JobOut, responses=errors(403, 404, 409))
 def pause_job(
     env: str,
     job: _JOB,
@@ -214,7 +234,11 @@ def pause_job(
     principal: PrincipalRef = Depends(get_principal),
     service: JobService = Depends(get_job_service),
 ) -> JobOut:
-    """Pause a job's schedule (needs `DEPLOY` on the environment).
+    """Pause a job's schedule.
+
+    Needs `DEPLOY` on the environment; a CI token is always refused. Answers 404 when the
+    environment, repository or job does not exist or is not deployed, and 409 when the job
+    has no schedule here.
 
     Parameters
     ----------
@@ -237,7 +261,7 @@ def pause_job(
     return _job_out(service.pause(principal, env, body.repository, job))
 
 
-@router.post("/jobs/{job}/resume", response_model=JobOut)
+@router.post("/jobs/{job}/resume", response_model=JobOut, responses=errors(403, 404))
 def resume_job(
     env: str,
     job: _JOB,
@@ -245,7 +269,11 @@ def resume_job(
     principal: PrincipalRef = Depends(get_principal),
     service: JobService = Depends(get_job_service),
 ) -> JobOut:
-    """Resume a job's schedule from now (needs `DEPLOY` on the environment).
+    """Resume a job's schedule.
+
+    The schedule continues from now. Needs `DEPLOY` on the environment; a CI token is always
+    refused. Answers 404 when the environment, repository or job does not exist or is not
+    deployed.
 
     Parameters
     ----------
@@ -268,7 +296,12 @@ def resume_job(
     return _job_out(service.resume(principal, env, body.repository, job))
 
 
-@router.post("/jobs/{job}/notify-test", response_model=NotifyTestOut, status_code=202)
+@router.post(
+    "/jobs/{job}/notify-test",
+    response_model=NotifyTestOut,
+    status_code=202,
+    responses=errors(403, 404, 409),
+)
 def notify_test(
     env: str,
     job: _JOB,
@@ -276,9 +309,12 @@ def notify_test(
     principal: PrincipalRef = Depends(get_principal),
     service: JobService = Depends(get_job_service),
 ) -> NotifyTestOut:
-    """Queue a test message to a job's webhook (needs `DEPLOY` on the environment).
+    """Send a test message to a job's webhook.
 
-    Answers 202 with the delivery id: a worker sends it, and the delivery shows how it went.
+    Queues a test message and answers 202 with a delivery id; a worker sends it, and the
+    delivery shows how it went. Needs `DEPLOY` on the environment; a CI token is always
+    refused. Answers 404 when the environment, repository or job does not exist or is not
+    deployed, and 409 when the job has no usable `notify:` setting in the environment.
 
     Parameters
     ----------
@@ -301,17 +337,18 @@ def notify_test(
     return NotifyTestOut(delivery_id=service.notify_test(principal, env, body.repository, job))
 
 
-@router.get("/notifications/{delivery_id}", response_model=DeliveryOut)
+@router.get("/notifications/{delivery_id}", response_model=DeliveryOut, responses=errors(403, 404))
 def get_notification(
     env: str,
     delivery_id: uuid.UUID,
     principal: PrincipalRef = Depends(get_principal),
     service: JobService = Depends(get_job_service),
 ) -> DeliveryOut:
-    """Show one notification delivery (needs `DEPLOY`, `RUN` or `READ_ENVIRONMENT`).
+    """Show one notification delivery.
 
-    A test has no run, so the right to read a run does not reach it; whoever may test a webhook
-    may read the result.
+    A test has no run, so the right to read a run does not reach it; whoever may test a
+    webhook may read the result. Needs `DEPLOY`, `RUN` or `READ_ENVIRONMENT`; a CI token is
+    always refused. Answers 404 when the delivery does not exist in the environment.
 
     Parameters
     ----------

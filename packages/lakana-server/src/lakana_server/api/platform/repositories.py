@@ -12,11 +12,15 @@ from lakana_core.auth import PrincipalRef
 from lakana_core.models import Repository, RepositoryKind
 from lakana_core.projects.repositories import RepositoryService
 from lakana_server.api.platform.schemas import RepositoryCreate, RepositoryOut, RepositoryUpdate
+from lakana_server.api.responses import errors
 from lakana_server.api.routing import AuthenticateFirstRoute
 from lakana_server.deps import get_principal, get_repository_service
 
 router = APIRouter(
-    route_class=AuthenticateFirstRoute, prefix="/api/v1/repositories", tags=["repositories"]
+    route_class=AuthenticateFirstRoute,
+    prefix="/api/v1/repositories",
+    tags=["repositories"],
+    responses=errors(401),
 )
 
 
@@ -48,13 +52,18 @@ def _to_out(repo: Repository) -> RepositoryOut:
     )
 
 
-@router.post("", response_model=RepositoryOut, status_code=201)
+@router.post("", response_model=RepositoryOut, status_code=201, responses=errors(403, 409))
 def create_repository(
     body: RepositoryCreate,
     principal: PrincipalRef = Depends(get_principal),
     service: RepositoryService = Depends(get_repository_service),
 ) -> RepositoryOut:
-    """Register a repository.
+    """Register a git repository.
+
+    Registers a repository that environments can deploy, by name, URL and optionally a
+    credential secret and known hosts. Deployers pick the name and never the URL. Needs
+    `MANAGE_REPOSITORY` on the instance. Answers 409 when the name is taken and 422 for a
+    field that is not valid.
 
     Parameters
     ----------
@@ -83,12 +92,14 @@ def create_repository(
     return _to_out(repo)
 
 
-@router.get("", response_model=list[RepositoryOut])
+@router.get("", response_model=list[RepositoryOut], responses=errors(403))
 def list_repositories(
     principal: PrincipalRef = Depends(get_principal),
     service: RepositoryService = Depends(get_repository_service),
 ) -> list[RepositoryOut]:
     """List repositories.
+
+    Needs `MANAGE_REPOSITORY` on the instance, or `READ_ENVIRONMENT` on any environment.
 
     Parameters
     ----------
@@ -105,13 +116,16 @@ def list_repositories(
     return [_to_out(repo) for repo in service.list_repositories(principal)]
 
 
-@router.get("/{name}", response_model=RepositoryOut)
+@router.get("/{name}", response_model=RepositoryOut, responses=errors(403, 404))
 def get_repository(
     name: str,
     principal: PrincipalRef = Depends(get_principal),
     service: RepositoryService = Depends(get_repository_service),
 ) -> RepositoryOut:
     """Show a repository.
+
+    Needs `MANAGE_REPOSITORY` on the instance, or `READ_ENVIRONMENT` on any environment.
+    Answers 404 when no repository has that name.
 
     Parameters
     ----------
@@ -130,14 +144,19 @@ def get_repository(
     return _to_out(service.get(principal, name))
 
 
-@router.patch("/{name}", response_model=RepositoryOut)
+@router.patch("/{name}", response_model=RepositoryOut, responses=errors(403, 404))
 def update_repository(
     name: str,
     body: RepositoryUpdate,
     principal: PrincipalRef = Depends(get_principal),
     service: RepositoryService = Depends(get_repository_service),
 ) -> RepositoryOut:
-    """Change a repository's URL, credential, username, known hosts or default ref.
+    """Change a repository.
+
+    Changes its URL, credential secret, username, known hosts or default ref. Needs
+    `MANAGE_REPOSITORY` on the instance; changing the URL of a repository whose secret is
+    bound also needs `MANAGE_SECRET` in that environment. Answers 404 when no repository has
+    that name and 422 when nothing is given or a field cannot be changed.
 
     Parameters
     ----------
@@ -158,15 +177,16 @@ def update_repository(
     return _to_out(service.update(principal, name, body.model_dump(exclude_unset=True)))
 
 
-@router.delete("/{name}", status_code=204)
+@router.delete("/{name}", status_code=204, responses=errors(403, 404, 409))
 def delete_repository(
     name: str,
     principal: PrincipalRef = Depends(get_principal),
     service: RepositoryService = Depends(get_repository_service),
 ) -> None:
-    """Delete a repository; refused (409) while any environment deploys it.
+    """Delete a repository.
 
-    Undeploy it first: `DELETE /environments/{env}/deployments/{repo}` (`lakana undeploy`).
+    Needs `MANAGE_REPOSITORY` on the instance. Answers 404 when no repository has that name
+    and 409 while an environment still deploys it: undeploy it there first.
 
     Parameters
     ----------

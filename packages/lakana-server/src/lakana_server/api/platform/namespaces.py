@@ -13,6 +13,7 @@ from lakana_core.auth import PrincipalRef
 from lakana_core.catalog.service import CatalogService
 from lakana_core.identifiers import NamespacePath
 from lakana_server.api.platform.schemas import NamespaceCreate, NamespaceOut
+from lakana_server.api.responses import errors
 from lakana_server.api.routing import AuthenticateFirstRoute
 from lakana_server.deps import get_catalog, get_principal, get_write_principal, with_break_glass
 
@@ -20,6 +21,7 @@ router = APIRouter(
     route_class=AuthenticateFirstRoute,
     prefix="/api/v1/environments/{env}/namespaces",
     tags=["namespaces"],
+    responses=errors(401),
 )
 
 
@@ -41,7 +43,7 @@ def _to_out(path: NamespacePath, properties: dict[str, str]) -> NamespaceOut:
     return NamespaceOut(path=".".join(path.parts), properties=properties)
 
 
-@router.post("", response_model=NamespaceOut, status_code=201)
+@router.post("", response_model=NamespaceOut, status_code=201, responses=errors(403, 404, 409))
 def create_namespace(
     env: str,
     body: NamespaceCreate,
@@ -49,6 +51,9 @@ def create_namespace(
     catalog: CatalogService = Depends(get_catalog),
 ) -> NamespaceOut:
     """Create a namespace.
+
+    Needs `CREATE_NAMESPACE`. Answers 404 when the environment does not exist and 409 when
+    the namespace exists.
 
     Parameters
     ----------
@@ -79,14 +84,17 @@ def create_namespace(
     return _to_out(path, ns.properties)
 
 
-@router.get("/{path}", response_model=NamespaceOut)
+@router.get("/{path}", response_model=NamespaceOut, responses=errors(403, 404))
 def get_namespace(
     env: str,
     path: str,
     principal: PrincipalRef = Depends(get_principal),
     catalog: CatalogService = Depends(get_catalog),
 ) -> NamespaceOut:
-    """Fetch a namespace by its dotted path.
+    """Show a namespace.
+
+    The namespace is named by its dotted path. Needs `READ_NAMESPACE`. Answers 404 when it
+    does not exist.
 
     Parameters
     ----------
@@ -114,17 +122,16 @@ def get_namespace(
     return _to_out(parsed, ns.properties)
 
 
-@router.get("", response_model=list[NamespaceOut])
+@router.get("", response_model=list[NamespaceOut], responses=errors(403, 404))
 def list_namespaces(
     env: str,
     principal: PrincipalRef = Depends(get_principal),
     catalog: CatalogService = Depends(get_catalog),
 ) -> list[NamespaceOut]:
-    """List every namespace in an environment.
+    """List the namespaces of an environment.
 
-    Unfiltered at M1 (Constraint 9 carry-forward), and un-nested: every
-    namespace regardless of depth, matching `CatalogService.list_namespaces`
-    called with no `parent`.
+    Lists every namespace of the environment at every depth, not only the top level. Needs
+    `READ_ENVIRONMENT`. Answers 404 when the environment does not exist.
 
     Parameters
     ----------
@@ -146,7 +153,7 @@ def list_namespaces(
     ]
 
 
-@router.delete("/{path}", status_code=204)
+@router.delete("/{path}", status_code=204, responses=errors(403, 404, 409))
 def drop_namespace(
     env: str,
     path: str,
@@ -154,6 +161,9 @@ def drop_namespace(
     catalog: CatalogService = Depends(get_catalog),
 ) -> None:
     """Drop a namespace.
+
+    Needs `DROP_NAMESPACE`. Answers 404 when the namespace does not exist and 409 while it
+    still holds tables or child namespaces.
 
     Parameters
     ----------

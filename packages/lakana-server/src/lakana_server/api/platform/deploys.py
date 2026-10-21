@@ -23,11 +23,15 @@ from lakana_server.api.platform.schemas import (
     ProjectVersionOut,
     RunAsIn,
 )
+from lakana_server.api.responses import errors
 from lakana_server.api.routing import AuthenticateFirstRoute
 from lakana_server.deps import get_deploy_service, get_principal
 
 router = APIRouter(
-    route_class=AuthenticateFirstRoute, prefix="/api/v1/environments/{env}", tags=["deploys"]
+    route_class=AuthenticateFirstRoute,
+    prefix="/api/v1/environments/{env}",
+    tags=["deploys"],
+    responses=errors(401),
 )
 
 
@@ -67,14 +71,19 @@ def _to_out(view: DeployRunView) -> DeployOut:
     )
 
 
-@router.post("/deploys", response_model=DeployAccepted, status_code=202)
+@router.post("/deploys", response_model=DeployAccepted, status_code=202, responses=errors(403, 404))
 def create_deploy(
     env: str,
     body: DeployCreate,
     principal: PrincipalRef = Depends(get_principal),
     service: DeployService = Depends(get_deploy_service),
 ) -> DeployAccepted:
-    """Queue a deploy, dry run or rollback (needs `DEPLOY`).
+    """Queue a deploy, dry run or rollback.
+
+    Queues the work for a worker and answers 202 with the deploy's id; poll it to see how it
+    went. Needs `DEPLOY` on the environment. A CI token may queue only one deploy or dry run
+    of its own repository and signed commit. Answers 404 when the environment or repository
+    does not exist and 422 when the request is malformed or a rollback has no target.
 
     Parameters
     ----------
@@ -104,7 +113,7 @@ def create_deploy(
     return DeployAccepted(id=view.id, status=view.status.value)
 
 
-@router.get("/deploys", response_model=list[DeployOut])
+@router.get("/deploys", response_model=list[DeployOut], responses=errors(403, 404))
 def list_deploys(
     env: str,
     response: Response,
@@ -114,10 +123,13 @@ def list_deploys(
     principal: PrincipalRef = Depends(get_principal),
     service: DeployService = Depends(get_deploy_service),
 ) -> list[DeployOut]:
-    """List an environment's deploy history, newest first, one page at a time.
+    """List an environment's deploys.
 
-    The cursor of the next page is in the `X-Next-Cursor` response header; it is absent on the
-    last page. Send the same `repository` with every page.
+    Lists the deploy history, newest first, one page at a time. The cursor of the next page
+    is in the `X-Next-Cursor` response header and is absent on the last page; send the same
+    `repository` with every page. Needs `READ_ENVIRONMENT`. Answers 404 when the environment
+    or repository does not exist and 422 for a `limit` below 1 or a `cursor` this server did
+    not issue.
 
     Parameters
     ----------
@@ -148,14 +160,17 @@ def list_deploys(
     return [_to_out(view) for view in views]
 
 
-@router.get("/deploys/{deploy_id}", response_model=DeployOut)
+@router.get("/deploys/{deploy_id}", response_model=DeployOut, responses=errors(403, 404))
 def get_deploy(
     env: str,
     deploy_id: uuid.UUID,
     principal: PrincipalRef = Depends(get_principal),
     service: DeployService = Depends(get_deploy_service),
 ) -> DeployOut:
-    """Show one deploy run.
+    """Show one deploy.
+
+    Needs `DEPLOY` or `READ_ENVIRONMENT`. A CI token can see only the deploys it queued.
+    Answers 404 when the deploy does not exist in the environment.
 
     Parameters
     ----------
@@ -198,13 +213,16 @@ def _deployment_out(view: DeploymentView) -> DeploymentOut:
     )
 
 
-@router.get("/deployments", response_model=list[DeploymentOut])
+@router.get("/deployments", response_model=list[DeploymentOut], responses=errors(403, 404))
 def list_deployments(
     env: str,
     principal: PrincipalRef = Depends(get_principal),
     service: DeployService = Depends(get_deploy_service),
 ) -> list[DeploymentOut]:
-    """List the current project version per repository.
+    """List what is deployed in an environment.
+
+    Lists, per repository, the project version that is currently deployed. Needs
+    `READ_ENVIRONMENT`. Answers 404 when the environment does not exist.
 
     Parameters
     ----------
@@ -223,7 +241,7 @@ def list_deployments(
     return [_deployment_out(row) for row in service.deployments(principal, env)]
 
 
-@router.put("/deployments/{repo}/run-as", response_model=DeploymentOut)
+@router.put("/deployments/{repo}/run-as", response_model=DeploymentOut, responses=errors(403, 404))
 def set_run_as(
     env: str,
     repo: str,
@@ -231,7 +249,12 @@ def set_run_as(
     principal: PrincipalRef = Depends(get_principal),
     service: DeployService = Depends(get_deploy_service),
 ) -> DeploymentOut:
-    """Bind the service account runs of this deployment write as (needs `MANAGE_ENVIRONMENT`).
+    """Set the service account a deployment runs as.
+
+    Binds the service account whose rights the runs of this deployment use to write. Needs
+    `MANAGE_ENVIRONMENT` on the environment. Answers 404 when the environment, repository,
+    deployment or service account does not exist (one message for a missing or non-service
+    account) and 422 when the service account is deactivated.
 
     Parameters
     ----------
@@ -254,14 +277,19 @@ def set_run_as(
     return _deployment_out(service.set_run_as(principal, env, repo, body.principal))
 
 
-@router.delete("/deployments/{repo}/run-as", response_model=DeploymentOut)
+@router.delete(
+    "/deployments/{repo}/run-as", response_model=DeploymentOut, responses=errors(403, 404)
+)
 def clear_run_as(
     env: str,
     repo: str,
     principal: PrincipalRef = Depends(get_principal),
     service: DeployService = Depends(get_deploy_service),
 ) -> DeploymentOut:
-    """Remove the run principal binding (needs `MANAGE_ENVIRONMENT`).
+    """Remove the service account of a deployment.
+
+    Removes the binding. Needs `MANAGE_ENVIRONMENT` on the environment. Answers 404 when the
+    environment, repository or deployment does not exist.
 
     Parameters
     ----------
@@ -282,14 +310,19 @@ def clear_run_as(
     return _deployment_out(service.clear_run_as(principal, env, repo))
 
 
-@router.delete("/deployments/{repo}", status_code=204)
+@router.delete("/deployments/{repo}", status_code=204, responses=errors(403, 404, 409))
 def undeploy(
     env: str,
     repo: str,
     principal: PrincipalRef = Depends(get_principal),
     service: DeployService = Depends(get_deploy_service),
 ) -> Response:
-    """Remove a repository's deployment and binding; data stays (needs `DEPLOY`).
+    """Remove a deployment.
+
+    Removes the repository's deployment and its binding in the environment; the tables and
+    data stay. Needs `DEPLOY` on the environment; a CI token is always refused. Answers 404
+    when the environment, repository or deployment does not exist and 409 while a run of the
+    repository is queued or running.
 
     Parameters
     ----------
@@ -311,14 +344,21 @@ def undeploy(
     return Response(status_code=204)
 
 
-@router.get("/project-versions/{project_version_id}", response_model=ProjectVersionOut)
+@router.get(
+    "/project-versions/{project_version_id}",
+    response_model=ProjectVersionOut,
+    responses=errors(403, 404),
+)
 def get_project_version(
     env: str,
     project_version_id: uuid.UUID,
     principal: PrincipalRef = Depends(get_principal),
     service: DeployService = Depends(get_deploy_service),
 ) -> ProjectVersionOut:
-    """Show a project version's manifest, filtered for the caller.
+    """Show a project version.
+
+    Shows the version's manifest, limited to what the caller may see. Needs
+    `READ_ENVIRONMENT`. Answers 404 when the environment has no such project version.
 
     Parameters
     ----------
@@ -350,13 +390,16 @@ def get_project_version(
     )
 
 
-@router.get("/orphans", response_model=OrphansOut)
+@router.get("/orphans", response_model=OrphansOut, responses=errors(403, 404))
 def list_orphans(
     env: str,
     principal: PrincipalRef = Depends(get_principal),
     service: DeployService = Depends(get_deploy_service),
 ) -> OrphansOut:
-    """List tables earlier project versions produced and no current one does.
+    """List tables no project produces any more.
+
+    Lists the tables that earlier project versions produced and the current ones do not.
+    Needs `READ_ENVIRONMENT`. Answers 404 when the environment does not exist.
 
     Parameters
     ----------
