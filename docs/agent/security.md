@@ -2658,9 +2658,10 @@ in a DuckDB upgrade needs adding here. **`stats()` is blocked too**: DuckDB read
 statistics at bind time, below the rewriter's CTE `WHERE`, so `stats(col)` returned the
 min/max (and on strings a prefix, on 2.0.0 the whole value) of rows a row filter hides.
 **State-changing and name-dispatching functions** came with 2.0.0: `setval` changes a
-sequence, `index_key` reads a catalog index by name, and `to_aggregate_state` picks an
+sequence (and `nextval`/`currval`, older, are refused with it: sequence state is not data a
+governed read needs), `index_key` reads a catalog index by name, and `to_aggregate_state` picks an
 aggregate by a name given as data (nothing harmful found behind it, but dispatch by a name in
-a string is the class that made `json_execute_serialized_sql` a bypass); all three are listed.
+a string is the class that made `json_execute_serialized_sql` a bypass); all five are listed.
 **DuckDB's internal namespace is refused as a prefix:** any function whose name starts with
 `__` (`__cast`, `__between`, `__internal_barrier`, `__internal_tablefilter_*`, and the
 `__internal_compress_*`/`__internal_decompress_*` 1.5.5 already had) is refused by

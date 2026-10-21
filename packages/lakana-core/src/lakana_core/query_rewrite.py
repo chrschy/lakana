@@ -130,6 +130,8 @@ _BLACKLISTED_FUNCTIONS = frozenset(
         "get_block_size",
         "index_key",
         "setval",
+        "nextval",
+        "currval",
         "to_aggregate_state",
     }
 )
@@ -200,7 +202,9 @@ name, the introspection class again. `setval` changes a sequence: the first scal
 writes, where every other function a query may call only reads. `to_aggregate_state`
 picks an aggregate function by a name given as *data*; nothing harmful was found behind
 it, but dispatch by a name in a string is the class that made `json_execute_serialized_sql`
-a bypass, and a governed query has no use for it.
+a bypass, and a governed query has no use for it. `nextval` (which advances a sequence)
+and `currval` (which reads its state) predate 2.0.0 and are refused with `setval` for the
+same reason: sequence state is connection state, not data, and no governed read needs it.
 
 `stats` is the odd one out: it is a *scalar* that reads column statistics.
 DuckDB takes Parquet statistics at bind time, below the rewriter's CTE

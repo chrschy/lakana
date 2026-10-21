@@ -686,6 +686,8 @@ def test_blacklist_allows_every_query_shape(sql: str) -> None:
 
 _NEW_REFUSED_FUNCTIONS = (
     "setval",
+    "nextval",
+    "currval",
     "index_key",
     "to_aggregate_state",
     "__cast",
@@ -696,7 +698,7 @@ _NEW_REFUSED_FUNCTIONS = (
     "__internal_decompress_string",
     "__internal_not_yet_released",
 )
-"""Functions refused since DuckDB 2.0.0: three named ones and samples of the `__` namespace.
+"""Functions refused since DuckDB 2.0.0: five named ones and samples of the `__` namespace.
 
 `__internal_compress_string_ubigint` and `__internal_decompress_string` already exist on
 1.5.5; `__internal_not_yet_released` stands for a name a later release adds, which the
@@ -739,9 +741,9 @@ def test_blacklist_refuses_duckdb_internal_and_state_changing_functions_in_every
 ) -> None:
     """A refused function is refused however the query spells or nests the call.
 
-    `setval` changes a sequence, `index_key` reads a catalog index by name,
-    `to_aggregate_state` picks an aggregate by a name given as data, and a name starting
-    with `__` belongs to DuckDB's internal namespace.
+    `setval` and `nextval` change a sequence and `currval` reads one, `index_key` reads a
+    catalog index by name, `to_aggregate_state` picks an aggregate by a name given as data,
+    and a name starting with `__` belongs to DuckDB's internal namespace.
 
     Parameters
     ----------
