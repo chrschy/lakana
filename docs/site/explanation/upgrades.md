@@ -142,7 +142,7 @@ Nothing yet.
 artifacts and code archives use, and the size of each worker's caches; `lakana worker list` has
 a column `caches`. See [Disk use](../how-to/instance-health.md#disk-use).
 
-- **Migration `0048`** adds nullable size columns to `tables`, `job_versions` and `workers`,
+- **Migration `0048`** adds nullable columns for the sizes of tables, code archives and worker caches,
   empty on every row, and changes no data.
 - **The figures fill in after the upgrade.** The worker's hourly sweep measures up to 200 tables
   each time, so on a large instance the first sweeps leave some tables `unmeasured`. Code archives
