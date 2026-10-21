@@ -84,7 +84,7 @@ NO_RESULT_MESSAGE = "Query produced no result — check for empty or comment-onl
 
 _NAME_CHARS = 60
 _ERROR_MARK = "lakana_query_error"
-_TEXT_FIELDS = ("sql", "memory_limit", "temp_directory", "max_temp_directory_size")
+_TEXT_FIELDS = ("sql", "memory_limit", "temp_directory", "max_temp_directory_size", "ca_bundle")
 
 FieldIdMap = tuple[tuple[int, str, str], ...]
 """An Iceberg read's field-id map: field id, column name and DuckDB type of each column."""
@@ -128,8 +128,17 @@ class Request:
         The rewritten SQL.
     parameters
         The values the child sets as DuckDB variables, by name, before the statement runs.
-    restrict_local_filesystem
-        Whether DuckDB's local file system is disabled.
+    read_prefixes
+        The locations the statement may open, each ending in ``/``: the directory (local mode)
+        or the URL prefix (``http(s)://host[:port]/<path>/``) of every table the query reads.
+        They become DuckDB's ``allowed_directories``; every file the variables name must lie
+        under one of them.
+    ca_bundle
+        The PEM file of certificate authorities httpfs trusts (``ca_cert_file``), and the only
+        file DuckDB may open outside the prefixes (``allowed_paths``).
+    spill
+        Whether DuckDB may spill to ``temp_directory`` (local ``file://`` mode only); otherwise
+        ``max_temp_directory_size`` is ``0KB`` and a query over ``memory_limit`` fails.
     memory_limit
         DuckDB's ``memory_limit``.
     threads
@@ -149,7 +158,9 @@ class Request:
     mode: str
     sql: str
     parameters: Mapping[str, ParameterValue]
-    restrict_local_filesystem: bool
+    read_prefixes: tuple[str, ...]
+    ca_bundle: str
+    spill: bool
     memory_limit: str
     threads: int
     temp_directory: str
@@ -321,7 +332,9 @@ def encode_request(request: Request) -> bytes:
         "parameters": {
             name: _encode_value(name, value) for name, value in request.parameters.items()
         },
-        "restrict_local_filesystem": request.restrict_local_filesystem,
+        "read_prefixes": list(request.read_prefixes),
+        "ca_bundle": request.ca_bundle,
+        "spill": request.spill,
         "memory_limit": request.memory_limit,
         "threads": request.threads,
         "temp_directory": request.temp_directory,
@@ -386,7 +399,7 @@ def decode_request(data: bytes) -> Request:
         raise ValueError("query request: not a JSON document") from exc
     if not isinstance(document, dict):
         raise ValueError("query request: not a JSON object")
-    known = {*_TEXT_FIELDS, "mode", "parameters", "restrict_local_filesystem", "threads"}
+    known = {*_TEXT_FIELDS, "mode", "parameters", "read_prefixes", "spill", "threads"}
     known |= {"batch_rows", "extension_directory", "parent_pid"}
     unknown = sorted(set(document) - known)
     if unknown:
@@ -397,8 +410,11 @@ def decode_request(data: bytes) -> Request:
     mode = document.get("mode")
     if not isinstance(mode, str) or mode not in MODES:
         raise ValueError("query request: mode must be read, write, describe or check")
-    if not isinstance(document.get("restrict_local_filesystem"), bool):
-        raise ValueError("query request: restrict_local_filesystem must be true or false")
+    if not isinstance(document.get("spill"), bool):
+        raise ValueError("query request: spill must be true or false")
+    prefixes = document.get("read_prefixes")
+    if not isinstance(prefixes, list) or not all(isinstance(item, str) for item in prefixes):
+        raise ValueError("query request: read_prefixes must be a list of texts")
     parameters = document.get("parameters")
     if not isinstance(parameters, dict):
         raise ValueError("query request: parameters must be an object")
@@ -406,7 +422,9 @@ def decode_request(data: bytes) -> Request:
         mode=document["mode"],
         sql=document["sql"],
         parameters={name: _decode_value(name, value) for name, value in parameters.items()},
-        restrict_local_filesystem=document["restrict_local_filesystem"],
+        read_prefixes=tuple(prefixes),
+        ca_bundle=document["ca_bundle"],
+        spill=document["spill"],
         memory_limit=document["memory_limit"],
         threads=_positive(document, "threads"),
         temp_directory=document["temp_directory"],

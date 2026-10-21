@@ -18,7 +18,7 @@ import signal
 import threading
 import time
 import uuid
-from collections.abc import Generator, Iterator, Mapping
+from collections.abc import Generator, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 
 import pyarrow as pa
@@ -183,7 +183,8 @@ def _kill_after_first_batch(
     sql: str,
     parameters: Mapping[str, object] | None = None,
     *,
-    restrict_local_filesystem: bool = True,
+    read_prefixes: Sequence[str] = (),
+    spill: bool = False,
     limits: QueryLimitsConfig | None = None,
 ) -> Generator[tuple[pa.Schema, Iterator[pa.RecordBatch]], None, None]:
     """Run the real `stream_query`, and end the child from outside once one batch was written.
@@ -194,8 +195,10 @@ def _kill_after_first_batch(
         The rewritten SQL.
     parameters
         Its bound values.
-    restrict_local_filesystem
-        Whether the local file system is restricted.
+    read_prefixes
+        The locations the query process may open.
+    spill
+        Whether the query process may spill.
     limits
         The query limits.
 
@@ -205,7 +208,7 @@ def _kill_after_first_batch(
         The schema, and the batches with the kill inserted after the first.
     """
     with _REAL_STREAM_QUERY(
-        sql, parameters, restrict_local_filesystem=restrict_local_filesystem, limits=limits
+        sql, parameters, read_prefixes=read_prefixes, spill=spill, limits=limits
     ) as (schema, batches):
 
         def cut() -> Iterator[pa.RecordBatch]:

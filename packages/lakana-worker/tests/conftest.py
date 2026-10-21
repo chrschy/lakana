@@ -32,6 +32,7 @@ from lakana_core.storage.resolver import StorageResolver
 from lakana_worker import executor as executor_module
 from lakana_worker import pipeline as pipeline_module
 from lakana_worker.activity import ACTIVITY
+from lakana_worker.ca_bundle import query_ca_bundle
 from lakana_worker.query_process import REGISTRY, QueryChild
 from lakana_worker.runners import TASKS
 
@@ -52,6 +53,23 @@ def _no_real_watchdog(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("lakana_worker.__main__.start_watchdog", lambda *args: None)
     monkeypatch.setattr("lakana_worker.__main__.sweep_spill_directories", lambda: 0)
     monkeypatch.setattr("lakana_worker.__main__.sweep_deploy_checkouts", lambda **kwargs: 0)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_ca_bundle() -> Iterator[None]:
+    """Resolve the query process's CA bundle anew in every test.
+
+    `lakana_worker.ca_bundle.query_ca_bundle` keeps its answer for the life of the worker; a
+    test that sets ``AWS_CA_BUNDLE`` or ``SSL_CERT_FILE`` must not leave it to the next one.
+
+    Yields
+    ------
+    None
+        Once the test may run.
+    """
+    query_ca_bundle.cache_clear()
+    yield
+    query_ca_bundle.cache_clear()
 
 
 @pytest.fixture

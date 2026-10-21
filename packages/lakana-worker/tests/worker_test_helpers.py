@@ -9,7 +9,9 @@ across the whole workspace's `sys.path` — a second `helpers.py` (or a second
 """
 
 import json
+import os
 import uuid
+from collections.abc import Mapping
 
 from minio import Minio
 from testcontainers.core.container import DockerContainer
@@ -218,3 +220,32 @@ class ReadsById(AllowAllAuthorization):
         """
         if not self.permits(principal, action, securable):
             raise PermissionDenied("denied")
+
+
+def local_prefixes(parameters: Mapping[str, object]) -> tuple[str, ...]:
+    """Name the directory of every local file a rewritten query reads, as read prefixes.
+
+    The query process opens only the locations it is given (allow-list mode). A test that hands
+    `execute_query` local files of its own gives it their directories, as the pipeline gives it
+    the locations of the tables a query reads.
+
+    Parameters
+    ----------
+    parameters
+        The rewritten query's variables; every list among them is a list of files.
+
+    Returns
+    -------
+    tuple of str
+        Each file's directory followed by ``/``, sorted, without duplicates.
+    """
+    return tuple(
+        sorted(
+            {
+                os.path.dirname(url) + "/"
+                for value in parameters.values()
+                if isinstance(value, list)
+                for url in value
+            }
+        )
+    )

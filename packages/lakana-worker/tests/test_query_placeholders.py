@@ -13,6 +13,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from worker_test_helpers import local_prefixes
 
 from lakana_core.errors import ValidationError
 from lakana_core.query_rewrite import TableSource, check_blacklist, rewrite_query
@@ -117,7 +118,7 @@ def test_the_reported_leak_no_longer_returns_the_source_urls(customers: TableSou
         rewrite_query(sql, {"bronze.customers": customers})
 
     safe = rewrite_query("SELECT ssn FROM bronze.customers", {"bronze.customers": customers})
-    result = execute_query(safe.sql, safe.parameters, restrict_local_filesystem=False)
+    result = execute_query(safe.sql, safe.parameters, read_prefixes=local_prefixes(safe.parameters))
     assert customers.urls[0] not in str(result.to_pylist())
 
 
@@ -137,7 +138,9 @@ def test_the_rewritten_query_reads_its_urls_through_variables(customers: TableSo
     assert "?" not in rewritten.sql
     assert "GETVARIABLE('v_0_files')" in rewritten.sql
     assert rewritten.parameters == {"v_0_files": list(customers.urls)}
-    result = execute_query(rewritten.sql, rewritten.parameters, restrict_local_filesystem=False)
+    result = execute_query(
+        rewritten.sql, rewritten.parameters, read_prefixes=local_prefixes(rewritten.parameters)
+    )
     assert result.to_pylist() == [{"id": 2, "ssn": "***"}, {"id": 3, "ssn": "***"}]
 
 
@@ -159,7 +162,9 @@ def test_a_name_of_the_users_own_that_matches_a_variable_reads_the_users_data(
     check_blacklist(sql)
     rewritten = rewrite_query(sql, {"bronze.customers": customers})
 
-    result = execute_query(rewritten.sql, rewritten.parameters, restrict_local_filesystem=False)
+    result = execute_query(
+        rewritten.sql, rewritten.parameters, read_prefixes=local_prefixes(rewritten.parameters)
+    )
 
     assert sorted(result.to_pylist(), key=lambda row: row["id"]) == [
         {"id": 2, "v_0_files": 10, "label": "v_0_files"},
@@ -190,7 +195,7 @@ def test_a_positional_placeholder_that_slipped_past_validation_still_cannot_bind
     assert smuggled in sql
 
     with pytest.raises(ValidationError) as excinfo:
-        execute_query(sql, rewritten.parameters, restrict_local_filesystem=False)
+        execute_query(sql, rewritten.parameters, read_prefixes=local_prefixes(rewritten.parameters))
     assert customers.urls[0] not in str(excinfo.value)
     assert "c.parquet" not in str(excinfo.value)
 

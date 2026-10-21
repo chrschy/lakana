@@ -1451,6 +1451,7 @@ dev = [{ name = "lakana", editable = "packages/lakana" }]
 name = "lakana-worker"
 source = { editable = "packages/lakana-worker" }
 dependencies = [
+    { name = "certifi" },
     { name = "duckdb" },
     { name = "httpx" },
     { name = "lakana-core" },
@@ -1458,6 +1459,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "certifi", specifier = ">=2024.2.2" },
     { name = "duckdb", specifier = ">=1.1,<2" },
     { name = "httpx", specifier = ">=0.28,<1" },
     { name = "lakana-core", editable = "packages/lakana-core" },

@@ -17,6 +17,7 @@ import pyarrow.parquet as pq
 import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
+from worker_test_helpers import local_prefixes
 
 from lakana_core.query_rewrite import TableSource, rewrite_query
 from lakana_worker.executor import execute_query
@@ -116,7 +117,9 @@ def test_a_masked_column_never_carries_its_real_value_through_any_query_shape(
         column_masks={"ssn": "NULL"},
     )
     rewritten = rewrite_query(_build_query(shape), {"gold.customers": source})
-    result = execute_query(rewritten.sql, rewritten.parameters, restrict_local_filesystem=False)
+    result = execute_query(
+        rewritten.sql, rewritten.parameters, read_prefixes=local_prefixes(rewritten.parameters)
+    )
 
     assert result.num_rows == 3
     assert "ssn" in result.column_names
@@ -148,7 +151,9 @@ def test_a_filtered_row_never_appears_through_any_query_shape(
         row_filters=["region = 'EU'"],
     )
     rewritten = rewrite_query(_build_query(shape), {"gold.customers": source})
-    result = execute_query(rewritten.sql, rewritten.parameters, restrict_local_filesystem=False)
+    result = execute_query(
+        rewritten.sql, rewritten.parameters, read_prefixes=local_prefixes(rewritten.parameters)
+    )
 
     assert result.num_rows == 2
     assert set(result.column("region").to_pylist()) <= {"EU"}

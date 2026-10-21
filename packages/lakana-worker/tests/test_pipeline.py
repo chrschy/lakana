@@ -3,8 +3,10 @@
 import base64
 import time
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import cast
 from unittest import mock
 
 import pyarrow as pa
@@ -70,6 +72,7 @@ from lakana_core.secrets.keys import EnvKeyProvider
 from lakana_core.secrets.service import SecretService
 from lakana_core.storage.fsspec_storage import FsspecStorage
 from lakana_core.storage.resolver import ResolvedStorage, StorageResolver
+from lakana_worker import pipeline as pipeline_module
 from lakana_worker.pipeline import (
     _DELETED_PRINCIPAL_MESSAGE,
     _INACTIVE_PRINCIPAL_MESSAGE,
@@ -185,6 +188,86 @@ def test_run_one_executes_a_single_table_query_end_to_end(
     assert run.lineage_json is not None
     assert run.lineage_json["id"] == [{"table": "gold.sales", "column": "id"}]
     assert run.result_location is not None
+
+
+def test_a_query_opens_only_the_locations_of_the_tables_it_reads(
+    session: Session, principal: PrincipalRef, tmp_path: Path
+) -> None:
+    """The query process is given each table's location and nothing else of the store.
+
+    An Iceberg table's own id-suffixed directory and an external table's ``raw/`` claim; a
+    table the query does not read (``gold.other``) is not among them.
+    """
+    catalog = _local_catalog(session, principal, tmp_path)
+    ref = TableRef(environment="dev", namespace=NamespacePath.from_parts(["gold"]), name="sales")
+    created = catalog.create_table(
+        principal, ref, schema=Schema(NestedField(1, "id", LongType(), required=True))
+    )
+    data = pa.table({"id": [1, 2]}, schema=pa.schema([pa.field("id", pa.int64(), nullable=False)]))
+    _write_one_data_file_and_commit(catalog, principal, ref, created, data)
+    catalog.create_table(
+        principal,
+        TableRef(environment="dev", namespace=NamespacePath.from_parts(["gold"]), name="other"),
+        schema=Schema(NestedField(1, "id", LongType(), required=True)),
+    )
+    catalog.create_namespace(principal, "dev", NamespacePath.from_parts(["raw"]))
+    (tmp_path / "raw" / "events").mkdir(parents=True)
+    pq.write_table(pa.table({"id": [3]}), tmp_path / "raw" / "events" / "part-0.parquet")
+    catalog.create_external_table(
+        principal,
+        TableRef(environment="dev", namespace=NamespacePath.from_parts(["raw"]), name="events"),
+        location_pattern="raw/events/*.parquet",
+        format="parquet",
+    )
+    real = pipeline_module.execute_query
+    seen: list[tuple[str, ...]] = []
+
+    def spy(*args: object, **kwargs: object) -> pa.Table:
+        seen.append(tuple(cast("Sequence[str]", kwargs["read_prefixes"])))
+        return real(*args, **kwargs)  # ty: ignore[invalid-argument-type]
+
+    run = QueryService(session, AllowAllAuthorization()).submit_query(
+        principal,
+        "dev",
+        "SELECT id FROM gold.sales UNION ALL SELECT id FROM raw.events ORDER BY id",
+    )
+    with mock.patch("lakana_worker.pipeline.execute_query", spy):
+        run_one(session, run.id, AllowAllAuthorization())
+
+    session.refresh(run)
+    assert run.status == QueryRunStatus.SUCCEEDED, run.error_message
+    location = created.metadata.location.removeprefix("file://")
+    assert seen == [tuple(sorted([f"{location}/", f"{tmp_path}/raw/events/"]))]
+    assert _read_result(tmp_path, run).column("id").to_pylist() == [1, 2, 3]
+
+
+def test_a_table_location_outside_the_storage_root_is_never_turned_into_a_prefix(
+    session: Session, principal: PrincipalRef, tmp_path: Path
+) -> None:
+    """A location that does not start with the root fails the read before anything runs."""
+    catalog = _local_catalog(session, principal, tmp_path / "root")
+    ref = TableRef(environment="dev", namespace=NamespacePath.from_parts(["gold"]), name="sales")
+    created = catalog.create_table(
+        principal, ref, schema=Schema(NestedField(1, "id", LongType(), required=True))
+    )
+    elsewhere = f"file://{tmp_path}/elsewhere/{created.metadata.location.rsplit('/', 1)[1]}"
+    moved = created.metadata.model_copy(update={"location": elsewhere})
+    with (
+        mock.patch(
+            "lakana_core.catalog.service.CatalogService.load_table",
+            return_value=mock.Mock(metadata=moved),
+        ),
+        mock.patch(
+            "lakana_worker.pipeline.execute_query", side_effect=AssertionError("nothing may run")
+        ),
+    ):
+        run = QueryService(session, AllowAllAuthorization()).submit_query(
+            principal, "dev", "SELECT id FROM gold.sales"
+        )
+        run_one(session, run.id, AllowAllAuthorization())
+    session.refresh(run)
+    assert run.status == QueryRunStatus.FAILED
+    assert run.error_message == "Resolving the tables this query reads failed (ValidationError)."
 
 
 def test_run_one_fails_when_the_result_exceeds_the_row_cap(
@@ -3124,10 +3207,10 @@ def test_run_one_keeps_resolved_locations_out_of_the_error_message(
     assert "<file>" in run.error_message
 
 
-def test_run_one_restricts_the_local_filesystem_when_storage_is_not_local(
+def test_run_one_allows_no_spill_and_no_location_when_storage_is_not_local(
     session: Session, principal: PrincipalRef
 ) -> None:
-    """Cloud storage hands DuckDB presigned HTTPS URLs; the worker's own disk stays closed."""
+    """Cloud storage: no spill to the worker's disk, and a query of no table opens nothing."""
     catalog = CatalogService(session, StorageResolver(session), AllowAllAuthorization())
     catalog.create_environment(
         principal,
@@ -3145,15 +3228,16 @@ def test_run_one_restricts_the_local_filesystem_when_storage_is_not_local(
     ):
         run_one(session, run.id, AllowAllAuthorization())
 
-    assert execute_mock.call_args.kwargs["restrict_local_filesystem"] is True
+    assert execute_mock.call_args.kwargs["spill"] is False
+    assert execute_mock.call_args.kwargs["read_prefixes"] == ()
     session.refresh(run)
     assert run.status == QueryRunStatus.SUCCEEDED, run.error_message
 
 
-def test_run_one_allows_local_reads_when_storage_is_local(
+def test_run_one_allows_spill_when_storage_is_local(
     session: Session, principal: PrincipalRef, tmp_path: Path
 ) -> None:
-    """Local mode's resolved "URLs" are bare paths, which the restriction would block."""
+    """Local mode spills to the worker's disk, as it always has."""
     _local_catalog(session, principal, tmp_path)
     query_service = QueryService(session, AllowAllAuthorization())
     run = query_service.submit_query(principal, "dev", "SELECT 1 AS x")
@@ -3163,7 +3247,7 @@ def test_run_one_allows_local_reads_when_storage_is_local(
     ) as execute_mock:
         run_one(session, run.id, AllowAllAuthorization())
 
-    assert execute_mock.call_args.kwargs["restrict_local_filesystem"] is False
+    assert execute_mock.call_args.kwargs["spill"] is True
     session.refresh(run)
     assert run.status == QueryRunStatus.SUCCEEDED, run.error_message
 

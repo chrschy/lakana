@@ -2212,6 +2212,7 @@ def test_maintenance_during_the_read_gives_the_snapshot_gone_text(
         *,
         check_result_id: uuid.UUID | None = None,
         withheld: dict[str, str] | None = None,
+        prefixes: list[str] | None = None,
     ) -> dict[str, TableSource]:
         """Fail the first resolution after maintenance ran; resolve for real afterwards.
 
@@ -2234,6 +2235,8 @@ def test_maintenance_during_the_read_gives_the_snapshot_gone_text(
         check_result_id
             Passed through.
         withheld
+            Passed through.
+        prefixes
             Passed through.
 
         Returns
@@ -2260,6 +2263,7 @@ def test_maintenance_during_the_read_gives_the_snapshot_gone_text(
             pins,
             check_result_id=check_result_id,
             withheld=withheld,
+            prefixes=prefixes,
         )
 
     if when == "reading":

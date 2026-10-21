@@ -50,6 +50,7 @@ from lakana_worker.executor import (
     install_heartbeat,
     stream_query,
 )
+from lakana_worker.query_child import NO_SPILL, REFUSED_LOCATION
 from lakana_worker.query_process import REGISTRY, ChildFailed, StopReason
 from lakana_worker.query_protocol import MAX_REQUEST_BYTES, ErrorDocument
 from lakana_worker.spill import spill_prefix
@@ -78,15 +79,16 @@ def parquet_over_http(tmp_path: Path) -> Iterator[str]:
     Yields
     ------
     str
-        The URL of the served `probe.parquet`.
+        The URL of the served `t1/probe.parquet`; its directory is the read prefix.
     """
-    pq.write_table(pa.table({"a": [1, 2, 3]}), tmp_path / "probe.parquet")
+    (tmp_path / "t1").mkdir()
+    pq.write_table(pa.table({"a": [1, 2, 3]}), tmp_path / "t1" / "probe.parquet")
     handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(tmp_path))
     server = _ThreadingHTTPServer(("127.0.0.1", 0), handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        yield f"http://127.0.0.1:{server.server_address[1]}/probe.parquet"
+        yield f"http://127.0.0.1:{server.server_address[1]}/t1/probe.parquet"
     finally:
         server.shutdown()
         server.server_close()
@@ -144,17 +146,17 @@ def test_duckdbs_line_and_caret_context_is_stripped_from_the_error(tmp_path: Pat
     assert "Query failed" in str(exc_info.value)
 
 
-def test_a_local_query_still_works_when_local_filesystem_access_is_not_restricted() -> None:
-    """Local (file://) mode needs its own bare local paths readable.
+def test_a_local_query_reads_a_file_under_its_read_prefix() -> None:
+    """Local (file://) mode reads bare local paths, under the directories it is given.
 
-    See execute_query's `restrict_local_filesystem`.
+    See execute_query's `read_prefixes`.
     """
     with tempfile.TemporaryDirectory() as tmp:
         probe = Path(tmp) / "probe.parquet"
         pq.write_table(pa.table({"a": [1]}), probe)
 
         result = execute_query(
-            f"SELECT * FROM read_parquet('{probe}')", restrict_local_filesystem=False
+            f"SELECT * FROM read_parquet('{probe}')", read_prefixes=(f"{Path(tmp).resolve()}/",)
         )
 
         assert result.column("a").to_pylist() == [1]
@@ -168,7 +170,7 @@ def test_a_local_file_attach_is_refused_even_if_it_reached_the_executor(tmp_path
     writing this plan) because it opens a fresh in-memory catalog, not a
     path to real data — it is harmless, not a bypass, and asserting it fails
     would pin the wrong behaviour. A local file path is the real case this
-    connection's `disabled_filesystems` setting exists to block.
+    connection's allow-list mode exists to block.
     """
     with pytest.raises(ValidationError):
         execute_query(f"ATTACH '{tmp_path}/evil.db' AS x")
@@ -185,18 +187,19 @@ def test_reading_a_local_file_directly_is_refused_even_if_it_reached_the_executo
         execute_query(f"SELECT * FROM read_parquet('{probe}')")
 
 
-def test_a_presigned_style_remote_read_succeeds_with_the_local_filesystem_restricted(
+def test_a_presigned_style_remote_read_succeeds_under_its_read_prefix(
     parquet_over_http: str,
 ) -> None:
     """The default configuration must be able to run the reads it exists for.
 
-    DuckDB initialises its secret manager lazily, on the first httpfs read,
-    and that initialisation touches local disk. Without
-    `allow_persistent_secrets = false`, this very read fails with
-    `Permission Error: File system LocalFileSystem has been disabled by
-    configuration` — team/cloud mode could execute no query at all.
+    DuckDB initialises its secret manager lazily, on the first httpfs read, and that
+    initialisation touches local disk; `allow_persistent_secrets = false` keeps it off the disk,
+    which allow-list mode would refuse.
     """
-    result = execute_query(f"SELECT * FROM read_parquet('{parquet_over_http}')")
+    prefix = parquet_over_http.rsplit("/", 1)[0] + "/"
+    result = execute_query(
+        f"SELECT * FROM read_parquet('{parquet_over_http}')", read_prefixes=(prefix,)
+    )
 
     assert result.column("a").to_pylist() == [1, 2, 3]
 
@@ -276,7 +279,7 @@ def test_ambient_aws_credentials_are_cleared_in_local_mode_too(
 
     result = execute_query(
         "SELECT current_setting('s3_access_key_id') AS key_id",
-        restrict_local_filesystem=False,
+        spill=True,
     )
 
     assert result.column("key_id").to_pylist() == [""]
@@ -346,7 +349,7 @@ def test_a_quote_in_a_resolved_url_cannot_inject_sql(tmp_path: Path) -> None:
 
     interpolated = f"WITH a AS (SELECT * FROM read_parquet(['{evil}'])) SELECT id FROM a"
     assert (
-        42 in execute_query(interpolated, restrict_local_filesystem=False).column("id").to_pylist()
+        42 in execute_query(interpolated, read_prefixes=(f"{tmp_path}/",)).column("id").to_pylist()
     )
 
     rewritten = rewrite_query(
@@ -356,7 +359,7 @@ def test_a_quote_in_a_resolved_url_cannot_inject_sql(tmp_path: Path) -> None:
 
     assert evil not in rewritten.sql
     with pytest.raises(ValidationError, match="No files found that match the pattern"):
-        execute_query(rewritten.sql, rewritten.parameters, restrict_local_filesystem=False)
+        execute_query(rewritten.sql, rewritten.parameters, read_prefixes=(f"{tmp_path}/",))
 
 
 def test_result_exactly_at_the_row_cap_succeeds() -> None:
@@ -417,7 +420,7 @@ def test_a_masked_columns_rewritten_expression_never_leaks_through_a_line_echo(
     assert marker in rewritten.sql, "the mask's own expression must actually be in the CTE"
 
     with pytest.raises(ValidationError) as exc_info:
-        execute_query(rewritten.sql, rewritten.parameters, restrict_local_filesystem=False)
+        execute_query(rewritten.sql, rewritten.parameters, read_prefixes=(f"{tmp_path}/",))
 
     assert marker not in str(exc_info.value)
 
@@ -472,7 +475,7 @@ def test_an_invalid_memory_limit_is_a_validation_error() -> None:
 
 def test_stream_query_yields_the_schema_then_batches() -> None:
     """A write stream exposes the result schema before any batch is read."""
-    with stream_query("SELECT 1 AS a, 'x' AS b", restrict_local_filesystem=False) as (
+    with stream_query("SELECT 1 AS a, 'x' AS b") as (
         schema,
         batches,
     ):
@@ -491,14 +494,10 @@ def test_stream_query_exports_timestamptz_in_utc_whatever_the_session_zone(
     monkeypatch.setenv("TZ", "Europe/Berlin")
     sql = "SELECT TIMESTAMPTZ '2026-01-01 12:00:00+00' AS ts"
 
-    assert execute_query(sql, restrict_local_filesystem=False).schema.field("ts").type == (
-        pa.timestamp("us", tz="Europe/Berlin")
-    )
-    with stream_query(sql, restrict_local_filesystem=False) as (schema, _):
+    assert execute_query(sql).schema.field("ts").type == (pa.timestamp("us", tz="Europe/Berlin"))
+    with stream_query(sql) as (schema, _):
         assert schema.field("ts").type == pa.timestamp("us", tz="UTC")
-    assert describe_query(sql, restrict_local_filesystem=False).field("ts").type == pa.timestamp(
-        "us", tz="UTC"
-    )
+    assert describe_query(sql).field("ts").type == pa.timestamp("us", tz="UTC")
 
 
 def test_a_failure_mid_stream_surfaces_as_a_validation_error() -> None:
@@ -511,7 +510,7 @@ def test_a_failure_mid_stream_surfaces_as_a_validation_error() -> None:
     )
     with (
         pytest.raises(ValidationError, match="Query failed"),
-        stream_query(sql, restrict_local_filesystem=False, limits=_ONE_THREAD) as (_, batches),
+        stream_query(sql, limits=_ONE_THREAD) as (_, batches),
     ):
         for _ in batches:
             pass
@@ -519,7 +518,7 @@ def test_a_failure_mid_stream_surfaces_as_a_validation_error() -> None:
 
 def test_describe_query_plans_without_returning_rows() -> None:
     """`describe_query` returns the result schema."""
-    schema = describe_query("SELECT 1 AS a, 2.5 AS b", restrict_local_filesystem=False)
+    schema = describe_query("SELECT 1 AS a, 2.5 AS b")
 
     assert schema.names == ["a", "b"]
 
@@ -527,15 +526,13 @@ def test_describe_query_plans_without_returning_rows() -> None:
 def test_describe_query_reports_a_bad_query_as_a_validation_error() -> None:
     """A query that doesn't plan is a `ValidationError`."""
     with pytest.raises(ValidationError, match="Query failed"):
-        describe_query(
-            "SELECT missing_column FROM (SELECT 1 AS a)", restrict_local_filesystem=False
-        )
+        describe_query("SELECT missing_column FROM (SELECT 1 AS a)")
 
 
 @pytest.mark.parametrize("sql", ["", "-- comment only", ";"])
 def test_stream_query_on_sql_that_produces_no_result_raises_validation_error(sql: str) -> None:
     """`stream_query` mirrors `execute_query`'s handling of DuckDB's `None` result."""
-    with pytest.raises(ValidationError), stream_query(sql, restrict_local_filesystem=False):
+    with pytest.raises(ValidationError), stream_query(sql):
         pass
 
 
@@ -543,7 +540,7 @@ def test_stream_query_reports_a_bad_query_as_a_validation_error() -> None:
     """A query that fails to parse before it can start streaming is a `ValidationError`."""
     with (
         pytest.raises(ValidationError, match="Query failed"),
-        stream_query("SELECT FROM", restrict_local_filesystem=False),
+        stream_query("SELECT FROM"),
     ):
         pass
 
@@ -563,14 +560,12 @@ def test_parameters_bind_by_name_only(run: str) -> None:
             with stream_query(
                 "SELECT ?::INT AS x",
                 positional,  # ty: ignore[invalid-argument-type]
-                restrict_local_filesystem=False,
             ):
                 pass
         else:
             describe_query(
                 "SELECT ?::INT AS x",
                 positional,  # ty: ignore[invalid-argument-type]
-                restrict_local_filesystem=False,
             )
 
 
@@ -579,9 +574,9 @@ def test_a_variable_is_set_in_every_entry_point() -> None:
     sql = "SELECT getvariable('v_test')::INT AS x"
 
     assert execute_query(sql, {"v_test": 7}).column("x").to_pylist() == [7]
-    with stream_query(sql, {"v_test": 7}, restrict_local_filesystem=False) as (_, batches):
+    with stream_query(sql, {"v_test": 7}) as (_, batches):
         assert [row["x"] for batch in batches for row in batch.to_pylist()] == [7]
-    assert describe_query(sql, {"v_test": 7}, restrict_local_filesystem=False).names == ["x"]
+    assert describe_query(sql, {"v_test": 7}).names == ["x"]
 
 
 _SLOW_SQL = "SELECT sum(hash(a.range + b.range)) AS n FROM range(40000) a, range(40000) b"
@@ -659,6 +654,7 @@ def test_threads_and_max_temp_directory_size_are_applied() -> None:
     """The configured `threads` and `max_temp_directory_size` reach the connection."""
     table = execute_query(
         "SELECT current_setting('threads') AS t, current_setting('max_temp_directory_size') AS s",
+        spill=True,
         limits=QueryLimitsConfig(threads=2, max_temp_directory_size="3GB"),
     )
     row = table.to_pylist()[0]
@@ -672,8 +668,8 @@ def test_every_run_gets_its_own_temp_directory_that_is_removed_afterwards() -> N
     It is the `tmp` directory inside the child's private directory, which goes with it.
     """
     sql = "SELECT current_setting('temp_directory') AS d"
-    first = execute_query(sql, restrict_local_filesystem=False).to_pylist()[0]["d"]
-    second = execute_query(sql, restrict_local_filesystem=False).to_pylist()[0]["d"]
+    first = execute_query(sql).to_pylist()[0]["d"]
+    second = execute_query(sql).to_pylist()[0]["d"]
     assert first != second
     for spill in (first, second):
         assert Path(spill).name == "tmp"
@@ -734,7 +730,7 @@ def test_a_spilling_query_works_in_local_mode_and_cleans_up(
     try:
         table = execute_query(
             _SPILLING_SQL,
-            restrict_local_filesystem=False,
+            spill=True,
             limits=_SMALL_LIMIT,
         )
     finally:
@@ -769,35 +765,30 @@ _OVER_THE_LIMIT = [
 
 
 @pytest.mark.parametrize("sql", _OVER_THE_LIMIT)
-def test_a_refused_spill_is_reported_as_out_of_memory(sql: str) -> None:
-    """Restricted mode cannot spill, so a sort or aggregation over the limit is out of memory.
-
-    DuckDB refuses its own spill file with a permission error that talks about a file system.
-    The caller must see an out-of-memory failure with the advice, not that text.
-    """
+def test_a_query_that_may_not_spill_is_reported_as_out_of_memory(sql: str) -> None:
+    """Without spill a sort or aggregation over the limit is out of memory, with the advice."""
     with pytest.raises(OutOfMemoryQuery, match="LAKANA_QUERY_LIMITS__MEMORY_LIMIT") as info:
-        execute_query(sql, restrict_local_filesystem=True, limits=_SMALL_LIMIT)
-    assert "LocalFileSystem" not in str(info.value)
-    assert "ran out of memory" in str(info.value)
+        execute_query(sql, limits=_SMALL_LIMIT)
+    assert str(info.value) == NO_SPILL
 
 
 @pytest.mark.parametrize("sql", _OVER_THE_LIMIT)
-def test_a_refused_spill_in_a_write_stream_is_reported_as_out_of_memory(sql: str) -> None:
-    """The same holds for a write stream (the refusal comes at the start of the query)."""
+def test_a_write_stream_that_may_not_spill_is_reported_as_out_of_memory(sql: str) -> None:
+    """The same holds for a write stream."""
     with (
         pytest.raises(OutOfMemoryQuery, match="LAKANA_QUERY_LIMITS__MEMORY_LIMIT") as info,
-        stream_query(sql, restrict_local_filesystem=True, limits=_SMALL_LIMIT) as (_, batches),
+        stream_query(sql, limits=_SMALL_LIMIT) as (_, batches),
     ):
         for _ in batches:
             pass
-    assert "LocalFileSystem" not in str(info.value)
+    assert str(info.value) == NO_SPILL
 
 
-def test_a_refused_spill_stays_refused_and_the_filesystem_stays_disabled() -> None:
-    """No usable local path is handed to a restricted query to make the spill work."""
+def test_a_query_that_may_not_spill_writes_no_spill_file_and_reads_no_local_file() -> None:
+    """No spill space is given to a query that may not spill, and local reads stay refused."""
     with pytest.raises(OutOfMemoryQuery):
         execute_query(f"SELECT * FROM ({_OVER_THE_LIMIT_ROWS}) ORDER BY b", limits=_SMALL_LIMIT)
-    with pytest.raises(ValidationError, match="LocalFileSystem has been disabled"):
+    with pytest.raises(ValidationError, match="not one of the tables it reads"):
         execute_query("SELECT * FROM read_csv('/etc/hostname')", limits=_SMALL_LIMIT)
 
 
@@ -812,21 +803,20 @@ def test_a_refused_spill_stays_refused_and_the_filesystem_stays_disabled() -> No
     ],
     ids=["read_csv", "replacement_scan", "glob", "read_csv_after_a_sort"],
 )
-def test_a_refused_local_read_is_still_an_error_about_the_query(sql: str) -> None:
-    """The same permission error from a real local read is not out of memory."""
-    with pytest.raises(ValidationError, match="LocalFileSystem has been disabled") as info:
-        execute_query(sql, restrict_local_filesystem=True, limits=_SMALL_LIMIT)
+def test_a_refused_local_read_is_an_error_about_the_query(sql: str) -> None:
+    """A real local read is refused with the fixed text, which names no file, even after a sort."""
+    with pytest.raises(ValidationError) as info:
+        execute_query(sql, limits=_SMALL_LIMIT)
     assert type(info.value) is ValidationError
+    assert str(info.value) == REFUSED_LOCATION
+    assert "hostname" not in str(info.value)
 
 
 def test_a_refused_local_read_in_a_write_stream_is_still_an_error_about_the_query() -> None:
     """Also for a write stream."""
     with (
-        pytest.raises(ValidationError, match="LocalFileSystem has been disabled") as info,
-        stream_query("SELECT * FROM read_csv('/etc/hostname')", restrict_local_filesystem=True) as (
-            _,
-            batches,
-        ),
+        pytest.raises(ValidationError, match="not one of the tables it reads") as info,
+        stream_query("SELECT * FROM read_csv('/etc/hostname')") as (_, batches),
     ):
         for _ in batches:
             pass
@@ -846,7 +836,7 @@ def test_a_cancellation_also_stops_a_write_stream() -> None:
     with (
         cancellation(event),
         pytest.raises(QueryCancelled),
-        stream_query(_SLOW_SQL, restrict_local_filesystem=False) as (_, batches),
+        stream_query(_SLOW_SQL) as (_, batches),
     ):
         list(batches)
     timer.join()
@@ -863,7 +853,7 @@ def test_io_failures_are_transient(tmp_path: Path) -> None:
     """A DuckDB I/O error (a missing file, an unreachable store) is retryable."""
     missing = tmp_path / "nope.parquet"
     with pytest.raises(TransientQueryError, match="Query failed"):
-        execute_query(f"SELECT * FROM read_parquet('{missing}')", restrict_local_filesystem=False)
+        execute_query(f"SELECT * FROM read_parquet('{missing}')", read_prefixes=(f"{tmp_path}/",))
 
 
 def test_other_failures_stay_plain_validation_errors() -> None:
@@ -889,7 +879,7 @@ def test_a_mid_stream_sql_error_is_permanent_not_transient(sql: str) -> None:
     """DuckDB reports a mid-stream SQL error as a plain `OSError`; it must not retry."""
     with (
         pytest.raises(ValidationError, match="Query failed") as info,
-        stream_query(sql, restrict_local_filesystem=False, limits=_ONE_THREAD) as (_, batches),
+        stream_query(sql, limits=_ONE_THREAD) as (_, batches),
     ):
         for _ in batches:
             pass
@@ -900,40 +890,41 @@ def test_a_mid_stream_sql_error_is_permanent_not_transient(sql: str) -> None:
 def test_a_mid_stream_sql_error_in_a_buffered_query_is_permanent(sql: str) -> None:
     """The same holds for `execute_query`'s fetch loop."""
     with pytest.raises(ValidationError, match="Query failed") as info:
-        execute_query(sql, restrict_local_filesystem=False, limits=_ONE_THREAD)
+        execute_query(sql, limits=_ONE_THREAD)
     assert type(info.value) is ValidationError
 
 
-def test_a_refused_spill_is_out_of_memory_with_variables_set() -> None:
-    """The re-plan sees the variables: every production query reads some."""
+def test_running_out_of_memory_with_variables_set_is_out_of_memory() -> None:
+    """Every production query reads variables; they change nothing about the classification."""
     sql = (
         "SELECT * FROM (SELECT i, repeat('x', 100) || i::VARCHAR AS b "
         "FROM range(getvariable('n')) AS r(i)) ORDER BY b DESC"
     )
     with pytest.raises(OutOfMemoryQuery, match="LAKANA_QUERY_LIMITS__MEMORY_LIMIT"):
-        execute_query(sql, {"n": 200000}, restrict_local_filesystem=True, limits=_SMALL_LIMIT)
+        execute_query(sql, {"n": 200000}, limits=_SMALL_LIMIT)
 
 
 @pytest.mark.parametrize(
     "sql",
-    [
-        "SELECT * FROM sniff_csv('/etc/hostname')",
-        "SELECT count(*) FROM duckdb_extensions()",
-        "SELECT * FROM duckdb_temporary_files()",
-    ],
+    ["SELECT * FROM sniff_csv('/etc/hostname')", "SELECT count(*) FROM duckdb_extensions()"],
 )
-def test_catalog_functions_that_touch_the_disk_only_at_execution_are_a_known_residual(
-    sql: str,
-) -> None:
-    """Known residual: three functions refused at execution read as out of memory.
+def test_catalog_functions_refused_only_at_execution_are_errors_about_the_query(sql: str) -> None:
+    """Two functions DuckDB plans without the disk and refuses while running.
 
-    DuckDB plans them without touching the disk and fails only while running, which is the
-    timing of a refused spill. Nothing is read, only the message and cause are wrong. The
-    server refuses all three before the worker. This test pins today's behaviour so that a
-    DuckDB upgrade that changes it is noticed; it is accepted, not wanted.
+    They read as an error about the query (they once read as out of memory, when a refusal
+    while running meant a refused spill). The guard refuses both before the worker.
     """
-    with pytest.raises(OutOfMemoryQuery):
-        execute_query(sql, restrict_local_filesystem=True, limits=_SMALL_LIMIT)
+    with pytest.raises(ValidationError) as info:
+        execute_query(sql, limits=_SMALL_LIMIT)
+    assert type(info.value) is ValidationError
+    assert str(info.value) == REFUSED_LOCATION
+
+
+def test_listing_temporary_files_reads_no_file() -> None:
+    """``duckdb_temporary_files`` lists DuckDB's own spill files; the guard refuses it too."""
+    assert execute_query("SELECT count(*) AS n FROM duckdb_temporary_files()").to_pylist() == [
+        {"n": 0}
+    ]
 
 
 def _cross_join_of_literals(rows: int = 3000) -> str:
@@ -957,14 +948,13 @@ def test_a_real_out_of_memory_query_fails_with_the_out_of_memory_type() -> None:
     """Against real DuckDB: an aggregate that cannot spill exceeds a small limit.
 
     The query is a self cross join of literal rows, not a generated series: it fails
-    in about 0.1 s at 100MB. The local filesystem stays enabled so that DuckDB's own eviction
-    may spill: with it disabled, which of two errors (out of memory, or the refused spill) comes
-    first depends on thread timing.
+    in about 0.1 s at 100MB. Spilling is allowed, so the failure is DuckDB's own text, not the
+    fixed "cannot spill" wording of a query that may not spill.
     """
     with pytest.raises(OutOfMemoryQuery, match="LAKANA_QUERY_LIMITS__MEMORY_LIMIT"):
         execute_query(
             _cross_join_of_literals(),
-            restrict_local_filesystem=False,
+            spill=True,
             limits=QueryLimitsConfig(memory_limit="100MB", threads=2),
         )
 
@@ -1328,7 +1318,7 @@ def test_a_write_stream_reaches_its_commit_point_only_through_the_end_of_the_ite
     committed: list[bool] = []
     with (
         pytest.raises(kind) as caught,
-        stream_query("SELECT 1", restrict_local_filesystem=False) as (_, batches),
+        stream_query("SELECT 1") as (_, batches),
     ):
         for batch in batches:
             received.append(batch.num_rows)
@@ -1353,7 +1343,7 @@ def test_a_failed_stream_raises_its_error_again_and_never_ends_normally(
 ) -> None:
     """A caller that caught the error and reads on must not see a stream that just ended."""
     scripted("exit_7_after_a_full_stream")
-    with stream_query("SELECT 1", restrict_local_filesystem=False) as (_, batches):
+    with stream_query("SELECT 1") as (_, batches):
         with pytest.raises(DuckDBInternalError) as first:
             list(batches)
         with pytest.raises(DuckDBInternalError) as again:
@@ -1556,9 +1546,12 @@ def test_a_request_over_the_limit_without_a_file_list_does_not_talk_about_files(
 def test_a_request_of_a_thousand_files_is_sent() -> None:
     """An ordinary many-file read still goes through the check."""
     urls = [f"https://store.example/data/{'x' * 200}-{i}.parquet" for i in range(1000)]
-    assert execute_query("SELECT len(getvariable('u')) AS n", {"u": urls}).to_pydict() == {
-        "n": [1000]
-    }
+    result = execute_query(
+        "SELECT len(getvariable('u')) AS n",
+        {"u": urls},
+        read_prefixes=("https://store.example/data/",),
+    )
+    assert result.to_pydict() == {"n": [1000]}
 
 
 def test_the_start_up_checks_timeout_names_the_check_not_the_query_time_limit(

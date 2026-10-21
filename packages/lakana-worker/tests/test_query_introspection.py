@@ -12,6 +12,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from worker_test_helpers import local_prefixes
 
 from lakana_core.errors import ValidationError
 from lakana_core.query_rewrite import TableSource, check_blacklist, rewrite_query
@@ -139,7 +140,7 @@ def test_the_reported_leak_no_longer_returns_the_filter_and_mask(
         check_blacklist(sql)
 
     safe = rewrite_query("SELECT ssn FROM bronze.customers", {"bronze.customers": customers})
-    result = execute_query(safe.sql, safe.parameters, restrict_local_filesystem=False)
+    result = execute_query(safe.sql, safe.parameters, read_prefixes=local_prefixes(safe.parameters))
     assert result.to_pylist() == [{"ssn": "***"}, {"ssn": "***"}]
 
 
@@ -201,7 +202,9 @@ def test_stats_would_report_values_the_row_filter_hides(
     """
     sql = f"SELECT stats({column}) AS s FROM bronze.customers LIMIT 1"
     rewritten = rewrite_query(sql, {"bronze.customers": hidden_rows})
-    raw = execute_query(rewritten.sql, rewritten.parameters, restrict_local_filesystem=False)
+    raw = execute_query(
+        rewritten.sql, rewritten.parameters, read_prefixes=local_prefixes(rewritten.parameters)
+    )
     leaked = str(raw.to_pylist())
     assert "Min: 1," in leaked or "HIDDENVA" in leaked
 

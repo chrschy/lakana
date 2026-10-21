@@ -1457,7 +1457,7 @@ def test_a_query_over_the_limit_is_stopped_while_the_worker_and_a_task_live_on()
         with pytest.raises(OutOfMemoryQuery) as caught:
             execute_query(
                 _cross_join_of_literals(),
-                restrict_local_filesystem=False,
+                spill=True,
                 limits=QueryLimitsConfig(memory_limit="300MB", threads=2),
             )
         assert str(caught.value) == memory.query_child_message(LIMIT)
