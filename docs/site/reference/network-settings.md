@@ -50,8 +50,10 @@ chose (`Query processes trust the certificate authorities in /path (SOURCE).`):
 Set the variables on the **worker only**. A variable that names a missing, unreadable or non-PEM
 file stops the worker at startup:
 `AWS_CA_BUNDLE names /x, which is not a readable file of PEM certificates. Point it at your object
-store's certificate authority, or unset it.` Give a file of certificates only, never one that also
-holds a private key: a query that got past Lakana's checks could read the file.
+store's certificate authority, or unset it.` A file that also holds a private key stops it too,
+because a query that got past Lakana's checks could read the file:
+`AWS_CA_BUNDLE names /x, which also holds a private key, and a query can read the bundle. Point
+AWS_CA_BUNDLE at a file of certificates only.` Give a file of certificates only.
 
 A query opens only the locations of the tables it reads (and its own temporary files and this
 file), never another address; see [What leaves the machine](../explanation/what-leaves-the-machine.md).

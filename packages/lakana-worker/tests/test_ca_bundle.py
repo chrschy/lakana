@@ -123,3 +123,49 @@ def test_a_refusal_is_not_remembered(monkeypatch: pytest.MonkeyPatch, tmp_path: 
         ca_bundle.query_ca_bundle()
     monkeypatch.setenv("AWS_CA_BUNDLE", str(_pem(tmp_path / "ca.pem")))
     assert ca_bundle.query_ca_bundle() == str(tmp_path / "ca.pem")
+
+
+_KEYS = [
+    "PRIVATE KEY",
+    "ENCRYPTED PRIVATE KEY",
+    "RSA PRIVATE KEY",
+    "EC PRIVATE KEY",
+    "DSA PRIVATE KEY",
+    "OPENSSH PRIVATE KEY",
+]
+
+
+@pytest.mark.parametrize("variable", ["AWS_CA_BUNDLE", "SSL_CERT_FILE"])
+@pytest.mark.parametrize("kind", _KEYS)
+def test_a_bundle_that_also_holds_a_private_key_is_refused(
+    tmp_path: Path, variable: str, kind: str
+) -> None:
+    """A query past the guard could read the bundle, so it must hold certificates only."""
+    path = tmp_path / "combined.pem"
+    path.write_bytes(_PEM + f"-----BEGIN {kind}-----\nMIIE\n-----END {kind}-----\n".encode())
+    with pytest.raises(CaBundleError) as caught:
+        resolve_ca_bundle({variable: str(path)}, (certifi.where(),))
+    assert str(caught.value) == (
+        f"{variable} names {path}, which also holds a private key, and a query can read "
+        f"the bundle. Point {variable} at a file of certificates only."
+    )
+    assert "MIIE" not in str(caught.value)
+
+
+def test_a_system_bundle_that_holds_a_private_key_is_refused(tmp_path: Path) -> None:
+    path = tmp_path / "system.pem"
+    path.write_bytes(_PEM + b"-----BEGIN PRIVATE KEY-----\nMIIE\n-----END PRIVATE KEY-----\n")
+    with pytest.raises(CaBundleError) as caught:
+        resolve_ca_bundle({}, (str(path),))
+    assert str(caught.value) == (
+        f"the system's bundle names {path}, which also holds a private key, and a query can "
+        "read the bundle. Point AWS_CA_BUNDLE at a file of certificates only."
+    )
+
+
+def test_a_key_split_across_the_read_window_is_still_found(tmp_path: Path) -> None:
+    """The whole file is searched, not a first piece of it."""
+    path = tmp_path / "long.pem"
+    path.write_bytes(_PEM * 300_000 + b"-----BEGIN PRIVATE KEY-----\nMIIE\n")
+    with pytest.raises(CaBundleError):
+        resolve_ca_bundle({"AWS_CA_BUNDLE": str(path)}, ())

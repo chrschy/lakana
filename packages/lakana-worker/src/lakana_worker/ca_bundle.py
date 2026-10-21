@@ -15,7 +15,8 @@ the path, never the content):
 4. `certifi.where()`: Mozilla's bundle, shipped with the worker.
 
 A variable that names a missing, unreadable or non-PEM file stops the worker at start-up
-(`CaBundleError`) instead of failing every HTTPS read later. No setting of Lakana's own exists
+(`CaBundleError`) instead of failing every HTTPS read later, and so does a bundle that also
+holds a private key (the query process may read its bundle). No setting of Lakana's own exists
 for this; see ``docs/site/reference/network-settings.md``.
 """
 
@@ -23,6 +24,7 @@ from __future__ import annotations
 
 import functools
 import os
+import re
 from collections.abc import Callable, Mapping, Sequence
 
 import certifi
@@ -41,8 +43,9 @@ SYSTEM_BUNDLES = (
 as its refusal to read one names them."""
 
 _PEM_MARK = b"-----BEGIN CERTIFICATE-----"
-_READ_LIMIT = 16 * 1024 * 1024
-"""Bytes of a bundle read to find a certificate (a bundle of every public CA is about 200 kB)."""
+_PRIVATE_KEY = re.compile(rb"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")
+"""The header of any PEM private key: PKCS#8 (``PRIVATE KEY``, ``ENCRYPTED PRIVATE KEY``) and
+the algorithm-specific forms (``RSA``, ``EC``, ``DSA``, ``OPENSSH`` ...)."""
 
 
 class CaBundleError(ValueError):
@@ -70,24 +73,51 @@ def _message(variable: str, path: str) -> str:
     )
 
 
-def _is_pem_file(path: str) -> bool:
-    """Tell whether a path is a readable file holding at least one PEM certificate.
+def _key_message(source: str, path: str) -> str:
+    """Word the refusal of a bundle that also holds a private key.
+
+    Parameters
+    ----------
+    source
+        The variable that named the file, or ``the system's bundle``.
+    path
+        The file.
+
+    Returns
+    -------
+    str
+        What the worker says before it stops. The key itself is never quoted.
+    """
+    variable = source if source in VARIABLES else VARIABLES[0]
+    return (
+        f"{source} names {path}, which also holds a private key, and a query can read the "
+        f"bundle. Point {variable} at a file of certificates only."
+    )
+
+
+def _scan(path: str) -> tuple[bool, bool]:
+    """Read a bundle line by line for certificates and private keys.
 
     Parameters
     ----------
     path
-        The path.
+        The file.
 
     Returns
     -------
-    bool
-        Whether the file can be read and holds ``-----BEGIN CERTIFICATE-----``.
+    tuple of (bool, bool)
+        Whether the file could be read and holds ``-----BEGIN CERTIFICATE-----``, and whether
+        it holds the header of a private key anywhere. An unreadable file gives two `False`.
     """
+    certificate = key = False
     try:
         with open(path, "rb") as bundle:
-            return _PEM_MARK in bundle.read(_READ_LIMIT)
+            for line in bundle:
+                certificate = certificate or _PEM_MARK in line
+                key = key or _PRIVATE_KEY.search(line) is not None
     except OSError:
-        return False
+        return False, False
+    return certificate, key
 
 
 def find_ca_bundle(
@@ -119,18 +149,25 @@ def find_ca_bundle(
     Raises
     ------
     CaBundleError
-        If a set variable names a missing, unreadable or non-PEM file. An empty variable counts
-        as not set.
+        If a set variable names a missing, unreadable or non-PEM file (an empty variable counts
+        as not set), or if the chosen bundle also holds a private key: the query process may
+        read its bundle, so a combined certificate-and-key file would hand the key to SQL that
+        got past the guard.
     """
     environment = os.environ if environ is None else environ
     for variable in VARIABLES:
         value = environment.get(variable, "")
         if value:
-            if not _is_pem_file(value):
+            certificate, key = _scan(value)
+            if not certificate:
                 raise CaBundleError(_message(variable, value))
+            if key:
+                raise CaBundleError(_key_message(variable, value))
             return os.path.abspath(value), variable
     for candidate in system_bundles:
         if os.path.isfile(candidate) and os.access(candidate, os.R_OK):
+            if _scan(candidate)[1]:
+                raise CaBundleError(_key_message("the system's bundle", candidate))
             return candidate, "the system's bundle"
     return os.path.abspath(fallback()), "certifi"
 

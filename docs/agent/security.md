@@ -2633,8 +2633,10 @@ own process opens no DuckDB connection and imports no `duckdb`.
   readable file of DuckDB 2.0's own system list, then `certifi.where()`. A variable naming a
   missing, unreadable or non-PEM file stops the worker at start-up with a message that names
   it. The bundle is the connection's `ca_cert_file` and its only `allowed_paths` entry, so SQL
-  past the guard could read it with `read_text` (public data, unless an operator points the
-  variable at a file that also holds a private key: do not). DuckDB's refusal to read it
+  past the guard could read it with `read_text`; that is public data, and the start-up check
+  keeps it so: a bundle holding any PEM private key (`-----BEGIN … PRIVATE KEY-----`: PKCS#8,
+  encrypted, RSA, EC, DSA, OpenSSH), from a variable or the system store, stops the worker with a
+  message naming the file and the variable, never the key. DuckDB's refusal to read it
   (`Cannot read a CA certificate bundle`) is classified `internal` with a message naming the
   bundle, both variables and the network-settings page; it should not occur once configured.
   **Both 1.5.5 and 2.0.0 verify the store's certificate already** (probed with the fixture:

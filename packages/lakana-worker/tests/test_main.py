@@ -443,6 +443,33 @@ def test_main_refuses_a_query_ca_bundle_that_is_not_a_pem_file(
     poll.assert_not_called()
 
 
+def test_main_refuses_a_query_ca_bundle_that_holds_a_private_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A combined certificate-and-key file stops the worker before any query child."""
+    bundle = tmp_path / "combined.pem"
+    bundle.write_bytes(
+        b"-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"
+        b"-----BEGIN EC PRIVATE KEY-----\nKEYDATA\n-----END EC PRIVATE KEY-----\n"
+    )
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{tmp_path}/lakana.db")
+    monkeypatch.setenv("AWS_CA_BUNDLE", str(bundle))
+    monkeypatch.setattr(
+        "lakana_worker.__main__.check_limits",
+        lambda *_a, **_k: pytest.fail("no query process may start with a key in the bundle"),
+    )
+    with (
+        mock.patch("lakana_worker.__main__.poll_forever") as poll,
+        mock.patch("lakana_worker.__main__.SchedulerLoop"),
+        mock.patch("lakana_worker.__main__.signal.signal"),
+        pytest.raises(SystemExit) as caught,
+    ):
+        main()
+    assert "AWS_CA_BUNDLE" in str(caught.value) and str(bundle) in str(caught.value)
+    assert "private key" in str(caught.value) and "KEYDATA" not in str(caught.value)
+    poll.assert_not_called()
+
+
 def test_main_logs_the_query_ca_bundle_it_resolved(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
