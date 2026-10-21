@@ -349,6 +349,7 @@ def resolve_ci_scope(
         kinds=frozenset(token.kinds) & frozenset(rule.kinds),
         sha=token.sha,
         used=token.used_at is not None,
+        expires_at=token.expires_at,
     )
 
 

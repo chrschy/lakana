@@ -11,7 +11,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 
 from lakana_core.auth import PrincipalRef
-from lakana_server.api.platform.schemas import TaskTokenScopeOut, WhoamiOut
+from lakana_server.api.platform.schemas import CiTokenScopeOut, TaskTokenScopeOut, WhoamiOut
 from lakana_server.api.routing import AuthenticateFirstRoute
 from lakana_server.deps import get_principal
 
@@ -30,14 +30,26 @@ def whoami(principal: PrincipalRef = Depends(get_principal)) -> WhoamiOut:
     Returns
     -------
     WhoamiOut
-        The caller's name and type, plus its task-token scope if it
-        authenticated with a task token.
+        The caller's name and type, plus its task-token scope or its CI token's scope if it
+        authenticated with one of those.
     """
     scope = principal.task_scope
+    ci = principal.ci_scope
     return WhoamiOut(
         name=principal.name,
         type=principal.type.value,
         task_token=None
         if scope is None
         else TaskTokenScopeOut(environment=scope.environment, asset_scope=list(scope.asset_scope)),
+        ci_token=None
+        if ci is None
+        else CiTokenScopeOut(
+            rule_id=ci.rule_id,
+            environment=ci.environment,
+            repository=ci.repository,
+            kinds=sorted(ci.kinds),
+            sha=ci.sha,
+            expires_at=ci.expires_at,
+            used=ci.used,
+        ),
     )

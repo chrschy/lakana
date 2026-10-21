@@ -173,6 +173,37 @@ class TaskTokenScope:
 
 
 @dataclass(frozen=True)
+class CiTokenScope:
+    """What a CI token (``lakana_ci_…``) caller may do; never the token itself.
+
+    Parameters
+    ----------
+    rule_id
+        The CI trust rule that accepted the job's ID token.
+    environment
+        The one environment it may deploy to.
+    repository
+        The one repository it may deploy.
+    kinds
+        What it may queue, once: ``deploy`` and/or ``dry_run``.
+    sha
+        The commit a deploy is pinned to, or `None`.
+    expires_at
+        When the token stops working.
+    used
+        Whether it has already queued its one deploy or dry run.
+    """
+
+    rule_id: str
+    environment: str
+    repository: str
+    kinds: list[str]
+    sha: str | None
+    expires_at: datetime | None
+    used: bool
+
+
+@dataclass(frozen=True)
 class Whoami:
     """Who the configured credential authenticates as.
 
@@ -184,11 +215,14 @@ class Whoami:
         `"USER"` or `"SERVICE_ACCOUNT"`.
     task_token
         The scope, when the credential is a task token; `None` for a PAT.
+    ci_token
+        The scope, when the credential is a CI token; `None` otherwise.
     """
 
     name: str
     type: str
     task_token: TaskTokenScope | None
+    ci_token: CiTokenScope | None = None
 
 
 @dataclass(frozen=True)

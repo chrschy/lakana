@@ -1794,6 +1794,36 @@ class TaskTokenScopeOut(BaseModel):
     asset_scope: list[str]
 
 
+class CiTokenScopeOut(BaseModel):
+    """What a CI token caller may do; never the token itself.
+
+    Parameters
+    ----------
+    rule_id
+        The CI trust rule the token was issued under.
+    environment
+        The one environment it may deploy to.
+    repository
+        The one repository it may deploy.
+    kinds
+        What it may queue, once: ``deploy`` and/or ``dry_run``, sorted.
+    sha
+        The commit a deploy is pinned to, or `None`.
+    expires_at
+        When the token stops working.
+    used
+        Whether it has already queued its one deploy or dry run.
+    """
+
+    rule_id: uuid.UUID
+    environment: str
+    repository: str
+    kinds: list[str]
+    sha: str | None
+    expires_at: datetime | None
+    used: bool
+
+
 class WhoamiOut(BaseModel):
     """Response body for `GET /api/v1/whoami`.
 
@@ -1806,11 +1836,14 @@ class WhoamiOut(BaseModel):
     task_token
         The task token's scope when the caller authenticated with one;
         `None` for a PAT.
+    ci_token
+        The CI token's scope when the caller authenticated with one; `None` otherwise.
     """
 
     name: str
     type: Literal["USER", "SERVICE_ACCOUNT"]
     task_token: TaskTokenScopeOut | None
+    ci_token: CiTokenScopeOut | None = None
 
 
 class EnvironmentStorageUpdate(BaseModel):

@@ -80,7 +80,15 @@ def invoke_cli() -> Callable[..., Result]:
 
     def run(state: CliState, *args: str, input: str | None = None) -> Result:
         env = {
-            name: None for name in ("LAKANA_OUTPUT", "LAKANA_PROFILE", "LAKANA_TOKEN", "LAKANA_URL")
+            name: None
+            for name in (
+                "LAKANA_OUTPUT",
+                "LAKANA_PROFILE",
+                "LAKANA_TOKEN",
+                "LAKANA_URL",
+                "LAKANA_OIDC",
+                "LAKANA_OIDC_TOKEN",
+            )
         }
         env["COLUMNS"] = "200"
         env.update({"FORCE_COLOR": None, "PY_COLORS": None, "NO_COLOR": "1"})

@@ -1,0 +1,10 @@
+{
+  "iss": "https://gitlab.com",
+  "project_id": "123456",
+  "ref": "main",
+  "ref_type": "branch",
+  "ref_protected": "true",
+  "pipeline_source": "push",
+  "environment": "prod",
+  "sha": "0123456789abcdef0123456789abcdef01234567"
+}

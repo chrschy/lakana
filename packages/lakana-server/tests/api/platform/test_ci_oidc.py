@@ -533,3 +533,28 @@ def test_a_success_with_a_ci_token_is_recorded_once_per_window(
         if row.detail.get("key_id") == key_id
     ]
     assert len(rows) == 1
+
+
+def test_whoami_shows_a_ci_tokens_scope_and_whether_it_was_used(ci_client: TestClient) -> None:
+    rule_id = _setup(ci_client)
+    issued = _exchange(ci_client).json()
+    header = _bearer(issued["token"])
+    before = ci_client.get("/api/v1/whoami", headers=header).json()
+    assert before["task_token"] is None
+    assert before["ci_token"] == {
+        "rule_id": rule_id,
+        "environment": "prod",
+        "repository": "analytics",
+        "kinds": ["deploy", "dry_run"],
+        "sha": SHA,
+        "expires_at": before["ci_token"]["expires_at"],
+        "used": False,
+    }
+    expires = datetime.fromisoformat(before["ci_token"]["expires_at"])
+    assert expires == datetime.fromisoformat(issued["expires_at"])
+    assert issued["token"] not in json.dumps(before)
+    accepted = ci_client.post(
+        "/api/v1/environments/prod/deploys", headers=header, json={"repository": "analytics"}
+    )
+    assert accepted.status_code == 202, accepted.text
+    assert ci_client.get("/api/v1/whoami", headers=header).json()["ci_token"]["used"] is True

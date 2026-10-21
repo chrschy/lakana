@@ -10,6 +10,7 @@ from __future__ import annotations
 import enum
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING, Protocol
 
 from lakana_core.identifiers import NamespacePath
@@ -127,6 +128,8 @@ class CiScope:
         `None` when the ID token carried none (then only a dry run is possible).
     used
         Whether the token has already submitted its one run.
+    expires_at
+        When the token stops working; `None` only where a scope is built without a token row.
     """
 
     token_id: uuid.UUID
@@ -138,6 +141,7 @@ class CiScope:
     kinds: frozenset[str]
     sha: str | None
     used: bool = False
+    expires_at: datetime | None = None
 
 
 @dataclass(frozen=True)

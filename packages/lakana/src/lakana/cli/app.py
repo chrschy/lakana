@@ -45,7 +45,7 @@ from lakana.cli import (
     tables,
     tokens,
 )
-from lakana.cli._state import CliError, CliState, state_of
+from lakana.cli._state import CliError, CliState, ci_oidc_in_use, state_of
 from lakana.errors import (
     AuthenticationError,
     ConfigError,
@@ -115,6 +115,11 @@ def _hint(exc: LakanaError) -> str | None:
     str or None
         The hint.
     """
+    if isinstance(exc, (AuthenticationError, PermissionDenied)) and ci_oidc_in_use():
+        return (
+            "an administrator can run 'lakana ci-trust explain' with the job's claims to see "
+            "which rule matches; see https://lakana-labs.github.io/lakana/reference/ci-trust-rules/"
+        )
     if isinstance(exc, AuthenticationError):
         return "run 'lakana login'"
     if isinstance(exc, ConfigError) and str(exc).startswith("No credentials"):
