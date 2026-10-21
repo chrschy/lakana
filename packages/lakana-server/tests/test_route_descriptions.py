@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from lakana_server.api.responses import ERROR_MEANING, ErrorOut, errors
 from lakana_server.api.routing import (
     AuthenticateFirstRoute,
+    describe_openapi,
     parameter_docs,
     split_public_text,
 )
@@ -71,6 +72,7 @@ def _app_with(router: APIRouter) -> dict:
     """
     app = FastAPI()
     app.include_router(router)
+    describe_openapi(app, [router])
     return app.openapi()
 
 
@@ -214,6 +216,7 @@ def test_describing_a_parameter_keeps_the_constraints_declared_in_annotated() ->
 
     app = FastAPI()
     app.include_router(router)
+    describe_openapi(app, [router])
     client = TestClient(app)
     assert client.get("/x/abcde").status_code == 200
     assert client.get("/x/abcdef").status_code == 422
@@ -239,70 +242,6 @@ def _platform_endpoints() -> list:
     return [r.endpoint for router in ROUTERS for r in router.routes if isinstance(r, APIRoute)]
 
 
-def _parameters_of(document: dict) -> dict:
-    """Collect every parameter of a document without its description.
-
-    Parameters
-    ----------
-    document
-        An OpenAPI document.
-
-    Returns
-    -------
-    dict
-        The parameters by method, path and name, each without ``description``.
-    """
-
-    def bare(value: object) -> object:
-        """Drop every ``description`` key, however deep.
-
-        Parameters
-        ----------
-        value
-            A JSON value.
-
-        Returns
-        -------
-        object
-            The value without descriptions.
-        """
-        if isinstance(value, dict):
-            return {k: bare(v) for k, v in value.items() if k != "description"}
-        if isinstance(value, list):
-            return [bare(v) for v in value]
-        return value
-
-    return {
-        (method, path, p["in"], p["name"]): bare(p)
-        for path, item in document["paths"].items()
-        for method, operation in item.items()
-        for p in operation.get("parameters", [])
-    }
-
-
-def test_describing_parameters_changes_nothing_but_their_descriptions() -> None:
-    """Every parameter schema of the platform API is the same with and without the texts."""
-    from lakana_server.app import ROUTERS
-
-    def document() -> dict:
-        app = FastAPI()
-        for router in ROUTERS:
-            app.include_router(router)
-        return app.openapi()
-
-    with_texts = document()
-    endpoints = _platform_endpoints()
-    saved = {id(e): e.__dict__.pop("__signature__", None) for e in endpoints}
-    try:
-        without = document()
-    finally:
-        for endpoint in endpoints:
-            if saved[id(endpoint)] is not None:
-                endpoint.__signature__ = saved[id(endpoint)]
-    assert _parameters_of(with_texts) == _parameters_of(without)
-    assert any(saved.values())
-
-
 def test_every_platform_function_with_a_dependency_is_a_route() -> None:
     """A route function that lost its decorator would silently leave the API."""
     import lakana_server.api.platform as package
@@ -322,3 +261,44 @@ def test_every_platform_function_with_a_dependency_is_a_route() -> None:
             if depends and function not in routes:
                 orphans.append(f"{info.name}.{name}")
     assert orphans == []
+
+
+def test_every_route_resolves_its_dependencies() -> None:
+    """FastAPI analyses a route's parameters lazily; a mistake in one must fail here, not live."""
+    from fastapi.dependencies.utils import get_dependant
+
+    from lakana_server.app import ROUTERS
+
+    for router in ROUTERS:
+        for route in router.routes:
+            if isinstance(route, APIRoute):
+                assert get_dependant(path=route.path, call=route.endpoint) is not None
+
+
+def test_a_request_with_a_default_parameter_is_served() -> None:
+    """A described query parameter keeps its default and its type, on any FastAPI."""
+    router = APIRouter(route_class=AuthenticateFirstRoute)
+
+    @router.get("/x")
+    def route(deleted: bool = False) -> bool:
+        """Show the thing.
+
+        Parameters
+        ----------
+        deleted
+            Whether to show the deleted ones.
+
+        Returns
+        -------
+        bool
+            The flag.
+        """
+        return deleted
+
+    app = FastAPI()
+    app.include_router(router)
+    describe_openapi(app, [router])
+    client = TestClient(app)
+    assert client.get("/x").json() is False
+    assert client.get("/x?deleted=true").json() is True
+    assert app.openapi() is app.openapi()

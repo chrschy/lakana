@@ -2,18 +2,14 @@
 
 from __future__ import annotations
 
-import copy
 import inspect
-import operator
 import re
-from collections.abc import Callable, Coroutine
-from typing import Annotated, Any
+from collections.abc import Callable, Coroutine, Iterable
+from typing import Any
 
-from fastapi import Request, Response
+from fastapi import APIRouter, FastAPI, Request, Response
 from fastapi.dependencies.models import Dependant
 from fastapi.routing import APIRoute
-from pydantic.fields import FieldInfo
-from pydantic_core import PydanticUndefined
 from starlette.concurrency import run_in_threadpool
 
 from lakana_server.deps import authenticate_before_body, get_principal
@@ -107,46 +103,48 @@ def parameter_docs(doc: str | None) -> dict[str, str]:
     return found
 
 
-def describe_parameters(
-    endpoint: Callable[..., Any], dependant: Dependant, docs: dict[str, str]
-) -> None:
-    """Give the path and query parameters of a function the text its docstring documents.
+def describe_openapi(app: FastAPI, routers: Iterable[APIRouter]) -> None:
+    """Add the documented text of every path and query parameter to an app's OpenAPI document.
 
-    FastAPI builds a route's parameters again from the function's signature when the router is
-    included, so the text is written into the signature (``__signature__``) rather than into
-    the route's own parameter objects.
+    The text is written into the finished document, not into the functions' signatures,
+    because FastAPI builds a route's parameters from the signature in ways that change between
+    versions. A description set in the code (``Query(description=...)``) is kept.
 
     Parameters
     ----------
-    endpoint
-        The route's function; its ``__signature__`` is replaced.
-    dependant
-        The route's dependency tree, which says which parameters are path and query parameters.
-    docs
-        The documented text of each parameter, by name (`parameter_docs`).
+    app
+        The application whose ``openapi`` method is wrapped.
+    routers
+        The routers whose routes the document describes; their functions' ``Parameters``
+        sections (`parameter_docs`) are the source.
     """
-    signature = inspect.signature(endpoint)
-    changed: dict[str, inspect.Parameter] = {}
-    for field in (*dependant.path_params, *dependant.query_params):
-        param = signature.parameters[field.name]
-        info = field.field_info
-        if info.description is not None or field.name not in docs:
-            continue
-        if isinstance(param.default, FieldInfo):
-            described = copy.copy(param.default)
-            described.description = docs[field.name]
-            changed[field.name] = param.replace(default=described)
-        else:
-            # The field's own FieldInfo, so every constraint declared in `Annotated` stays.
-            described = copy.copy(info)
-            described.description = docs[field.name]
-            described.default = PydanticUndefined
-            annotated = operator.getitem(Annotated, (info.annotation, described))
-            changed[field.name] = param.replace(annotation=annotated)
-    if changed:
-        endpoint.__signature__ = signature.replace(  # ty: ignore[unresolved-attribute]
-            parameters=[changed.get(name, param) for name, param in signature.parameters.items()]
-        )
+    docs = {
+        (route.path, method.lower()): parameter_docs(inspect.getdoc(route.endpoint))
+        for router in routers
+        for route in router.routes
+        if isinstance(route, APIRoute)
+        for method in route.methods or ()
+    }
+    original = app.openapi
+
+    def openapi() -> dict[str, Any]:
+        """Build the document, then describe the parameters that have no text yet.
+
+        Returns
+        -------
+        dict
+            The OpenAPI document.
+        """
+        document = original()
+        for path, item in document["paths"].items():
+            for method, operation in item.items():
+                texts = docs.get((path, method), {})
+                for parameter in operation.get("parameters", []):
+                    if not parameter.get("description") and parameter["name"] in texts:
+                        parameter["description"] = texts[parameter["name"]]
+        return document
+
+    app.openapi = openapi  # ty: ignore[invalid-assignment]
 
 
 class AuthenticateFirstRoute(APIRoute):
@@ -158,9 +156,9 @@ class AuthenticateFirstRoute(APIRoute):
     unchanged.
 
     The route's summary and description in the OpenAPI document come from the public part of
-    its docstring (`split_public_text`) unless the decorator sets them, and the description of
-    each path and query parameter from the docstring's ``Parameters`` section
-    (`parameter_docs`), so the docstring stays the one place a route is described.
+    its docstring (`split_public_text`) unless the decorator sets them; the description of each
+    path and query parameter comes from the docstring's ``Parameters`` section
+    (`describe_openapi`), so the docstring stays the one place a route is described.
     """
 
     # APIRoute's own keyword arguments, passed on whole, so there is no narrower type.
@@ -183,7 +181,6 @@ class AuthenticateFirstRoute(APIRoute):
             # Never None or empty: FastAPI would fall back to the whole docstring.
             kwargs["description"] = description or (f"{summary}." if summary else None)
         super().__init__(path, endpoint, **kwargs)
-        describe_parameters(endpoint, self.dependant, parameter_docs(inspect.getdoc(endpoint)))
 
     def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
         """Wrap the handler of a route with a body model in an authentication step.
