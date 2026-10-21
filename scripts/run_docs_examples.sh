@@ -16,12 +16,24 @@
 # LAKANA_DOCS_EXAMPLE_BUDGET (default 120) is the number of seconds one example may take. An
 # example that needs longer (it waits for a schedule, or builds a Python environment) says so in
 # a file `budget` next to its run.sh, one number of seconds; the longer of the two applies.
+# LAKANA_DOCS_CAPTURE, when set to a directory, makes the runner write what each region of an
+# example (the lines between `# docs:start NAME` and `# docs:end NAME` of its run.sh) printed, to
+# $LAKANA_DOCS_CAPTURE/EXAMPLE/NAME.txt, stdout and stderr together as the page shows them; the
+# output also still reaches the log. `scripts/docs_blocks.py --captured DIR` compares the
+# `<!-- output: EXAMPLE#NAME -->` blocks of the pages with those files, and `--fix` copies them in.
+# A region that runs twice keeps its last run. There is no default directory: unset, nothing is
+# captured.
 # The instance is stopped and the directories removed on success, failure, timeout or ^C.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 examples_dir="$root/docs/examples"
 default_budget=${LAKANA_DOCS_EXAMPLE_BUDGET:-120}
+capture_root=${LAKANA_DOCS_CAPTURE:-}
+if [ -n "$capture_root" ]; then
+  mkdir -p "$capture_root"
+  capture_root=$(cd "$capture_root" && pwd)
+fi
 
 names=("$@")
 if [ ${#names[@]} -eq 0 ]; then
@@ -43,13 +55,32 @@ if ! command -v lakana >/dev/null 2>&1; then
 fi
 
 summary=$(mktemp)
-# Sourced by the bash that runs an example's run.sh (and only by that one): when a command fails,
-# print which line it was, so a silent check (`test -f ...`) names itself.
+# Sourced by the bash that runs an example's run.sh (and only by that one, DOCS_RUN_SCRIPT): when a
+# command fails, print which line it was, so a silent check (`test -f ...`) names itself. It also
+# defines what the markers of a region become when the output is captured (see run_one): the
+# region's output goes to its file, and back to where it was going (a file an example captures
+# into itself, or the log) when the region ends.
 tracer=$(mktemp)
 cat > "$tracer" <<'TRACER'
-if [ "$0" = "${EXAMPLE_DIR:-}/run.sh" ]; then
+if [ "$0" = "${DOCS_RUN_SCRIPT:-}" ]; then
   set -E
   trap 'echo "run.sh line ${LINENO}: ${BASH_COMMAND}" >&2' ERR
+  # Both leave $? as they found it, so `status=$?` right after a region reads the status of the
+  # region's last command; `return` runs no ERR trap of its own beyond the one that status caused.
+  __docs_begin() {
+    local saved=$?
+    echo "$1" > "$DOCS_CAPTURE_DIR/.open"
+    __docs_file="$DOCS_CAPTURE_DIR/$1.txt"
+    exec {__docs_out}>&1 {__docs_err}>&2 >"$__docs_file" 2>&1
+    return "$saved"
+  }
+  __docs_end() {
+    local saved=$?
+    exec >&"$__docs_out" 2>&"$__docs_err" {__docs_out}>&- {__docs_err}>&-
+    rm -f "$DOCS_CAPTURE_DIR/.open"
+    cat "$__docs_file"
+    return "$saved"
+  }
 fi
 TRACER
 base=""
@@ -170,6 +201,19 @@ run_one() {
   # Git's own defaults, as a newcomer has them; stable English output.
   export LC_ALL=C
   export EXAMPLE_DIR="$examples_dir/$name" WORK="$base/home/work"
+  export DOCS_RUN_SCRIPT="$EXAMPLE_DIR/run.sh"
+  unset DOCS_CAPTURE_DIR
+  if [ -n "$capture_root" ]; then
+    # A copy of run.sh whose region markers call the functions of the tracer. One line for one
+    # line, so the line numbers of a failure stay those of the original.
+    rm -rf "${capture_root:?}/$name"
+    mkdir -p "$capture_root/$name"
+    export DOCS_CAPTURE_DIR="$capture_root/$name" DOCS_RUN_SCRIPT="$base/run.sh"
+    sed -E \
+      -e 's/^([[:space:]]*)#[[:space:]]*docs:start[[:space:]]+([A-Za-z0-9_-]+)[[:space:]]*$/\1__docs_begin \2/' \
+      -e 's/^([[:space:]]*)#[[:space:]]*docs:end[[:space:]]+([A-Za-z0-9_-]+)[[:space:]]*$/\1__docs_end \2/' \
+      "$EXAMPLE_DIR/run.sh" > "$DOCS_RUN_SCRIPT"
+  fi
   port=$(free_port)
   # Its own process group, so a hard stop reaches the server and worker too.
   read -ra words <<< "$(start_command "$examples_dir/$name")"
@@ -187,7 +231,7 @@ run_one() {
   else
     echo "== example '$name' (instance on port $port, budget ${budget} s)"
     # In the background, so ^C reaches the trap at once; its own session, so one signal stops all of it.
-    BASH_ENV="$tracer" setsid --wait timeout -k 5 "$budget" bash "$EXAMPLE_DIR/run.sh" &
+    BASH_ENV="$tracer" setsid --wait timeout -k 5 "$budget" bash "$DOCS_RUN_SCRIPT" &
     epid=$!
     wait "$epid" || status=$?
     epid=""
@@ -196,6 +240,14 @@ run_one() {
     elif [ "$status" -ne 0 ]; then
       echo "example '$name' failed with exit code $status. The line 'run.sh line N: ...' above names the command that failed; open docs/examples/$name/run.sh at that line and fix the command or its check." >&2
     fi
+    # The output of a region that was open when the example stopped sat in its file, not the log.
+    if [ "$status" -ne 0 ] && [ -n "$capture_root" ] && [ -f "$capture_root/$name/.open" ]; then
+      open_region=$(cat "$capture_root/$name/.open")
+      echo "--- the output of region \`$open_region\`, which was open when the example stopped:" >&2
+      cat "$capture_root/$name/$open_region.txt" >&2 || true
+      echo "--- end of the region's output" >&2
+    fi
+    rm -f "${capture_root:-/nonexistent}/$name/.open"
   fi
   if [ "$status" -ne 0 ]; then
     echo "--- the instance's log:" >&2

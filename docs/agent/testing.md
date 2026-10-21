@@ -320,7 +320,8 @@ the strict build fails on a broken link or anchor.
 - **No command in running text.** A command the reader is meant to type goes in a block, so it
   is checked. Inline code is for names (a file, an option, a table).
 - **Output blocks show real output.** Run the command and paste what it printed. Do not
-  write what you expect.
+  write what you expect. Better, tie the block to the region that prints it
+  (`<!-- output: EXAMPLE#REGION -->`, below): CI then compares the two on every change.
 - **No milestone names.** A reader does not know `M5c1` or `M7b`; say what the work is or "in a
   later release". Only `explanation/scope.md` and `explanation/roadmap.md`, which define the
   milestones, may use them; `scripts/tests/test_docs_site.py` fails on any other page.
@@ -335,6 +336,13 @@ the strict build fails on a broken link or anchor.
   that loads from another host, on a CSS `url()` or `@import` that does, and on a local `src`
   or `href` of those elements whose file is not in the build (a missing image builds clean).
   Plain `<a href>` links to other sites are fine.
+- **The count of unchecked output blocks only goes down.** An output block is *unchecked* when it
+  is plain `<!-- output -->`: no example prints it, so nothing notices when the CLI's output
+  changes. The checker prints the number it compares and the number it does not;
+  `UNCHECKED_OUTPUT_CEILING` in `scripts/tests/test_docs_site.py` fails the tests when it rises,
+  and when it falls without the ceiling (lower it in the same change). Tie every new block that
+  an example can print.
+
 - **The count of not-tested blocks only goes down.** The checker prints it, and `NOT_TESTED_CEILING` in
   `scripts/tests/test_docs_site.py` fails the tests when it rises; every block marked
   "not tested" is a defect waiting to rot. Add one only with a real reason. It rose once, from 36 to
@@ -344,6 +352,65 @@ the strict build fails on a broken link or anchor.
   `private-package-index.md` need a package index that asks for a password or the id of a
   deployed project version, which the docs-examples job cannot reach without a new service; the integration tests of the
   "Private package indexes" paragraph below are the proof. The upgrade note of the next release rose it from 48 to 52 (two blocks with placeholders for names and ids, and the recovery `SELECT` and `UPDATE` of "Delegation needs the ADMIN role" in `upgrades.md`, which read and change a real database); its other commands run in `getting-started/run.sh`. "Why is my query or task waiting?" (M5c3b) rose it from 53 to 54 for `lakana query status QUERY_ID`, which needs the id of a query that is still queued; the tests of the wait line in `test_queries.py` assert the line the page shows. The upgrade note "A secret is bound to one use" rose it from 52 to 53 (placeholders for names; the commands run in `bind-a-secret/run.sh`). "Verify a download" in `deploy-with-compose.md` rose it from 53 to 54 (#130): its `pip download` and `gh attestation verify` need the network, the GitHub CLI and a published, attested release, which the example harness cannot provide. Sorting the pages (#55) lowered it from 55 to 48 by testing seven blocks (the new example `projects`, `uv lock` from `train-and-predict`, and the `*lakana-env` block, which now shows its anchor and is parsed) and giving the other 21 "moved as is" blocks a real reason; the reason `moved as is` is refused by `scripts/tests/test_docs_site.py`. The operator's guide (#57) rose it from 48 to 51 (the single backup procedure of `deploy-with-compose.md` replaced two blocks, so 50): the three blocks of its recipe "One instance per client" (two Compose stacks on one host, `docker compose ls`, the upgrade of one) need Docker and two complete stacks, which the example harness cannot provide. The health page (#45) rose it from 50 to 53 with three blocks that ask Docker about a running stack (`docker compose ps --all`, the disk use, the log filter that removes secrets); the health route, the queue listings and the version run in `getting-started/run.sh`. The restore (#200) lowered it to 52: the backup block is synced from `docs/examples/compose-restore.sh`, which `compose-smoke` runs. Lowering the ceiling when blocks become tested is still the expected direction.
+
+
+### Output blocks tied to an example
+
+A block that shows what a command printed names the region of `docs/examples/EXAMPLE/run.sh`
+that prints it, instead of plain `<!-- output -->`:
+
+````markdown
+<!-- source: docs/examples/getting-started/run.sh#query -->
+```bash
+lakana sql "SELECT * FROM gold.station_ranking ORDER BY warmth_rank"
+```
+
+<!-- output: getting-started#query -->
+```text
+...what the command printed...
+```
+````
+
+- **The region must print exactly the block.** Everything between `# docs:start NAME` and
+  `# docs:end NAME`, standard output and standard error together, is the output. A block that
+  shows only part of it, or output of a case the region does not run, stays plain
+  `<!-- output -->` (and is counted as unchecked). Trailing spaces and blank lines at the end
+  do not count; every other character does.
+- **The runner captures.** With `LAKANA_DOCS_CAPTURE=DIR`, `scripts/run_docs_examples.sh` writes
+  `DIR/EXAMPLE/NAME.txt` for each region it runs (a region that runs twice keeps its last run) and
+  still shows the output in the log. Unset, nothing is captured; there is no default directory.
+  The example's own `capture_start`/`capture_end` redirects nest inside and are unaffected.
+- **The checker compares.** `scripts/docs_blocks.py --captured DIR` (or the same variable)
+  compares each tied block with its file after both are masked (below); a mismatch names the
+  page and line and prints a diff of the masked texts. Without a capture it checks only that the
+  region exists in `run.sh` and says that the comparison was skipped. CI's `docs-examples` job
+  runs the examples with the variable set, compares after them, and uploads the captures as the
+  artifact `docs-captures` even when a step failed.
+- **`--fix` refreshes.** `uv run python scripts/docs_blocks.py --fix --captured DIR` rewrites only
+  the tied blocks that differ, and only the lines that differ after masking: a line that equals
+  the run's after masking keeps the page's text (a page may show its own identifier). Run it
+  on the unzipped `docs-captures` artifact of a red CI run, read the diff, and commit. It also
+  copies *every* differing line, so a block that deliberately shows less than the region prints
+  must be untied (plain marker) rather than fixed.
+- **Masks.** The parts that differ per run are replaced on both sides before comparing, in this
+  order. `MASKS` in `scripts/docs_blocks.py` is the one list; each row has a test in
+  `scripts/tests/test_docs_output.py`, and a test fails if a rule is missing from this table.
+
+| Name | Hides | Becomes |
+|---|---|---|
+| `uuid` | run, deploy and query identifiers | `<uuid>` |
+| `timestamp` | ISO 8601 date and time, with or without zone | `<timestamp>` |
+| `hash` | 40 to 64 hexadecimal digits: commits, SHA-256 digests | `<hash>` |
+| `token` | `lakana_pat_`, `lakana_ci_` and `lakana_task_` tokens | `lakana_pat_<key id>_<secret>` |
+| `port` | the port after `localhost`, `127.0.0.1`, `0.0.0.0`, `[::1]` | `host:<port>` |
+| `path` | absolute paths under `/tmp`, `/var/tmp`, `/var/folders`, `/home`, `/Users`, `/root`, `/run/user` | `<path>` |
+| `version` | `1.2.3`, with `.dev4`, `rc1`, `+g1a2b3c` | `<version>` |
+| `duration` | a number with `ms`, `s`, `sec`, `seconds`, `min`, `minutes` | `<duration>` |
+| `size` | a number with `KiB`, `MiB`, `GiB`, `KB`, `MB`, `GB` | `<size>` |
+
+A mask hides a change too, so add one only for a value that really differs per run, and
+prefer a narrow pattern. Table width depends on the terminal: an example that quotes tables
+sets `COLUMNS` as the page shows them (`export COLUMNS=120`).
 
 ### Text that leaves the repository
 

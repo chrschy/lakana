@@ -60,7 +60,7 @@ monitoring system or Docker can ask them. `$URL` is the public address of the in
 curl -s "$URL/healthz"
 ```
 
-<!-- output -->
+<!-- output: getting-started#healthz -->
 ```text
 {"status":"ok"}
 ```
@@ -77,7 +77,7 @@ from.
 curl -s "$URL/readyz"
 ```
 
-<!-- output -->
+<!-- output: getting-started#readyz -->
 ```text
 {"status":"ready"}
 ```

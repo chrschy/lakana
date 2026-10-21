@@ -84,7 +84,7 @@ lakana --version
 
 The versions, and the port in the second line, differ on your machine:
 
-<!-- output -->
+<!-- output: getting-started#version -->
 ```text
 lakana 0.8.1.dev6+g6af3c5d2a
 instance http://127.0.0.1:8765: 0.8.1.dev6+g6af3c5d2a
@@ -351,7 +351,7 @@ lakana sql "SELECT * FROM gold.station_ranking ORDER BY warmth_rank"
 
 You will see this result:
 
-<!-- output -->
+<!-- output: getting-started#query -->
 ```text
 ┏━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━━┓
 ┃ station_id ┃ avg_temp_c ┃ warmth_rank ┃
