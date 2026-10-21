@@ -27,6 +27,7 @@ nav:
       - tutorials/index.md
       - tutorials/getting-started.md
       - tutorials/train-a-model.md
+      - tutorials/move-a-sql-project.md
   - How-to guides:
       - how-to/index.md
       - how-to/projects.md
@@ -84,6 +85,7 @@ nav:
       - explanation/index.md
       - explanation/scope.md
       - explanation/where-lakana-fits.md
+      - explanation/moving-sql-transformations.md
       - explanation/roadmap.md
       - explanation/support.md
       - explanation/upgrades.md

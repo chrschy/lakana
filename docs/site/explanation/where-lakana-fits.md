@@ -39,7 +39,8 @@ does. What it adds is the part that keeps several people, and production, safe:
 
 - **No templating and no packages for SQL.** A SQL file holds exactly one query, and it names
   other tables by their names ([Project layout](../reference/project-layout.md)). There are no
-  macros and no shared packages of SQL.
+  macros and no shared packages of SQL; what to do instead is in
+  [Moving SQL transformations to Lakana](moving-sql-transformations.md).
 - **Simple orchestration.** A job starts by hand, through the API, or on a cron schedule. A job
   started by another job or by an event, and building a table by merging changed rows, come after
   v1.0.0 ([Roadmap](roadmap.md#after-v100)).
