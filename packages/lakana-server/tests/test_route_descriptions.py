@@ -136,6 +136,12 @@ def test_parameter_docs_read_the_parameters_section() -> None:
     assert parameter_docs("Do it.") == {}
 
 
+def test_an_indented_line_before_any_parameter_name_is_ignored() -> None:
+    """A continuation line with no parameter above it belongs to none."""
+    doc = "Do it.\n\nParameters\n----------\n    stray text\nenv\n    Environment name.\n"
+    assert parameter_docs(doc) == {"env": "Environment name."}
+
+
 def test_a_request_parameter_takes_its_description_from_the_docstring() -> None:
     """Path and query parameters show the text of the ``Parameters`` section; a set one wins."""
     router = APIRouter(route_class=AuthenticateFirstRoute)
