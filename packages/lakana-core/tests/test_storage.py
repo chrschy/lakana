@@ -21,6 +21,7 @@ from lakana_core.storage.fsspec_storage import (
     _modified_at,
     _RemoteStreamWriter,
     _translate_s3_options,
+    url_prefix_from_signed,
 )
 
 
@@ -376,6 +377,87 @@ def test_resolve_read_url_returns_the_local_path_unsigned(tmp_path: Path) -> Non
     url = storage.resolve_read_url("a/b.parquet", ttl_seconds=60)
 
     assert url == f"{tmp_path}/a/b.parquet"
+
+
+def test_a_local_read_prefix_is_the_absolute_directory_with_a_slash(tmp_path: Path) -> None:
+    """Every local path `resolve_read_url` returns below the directory starts with the prefix."""
+    storage = FsspecStorage(f"file://{tmp_path}", {})
+
+    prefix = storage.read_url_prefix("managed/ns/t-1")
+
+    assert prefix == f"{tmp_path}/managed/ns/t-1/"
+    assert storage.resolve_read_url("managed/ns/t-1/data/a.parquet", ttl_seconds=60).startswith(
+        prefix
+    )
+
+
+@pytest.mark.parametrize("path", ["", ".", "/", "a/..", "../x", "a/../../x", "a\x00b"])
+def test_a_read_prefix_of_the_root_or_outside_it_is_refused(tmp_path: Path, path: str) -> None:
+    """The root itself and anything outside it never become a readable prefix (fail closed)."""
+    storage = FsspecStorage(f"file://{tmp_path}", {})
+
+    with pytest.raises(ValidationError):
+        storage.read_url_prefix(path)
+
+
+def _s3_storage() -> FsspecStorage:
+    """Build an S3 storage with dummy keys; signing a URL needs no network.
+
+    Returns
+    -------
+    FsspecStorage
+        Rooted at ``s3://bucket/root`` behind a path-style endpoint on a closed port.
+    """
+    return FsspecStorage(
+        "s3://bucket/root",
+        {
+            "s3.endpoint": "http://127.0.0.1:9",
+            "s3.access-key-id": "AKIAEXAMPLE",
+            "s3.secret-access-key": "dummy",
+            "s3.region": "us-east-1",
+        },
+    )
+
+
+def test_a_remote_read_prefix_is_the_signed_urls_path_without_query() -> None:
+    """Path style: the prefix is scheme, host, port and the directory, as the signer writes it."""
+    storage = _s3_storage()
+
+    prefix = storage.read_url_prefix("managed/ns/t-1")
+    url = storage.resolve_read_url("managed/ns/t-1/data/a b.parquet", ttl_seconds=60)
+
+    assert prefix == "http://127.0.0.1:9/bucket/root/managed/ns/t-1/"
+    assert url.startswith(prefix)
+    assert "?" not in prefix
+    assert "Signature" not in prefix
+
+
+@pytest.mark.parametrize(
+    "signed",
+    [
+        "http://h:9/b/root/t/other?sig=1",
+        "http://h:9/b/root/t/lakana-read-prefix/x",
+        "ftp://h/b/root/t/lakana-read-prefix",
+        "http://user@h/b/root/t/lakana-read-prefix",
+        "http:///b/root/t/lakana-read-prefix",
+        "http://h/lakana-read-prefix",
+        "/local/b/root/t/lakana-read-prefix",
+    ],
+)
+def test_a_signed_url_of_an_unexpected_shape_is_refused(signed: str) -> None:
+    """Anything but ``http(s)://host[:port]/<path>/<sentinel>`` raises (fail closed)."""
+    with pytest.raises(ValidationError, match="read prefix"):
+        url_prefix_from_signed(signed)
+
+
+def test_the_prefix_of_a_well_formed_signed_url_drops_query_and_fragment() -> None:
+    """Query string and fragment (an S3 signature, an Azure SAS) are not part of the prefix."""
+    assert (
+        url_prefix_from_signed(
+            "https://acct.blob.core.windows.net/c/root/t/lakana-read-prefix?sv=1#f"
+        )
+        == "https://acct.blob.core.windows.net/c/root/t/"
+    )
 
 
 def test_translate_s3_options_maps_all_recognised_keys() -> None:

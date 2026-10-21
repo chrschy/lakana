@@ -5,6 +5,7 @@ import io
 import os
 import posixpath
 import secrets
+import urllib.parse
 from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime
 from typing import Any
@@ -232,6 +233,51 @@ ROOT_CHAIN_MESSAGE = (
 )
 
 
+READ_PREFIX_SENTINEL = "lakana-read-prefix"
+"""The name `FsspecStorage.read_url_prefix` signs below a directory and cuts off again. Plain
+ASCII, so every signer writes it unchanged."""
+
+_READ_PREFIX_SCHEMES = frozenset({"http", "https"})
+
+
+def url_prefix_from_signed(signed: str) -> str:
+    """Cut a signed URL of `READ_PREFIX_SENTINEL` down to the prefix of its directory.
+
+    Parameters
+    ----------
+    signed
+        What the backend's signer returned for ``<directory>/<sentinel>``.
+
+    Returns
+    -------
+    str
+        ``scheme://host[:port]/<path>/``: the URL without query, fragment and sentinel.
+
+    Raises
+    ------
+    ValidationError
+        If the URL is not ``http(s)://host[:port]/<non-empty path>/<sentinel>`` (another
+        scheme, no host, user information, or a path that does not end in the sentinel).
+        Fail closed: a shape this function does not know is never turned into a prefix.
+    """
+    parts = urllib.parse.urlsplit(signed)
+    suffix = "/" + READ_PREFIX_SENTINEL
+    directory = parts.path[: -len(READ_PREFIX_SENTINEL)]
+    if (
+        parts.scheme not in _READ_PREFIX_SCHEMES
+        or not parts.netloc
+        or "@" in parts.netloc
+        or not parts.path.endswith(suffix)
+        or directory.strip("/") == ""
+    ):
+        raise ValidationError(
+            "The storage signed a URL of a shape Lakana does not know, so no read prefix could "
+            "be derived from it; the query is not run. Tell the operator: this storage backend "
+            "is not supported for queries."
+        )
+    return f"{parts.scheme}://{parts.netloc}{directory}"
+
+
 class FsspecStorage:
     """Storage backed by any filesystem fsspec can open.
 
@@ -380,6 +426,41 @@ class FsspecStorage:
                     "Path passes through a symbolic link inside the storage root; "
                     "remove the link or write elsewhere."
                 )
+
+    def read_url_prefix(self, path: str) -> str:
+        """Return the prefix of every URL `resolve_read_url` returns for a path under `path`.
+
+        Parameters
+        ----------
+        path
+            Root-relative path of a directory: a table's location, an external table's claim.
+
+        Returns
+        -------
+        str
+            For a local filesystem, the absolute directory followed by ``/``. For a cloud
+            backend, the URL the signer writes for ``<path>/<sentinel>``, without its query
+            string, fragment and sentinel: the same signer and encoding as the files', so a
+            path-style, virtual-host or SAS URL comes out right without parsing an endpoint.
+
+        Raises
+        ------
+        ValidationError
+            If the path contains a NUL byte, escapes the configured storage root or names the
+            root itself (the whole store is never one table's prefix), or if the signed URL
+            has a shape `url_prefix_from_signed` refuses.
+        """
+        full = self._full(path)
+        if full == self._base:
+            raise ValidationError(
+                f"A read prefix must name a directory below the storage root: {path!r}."
+            )
+        if self._root.startswith("file://"):
+            return full + "/"
+        # Signing is offline for S3 (SigV2/SigV4 compute the signature locally); the TTL does
+        # not matter, the query string is cut off.
+        signed = self._fs.sign(f"{full}/{READ_PREFIX_SENTINEL}", expiration=60)
+        return url_prefix_from_signed(signed)
 
     def open_write(self, path: str) -> StreamWriter:
         """Open a stream to an object; see `Storage.open_write`.
@@ -679,13 +760,10 @@ class FsspecStorage:
         full = self._full(path)
         if self._root.startswith("file://"):
             return full
-        # S3 presigning is exercised only against a real SeaweedFS container
-        # (test_resolve_read_url_against_real_seaweedfs in
-        # test_postgres_integration.py), which runs under `pytest -m
-        # integration` and is excluded from the coverage-measured run by
-        # this repo's own addopts and CI job split — mirroring the
-        # migrations `omit` rationale above.
-        return self._fs.sign(full, expiration=ttl_seconds)  # pragma: no cover
+        # Signing is offline (a unit test signs with dummy keys); that the store accepts the
+        # URL is shown against a real SeaweedFS container
+        # (test_resolve_read_url_against_real_seaweedfs in test_postgres_integration.py).
+        return self._fs.sign(full, expiration=ttl_seconds)
 
 
 def build_storage(config: StorageConfig) -> Storage:
