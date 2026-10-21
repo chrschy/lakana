@@ -1561,7 +1561,8 @@ worker's `deploy.py` (`code_uri`), `task_integrity.py`, `pipeline.py` and `pytho
 an environment created at `file:///` before this refusal keeps those spellings: its files land
 relative to each process's working directory; the sweep never purges its records (`file:/...`
 is not inside `file:///managed` for `_confined`), and the leftovers command lists nothing for it
-(`target` keeps `file:`). Do **not** fix one of these sites in isolation: `root_base`
+(`target` keeps `file:`), so its table directories stay; the sweeps of unreferenced code archives
+and artifact files still run for it, in the worker's working directory. Do **not** fix one of these sites in isolation: `root_base`
 (`resolver.py`, used by `near_other_location`, `child_location`, the sweep's `_Run` and
 `root_relative_path` since #231) is safe only because every other site still fails closed on such
 a root; giving `orphaned_locations.target` its real root alone would let `--delete` purge

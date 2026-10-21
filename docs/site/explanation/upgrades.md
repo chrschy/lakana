@@ -167,8 +167,9 @@ such as `file:///data/lakana`. Lakana's storage read such a root as each process
 directory, so the files of an environment created earlier at `file:///` were written, read and
 cleaned up relative to wherever the server and the workers were started, not at `/`.
 
-- **An environment created earlier at `file:///`** is left as it is; the clean-up of the workers
-  and `lakana env orphaned-locations` keep all its files. Create a new environment on a directory,
+- **An environment created earlier at `file:///`** is left as it is; the table-location clean-up and
+  `lakana env orphaned-locations` keep its table directories, while the sweeps of unreferenced code
+  archives and artifact files still run, in the worker's working directory. Create a new environment on a directory,
   move the tables there (deploy the projects to it, or load the data again), and then delete the
   old environment.
 
