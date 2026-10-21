@@ -148,6 +148,7 @@ from lakana_core.errors import (
 )
 from lakana_core.grants.revocation import revoke_attached
 from lakana_core.identifiers import NamespacePath, TableRef, shown, validate_path_component
+from lakana_core.log_events import LogEvent, log_event
 from lakana_core.models import (
     LIVE_ENVIRONMENT,
     ArtifactBlob,
@@ -615,7 +616,11 @@ class BlobUpload:
         try:
             self._writer.write(data)
         except Exception as exc:
-            logger.warning("Writing a file of an artifact upload failed (%s).", type(exc).__name__)
+            logger.warning(
+                "Writing a file of an artifact upload failed (%s).",
+                type(exc).__name__,
+                extra=log_event(LogEvent.STORAGE_UNREACHABLE),
+            )
             with contextlib.suppress(Exception):
                 self.abort()
             raise StorageUnavailableError(STORAGE_NOT_WRITTEN) from None
@@ -679,7 +684,9 @@ class BlobUpload:
                 raise ConflictError(UPLOAD_GONE) from None
             except Exception as exc:
                 logger.warning(
-                    "Completing a file of an artifact upload failed (%s).", type(exc).__name__
+                    "Completing a file of an artifact upload failed (%s).",
+                    type(exc).__name__,
+                    extra=log_event(LogEvent.STORAGE_UNREACHABLE),
                 )
                 raise StorageUnavailableError(STORAGE_NOT_WRITTEN) from None
             session.add(
@@ -1576,7 +1583,11 @@ class ArtifactService:
         try:
             writer = storage.open_write(path)
         except Exception as exc:
-            logger.warning("Opening a file of an artifact upload failed (%s).", type(exc).__name__)
+            logger.warning(
+                "Opening a file of an artifact upload failed (%s).",
+                type(exc).__name__,
+                extra=log_event(LogEvent.STORAGE_UNREACHABLE),
+            )
             self._session.rollback()
             raise StorageUnavailableError(STORAGE_NOT_WRITTEN) from None
         self._session.rollback()
@@ -2816,6 +2827,7 @@ class ArtifactService:
                 "Opening a file of artifact %s for download failed (%s).",
                 shown(ref.dotted()),
                 type(exc).__name__,
+                extra=log_event(LogEvent.STORAGE_UNREACHABLE),
             )
             self._session.rollback()
             raise StorageUnavailableError(STORAGE_NOT_READ) from None

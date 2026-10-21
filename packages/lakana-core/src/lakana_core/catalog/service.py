@@ -216,6 +216,7 @@ from lakana_core.identifiers import (
     shown,
     validate_path_component,
 )
+from lakana_core.log_events import LogEvent, log_event
 from lakana_core.models import (
     LIVE_ENVIRONMENT,
     AuditEvent,
@@ -3940,6 +3941,7 @@ class CatalogService:
                 shown(ref.environment),
                 shown(ref.name),
                 type(exc).__name__,
+                extra=log_event(LogEvent.STORAGE_UNREACHABLE),
             )
             raise StorageUnavailableError(
                 TABLE_STORAGE_UNREACHABLE.format(environment=shown(ref.environment))

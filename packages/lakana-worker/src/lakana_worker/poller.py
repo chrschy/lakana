@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session
 from lakana_core.auth import AuthorizationService
 from lakana_core.config import QueryLimitsConfig
 from lakana_core.db import db_now
+from lakana_core.log_events import LogEvent, log_event
 from lakana_core.models import DeployRun, DeployStatus, QueryRun, QueryRunStatus
 from lakana_core.runs import pools
 from lakana_core.runs.store import end_orphaned_runs
@@ -446,7 +447,9 @@ def poll_iteration(
                 passed_by=passed_by,
             )
     except Exception:
-        logger.exception("Polling iteration failed; continuing.")
+        logger.exception(
+            "Polling iteration failed; continuing.", extra=log_event(LogEvent.POLL_FAILED)
+        )
         return False
 
 

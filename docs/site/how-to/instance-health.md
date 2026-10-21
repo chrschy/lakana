@@ -189,10 +189,10 @@ the server reaches the database, so an answer proves it. When the database goes 
   container does not start (the `migrate` service runs first and exits with an error);
 - each worker's container turns `unhealthy` within about half a minute after its heartbeat is a
   minute old;
-- each worker logs `The worker's heartbeat could not be written; it is tried again every 5 s.`
-  and, after a minute without success, `No heartbeat was written for 60 s (LAKANA_RUN__LEASE_SECONDS): this worker claims nothing and stops the query it runs until one is written. Check that the database is reachable.`
+- each worker logs `The worker's heartbeat could not be written; it is tried again every 5 s.` (the line ends `event=database_unreachable`)
+  and, after a minute without success, `No heartbeat was written for 60 s (LAKANA_RUN__LEASE_SECONDS): this worker claims nothing and stops the query it runs until one is written. Check that the database is reachable. event=heartbeat_missed`
   Its queries and deploys are then ended as lost. When the database is back, it logs
-  `The worker's heartbeat is fresh again; it claims work again.`
+  `The worker's heartbeat is fresh again; it claims work again. event=heartbeat_recovered`
 
 **The object storage.** `seaweedfs` being `healthy` shows the gateway answers, and `/readyz`
 without `storage` shows that the server reaches each environment's storage with its credentials.
@@ -267,18 +267,22 @@ level, `INFO`, shows all of the lines below. How to change the level and what th
 sweep mean: [The sweep](deploy-with-compose.md#the-sweep) and
 [After a restore](deploy-with-compose.md#after-a-restore).
 
-| Where | The line starts | What it means and what to do |
-|---|---|---|
-| worker | `Memory limit exceeded: the worker and its tasks use` | The worker passed 90 percent of its memory limit and ended its largest query or task, or stopped itself. Narrow the work or raise `LAKANA_WORKER_MEMORY`: [Memory limits](deploy-with-compose.md#memory-limits). |
-| worker | `The worker's heartbeat could not be written` | The worker cannot reach the database (see above). `The worker's heartbeat is still failing` repeats it, and `No heartbeat was written for` says the worker has stopped claiming work. |
-| worker | `Task run <id> is no longer ours; its outcome is dropped.` | The worker's claim on a task had run out when the task finished, so the worker dropped the result. Look for `worker_lost` on the run. |
-| worker | `Lease renewal of task run <id> failed; retrying.` | The worker could not extend its claim on a task. If it keeps failing, the task is taken from it. |
-| worker | `Polling iteration failed; continuing.` | The worker's loop that looks for work hit an error, followed by the error itself. Occasional lines are harmless; a stream of them is not. |
-| worker | `Running task run <id> failed unexpectedly.`, `Deploy run <id> failed unexpectedly.` | The platform failed in a way it did not expect. The run shows the code `internal` and says to see the worker log; the traceback follows the line. |
-| worker | `Python assets: disabled:` | At start-up: this worker cannot run Python tasks; the line ends with `To enable it:` and the fix. |
-| server | `The grants that have no effect could not be listed at start-up (a database error)` | The database answered with an error while the server started. Start-up goes on; check the database. |
-| server | A start-up that stops with a message that names a setting | A setting has a value the program does not accept. The message names it; correct it in `compose.yaml` or `.env`. |
-| server | An access line that ends `500 Internal Server Error` or `503` | The server could not answer a request (a 503 asks the client to try again, for example when the storage could not be opened). The lines around it have the cause. |
+The lines worth an alert end with a stable code, `event=<code>`: match your alert rules on it,
+not on the wording. Every code, its process and what to do: [Log events](../reference/log-events.md).
+
+| Where | The line starts | Code | What it means and what to do |
+|---|---|---|---|
+| worker | `Memory limit exceeded: the worker and its tasks use` | `memory_stop`, `memory_task_ended` | The worker passed 90 percent of its memory limit and ended its largest query or task, or stopped itself. Narrow the work or raise `LAKANA_WORKER_MEMORY`: [Memory limits](deploy-with-compose.md#memory-limits). |
+| worker | `The worker's heartbeat could not be written` | `database_unreachable` | The worker cannot reach the database (see above). `The worker's heartbeat is still failing` repeats it, and `No heartbeat was written for` (`heartbeat_missed`) says the worker has stopped claiming work. |
+| worker | `Task run <id> is no longer ours; its outcome is dropped.` | `lease_lost` | The worker's claim on a task had run out when the task finished, so the worker dropped the result. Look for `worker_lost` on the run. |
+| worker | `Lease renewal of task run <id> failed; retrying.` | `lease_renewal_failed` | The worker could not extend its claim on a task. If it keeps failing, the task is taken from it. |
+| worker | `Polling iteration failed; continuing.` | `poll_failed` | The worker's loop that looks for work hit an error, followed by the error itself. Occasional lines are harmless; a stream of them is not. |
+| worker | `Running task run <id> failed unexpectedly.`, `Deploy run <id> failed unexpectedly.` | `internal_error` | The platform failed in a way it did not expect. The run shows the code `internal` and says to see the worker log; the traceback follows the line. |
+| worker | `Python assets: disabled:` | none | At start-up: this worker cannot run Python tasks; the line ends with `To enable it:` and the fix. |
+| server | `The instance is not ready: /readyz answers 503.` | `readiness_failed` | The readiness check turned to failing; the line says which check and why. `readiness_recovered` says it is back. |
+| server | `The grants that have no effect could not be listed at start-up (a database error)` | none | The database answered with an error while the server started. Start-up goes on; check the database. |
+| server | A start-up that stops with a message that names a setting | none | A setting has a value the program does not accept. The message names it; correct it in `compose.yaml` or `.env`. |
+| server | An access line that ends `500 Internal Server Error` or `503` | none | The server could not answer a request (a 503 asks the client to try again, for example when the storage could not be opened). The lines around it have the cause. |
 
 ## What to collect before you ask
 
@@ -331,4 +335,5 @@ you for more.
 - [Run Lakana for other people](operate-for-others.md): the whole job of an operator, in order.
 - [Why is my query or task waiting?](why-is-it-waiting.md) and [Why did it fail?](../reference/why-did-it-fail.md).
 - [Deploying with Compose](deploy-with-compose.md): the services, the memory limit, the sweep and the logs.
+- [Log events](../reference/log-events.md): the codes of the log lines worth an alert.
 - [The audit log](../explanation/security.md#what-the-audit-log-records): who did what.

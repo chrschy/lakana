@@ -308,6 +308,16 @@ of "done".
 Reviewers check both parts: a user-facing change without a default that works, a clear error
 or its documentation is not ready to merge.
 
+## Log lines worth an alert
+
+A log line an operator may want an alert for (a stop, a lost worker or claim, a database or
+storage that does not answer, a failing sweep) carries a stable code:
+`logger.warning("...", extra=log_event(LogEvent.X))` from `lakana_core.log_events`; the formatter
+ends the message with ` event=<code>`. A new code needs its member in `LogEvent`, its process in
+`WHERE`, its row in `docs/site/reference/log-events.md` (same order), and a test of its call site
+that asserts the code; `scripts/tests/test_log_events_doc.py` fails otherwise. A code is never
+renamed or reused; keep the wording of a line free to change, the code is the contract.
+
 ## Names
 
 A namespace component or table name must be non-empty, not whitespace-only, and must not

@@ -89,6 +89,7 @@ def test_an_unreachable_storage_names_the_environment_and_the_next_step(
     principal: PrincipalRef,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     monkeypatch.setattr(
         "lakana_core.catalog.service.read_metadata",
@@ -102,6 +103,9 @@ def test_an_unreachable_storage_names_the_environment_and_the_next_step(
     assert message == TABLE_STORAGE_UNREACHABLE.format(environment="dev")
     assert "'dev'" in message and "Try again" in message and "operator" in message
     assert str(tmp_path) not in message and "AWS" not in message
+    (line,) = caplog.records
+    assert line.event == "storage_unreachable"  # ty: ignore[unresolved-attribute]
+    assert "AWS" not in line.getMessage() and "OSError" in line.getMessage()
 
 
 def test_a_missing_metadata_file_is_not_called_unreachable(

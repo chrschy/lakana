@@ -159,6 +159,16 @@ environment and at least one worker answer, `503` with the names of those that d
   `Resolving the tables this query reads failed (OSError).`, and the server answers `503` (try
   again) where it answered `500`.
 
+### Stable codes on the log lines worth an alert
+
+The log lines an operator may want an alert for end with `event=<code>`, for example
+`event=memory_stop`; every code is in [Log events](../reference/log-events.md). The wording of
+the lines is unchanged; only the code is added at the end of the first line. A rule that matched
+a whole line up to its end no longer matches: match the code instead. New lines: the worker logs
+when it takes and loses the scheduler role (`scheduler_role_taken`, `scheduler_role_lost`) and,
+with the role, when it ends the runs of a lost worker (`worker_lost`); the server logs when
+`/readyz` turns to failing and back.
+
 ### A new environment's root cannot lie in another environment's files
 
 `lakana env create` (and `POST /api/v1/environments`) now refuses a storage root at or inside

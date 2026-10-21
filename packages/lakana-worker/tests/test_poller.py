@@ -196,7 +196,9 @@ def test_poll_forever_logs_a_failing_iteration_and_keeps_going() -> None:
     log_mock.assert_called_once()
 
 
-def test_poll_iteration_reports_a_failed_iteration_as_unclaimed() -> None:
+def test_poll_iteration_reports_a_failed_iteration_as_unclaimed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Reporting a failure as "nothing claimed" makes the caller back off, not spin."""
     engine = create_engine(DatabaseConfig(url="sqlite://"))
     Base.metadata.create_all(engine)
@@ -208,6 +210,7 @@ def test_poll_iteration_reports_a_failed_iteration_as_unclaimed() -> None:
             )
     finally:
         engine.dispose()
+    assert "poll_failed" in {getattr(r, "event", None) for r in caplog.records}
 
 
 def test_poll_iteration_authorizes_through_the_session_it_runs_the_work_against() -> None:

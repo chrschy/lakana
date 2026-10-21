@@ -51,6 +51,7 @@ from lakana_core.errors import (
     ValidationError,
 )
 from lakana_core.identifiers import NamespacePath, TableRef, shown
+from lakana_core.log_events import LogEvent, log_event
 from lakana_core.models import (
     AuditEventType,
     Environment,
@@ -783,7 +784,11 @@ def _execute(
                 worker_id=settings.worker_id,
             )
     except Exception:
-        logger.exception("Running task run %s failed unexpectedly.", claimed.task_run_id)
+        logger.exception(
+            "Running task run %s failed unexpectedly.",
+            claimed.task_run_id,
+            extra=log_event(LogEvent.INTERNAL_ERROR),
+        )
         crashed = True
         _close_write(session, prepared.query_run_id, INTERNAL_ERROR_MESSAGE)
     finally:
@@ -872,7 +877,11 @@ def _attempt(
             failure_code=failure_code_of(exc),
         )
     except Exception:
-        logger.exception("Preparing task run %s failed unexpectedly.", claimed.task_run_id)
+        logger.exception(
+            "Preparing task run %s failed unexpectedly.",
+            claimed.task_run_id,
+            extra=log_event(LogEvent.INTERNAL_ERROR),
+        )
         return TaskOutcome(
             FailureKind.TRANSIENT,
             INTERNAL_ERROR_MESSAGE,
@@ -1038,7 +1047,11 @@ def _dispatch(
             )
         return engine.python.attempt(engine, claimed, keeper, environment, serve_queries)
     except Exception:
-        logger.exception("Running task run %s failed unexpectedly.", claimed.task_run_id)
+        logger.exception(
+            "Running task run %s failed unexpectedly.",
+            claimed.task_run_id,
+            extra=log_event(LogEvent.INTERNAL_ERROR),
+        )
         return TaskOutcome(
             FailureKind.TRANSIENT,
             RUN_ERROR_MESSAGE,
@@ -1178,7 +1191,9 @@ def _run_claimed(
                 keeper.stop()
             if outcome is None or keeper.lost:
                 logger.warning(
-                    "Task run %s is no longer ours; its outcome is dropped.", claimed.task_run_id
+                    "Task run %s is no longer ours; its outcome is dropped.",
+                    claimed.task_run_id,
+                    extra=log_event(LogEvent.LEASE_LOST),
                 )
                 return
             if ACTIVITY.stopping:
@@ -1198,6 +1213,7 @@ def _run_claimed(
                     logger.warning(
                         "Task run %s is no longer ours; the outcome of its checks is dropped.",
                         claimed.task_run_id,
+                        extra=log_event(LogEvent.LEASE_LOST),
                     )
                     return
                 if ACTIVITY.stopping:

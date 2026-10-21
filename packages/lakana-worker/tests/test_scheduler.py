@@ -137,6 +137,7 @@ def test_a_failing_step_is_logged_and_survived(
     loop = SchedulerLoop(engine, "w1", election=Broken(engine, "w1"))
     assert loop.step() is False
     assert "Scheduler step failed" in caplog.text
+    assert "scheduler_step_failed" in {getattr(r, "event", None) for r in caplog.records}
 
 
 def test_the_thread_runs_until_stopped_and_then_resigns(engine: sqlalchemy.Engine) -> None:
@@ -343,6 +344,7 @@ def test_failing_housekeeping_is_logged_and_the_loop_goes_on(
         assert loop.step() is True
         _finished(loop)
     assert "Housekeeping failed; continuing." in caplog.text
+    assert "sweep_failed" in {getattr(r, "event", None) for r in caplog.records}
     assert loop.next_wait == loop._interval
 
 
@@ -501,6 +503,7 @@ def test_a_housekeeping_that_hangs_is_reported_once(
                 ticks[0] = moment
                 loop.step()
         reported = [r.getMessage() for r in caplog.records if "has been running" in r.getMessage()]
+        assert "sweep_hung" in {getattr(r, "event", None) for r in caplog.records}
         assert reported == [
             "Housekeeping has been running for 201 s, more than twice its limit of 100 s, so no "
             "further run starts until it ends; it may be waiting on storage or the database."
@@ -948,3 +951,32 @@ def test_a_failing_waiting_start_step_is_logged_and_does_not_fail_the_tick(
     with caplog.at_level(logging.ERROR):
         assert loop.step() is True
     assert "waiting starts unreadable" in caplog.text
+
+
+def test_taking_and_losing_the_role_is_logged_once_each(
+    engine: sqlalchemy.Engine, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A follower logs nothing; the leader logs when it takes the role and when it loses it."""
+    leads = [True]
+
+    class Switching(LeaderElection):
+        def try_lead(self, now: datetime) -> bool:
+            return leads[0] and super().try_lead(now)
+
+    loop = SchedulerLoop(engine, "w1", clock=lambda: NOW, election=Switching(engine, "w1"))
+    with caplog.at_level(logging.INFO, logger="lakana_worker.scheduler"):
+        assert loop.step() is True
+        assert loop.step() is True
+        leads[0] = False
+        assert loop.step() is False
+        assert loop.step() is False
+
+    roles = [
+        (r.levelno, r.event)  # ty: ignore[unresolved-attribute]
+        for r in caplog.records
+        if getattr(r, "event", "").startswith("scheduler_role")
+    ]
+    assert roles == [
+        (logging.INFO, "scheduler_role_taken"),
+        (logging.WARNING, "scheduler_role_lost"),
+    ]

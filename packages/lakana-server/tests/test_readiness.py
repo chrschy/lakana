@@ -314,6 +314,10 @@ def test_the_log_says_when_readiness_fails_and_when_it_is_back(
         _failed(check)
 
     assert [record.levelno for record in caplog.records] == [logging.WARNING, logging.INFO]
+    assert [getattr(record, "event", None) for record in caplog.records] == [
+        "readiness_failed",
+        "readiness_recovered",
+    ]
     warning, info = (record.getMessage() for record in caplog.records)
     assert "/readyz" in warning and "worker" in warning
     assert "ready again" in info

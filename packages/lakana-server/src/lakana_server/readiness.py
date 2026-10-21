@@ -27,6 +27,7 @@ from collections.abc import Callable
 from typing import TypeVar
 
 from lakana_core.identifiers import shown
+from lakana_core.log_events import LogEvent, log_event
 from lakana_core.readiness import READINESS_CHECKS, DatabaseFindings
 from lakana_core.storage.resolver import ResolvedStorage
 
@@ -244,9 +245,13 @@ class ReadinessCheck:
             logger.warning(
                 "The instance is not ready: /readyz answers 503. %s.",
                 "; ".join(f"{name}: {reasons[name]}" for name in failed),
+                extra=log_event(LogEvent.READINESS_FAILED),
             )
         else:  # it failed before, or the answer would not have changed
-            logger.info("The instance is ready again: /readyz answers 200.")
+            logger.info(
+                "The instance is ready again: /readyz answers 200.",
+                extra=log_event(LogEvent.READINESS_RECOVERED),
+            )
 
 
 def _settle(future: asyncio.Future[_T], result: _T | None, error: BaseException | None) -> None:

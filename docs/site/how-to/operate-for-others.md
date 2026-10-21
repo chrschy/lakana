@@ -196,10 +196,13 @@ with what a bad answer looks like. What the two commands show, and what to do wh
 
 **Logs worth alerting on.** The server and the workers print to standard error:
 `docker compose logs server` and `docker compose logs worker`. Set the level with
-`LAKANA_LOG__LEVEL` in the `x-lakana-env` block of `compose.yaml` ([the steps](deploy-with-compose.md#the-sweep)). Three messages deserve an alert: a worker that stops for its memory limit
-(`Memory limit exceeded`; see [Memory limits](deploy-with-compose.md#memory-limits)), a sweep
-that "left an artifact whole" (see [After a restore](deploy-with-compose.md#after-a-restore)),
-and a start-up that stops with a message that names a setting. [The sweep](deploy-with-compose.md#the-sweep)
+`LAKANA_LOG__LEVEL` in the `x-lakana-env` block of `compose.yaml` ([the steps](deploy-with-compose.md#the-sweep)). The lines worth an alert end with a stable code, such as
+`event=memory_stop` for a worker that stops for its memory limit
+([Memory limits](deploy-with-compose.md#memory-limits)); match alert rules on the code, not on the
+wording. Every code and what to do: [Log events](../reference/log-events.md). Two more deserve
+an alert and have no code: a sweep that "left an artifact whole" (see
+[After a restore](deploy-with-compose.md#after-a-restore)), and a start-up that stops with a
+message that names a setting. [The sweep](deploy-with-compose.md#the-sweep)
 describes both logs and what the lines look like.
 
 **The audit log.** It records who signed in, what was granted and revoked, who deployed and

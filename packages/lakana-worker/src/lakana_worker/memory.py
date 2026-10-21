@@ -63,6 +63,7 @@ from sqlalchemy.orm import Session
 from lakana_core.config import DEFAULT_WORKER_MEMORY, MIN_WORKER_MEMORY, parse_memory_limit
 from lakana_core.db import db_now
 from lakana_core.identifiers import shown
+from lakana_core.log_events import LogEvent, log_event
 from lakana_core.models import QueryRun, QueryRunStatus
 from lakana_core.runs.failures import FailureCode
 from lakana_core.runs.scheduler import COMMITTED_BEFORE_STOPPED_MESSAGE
@@ -682,6 +683,7 @@ def stop_worker(
         "has attempts left.",
         total // _MB,
         limit.origin(),
+        extra=log_event(LogEvent.MEMORY_STOP),
     )
     try:
         if mark_stopping is not None:
@@ -1031,6 +1033,7 @@ def stop_largest_consumer(
         total // _MB,
         limit.origin(),
         what,
+        extra=log_event(LogEvent.MEMORY_TASK_ENDED),
     )
     deadline = clock() + RELEASE_SECONDS
     while resident(pid) > 0 and clock() < deadline:

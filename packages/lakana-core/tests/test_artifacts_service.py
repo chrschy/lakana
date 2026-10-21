@@ -2189,6 +2189,7 @@ def test_storage_that_cannot_be_written_is_a_domain_error_without_storage_text(
     principal: PrincipalRef,
     monkeypatch: pytest.MonkeyPatch,
     where: str,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     service = artifact_service(session, tmp_path)
     upload = service.begin_upload(principal, ARTIFACT_REF, artifact_document({"m": _MODEL}))
@@ -2211,4 +2212,5 @@ def test_storage_that_cannot_be_written_is_a_domain_error_without_storage_text(
     assert str(caught.value) == STORAGE_NOT_WRITTEN
     assert "secret" not in str(caught.value)
     assert "Try again" in str(caught.value)
+    assert "storage_unreachable" in {getattr(r, "event", None) for r in caplog.records}
     assert not session.in_transaction()

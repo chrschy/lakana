@@ -112,6 +112,7 @@ from lakana_core.errors import (
 from lakana_core.identifiers import NamespacePath, TableRef, shown
 from lakana_core.identity.task_tokens import resolve_task_token_scope
 from lakana_core.lineage import extract_lineage
+from lakana_core.log_events import LogEvent, log_event
 from lakana_core.models import (
     AuditEventType,
     CheckResult,
@@ -1069,6 +1070,14 @@ def _resolve_sources_opaquely(
         raise
     except Exception as exc:
         if isinstance(exc, StorageUnavailableError) or is_storage_unavailable(exc):
+            if not isinstance(exc, StorageUnavailableError):  # the catalog logged that one
+                logger.warning(
+                    "The storage of environment %s could not be reached while the tables of a "
+                    "query were resolved (%s).",
+                    shown(environment_name),
+                    type(exc).__name__,
+                    extra=log_event(LogEvent.STORAGE_UNREACHABLE),
+                )
             raise _ResolutionFailed(
                 TABLE_STORAGE_UNREACHABLE.format(environment=shown(environment_name))
             ) from exc

@@ -39,6 +39,7 @@ from sqlalchemy.orm import Session
 
 from lakana_core.db import db_now
 from lakana_core.jobs.scheduler import TICK_BUDGET_SECONDS, fire_due, start_waiting_jobs
+from lakana_core.log_events import LogEvent, log_event
 from lakana_core.projects.run_policy import RunCaps
 from lakana_core.runs.leader import LeaderElection
 from lakana_core.runs.store import scheduler_tick
@@ -145,6 +146,30 @@ class SchedulerLoop:
         self._housekeeping_thread: threading.Thread | None = None
         self._housekeeping_limit = housekeeping_limit
         self._hang_reported = False
+        self._leading = False
+
+    def _note_role(self, leading: bool) -> None:
+        """Log when this worker takes the scheduler role and when it no longer holds it.
+
+        Parameters
+        ----------
+        leading
+            Whether this worker holds the role after this step's election.
+        """
+        if leading == self._leading:
+            return
+        self._leading = leading
+        if leading:
+            logger.info(
+                "This worker holds the scheduler role now.",
+                extra=log_event(LogEvent.SCHEDULER_ROLE_TAKEN),
+            )
+        else:
+            logger.warning(
+                "This worker no longer holds the scheduler role (its database connection failed, "
+                "or another worker took it over).",
+                extra=log_event(LogEvent.SCHEDULER_ROLE_LOST),
+            )
 
     def _now(self) -> datetime:
         """Return the step's time: the injected clock, else the database's.
@@ -200,6 +225,7 @@ class SchedulerLoop:
         try:
             now = self._now()
             leading = self._election.try_lead(now)
+            self._note_role(leading)
             if leading:
                 lease, forget = self._sweep_plan(now)
                 with Session(self._engine) as session:
@@ -209,10 +235,16 @@ class SchedulerLoop:
         except Exception as error:
             self._failures += 1
             if self._failures == 1:
-                logger.exception("Scheduler step failed; continuing.")
+                logger.exception(
+                    "Scheduler step failed; continuing.",
+                    extra=log_event(LogEvent.SCHEDULER_STEP_FAILED),
+                )
             else:
                 logger.warning(
-                    "Scheduler step still failing (%d in a row): %s", self._failures, error
+                    "Scheduler step still failing (%d in a row): %s",
+                    self._failures,
+                    error,
+                    extra=log_event(LogEvent.SCHEDULER_STEP_FAILED),
                 )
             return False
         self._failures = 0
@@ -282,6 +314,7 @@ class SchedulerLoop:
                     "the database.",
                     elapsed,
                     self._housekeeping_limit,
+                    extra=log_event(LogEvent.SWEEP_HUNG),
                 )
             return
         if not due:
@@ -305,7 +338,9 @@ class SchedulerLoop:
         try:
             self._housekeeping(now, self._stop)
         except Exception:
-            logger.exception("Housekeeping failed; continuing.")
+            logger.exception(
+                "Housekeeping failed; continuing.", extra=log_event(LogEvent.SWEEP_FAILED)
+            )
 
     def join_housekeeping(self, timeout: float) -> bool:
         """Wait for a running housekeeping thread.

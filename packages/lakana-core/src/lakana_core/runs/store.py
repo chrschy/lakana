@@ -111,6 +111,7 @@ from lakana_core.audit.content import stored_query_text
 from lakana_core.audit.service import AuditService
 from lakana_core.auth import Securable
 from lakana_core.db import rowcount
+from lakana_core.log_events import LogEvent, log_event
 from lakana_core.models import (
     AttemptOutcome,
     AuditEventType,
@@ -1597,9 +1598,19 @@ def end_lost_runs(session: Session, now: datetime, lease_seconds: int) -> int:
             for run in _lost_deploy_runs(session, now, lease_seconds, run_id)
         )
 
-    return _end_each(
+    ended = _end_each(
         session, query_ids, lambda run_id: end_lost_run(session, run_id, now, lease_seconds)
     ) + _end_each(session, deploy_ids, end_deploy)
+    if ended:
+        logger.warning(
+            "Ended %d query or deploy run(s) whose worker stopped reporting for %d s "
+            "(LAKANA_RUN__LEASE_SECONDS); they show the code worker_lost. Look at that "
+            "worker's log and memory limit.",
+            ended,
+            lease_seconds,
+            extra=log_event(LogEvent.WORKER_LOST),
+        )
+    return ended
 
 
 def scheduler_tick(

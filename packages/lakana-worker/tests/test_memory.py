@@ -419,6 +419,7 @@ def test_stopping_logs_records_kills_children_then_exits(caplog: pytest.LogCaptu
             mark_stopping=lambda: order.append("stopping"),
         )
     assert order == ["stopping", "kill", "record", f"exit {EXIT_CODE}"]
+    assert caplog.records[0].event == "memory_stop"  # ty: ignore[unresolved-attribute]
     assert caplog.messages[0] == (
         "Memory limit exceeded: the worker and its tasks use 5123 MB, the limit is 4GB "
         "(LAKANA_WORKER__MEMORY_LIMIT). The worker stops now. What it was running is marked "
@@ -1223,6 +1224,7 @@ def test_the_log_names_the_task_its_run_the_total_the_limit_and_that_the_worker_
 def test_the_log_names_a_query_by_its_process(caplog: pytest.LogCaptureFixture) -> None:
     with caplog.at_level("ERROR", logger="lakana_worker.memory"):
         _stop([_Consumer(4711)], [], {4711: 300})
+    assert caplog.records[0].event == "memory_task_ended"  # ty: ignore[unresolved-attribute]
     assert caplog.messages == [
         f"Memory limit exceeded: the worker and its tasks use 5000 MB, the limit is "
         f"{LIMIT.origin()}. The largest consumer, a query (process 4711), was ended; the "

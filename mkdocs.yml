@@ -76,6 +76,7 @@ nav:
       - reference/python-assets.md
       - reference/network-settings.md
       - reference/compose-bundle.md
+      - reference/log-events.md
       - reference/cli.md
       - reference/settings.md
       - reference/why-did-it-fail.md

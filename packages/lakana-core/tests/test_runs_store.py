@@ -1099,13 +1099,22 @@ def test_the_run_of_an_alive_worker_is_never_ended(
 
 
 def test_a_running_run_without_a_worker_id_is_ended_once_it_started_a_lease_ago(
-    session: Session, environment_id: uuid.UUID
+    session: Session, environment_id: uuid.UUID, caplog: pytest.LogCaptureFixture
 ) -> None:
     now = db_now(session)
     run = _run(session, environment_id, worker_id=None, started_at=now - timedelta(seconds=60))
     session.commit()
     assert end_lost_runs(session, now, 60) == 1
     assert _stored(session, run).status is QueryRunStatus.FAILED
+    (line,) = [r for r in caplog.records if getattr(r, "event", None) == "worker_lost"]
+    assert "Ended 1 query or deploy run(s)" in line.getMessage() and "60 s" in line.getMessage()
+
+
+def test_a_sweep_that_ends_nothing_logs_nothing(
+    session: Session, environment_id: uuid.UUID, caplog: pytest.LogCaptureFixture
+) -> None:
+    assert end_lost_runs(session, db_now(session), 60) == 0
+    assert caplog.records == []
 
 
 def test_a_running_run_without_a_worker_id_is_kept_before_that(

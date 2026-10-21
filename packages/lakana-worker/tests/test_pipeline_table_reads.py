@@ -205,6 +205,7 @@ def test_a_read_of_an_unreachable_storage_names_the_environment_and_the_next_ste
     sales: QueryService,
     monkeypatch: pytest.MonkeyPatch,
     where: str,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Whether the table's metadata or its file list fails, the message is the same."""
     monkeypatch.setattr(where, _raise_unreachable)
@@ -217,3 +218,5 @@ def test_a_read_of_an_unreachable_storage_names_the_environment_and_the_next_ste
     assert run.error_message == TABLE_STORAGE_UNREACHABLE.format(environment="dev")
     assert "seaweedfs" not in (run.error_message or "")
     assert _counts(session) == []
+    (line,) = [r for r in caplog.records if getattr(r, "event", None) == "storage_unreachable"]
+    assert "seaweedfs" not in line.getMessage()

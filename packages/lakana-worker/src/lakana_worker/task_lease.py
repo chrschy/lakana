@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from lakana_core.log_events import LogEvent, log_event
 from lakana_core.models import Run
 from lakana_core.runs.checks import run_stop_message
 from lakana_core.runs.tasks import (
@@ -124,7 +125,11 @@ class LeaseKeeper:
                     session, self._task_run_id, self._worker, self._claim, self._lease_seconds
                 )
         except Exception:
-            logger.exception("Lease renewal of task run %s failed; retrying.", self._task_run_id)
+            logger.exception(
+                "Lease renewal of task run %s failed; retrying.",
+                self._task_run_id,
+                extra=log_event(LogEvent.LEASE_RENEWAL_FAILED),
+            )
             return
         if state is LeaseState.LOST:
             self.lost = True
