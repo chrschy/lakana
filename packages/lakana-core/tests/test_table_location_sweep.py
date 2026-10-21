@@ -17,7 +17,7 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
-from core_test_helpers import python_task_run
+from core_test_helpers import _earlier_layout, python_task_run
 from pyiceberg.schema import Schema
 from pyiceberg.types import LongType, NestedField
 from sqlalchemy import delete as sa_delete
@@ -1630,11 +1630,7 @@ def test_another_environment_root_inside_a_location_blocks_a_purge(
     location = _location(store)
     _put(location, "inner/raw/a.csv")
     _claim(session, location, state=TableLocationState.ABANDONED, purge_after=_NOW)
-    catalog.create_environment(
-        principal,
-        name="inner",
-        storage=StorageConfig(scheme="file", root=f"{location}/inner", options={}),
-    )
+    _earlier_layout(catalog, principal, "inner", f"{location}/inner")
 
     assert _sweep(session).purges_blocked == 1
     assert _files(location) == ["inner/raw/a.csv"]
@@ -1648,11 +1644,7 @@ def test_another_environment_rooted_at_managed_blocks_a_purge(
     location = _location(store)
     _put(location, "data/a.parquet")
     _claim(session, location, state=TableLocationState.ABANDONED, purge_after=_NOW)
-    catalog.create_environment(
-        principal,
-        name="other",
-        storage=StorageConfig(scheme="file", root=f"file://{store}/managed{slash}", options={}),
-    )
+    _earlier_layout(catalog, principal, "other", f"file://{store}/managed{slash}")
 
     assert _sweep(session).purges_blocked == 1
     assert _files(location) == ["data/a.parquet"]
@@ -1664,9 +1656,7 @@ def test_a_root_in_another_environments_unrecorded_files_blocks_a_purge(
 ) -> None:
     """The enclosing environment keeps files there that no record names."""
     inner = f"file://{store}/{zone}/inner"
-    catalog.create_environment(
-        principal, name="inner", storage=StorageConfig(scheme="file", root=inner, options={})
-    )
+    _earlier_layout(catalog, principal, "inner", inner)
     location = f"{inner}/managed/gold/t-{uuid.uuid4().hex}"
     _put(location, "data/a.parquet")
     _claim(
@@ -1694,11 +1684,7 @@ def test_an_environment_rooted_inside_this_one_away_from_the_location_does_not_b
     location = _location(store)
     _put(location, "data/a.parquet")
     _claim(session, location, state=TableLocationState.ABANDONED, purge_after=_NOW)
-    catalog.create_environment(
-        principal,
-        name="inner",
-        storage=StorageConfig(scheme="file", root=f"file://{store}/{inner}", options={}),
-    )
+    _earlier_layout(catalog, principal, "inner", f"file://{store}/{inner}")
 
     assert _sweep(session).locations_purged == 1
     assert _files(location) == []
@@ -1917,3 +1903,54 @@ def test_places_that_only_look_alike_are_not_compared_as_one(
     ):
         _claim(session, other, state=TableLocationState.LIVE)
     assert near_other_location(session, target, root="s3://bucket") is None
+
+
+@pytest.mark.parametrize("root", ["file:///", "file://"])
+def test_a_location_under_the_root_of_the_disk_is_judged_like_any_other(
+    session: Session, catalog: CatalogService, root: str
+) -> None:
+    """``file:///`` is a root like any other: its ``managed/`` is ``file:///managed``.
+
+    ``file://`` is how the sweep holds that root, without its trailing slash.
+    """
+    from lakana_core.catalog.locations import Nearby, near_other_location
+
+    target = f"file:///managed/gold/t-{_HEX}"
+    assert near_other_location(session, target, root=root) is None
+
+    _existing_environment(session, "inner", "FILE:///managed/")
+    assert near_other_location(session, target, root=root) == Nearby(
+        "FILE:///managed/", environment_root=True
+    )
+
+
+def test_an_unreadable_root_beside_the_root_of_the_disk_still_keeps_the_location(
+    session: Session, catalog: CatalogService
+) -> None:
+    """A relative ``file`` root on the same scheme cannot be compared, so it keeps everything."""
+    from lakana_core.catalog.locations import Nearby, near_other_location
+
+    _existing_environment(session, "rel", "file://relative")
+    target = f"file:///managed/gold/t-{_HEX}"
+    assert near_other_location(session, target, root="file:///") == Nearby(
+        "file://relative", environment_root=True
+    )
+
+
+def test_the_sweep_confines_a_location_under_the_root_of_the_disk(session: Session) -> None:
+    """Its own root's ``managed/`` and the root-relative path, for an environment at ``file:///``."""
+    run = sweep_module._Run(
+        session,
+        mock.Mock(),
+        "file:///",
+        "disk",
+        _NOW,
+        timedelta(hours=1),
+        7,
+        lambda: 0.0,
+        1.0,
+        lambda: False,
+    )
+    assert run._confined(f"file:///managed/gold/t-{_HEX}") == f"managed/gold/t-{_HEX}"
+    assert run._confined(f"file:///raw/gold/t-{_HEX}") is None
+    assert run._confined(f"file:///managed//gold/t-{_HEX}") is None

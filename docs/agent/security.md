@@ -1537,7 +1537,37 @@ dropped, a leading `//` included, which `posixpath.normpath` keeps; `..` unjudge
 location must be absolute with an empty host: `_is_canonical_uri`, `is_within_location` and
 `spelled_canonically` build on it, and `create_environment` refuses a root that is not canonical
 (`check_storage_root`, 422 naming the spelling to use; relative and host `file` roots, percent
-escapes, glob characters and scheme aliases refused too). `near_other_location` compares every
+escapes, glob characters and scheme aliases refused too). It also refuses (#231,
+`locations.refuse_root_clash`, 422 naming the other environment, its root, the directory and a
+root of its own, `<outer root>/<name>` when that one would be accepted) a root that is, or lies
+inside, another environment's `managed/` or `UNRECORDED_ZONES` directory, or whose own such
+directory is or holds another environment's root, compared under every `readings` spelling of
+both and against every `environments` row, deleted ones included; a shared root (equal under some
+reading) and one nested elsewhere in another root stay accepted, and a stored root that cannot be
+read at all is skipped (the checks above fail closed on it). `update_environment_storage` cannot
+change a root. Existing environments in such a layout are untouched and keep failing closed: the
+listing names the other root with `HELD_PREFIX` ("move this environment to a root of its own")
+instead of `UNJUDGED_PREFIX`. Pins: `test_environment_root_placement.py`.
+
+**The root of the disk.** `check_storage_root` refuses `file:///` in every spelling (`file://`,
+`FILE:///`, `file:////`, `file:///.`, `file://localhost[/]`; `ROOT_DISK_MESSAGE`, 422, suggests
+`file:///data/lakana`). Many sites build paths with `root.rstrip("/")`, which turns `file:///`
+into `file:`, and `fsspec.core.url_to_fs("file:")` (also `"file://"`) answers the **working
+directory**: `FsspecStorage.__init__` (`fsspec_storage.py`), `ResolvedStorage.table_location`
+(`file:/managed/...`), `CatalogService` external-table claims and maintenance's `root_prefix`
+(`service.py`), `code_sweep._code_uri` and its grouping key, `orphaned_locations.target`, the
+worker's `deploy.py` (`code_uri`), `task_integrity.py`, `pipeline.py` and `python_tasks.py`
+(root prefixes), and `orphaned_locations._ineligible`'s `spelled_canonically` check. **Residual:**
+an environment created at `file:///` before this refusal keeps those spellings: its files land
+relative to each process's working directory; the sweep never purges its records (`file:/...`
+is not inside `file:///managed` for `_confined`), and the leftovers command lists nothing for it
+(`target` keeps `file:`), so its table directories stay; the sweeps of unreferenced code archives
+and artifact files still run for it, in the worker's working directory. Do **not** fix one of these sites in isolation: `root_base`
+(`resolver.py`, used by `near_other_location`, `child_location`, the sweep's `_Run` and
+`root_relative_path` since #231) is safe only because every other site still fails closed on such
+a root; giving `orphaned_locations.target` its real root alone would let `--delete` purge
+id-suffixed directories under the server's working directory. The fix for users is a new
+environment on a directory (upgrade note). `near_other_location` compares every
 root, record (`record_states`; never the purge's own) and table directory under all `readings`:
 percent-decoded up to three times, case-folded and NFC, `normpath` and, for `file`, `realpath`
 (symbolic links), object-store keys literal and with `..` resolved, `abfs` reduced to the
@@ -3707,16 +3737,36 @@ pins each line.
   check to prove no second resolution happens.
 - **Refused:** everything the standard library does not call global, plus explicit lists:
   private, loopback, link-local (`169.254.0.0/16`, `fe80::/10`), `100.64.0.0/10`, `0.0.0.0/8`,
-  documentation and benchmarking ranges, multicast, `240.0.0.0/4`, `fc00::/7`, the unspecified
+  documentation and benchmarking ranges, multicast, `240.0.0.0/4`, `fc00::/7`, `fec0::/10`
+  (deprecated site-local, which `ipaddress` calls global on 3.11 and 3.14; #243), the unspecified
   address, and any IPv6 form that embeds such an IPv4 (mapped, compatible, 6to4, Teredo,
-  NAT64). All of 6to4 is refused. A shorthand IPv4 spelling (`127.1`, `2130706433`, a last label
+  NAT64: the well-known `64:ff9b::/96` and the local-use `64:ff9b:1::/48` of RFC 8215, both
+  judged by their last 32 bits). All of 6to4 is refused. A shorthand IPv4 spelling (`127.1`, `2130706433`, a last label
   of digits) is refused before any lookup. Userinfo in the URL is refused.
 - **No ambient configuration.** `httpx` runs with `trust_env=False` and `follow_redirects=False`;
   `HTTPS_PROXY`, `SSL_CERT_FILE` and the like change nothing. `LAKANA_WEBHOOK__PROXY` is the
   only proxy; with it the destination name is still checked but cannot be pinned (the proxy
   resolves it), so the proxy is trusted. `LAKANA_WEBHOOK__CA_BUNDLE` replaces trust and never
-  disables verification. `LAKANA_WEBHOOK__ALLOW_HOSTS` exempts named hosts from the scheme, port
-  and address rules, nothing else.
+  disables verification. `LAKANA_WEBHOOK__ALLOW_HOSTS` exempts named hosts from the scheme and
+  port rules and from the private-address check, nothing else: a listed host is still refused
+  (`NEVER_REACHABLE`) when any of its addresses `is_never_reachable` (loopback, link-local,
+  unspecified, multicast, reserved, `fd00:ec2::254`, `100.100.100.200`, or an IPv6 form that
+  carries such an IPv4), the rule of `LAKANA_CI_OIDC__ALLOW_HOSTS` (#243). One exception: the
+  entry `localhost`, for the URL host `localhost` only, may reach loopback addresses (never the
+  rest of the set), so that a receiver on the worker's own machine still works (the get-told
+  documentation example); any other listed name whose DNS points at loopback is refused. The
+  scheme and port exemption stays: an internal chat server on `http` or another port is the
+  setting's purpose, and with the address rule the exemption reaches no address the rule
+  refuses. Pins: `test_an_allowed_host_never_reaches_loopback_link_local_or_metadata`,
+  `test_a_listed_localhost_may_reach_loopback_and_nothing_else_never_reachable`.
+  **Residual:** a NAT64 prefix length other than /96 inside the local-use `64:ff9b:1::/48`
+  (RFC 6052 then places the IPv4 elsewhere) is not decoded, so a host on
+  `LAKANA_WEBHOOK__ALLOW_HOSTS` or `LAKANA_CI_OIDC__ALLOW_HOSTS` that resolves to such an address
+  carrying a metadata or loopback IPv4 is reached as a private address; an unlisted host is
+  refused there, because the whole `/48` is not global. A NAT64 prefix an operator chose in their
+  own global IPv6 space cannot be known at all: an address in it looks public, to listed and
+  unlisted hosts alike, and only the NAT64 gateway's own rules keep it from internal IPv4
+  destinations.
 - **No URL in any text.** Every exception is reduced to a fixed reason
   (`lakana_core.net.egress.classify`); `str(exc)`
   of an `httpx` error embeds the URL and is never read. Refusals are raised outside `except`
@@ -3855,9 +3905,9 @@ and a fake fetcher; no test reaches the network.
   be public. Even a listed host is refused when any of its addresses is loopback, link-local
   (`169.254.0.0/16`, `fe80::/10`, so 169.254.169.254), unspecified, multicast or reserved, a
   known metadata address inside a private range (`fd00:ec2::254`, `100.100.100.200`), or an
-  IPv6 form that carries such an IPv4 address (`is_never_reachable`). This is stricter than
-  `LAKANA_WEBHOOK__ALLOW_HOSTS`, which exempts a listed host from every address check, the
-  scheme and the port. Pinning, `https` on 443, no redirects, the 64 KiB cap and the deadlines
+  IPv6 form that carries such an IPv4 address (`is_never_reachable`). Since #243
+  `LAKANA_WEBHOOK__ALLOW_HOSTS` applies the same rule (with a loopback exception for the entry
+  `localhost`), and it still exempts the scheme and the port. Pinning, `https` on 443, no redirects, the 64 KiB cap and the deadlines
   still apply. As with the webhooks, list only names whose DNS you control: whoever controls
   a listed name's DNS can point it at any private address.
 - **Residuals:** the `typ` header is not checked; `aud` and the issuer's own key set keep other

@@ -762,7 +762,9 @@ profile `bundle init` saved (see [Quickstart](#quickstart)).
 1. Create the environment in the bundle's bucket, `lakana`, under its own prefix, with the
    endpoint the services use inside the Compose network. It has no secret yet. Write the root
    plainly, as below: a root spelled another way (`s3a://`, a doubled slash, a `.` or `..`
-   segment, a percent escape) is refused with the spelling to use instead.
+   segment, a percent escape) is refused with the spelling to use instead. A root inside another
+   environment's `managed/`, `raw/`, `artifacts/` or `_artifacts/` (such as
+   `s3://lakana/dev/raw/prod`) is refused too, with a root to use instead.
 
 <!-- source: docs/examples/compose-add-environment.sh#create -->
 ```bash

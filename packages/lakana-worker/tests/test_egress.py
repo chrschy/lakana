@@ -95,6 +95,8 @@ REFUSED = [
     "fd00::1",
     "fd00:ec2::254",
     "fc00::1",
+    "fec0::1",  # site-local, deprecated: the standard library calls it global
+    "feff:ffff::1",
     "ff02::1",
     "ff0e::1",
     "::ffff:10.0.0.1",
@@ -262,6 +264,83 @@ def test_an_unlisted_host_gets_no_exemption_from_a_listed_one(
 ) -> None:
     resolves_to(monkeypatch, "10.0.0.5")
     assert refusal("http://other.test/x", allowed("chat.corp.test")) == egress.NOT_HTTPS
+
+
+NEVER_REACHABLE = [
+    "127.0.0.1",
+    "127.1.2.3",
+    "::1",
+    "0.0.0.0",
+    "::",
+    "169.254.169.254",
+    "169.254.1.1",
+    "100.100.100.200",
+    "fd00:ec2::254",
+    "fe80::1%eth0",
+    "224.0.0.1",
+    "240.0.0.1",
+    "ff02::1",
+    "::ffff:127.0.0.1",
+    "::ffff:169.254.169.254",
+    "::127.0.0.1",
+    "64:ff9b::7f00:1",
+    "64:ff9b::a9fe:a9fe",
+    "64:ff9b:1::a9fe:a9fe",  # the local-use NAT64 prefix (RFC 8215)
+    "64:ff9b:1::7f00:1",
+    "64:ff9b:1:ffff::a9fe:a9fe",
+    "2002:a9fe:a9fe::1",
+]
+
+
+@pytest.mark.parametrize("address", NEVER_REACHABLE)
+@pytest.mark.parametrize("url", ["https://chat.corp.test/hook", "http://chat.corp.test:8080/x"])
+def test_an_allowed_host_never_reaches_loopback_link_local_or_metadata(
+    monkeypatch: pytest.MonkeyPatch, address: str, url: str
+) -> None:
+    resolves_to(monkeypatch, "10.0.0.5", address)
+    assert refusal(url, allowed("chat.corp.test")) == egress.NEVER_REACHABLE
+
+
+@pytest.mark.parametrize(
+    "address", ["10.0.0.5", "192.168.1.1", "100.64.0.1", "fd12::1", "fec0::1", "64:ff9b:1::a00:5"]
+)
+def test_an_allowed_host_keeps_its_private_address_exemption(
+    monkeypatch: pytest.MonkeyPatch, address: str
+) -> None:
+    resolves_to(monkeypatch, address, "93.184.216.34")
+    destination = check_destination("https://chat.corp.test/hook", allowed("chat.corp.test"))
+    assert destination.addresses == (address, "93.184.216.34")
+
+
+def test_the_test_hook_admits_loopback_but_not_metadata_for_an_allowed_host(
+    monkeypatch: pytest.MonkeyPatch, allow_loopback: None
+) -> None:
+    resolves_to(monkeypatch, "127.0.0.1")
+    config = allowed("chat.corp.test")
+    assert check_destination("http://chat.corp.test:8080/x", config).addresses == ("127.0.0.1",)
+    resolves_to(monkeypatch, "127.0.0.1", "169.254.169.254")
+    assert refusal("http://chat.corp.test:8080/x", config) == egress.NEVER_REACHABLE
+
+
+def test_a_listed_localhost_may_reach_loopback_and_nothing_else_never_reachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Listing ``localhost`` itself asks for loopback; no other listed name gets it."""
+    config = allowed("localhost, chat.corp.test")
+    resolves_to(monkeypatch, "127.0.0.1", "::1")
+    for url in ("http://localhost:8080/hook", "http://LOCALHOST.:8080/hook"):
+        assert check_destination(url, config).addresses == ("127.0.0.1", "::1")
+    assert refusal("http://chat.corp.test:8080/hook", config) == egress.NEVER_REACHABLE
+    assert refusal("http://localhost:8080/hook") == egress.NOT_HTTPS
+    resolves_to(monkeypatch, "127.0.0.1", "169.254.169.254")
+    assert refusal("http://localhost:8080/hook", config) == egress.NEVER_REACHABLE
+    resolves_to(monkeypatch, "0.0.0.0")
+    assert refusal("http://localhost:8080/hook", config) == egress.NEVER_REACHABLE
+
+
+def test_the_never_reachable_reason_names_the_setting() -> None:
+    assert "LAKANA_WEBHOOK__ALLOW_HOSTS" in egress.NEVER_REACHABLE
+    assert "metadata" in egress.NEVER_REACHABLE
 
 
 @pytest.mark.parametrize(
@@ -467,7 +546,9 @@ def test_a_redirect_is_not_followed(
     assert "stolen" not in result.reason and "127.0.0.1" not in result.reason
 
 
-def test_an_allowed_host_may_be_plain_http_on_any_port(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_an_allowed_host_may_be_plain_http_on_any_port(
+    monkeypatch: pytest.MonkeyPatch, allow_loopback: None
+) -> None:
     resolves_to(monkeypatch, "127.0.0.1")
     with Server() as plain:
         destination = check_destination(

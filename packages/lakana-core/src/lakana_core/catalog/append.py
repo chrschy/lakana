@@ -28,7 +28,7 @@ from pyiceberg.table.snapshots import Snapshot
 from pyiceberg.table.update import TableRequirement, TableUpdate
 
 from lakana_core.errors import ValidationError
-from lakana_core.storage.resolver import ResolvedStorage
+from lakana_core.storage.resolver import ResolvedStorage, root_base
 
 logger = logging.getLogger(__name__)
 
@@ -357,7 +357,7 @@ def root_relative_path(root: str, absolute: str) -> str | None:
         with `root` (nothing to delete through `Storage`, which only
         accepts root-relative paths).
     """
-    stripped = root.rstrip("/")
+    stripped = root_base(root)
     if not absolute.startswith(stripped + "/"):
         return None
     return absolute[len(stripped) + 1 :]
