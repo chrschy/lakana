@@ -301,10 +301,12 @@ One directory per kind, each with an `index.md` that introduces it:
 | `docs/site/reference/` | Reference | exact facts: every option, default and limit |
 | `docs/site/explanation/` | Explanation | why it works this way |
 
-Two reference pages are generated, never edited by hand: `reference/cli.md` from the Typer app
-and `reference/settings.md` from the settings models of `lakana-core` and `lakana-server` (the
+Three reference files are generated, never edited by hand: `reference/cli.md` from the Typer app,
+`reference/settings.md` from the settings models of `lakana-core` and `lakana-server` (the
 description of a variable is its entry in the model's `Parameters` docstring section, so document
-a new setting there). After a command, an option or a setting changes, run
+a new setting there), and `reference/openapi.json`, the OpenAPI document of the platform REST API
+(`docs/agent/release.md`, "The REST API contract"). After a command, an option, a setting or a
+route changes, run
 `uv run python scripts/generate_reference.py` and commit the pages; `--check` fails, naming the
 stale page, and runs in CI's `docs` job and in `scripts/tests/test_generate_reference.py`.
 
@@ -512,7 +514,7 @@ A change under `docs/examples/` is not a documentation-only change, so CI runs t
 ```bash
 uv sync --locked --all-packages --group docs
 uv run python scripts/docs_blocks.py            # check every block; add --fix to rewrite synced ones
-uv run python scripts/generate_reference.py     # rewrite the CLI and settings references (--check: fail when stale)
+uv run python scripts/generate_reference.py     # rewrite the CLI, settings and OpenAPI references (--check: fail when stale)
 uv run --group docs zensical build --strict     # build into site-build/ (a traceback after the message is normal on failure)
 uv run python scripts/check_built_site.py site-build   # external resources, missing files and URLs outside /lakana/
 uv run --group docs zensical serve              # preview on http://localhost:8000

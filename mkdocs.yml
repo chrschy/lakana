@@ -80,6 +80,7 @@ nav:
       - reference/log-events.md
       - reference/cli.md
       - reference/settings.md
+      - reference/rest-api.md
       - reference/why-did-it-fail.md
   - Explanation:
       - explanation/index.md

@@ -10,7 +10,9 @@ New here? Begin with [Getting started](tutorials/getting-started.md).
 
 There is no web interface yet. You work with Lakana through the command line (CLI), the Python
 SDK or the REST API, and the interface is planned after the public beta
-(see the [roadmap](explanation/roadmap.md)).
+(see the [roadmap](explanation/roadmap.md)). To build on the REST API, read [The REST API as a
+contract](reference/rest-api.md): what Lakana promises about it and where to get its OpenAPI
+document.
 
 Lakana is an open-source project with best-effort [support](explanation/support.md), and its
 code contains no telemetry: see [what leaves the machine](explanation/what-leaves-the-machine.md).

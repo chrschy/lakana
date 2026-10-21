@@ -1,21 +1,25 @@
-"""Tests for the generator of the CLI and settings references."""
+"""Tests for the generator of the CLI, settings and OpenAPI references."""
 
+import json
 import re
 from pathlib import Path
 from typing import Annotated, Literal
 
 import pytest
 import typer
+from fastapi import APIRouter
 from pydantic import BaseModel, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from scripts.generate_reference import (
     CLI_PAGE,
+    OPENAPI_PAGE,
     SETTINGS_PAGE,
     docstring_parameters,
     main,
     real_pages,
     render_cli,
+    render_openapi,
     render_settings,
 )
 
@@ -275,7 +279,74 @@ def test_the_committed_pages_are_current() -> None:
 
 def test_the_page_names_are_the_documented_ones() -> None:
     """The constants the docs and CI refer to."""
-    assert (CLI_PAGE, SETTINGS_PAGE) == ("reference/cli.md", "reference/settings.md")
+    assert (CLI_PAGE, SETTINGS_PAGE, OPENAPI_PAGE) == (
+        "reference/cli.md",
+        "reference/settings.md",
+        "reference/openapi.json",
+    )
+
+
+def _fixture_router() -> APIRouter:
+    """Build a router with one route.
+
+    Returns
+    -------
+    APIRouter
+        A router with ``GET /api/v1/things``.
+    """
+    router = APIRouter(prefix="/api/v1/things")
+
+    @router.get("")
+    def list_things(limit: int = 10) -> list[str]:
+        """List things.
+
+        Parameters
+        ----------
+        limit
+            How many.
+
+        Returns
+        -------
+        list of str
+            The things.
+        """
+        return []
+
+    return router
+
+
+def test_the_openapi_document_describes_the_routers_it_is_given() -> None:
+    """The document is OpenAPI JSON with the routes of the given routers and a fixed version."""
+    text = render_openapi([_fixture_router()])
+    doc = json.loads(text)
+    assert doc["openapi"].startswith("3.")
+    assert list(doc["paths"]) == ["/api/v1/things"]
+    assert doc["info"]["title"] == "Lakana platform API"
+    assert doc["info"]["version"] == "unreleased"
+    assert "https://lakana-labs.github.io/lakana/reference/rest-api/" in doc["info"]["description"]
+    assert text.endswith("}\n")
+    assert render_openapi([_fixture_router()]) == text
+
+
+def test_the_committed_openapi_document_is_the_platform_api_only() -> None:
+    """Every route is under /api/; the Iceberg REST catalog has its own specification."""
+    doc = json.loads(real_pages()[OPENAPI_PAGE])
+    assert doc["paths"]
+    assert [path for path in doc["paths"] if not path.startswith("/api/")] == []
+
+
+def test_an_instance_serves_the_committed_platform_routes(tmp_path: Path) -> None:
+    """``/openapi.json`` of a running instance has the same platform routes as the snapshot."""
+    from lakana_core.config import DatabaseConfig
+    from lakana_server.app import create_app
+    from lakana_server.settings import Settings
+
+    served = create_app(
+        Settings(database=DatabaseConfig(url=f"sqlite:///{tmp_path}/x.db"))
+    ).openapi()
+    committed = json.loads(real_pages()[OPENAPI_PAGE])
+    platform = {path: item for path, item in served["paths"].items() if path.startswith("/api/")}
+    assert platform == committed["paths"]
 
 
 _INTERNAL = re.compile(

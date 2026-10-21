@@ -1218,21 +1218,150 @@ def test_only_the_job_that_uploads_the_sbom_can_write_to_the_release() -> None:
 
     job = jobs["sbom-release"]
     assert job["permissions"] == {"contents": "write"}
-    assert set(job["needs"]) == {"release-please", "approve", "sbom"}
+    assert set(job["needs"]) == {"release-please", "approve", "sbom", "openapi"}
     assert job["if"] == jobs["sbom"]["if"]
     uses = [s["uses"].split("@")[0] for s in job["steps"] if "uses" in s]
-    assert uses == ["actions/download-artifact"]
+    assert set(uses) == {"actions/download-artifact"}
+    downloaded = {s["with"]["name"] for s in job["steps"] if "uses" in s}
+    assert downloaded == {"lakana-sbom.spdx.json", "lakana-openapi.json"}
     upload = next(s for s in job["steps"] if "gh release upload" in s.get("run", ""))
     assert upload["env"]["TAG"] == "${{ needs.release-please.outputs.tag }}"
     (command,) = _commands(upload)
     assert '"$TAG"' in command
-    assert "lakana-sbom.spdx.json" in command
+    assert "sbom/lakana-sbom.spdx.json" in command
+    assert "openapi/lakana-openapi.json" in command
     assert "--clobber" in command
     assert "--repo" in command
 
     for name, other in jobs.items():
         if name not in {"sbom-release", "provenance-release"}:
             assert _effective_permissions(workflow, other).get("contents") != "write", name
+
+
+def test_each_release_carries_the_openapi_document_with_its_version(tmp_path: Path) -> None:
+    """The committed snapshot, with the release's version in ``info.version`` and nothing else.
+
+    The job is read-only and checks out the tag; ``sbom-release`` (above) attaches the file.
+    Its command is run here on the real snapshot, with the tag the workflow would pass.
+    """
+    jobs = _jobs("release.yml")
+    job = jobs["openapi"]
+    assert job["permissions"] == {"contents": "read"}
+    assert set(job["needs"]) == {"release-please", "approve"}
+    assert job["if"] == jobs["sbom"]["if"]
+    checkout = job["steps"][0]
+    assert checkout["uses"].startswith("actions/checkout@")
+    assert checkout["with"]["ref"] == "${{ needs.release-please.outputs.tag }}"
+    assert checkout["with"]["persist-credentials"] is False
+    stamp = next(s for s in job["steps"] if "jq" in s.get("run", ""))
+    assert stamp["env"]["TAG"] == "${{ needs.release-please.outputs.tag }}"
+    upload = next(s for s in job["steps"] if "upload-artifact" in str(s.get("uses")))
+    assert upload["with"] == {"name": "lakana-openapi.json", "path": "lakana-openapi.json"}
+
+    snapshot = tmp_path / "docs" / "site" / "reference" / "openapi.json"
+    snapshot.parent.mkdir(parents=True)
+    committed = (ROOT / "docs" / "site" / "reference" / "openapi.json").read_text()
+    snapshot.write_text(committed)
+    env = {**os.environ, "TAG": "v1.2.3"}
+    subprocess.run(["bash", "-e", "-c", stamp["run"]], cwd=tmp_path, env=env, check=True)
+    released = json.loads((tmp_path / "lakana-openapi.json").read_text())
+    expected = json.loads(committed)
+    expected["info"]["version"] = "1.2.3"
+    assert released == expected
+
+
+def _run_api_contract_step(tmp_path: Path, *, base: dict | None, head: dict, title: str) -> int:
+    """Run the conventional check's REST API step on a scratch pull request merge commit.
+
+    Parameters
+    ----------
+    tmp_path
+        Directory for the scratch repository.
+    base
+        The base branch's OpenAPI snapshot; ``None`` for a base branch without one.
+    head
+        The pull request's snapshot.
+    title
+        The pull request title.
+
+    Returns
+    -------
+    int
+        The step's exit code.
+    """
+    (step,) = [
+        s
+        for s in _jobs("conventional.yml")["conventional"]["steps"]
+        if "openapi_diff" in s.get("run", "")
+    ]
+    repo = tmp_path / "repo"
+    (repo / "scripts").mkdir(parents=True)
+    (repo / "scripts" / "openapi_diff.py").write_text(
+        (ROOT / "scripts" / "openapi_diff.py").read_text()
+    )
+    snapshot = repo / step["env"]["SNAPSHOT"]
+    snapshot.parent.mkdir(parents=True)
+    runner_temp = tmp_path / "runner"
+    runner_temp.mkdir()
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "RUNNER_TEMP": str(runner_temp)}
+    env |= {"PR_TITLE": title, "SNAPSHOT": step["env"]["SNAPSHOT"]}
+
+    def git(*args: str) -> None:
+        identity = ["-c", "user.name=t", "-c", "user.email=t@example.org"]
+        subprocess.run(
+            ["git", *identity, *args], cwd=repo, env=env, check=True, capture_output=True
+        )
+
+    git("init", "-q", "-b", "main")
+    if base is not None:
+        snapshot.write_text(json.dumps(base))
+    git("add", "-A")
+    git("commit", "-q", "-m", "base")
+    git("checkout", "-q", "-b", "pr")
+    snapshot.write_text(json.dumps(head))
+    git("add", "-A")
+    git("commit", "-q", "-m", "pr")
+    git("checkout", "-q", "main")
+    (repo / "unrelated").write_text("x")
+    git("add", "-A")
+    git("commit", "-q", "-m", "later on main")
+    git("merge", "-q", "--no-ff", "-m", "merge", "pr")
+    return subprocess.run(["bash", "-e", "-c", step["run"]], cwd=repo, env=env).returncode
+
+
+_ROUTE = {"/api/v1/x": {"get": {"responses": {"200": {"description": "OK"}}}}}
+_BEFORE = {"openapi": "3.1.0", "paths": _ROUTE}
+_AFTER = {"openapi": "3.1.0", "paths": {}}
+
+
+def test_the_conventional_check_reads_the_title_and_the_merge_commit_s_base() -> None:
+    """The step gets the title from the event and two commits of history."""
+    job = _jobs("conventional.yml")["conventional"]
+    assert job["steps"][0]["with"]["fetch-depth"] == 2
+    (step,) = [s for s in job["steps"] if "openapi_diff" in s.get("run", "")]
+    assert step["env"]["PR_TITLE"] == "${{ github.event.pull_request.title }}"
+    assert step["env"]["SNAPSHOT"] == "docs/site/reference/openapi.json"
+    assert "--require-breaking-title" in " ".join(_commands(step))
+
+
+def test_a_breaking_api_change_without_a_breaking_title_fails_the_check(tmp_path: Path) -> None:
+    """Removing a route needs ``!``."""
+    assert _run_api_contract_step(tmp_path, base=_BEFORE, head=_AFTER, title="feat: x") == 1
+
+
+def test_a_breaking_api_change_with_a_breaking_title_passes_the_check(tmp_path: Path) -> None:
+    """Marked breaking, the change is deliberate; the footer check is the step before."""
+    assert _run_api_contract_step(tmp_path, base=_BEFORE, head=_AFTER, title="feat!: x") == 0
+
+
+def test_an_additive_api_change_passes_the_check(tmp_path: Path) -> None:
+    """Adding a route only updates the snapshot."""
+    assert _run_api_contract_step(tmp_path, base=_AFTER, head=_BEFORE, title="feat: x") == 0
+
+
+def test_a_base_branch_without_a_snapshot_passes_the_check(tmp_path: Path) -> None:
+    """The pull request that adds the snapshot has nothing to compare with."""
+    assert _run_api_contract_step(tmp_path, base=None, head=_AFTER, title="docs: x") == 0
 
 
 def test_the_scorecard_workflow_is_read_only_and_publishes_its_results() -> None:

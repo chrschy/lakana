@@ -20,6 +20,7 @@ Pages:
 
 - [Command line](cli.md): every `lakana` command and sub-command with its arguments and options. Generated from the code.
 - [Settings](settings.md): every `LAKANA_*` environment variable with its type, default, reader and description. Generated from the code.
+- [The REST API as a contract](rest-api.md): the platform API and the Iceberg REST catalog, what Lakana promises, what counts as breaking, how deprecations are announced, and where to get the [OpenAPI document](openapi.json) (generated from the code).
 
 - [Project layout](project-layout.md): the files a deploy reads and the table names they give.
 - [Asset front-matter](asset-front-matter.md): every key of the `/* lakana */` block of an asset.
