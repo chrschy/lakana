@@ -44,9 +44,10 @@ PostgreSQL, so that a small team gets them in one install instead of assembling 
 | Area | What Lakana covers |
 |---|---|
 | Analytics | SQL assets, incremental tables, lineage, governed queries |
+| Data modelling | Medallion layers and Kimball-lite star schemas, merge and history write modes, translated metadata, measures as metadata (before v1.0.0, #249) |
 | Data science | Python assets, reproducible environments, exploration through the SDK (including from your own notebook) |
 | ML | Training and batch scoring as assets, versioned model artifacts, experiment tracking, a feature store |
-| Operations | Runs, schedules, retries, audit, secrets, access policies, table and environment retention (0.17.0, #87) |
+| Operations | Runs, schedules, retries, audit, secrets, access policies, table and environment retention (0.17.0, #87), deploys from CI without a stored secret (0.18.0, #15), health checks and stable log codes (0.18.0, #205, #207) |
 
 How the larger pieces are meant to work:
 
@@ -61,6 +62,13 @@ How the larger pieces are meant to work:
   is a named address and secret, and the asset's helper does the reading. Configuring a
   recurring load without writing an asset (no-code loads, #86) is an idea for after v1.0.0
   only.
+- **Data modelling.** Lakana is opinionated about how tables are laid out: medallion layers
+  (bronze, silver, gold) and Kimball-lite star schemas, with wide tables allowed where a star is
+  too much. Model metadata sits in the asset header (#250), labels and descriptions can be
+  translated with a main language (#251), and layer rules are opt-in first and enforced later
+  (#252). The write modes `merge` (upsert) and `history` (SCD type 2) build tables whose rows
+  change (#253), and a template and a guide start a new team (#254). A measure is metadata on a
+  column, not a computed metric (#255). All of it comes before v1.0.0 (epic #249).
 - **Data quality.** A check is a SQL file that must return no rows. It either blocks (the table is
   set back to what it was before the run, and what reads it is not built) or only warns, and its
   results are kept as a history. Nothing more elaborate than that. See
@@ -127,7 +135,8 @@ These are choices, not gaps. Each keeps the platform small enough to understand 
   easy to audit.
 - **A plugin ecosystem and registry.** One proven way beats many unvetted ones.
 - **An online feature store.** See the feature store above.
-- **A semantic layer.** Metrics definitions belong in your SQL assets.
+- **A semantic layer.** Metrics definitions belong in your SQL assets. A measure recorded as
+  metadata (#255) is documentation and is not computed.
 
 **Parked:** unstructured data, meaning governed volumes for files. It may return if teams need it.
 

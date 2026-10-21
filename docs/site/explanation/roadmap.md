@@ -61,7 +61,7 @@ Notifications (M5d-c) complete M5d: a job can name a webhook, and a run that fai
 first run that succeeds after it, send a message in `json`, `slack` or `teams` format. The worker
 sends only to a public `https` address unless an operator allows a host, tries up to five times,
 and never changes the run. See [Get told when a job fails](../how-to/get-told-when-a-job-fails.md)
-and the [upgrade notes](upgrades.md#notifications-for-jobs). The next element is the move to DuckDB 2 (item 2 below).
+and the [upgrade notes](upgrades.md#notifications-for-jobs). 
 
 Housekeeping for data that is no longer wanted shipped in 0.17.0. A table, or every table of an
 environment, can be given a retention and then expires (#87, PR #227), so that development tables
@@ -74,9 +74,20 @@ anything is written, so files that never landed can be found and removed (#90), 
 The audit log records when a manager views other people's queries or a table's readers, and
 query text in other people's events needs `READ_QUERY_TEXT` (#88); a successful sign-in is written at most once per
 credential and window (#217). Deploying from CI without a stored secret, through OIDC token
-exchange (#15), is built in three parts that do not wait for the web interface: 0.17.0 verifies
-a CI provider's ID token (#244); the exchange, trust rules and enforcement, and then the client,
-how-tos and templates follow.
+exchange (#15), was built in three parts that did not wait for the web interface: 0.17.0
+verified a CI provider's ID token (#244); the exchange, trust rules and enforcement, and then
+the client, how-tos and templates followed in 0.18.0.
+
+0.18.0 shipped the rest of that work and the first operating and contract items. CI deploys
+without a stored secret, through OIDC token exchange, from GitHub Actions and from GitLab CI
+(#15 is complete: parts 2 and 3 are #247 and #258). `/readyz`, `lakana-worker healthcheck` and
+stable log codes tell an operator whether an instance is ready and why not (#205, #207); disk use
+is shown per environment and the worker's package cache trims itself (#206). The storage root
+and the webhook allow-list are hardened (#231, #243, #260). The REST API is declared a versioned
+contract with a CI schema check, and the promise starts at v1.0.0 (#7); routes carry
+descriptions (#268). A guide and a tutorial show how to move SQL transformations (#61), and the
+output blocks in the documentation are checked (#54). The next element is the move to DuckDB 2
+(item 2 below).
 
 ## To v1.0.0
 
@@ -95,11 +106,11 @@ ingestion helpers and named connections.
    come after v1.0.0. Done when a failing check stops a downstream build, its result is kept, and the
    failure is announced.
 2. **The move to DuckDB 2.** Lakana runs on DuckDB 1.5 and moves to DuckDB 2 before M7b. It is a
-   migration, not a milestone; it is tracked in #96. DuckDB 1.5 will reach its end of life
+   migration, not a milestone; it is tracked in #96. DuckDB 2.0.0 was released on 2026-10-21 and
+   the move is the next element. DuckDB 1.5 will reach its end of life
    ([release calendar](https://duckdb.org/release_calendar)). On a 2.0 development build, reading Parquet over HTTP was 2 to 14
    times faster in the way Lakana queries it, and about equal on local files. Until the move the
-   worker requires `duckdb<2`. If DuckDB 2.0 comes out too late, the beta ships on DuckDB 1.5.6 and the move
-   follows right after the beta, before the web interface (M7).
+   worker requires `duckdb<2`.
 3. **M7b, task isolation.** A Docker runner executes each Python task in its own container. A
    short design trial comes first: how the worker reaches a container runtime without gaining
    root on the host. Done when a task cannot read the worker's credentials or another project's
@@ -142,9 +153,18 @@ ingestion helpers and named connections.
     a token as the password. A service account is refused on a table that has a row filter or
     column mask; a dashboard on restricted data reads a table built for its audience. Done when
     each tool on the tested list connects and sees only what its identity may.
-10. **M9, performance and multi-host workers.** Measured query performance, and workers that
+10. **Data modelling (epic #249).** Decided on 2026-10-20 and built before v1.0.0, after M8c
+    and before M9. Opinionated support for medallion layers (bronze, silver, gold) and
+    Kimball-lite star schemas, with optional wide tables. The parts: model metadata in the asset
+    header (#250); translated labels and descriptions with a main language (#251); layer rules,
+    first opt-in and then enforced (#252); the write modes `merge` (upsert) and `history`
+    (SCD type 2), which supersede #39 (#253); a template and a guide (#254); and measures as
+    metadata only, with no metrics layer (#255). Done when a new team can start from the
+    template, build a star schema with a history dimension, and see its layers and labels in the
+    catalog.
+11. **M9, performance and multi-host workers.** Measured query performance, and workers that
     run on more than one host. Done when adding a host increases throughput as documented.
-11. **M10, hardening and v1.0.0.** Security review, upgrade paths, documentation pass and the
+12. **M10, hardening and v1.0.0.** Security review, upgrade paths, documentation pass and the
     API freeze. Done when the release criteria are met and v1.0.0 is tagged.
 
 ## After v1.0.0
@@ -154,7 +174,6 @@ ingestion helpers and named connections.
 - Arrow Flight SQL, for Python, R and other clients.
 - More databases for ingestion, starting with the ones teams ask for most.
 - SFTP as a file source.
-- Merge (upsert) as a way to build a table, for sources whose rows change or disappear.
 - Data contracts: the schema, freshness and checks a published table promises its consumers.
 - Cloud file-sharing services as file sources.
 - No-code loads: configuring a recurring load without writing an asset (#86). Nothing no-code
