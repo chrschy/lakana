@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import errno
 import ipaddress
 import json
 import logging
@@ -99,6 +100,51 @@ _SOCKET_FOUND = 4
 _TOO_MANY = 5
 _UNREADABLE = 6
 """Exit statuses of the ingestion-root probe."""
+
+
+_KEY_TEMPORARY = re.compile(r"\.[0-9a-f]{16}\.tmp\Z")
+_STALE_TEMPORARY_SECONDS = 60.0
+"""How old a temporary key file must be before a start removes it as a crash's leftover."""
+
+
+def _sweep_key_temporaries(directory: Path, name: str) -> None:
+    """Remove the temporary key files a launcher killed while writing `cache.key` left behind.
+
+    Only names of the form ``<name>.<16 hex>.tmp`` older than `_STALE_TEMPORARY_SECONDS` are
+    removed: a younger one may belong to a launcher starting next to this one on the same
+    volume, which links it in a moment.
+
+    Parameters
+    ----------
+    directory
+        The launcher's state directory.
+    name
+        The key file's name.
+    """
+    stale_before = time.time() - _STALE_TEMPORARY_SECONDS
+    with contextlib.suppress(OSError):
+        for entry in os.scandir(directory):
+            suffix = entry.name[len(name) :] if entry.name.startswith(name) else ""
+            if _KEY_TEMPORARY.match(suffix) is None:
+                continue
+            with contextlib.suppress(OSError):
+                if entry.stat(follow_symlinks=False).st_mtime < stale_before:
+                    os.unlink(entry.path)
+
+
+def _sync_directory(directory: Path) -> None:
+    """Flush a directory's entries to disk, so a link made in it survives a crash.
+
+    Parameters
+    ----------
+    directory
+        The directory.
+    """
+    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 class StartError(Exception):
@@ -554,6 +600,7 @@ class Launcher:
             If the file exists and is not a private regular file of 32 bytes.
         """
         path = self.settings.state_dir / "cache.key"
+        _sweep_key_temporaries(self.settings.state_dir, path.name)
         try:
             return self._read_cache_key(path)
         except FileNotFoundError:
@@ -571,6 +618,7 @@ class Launcher:
             return self._read_cache_key(path)
         finally:
             temporary.unlink(missing_ok=True)
+        _sync_directory(self.settings.state_dir)
         return key
 
     @staticmethod
@@ -597,14 +645,18 @@ class Launcher:
         """
         fix = "delete it and restart (the shared caches then start empty)"
         try:
-            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            # O_NONBLOCK: a FIFO planted here would otherwise block the open until a writer came.
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
         except FileNotFoundError:
             raise
         except OSError as exc:
-            raise StartError(
-                f"{path} cannot be opened without following a symbolic link ({exc.strerror}); "
-                f"{fix}."
-            ) from None
+            if exc.errno == errno.ELOOP:
+                reason = "is a symbolic link"
+            elif exc.errno in (errno.EACCES, errno.EPERM):
+                reason = "cannot be read by the launcher's user (permission denied)"
+            else:
+                reason = f"cannot be opened ({exc.strerror or type(exc).__name__})"
+            raise StartError(f"{path} {reason}; {fix}.") from None
         try:
             info = os.fstat(descriptor)
             if not stat.S_ISREG(info.st_mode):
