@@ -1012,6 +1012,26 @@ access-controlled on the server; `read_only=True` seals it (0400/0500) for a tas
   index, and the hosts of those indexes for the egress proxy. Credentials are decrypted only when
   a build runs, never for an environment the launcher reports complete; the build's output is
   redacted for every form of every credential before it reaches the task log.
+- **A build's only way out is the egress proxy** (`launcher/egress.py`, `lakana-egress`,
+  standard library; Squid and tinyproxy are GPL). The launcher attaches the `egress` service to
+  each build network and puts a token in the build's `HTTPS_PROXY` (`egress_token.mint`):
+  HMAC-SHA256 with `egress.key` (32 random bytes, hex, mode 0640, in the `egress-key` volume the
+  proxy mounts read-only) over a purpose (`build`), the build network's /29, exact host:port
+  pairs (`requests.build_targets`: 443 of every host, plus a port an index URL names) and an
+  expiry (the build's timeout and a minute, counted after the image pull). The proxy keeps no
+  state and knows nothing of builds: it tunnels `CONNECT host:port` only when the token
+  verifies, the client's address is in the token's network (a token copied into another
+  container is refused), and the pair is in the token; host matching is exact on one spelling
+  (lower case, no trailing dot, no IPv6 literal, no leading-zero port). Directly it never
+  connects to loopback, link-local (cloud metadata), multicast, unspecified, reserved or known
+  metadata addresses, nor to a network its own container is attached to (read from
+  `/proc/net/route`: the Compose network and every build network), resolving once and
+  connecting to a checked address (no DNS rebinding); other private addresses stay reachable,
+  because a company index often is one. The head must arrive whole within 10 s and 16 KiB,
+  strictly CRLF, one `Proxy-Authorization`, at most 64 lines; at most 256 connections (503
+  beyond, then closed without a thread); a tunnel ends idle after 5 minutes and at the token's
+  expiry. `LAKANA_EGRESS__UPSTREAM_PROXY` chains a company proxy, which then resolves and
+  decides. M6 is meant to give ingestion tasks tokens of another purpose through the same proxy.
 - **Incident response.** When an environment may be poisoned (a malicious dependency or vendored
   package was deployed) or a worker may be compromised:
   1. Stop the workers (`docker compose stop worker`), so nothing builds or runs meanwhile.

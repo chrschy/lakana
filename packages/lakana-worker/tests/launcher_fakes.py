@@ -37,6 +37,7 @@ def settings(state: Path, **changes: Any) -> LauncherSettings:
         "work_volume": "lakana-task-work",
         "socket": Path("l.sock"),
         "state_dir": state,
+        "egress_key": state / "egress.key",
     }
     values.update(changes)
     return LauncherSettings(**values)

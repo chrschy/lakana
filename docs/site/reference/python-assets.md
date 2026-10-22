@@ -294,7 +294,11 @@ at start: builds reach the package indexes through the egress service, and a bui
 trusts only the publicly trusted certificate authorities of its task image. A package index or a
 proxy whose certificate a private certificate authority signed therefore needs
 `LAKANA_RUN__RUNNER=local` for now (see [Python assets](../how-to/deploy-with-compose.md#python-assets)
-in "Deploying with Compose"). At start a `docker` worker asks the launcher to remove the containers
+in "Deploying with Compose"). The egress service lets a build reach port 443 of each package
+index's host, and another port only when the index's URL names it (a registered index with a
+credential, or `LAKANA_RUN__INDEX_URL`); it tunnels https only, so an `http://` index cannot be
+reached from a build. `docker compose logs egress` names each host and port it refuses
+(`Refused a build connection from … to <host>:<port>: not in its token.`). At start a `docker` worker asks the launcher to remove the containers
 its own earlier process left (the worker keeps its name for the launcher in `launcher-owner` in its
 cache directory, so workers that share a host name never remove each other's tasks); a launcher
 that cannot be reached is logged, the worker starts anyway, and each Python task fails with
