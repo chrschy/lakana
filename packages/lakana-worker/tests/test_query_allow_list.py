@@ -34,6 +34,7 @@ from lakana_worker.task_outcome import classify, failure_code_of
 NOT_ONE_SELECT = (
     "Query failed: the query process was given something other than one SELECT statement."
 )
+WRITES_IN_SELECT = "Query failed: the query process was given a SELECT that may write"
 
 
 def _parquet(path: Path, value: int) -> None:
@@ -459,6 +460,7 @@ def test_a_proxy_secret_in_the_statement_is_refused_before_anything_runs(
         "SET threads = 1",
         "CREATE TABLE t AS SELECT 1",
         "EXPLAIN SELECT 1",
+        "MERGE INTO t USING s ON t.a = s.a WHEN MATCHED THEN DELETE",
     ],
 )
 def test_anything_but_one_select_is_refused_by_the_child(sql: str) -> None:
@@ -478,6 +480,20 @@ def test_anything_but_one_select_is_refused_by_the_child(sql: str) -> None:
         "SELECT 1 AS a UNION ALL SELECT 2",
         "SELECT * FROM (SELECT 1 AS a, 2 AS b) PIVOT (sum(b) FOR a IN (1))",
         "SELECT * FROM (SELECT 1 AS a, 2 AS b) UNPIVOT (v FOR k IN (a, b))",
+        "PIVOT (SELECT 1 AS a, 2 AS b) ON a IN (1) USING sum(b)",
+        "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 3) FROM r",
+        "WITH x AS MATERIALIZED (SELECT 1 AS a) SELECT a FROM x",
+        "SELECT * FROM (WITH x AS (SELECT 1 AS a) SELECT a FROM x) LIMIT 1",
+        "SELECT list_transform([1, 2], LAMBDA x : x + 1) AS l",
+        "SELECT list_reduce([1, 2], LAMBDA x, y : x + y) AS l",
+        """SELECT '{"a": 1}'::JSON -> '$.a' AS j, '{"a": 1}'::JSON ->> 'a' AS k""",
+        "SELECT sum(a) FILTER (WHERE a > 0) OVER (PARTITION BY a ORDER BY a) AS s "
+        "FROM (SELECT 1 AS a)",
+        "SELECT a, row_number() OVER w AS n FROM (SELECT 1 AS a) WINDOW w AS (ORDER BY a) "
+        "QUALIFY true",
+        "SELECT (SELECT max(x) FROM range(3) AS r(x)) AS m WHERE EXISTS (SELECT 1)",
+        "SELECT 1 AS a INTERSECT SELECT 1 EXCEPT SELECT 2",
+        "SELECT unnest([1, 2]) AS u, [x * 2 FOR x IN [1, 2]] AS c, {'k': 1} AS s",
     ],
 )
 def test_one_select_in_any_spelling_still_runs(sql: str) -> None:
@@ -488,3 +504,36 @@ def test_one_select_in_any_spelling_still_runs(sql: str) -> None:
     and none of them changes a setting or a secret.
     """
     assert execute_query(sql).num_rows >= 1
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "WITH x AS (COPY (SELECT 1) TO '/nonexistent/x.csv') SELECT 1",
+        "SELECT * FROM (WITH x AS (COPY (SELECT 1) TO '/nonexistent/x.csv') SELECT 1)",
+        "SELECT 1 UNION ALL (WITH x AS (COPY (SELECT 1) TO '/nonexistent/x.csv') SELECT 1)",
+        "WITH x AS (DELETE FROM t RETURNING *) SELECT * FROM x",
+        "WITH x AS (UPDATE t SET a = 1 RETURNING *) SELECT * FROM x",
+        "WITH x AS (INSERT INTO t VALUES (1) RETURNING *) SELECT * FROM x",
+    ],
+)
+def test_a_write_nested_in_a_select_is_refused_by_the_child(sql: str) -> None:
+    """Red on 2.0.0 before the tree check: DuckDB's parser reports each as one SELECT."""
+    with pytest.raises(DuckDBInternalError) as caught:
+        execute_query(sql)
+    assert str(caught.value).startswith(WRITES_IN_SELECT)
+
+
+def test_a_copy_nested_in_a_select_writes_nothing_into_a_table_directory(tmp_path: Path) -> None:
+    """Red on 2.0.0 before the tree check: local mode wrote ``t1/b.parquet`` and returned 1.
+
+    DuckDB may write wherever it may read, so a nested ``COPY`` could add a file to a table
+    the query reads; the child refuses it before anything is configured.
+    """
+    _parquet(tmp_path / "t1" / "a.parquet", 1)
+    target = tmp_path / "t1" / "b.parquet"
+    sql = f"WITH x AS (COPY (SELECT 9 AS a) TO '{target}') SELECT 1 AS one"
+    with pytest.raises(DuckDBInternalError) as caught:
+        execute_query(sql, read_prefixes=(f"{tmp_path / 't1'}/",))
+    assert str(caught.value).startswith(WRITES_IN_SELECT)
+    assert not target.exists()
