@@ -2757,7 +2757,9 @@ functions refused by the allow-list below, the scalars read one by one)
 — `query`/`query_table`/
 `json_execute_serialized_sql` each evaluate a string argument as SQL/a table reference
 (`json_execute_serialized_sql` takes `json_serialize_sql`'s own output, so a query naming
-only that one function can still run arbitrary SQL from a string), the `parquet_*_metadata`
+only that one function can still run arbitrary SQL from a string), the scalar
+`json_serialize_plan` plans the SQL text it is given and DuckDB folds `getvariable(...)` into
+the plan, so it would show the session variables that carry a table's file URLs, the `parquet_*_metadata`
 family and `sniff_csv` read a named file's structure or contents directly, `read_duckdb`
 opens another DuckDB database file, and `which_secret` discloses which configured
 credential DuckDB would use for a path. **Introspection** is a fourth class:
@@ -2838,14 +2840,19 @@ bound) and runs the statement with no parameters (`connection.sql(sql).to_arrow_
 the call that streams and that keeps an Arrow export in DuckDB 2; `sql()` with parameters holds
 the whole result before the first batch). An incremental write's watermark is set the same way,
 as `v_watermark` (`catalog.watermark.wrap_incremental`). The names are predictable on purpose:
-`getvariable` and `duckdb_variables` are blacklisted and a `SET`/`RESET VARIABLE` is refused as
-a statement that is not a read, so no user SQL reads or sets a variable, and the child writes a
-name into `SET VARIABLE` only when it is an identifier. `query_rewrite._reject_placeholders`
-still refuses any `exp.Placeholder`/`exp.Parameter` node, in `check_blacklist` and again inside
-every parse `rewrite_query`/`extract_table_refs` make, including a view's stored SQL: nothing is
-bound to the statement, so a placeholder has no use, and DuckDB refuses one (`Unexpected
-prepared parameter`). A placeholder once bound to the rewriter's own URL list and returned the
-URLs as data. `executor.execute_query`/`stream_query`/`describe_query` refuse a positional
+`getvariable` and `duckdb_variables` are blacklisted, `json_serialize_plan` is blacklisted (it
+plans the SQL text it is given and folds `getvariable(...)` into the plan), a `SET`/`RESET
+VARIABLE` is refused as a statement that is not a read, and every placeholder is refused, so no
+user SQL reads or sets a variable; the child writes a name into `SET VARIABLE` only when it is
+an identifier. `query_rewrite._reject_placeholders` refuses any `exp.Placeholder`/
+`exp.Parameter` node, in `check_blacklist` and again inside every parse
+`rewrite_query`/`extract_table_refs` make, including a view's stored SQL. That refusal is
+load-bearing: DuckDB 2.0 resolves a `$name` no parameter is bound to as the session variable of
+that name, so `SELECT $v_0_files` returns the URL list on a prepared statement (`connection.sql()`
+still refuses it on 2.0.0, but nothing promises that), and the placeholder rule is what keeps
+the variables unreachable — never relax it
+(`test_a_named_placeholder_would_otherwise_read_a_variable`). A placeholder once bound to the
+rewriter's own URL list and returned the URLs as data. `executor.execute_query`/`stream_query`/`describe_query` refuse a positional
 sequence outright (`TypeError`): only a name-to-value mapping is accepted.
 
 **A foreign commit cannot add a data file without field ids.** `commit_table` calls
@@ -2894,13 +2901,25 @@ refusals that callers (the pipeline's `except SQL_SYNTAX_ERRORS`) already map to
 message, and a `MemoryError` is the resource limit's signal, which must not be disguised as a
 syntax problem.
 
+**No submitted query runs as a recursive query.** `query_rewrite._reject_recursive_ctes`
+(in `check_blacklist` and in every `_parse_checked`) refuses a `WITH RECURSIVE` clause anywhere,
+because sqlglot's scope binds a recursive CTE's name inside its base term where DuckDB reads a
+real relation, and it refuses `CONNECT BY` (`exp.Connect`, plus `exp.Prior` and
+`exp.ConnectByRoot`) anywhere too: sqlglot parses a hierarchical query to a plain `SELECT` and
+writes the `WITH RECURSIVE` only when it renders the tree, so a keyword check on the parsed tree
+alone would let a recursive query reach DuckDB. The parsed tree of a `CONNECT BY` holds no
+recursive CTE, so the base-term disagreement does not arise there (its table is classified and
+rewritten like any other); it is refused so the invariant holds for the SQL DuckDB is given.
+Any new sqlglot syntax that renders to a construct the guard refuses when written directly
+needs the same treatment.
+
 **A submitted query holds no statement but a read, at any depth.** `check_blacklist` requires
 the statement as a whole to be one of `_TOP_LEVEL_READS`: an `exp.Query` (a `SELECT`, a
 `WITH ... SELECT`, a `FROM`-first query, a set operation) or a bare `exp.Values` list
 (`VALUES (1, 'a'), (2, 'b')`, which DuckDB runs as a read). Every other check walks the whole
 tree, so the rows of a `VALUES` list are checked as a `SELECT` list is, with the same messages:
 table functions, blacklisted functions (`read_csv`, `getvariable`, `query`, `current_query`),
-placeholders, statements inside and `WITH RECURSIVE`. sqlglot builds no scope for a top-level
+placeholders, statements inside, `WITH RECURSIVE` and `CONNECT BY`. sqlglot builds no scope for a top-level
 `exp.Values`, so `_parse_checked` makes it `SELECT * FROM (VALUES ...) AS __lakana_values`
 (its `ORDER BY`, `LIMIT` and `OFFSET` move to the `SELECT`; any other argument — an alias,
 `WHERE`, `JOIN`, `SORT BY`, `FOR UPDATE`, which sqlglot attaches and DuckDB refuses there — is

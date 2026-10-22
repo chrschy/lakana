@@ -64,6 +64,19 @@ write refused.
 | A view | Is created; on DuckDB 2.0 the column's type reads `null`. |
 | A write to a table | On DuckDB 2.0 refused with "Column 'x' is NULL without a type, which a Lakana table can't store; write `CAST(NULL AS <type>) AS x`, for example `CAST(NULL AS VARCHAR)`." On DuckDB 1.5 the column is created as an `integer`, which is rarely what you want. |
 
+## Recursive queries are refused
+
+A query may not run recursively, in either spelling:
+
+| You write | Refused with |
+|---|---|
+| `WITH RECURSIVE r AS (...)` | "Recursive CTEs (WITH RECURSIVE) are not supported in submitted queries." |
+| `CONNECT BY`, with or without `START WITH`, `NOCYCLE`, `PRIOR`, `CONNECT_BY_ROOT` or `LEVEL` | "CONNECT BY is not supported in submitted queries: it runs as a recursive query. Write the query without hierarchical recursion, for example with one join per level." |
+
+This holds anywhere in the statement, in a CTE, a subquery or a view. To walk a hierarchy of
+known depth, join the table to itself once per level; for a deep or unknown depth, compute the
+path in a Python asset that writes it to a table, and query that table.
+
 ## Functions a query may not call
 
 A query reads tables, so a function that reads files, runs SQL from a string, reveals the

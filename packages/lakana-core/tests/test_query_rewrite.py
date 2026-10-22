@@ -1237,6 +1237,81 @@ def test_rewrite_query_rejects_a_recursive_cte() -> None:
         )
 
 
+_CONNECT_BY_SPELLINGS = {
+    "start_with": (
+        "SELECT id FROM bronze.org START WITH parent IS NULL CONNECT BY PRIOR id = parent"
+    ),
+    "no_start_with": "SELECT id FROM bronze.org CONNECT BY PRIOR id = parent",
+    "nocycle": "SELECT id FROM bronze.org CONNECT BY NOCYCLE PRIOR id = parent",
+    "root_and_level": (
+        "SELECT CONNECT_BY_ROOT id AS root, LEVEL FROM bronze.org CONNECT BY PRIOR id = parent"
+    ),
+    "level_only": "SELECT LEVEL FROM (SELECT 1) CONNECT BY LEVEL < 10",
+    "root_without_connect_by": "SELECT CONNECT_BY_ROOT id AS root FROM bronze.org",
+    "in_a_cte": (
+        "WITH h AS (SELECT id FROM bronze.org CONNECT BY PRIOR id = parent) SELECT id FROM h"
+    ),
+    "in_a_subquery": (
+        "SELECT * FROM (SELECT id FROM bronze.org CONNECT BY PRIOR id = parent) AS h"
+    ),
+    "in_an_in_predicate": (
+        "SELECT 1 WHERE 1 IN (SELECT id FROM bronze.org CONNECT BY PRIOR id = parent)"
+    ),
+}
+"""Hierarchical queries in Oracle's syntax, which sqlglot renders as `WITH RECURSIVE`.
+
+sqlglot parses `CONNECT BY` to an `exp.Connect` on a plain `SELECT` and only writes the
+recursive CTE when it renders the tree, so a check for the `RECURSIVE` keyword on the parsed
+tree never sees one.
+"""
+
+
+@pytest.mark.parametrize("spelling", sorted(_CONNECT_BY_SPELLINGS))
+def test_blacklist_refuses_every_connect_by_spelling(spelling: str) -> None:
+    """A hierarchical query is refused like the recursive query it renders to.
+
+    Parameters
+    ----------
+    spelling
+        Key into `_CONNECT_BY_SPELLINGS` naming the shape under test.
+    """
+    with pytest.raises(ValidationError, match="CONNECT BY is not supported"):
+        check_blacklist(_CONNECT_BY_SPELLINGS[spelling])
+
+
+@pytest.mark.parametrize("spelling", ["start_with", "in_a_cte", "root_and_level"])
+def test_the_classifier_and_the_rewrite_refuse_connect_by_on_their_own(spelling: str) -> None:
+    """Defence in depth: a caller that skipped `check_blacklist` is refused all the same.
+
+    Parameters
+    ----------
+    spelling
+        Key into `_CONNECT_BY_SPELLINGS` naming the shape under test.
+    """
+    sql = _CONNECT_BY_SPELLINGS[spelling]
+
+    with pytest.raises(ValidationError, match="CONNECT BY is not supported"):
+        extract_table_refs(sql)
+    with pytest.raises(ValidationError, match="CONNECT BY is not supported"):
+        rewrite_query(sql, {"bronze.org": _parquet("s3://bucket/part-0.parquet")})
+
+
+def test_a_views_stored_sql_cannot_use_connect_by() -> None:
+    """A view's stored SQL is refused for `CONNECT BY` too, at the top and nested."""
+    view = ViewDefinition(name="gold.v", sql=_CONNECT_BY_SPELLINGS["start_with"])
+    outer = ViewDefinition(name="gold.wrapper", sql="SELECT id FROM gold.v")
+    views = {"gold.v": view, "gold.wrapper": outer}
+
+    for sql in ("SELECT * FROM gold.v", "SELECT * FROM gold.wrapper"):
+        with pytest.raises(ValidationError, match="CONNECT BY is not supported"):
+            expand_views(sql, views.get)
+
+
+def test_a_column_or_table_named_like_a_connect_by_keyword_still_runs() -> None:
+    """Only the clause is refused: a column named `level` or `prior` is an ordinary name."""
+    check_blacklist("SELECT level, prior FROM bronze.connect_by WHERE level > 1")
+
+
 def test_a_table_with_no_policy_still_gets_a_bare_select_star() -> None:
     """No row_filters/column_masks means today's SELECT * FROM reader($name), byte for byte."""
     source = TableSource(urls=["s3://bucket/a.parquet"], file_format="parquet")
@@ -1749,6 +1824,29 @@ def test_user_sql_cannot_read_a_variable_of_the_connection(sql: str) -> None:
 
 
 @pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT json_serialize_plan('SELECT getvariable(''v_0_files'')') AS p",
+        "SELECT JSON_SERIALIZE_PLAN('SELECT 1') AS p",
+        "SELECT main.json_serialize_plan('SELECT 1') AS p",
+        "SELECT id FROM bronze.t WHERE json_serialize_plan('SELECT 1') IS NOT NULL",
+        "SELECT list_transform([1], lambda x: json_serialize_plan('SELECT 1')) AS p",
+        "WITH c AS (SELECT json_serialize_plan('SELECT 1') AS p) SELECT * FROM c",
+    ],
+)
+def test_user_sql_cannot_plan_sql_given_as_a_value(sql: str) -> None:
+    """A scalar that plans the SQL text it is given is refused wherever a scalar may sit.
+
+    Parameters
+    ----------
+    sql
+        A query that calls the scalar.
+    """
+    with pytest.raises(ValidationError, match="json_serialize_plan may not be called directly"):
+        check_blacklist(sql)
+
+
+@pytest.mark.parametrize(
     ("sql", "message"),
     [
         ("SET VARIABLE v_0_files = ['x']", "not SET"),
@@ -1997,6 +2095,7 @@ _IN_A_VALUES_LIST = [
     pytest.param("query('SELECT 1')", id="query"),
     pytest.param("current_query()", id="current-query"),
     pytest.param("json_execute_serialized_sql('x')", id="serialized-sql"),
+    pytest.param("json_serialize_plan('SELECT getvariable(''v_0_files'')')", id="serialize-plan"),
     pytest.param("?", id="placeholder"),
     pytest.param("$name", id="named-placeholder"),
     pytest.param(

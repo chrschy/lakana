@@ -103,6 +103,45 @@ def test_json_execute_serialized_sql_would_otherwise_read_another_files_rows(
         check_blacklist("SELECT * FROM json_execute_serialized_sql(?)")
 
 
+def test_json_serialize_plan_would_otherwise_show_a_variables_value() -> None:
+    """Reproduces why `json_serialize_plan` must be blacklisted.
+
+    DuckDB plans the SQL text given to `json_serialize_plan` and folds `getvariable(...)` into
+    the plan it returns, so a query naming only `json_serialize_plan` in its own text could read
+    the session variables that carry a table's file URLs. This proves the mechanism against a
+    raw DuckDB connection; blacklisting the function by name is what closes it.
+    """
+    con = duckdb.connect(":memory:")
+    con.execute("SET VARIABLE v_0_files = 'http://store/t/a.parquet?X-Amz-Signature=SECRET'")
+    plan_row = con.execute(
+        "SELECT json_serialize_plan('SELECT getvariable(''v_0_files'') AS v')"
+    ).fetchone()
+    assert plan_row is not None
+    assert "X-Amz-Signature=SECRET" in plan_row[0]
+    with pytest.raises(ValidationError, match="json_serialize_plan"):
+        check_blacklist("SELECT json_serialize_plan('SELECT getvariable(''v_0_files'') AS v') AS p")
+
+
+def test_a_named_placeholder_would_otherwise_read_a_variable() -> None:
+    """Pins why the guard refuses every placeholder, `$name` included.
+
+    DuckDB 2.0 resolves `$name` to the session variable of that name when a prepared statement
+    runs with no parameter bound, so `SELECT $v_0_files` returns a table's file list just as
+    `getvariable('v_0_files')` would. (`connection.sql()`, the query process's call, still
+    refuses an unbound `$name` on 2.0.0; nothing promises it keeps doing so.) The guard's
+    placeholder refusal is what keeps the variables the query process sets out of reach of user
+    SQL.
+    """
+    con = duckdb.connect(":memory:")
+    con.execute("SET VARIABLE v_0_files = 'http://store/t/a.parquet?X-Amz-Signature=SECRET'")
+
+    assert con.execute("SELECT $v_0_files").fetchall() == [
+        ("http://store/t/a.parquet?X-Amz-Signature=SECRET",)
+    ]
+    with pytest.raises(ValidationError, match="placeholders are not allowed"):
+        check_blacklist("SELECT $v_0_files")
+
+
 def test_a_column_mask_survives_execution_against_real_duckdb(tmp_path: Path) -> None:
     """A masked column's real value never reaches a fetched row, not merely the SQL text."""
     probe = tmp_path / "customers.parquet"

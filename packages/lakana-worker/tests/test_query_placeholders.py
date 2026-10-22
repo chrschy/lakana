@@ -2,8 +2,9 @@
 
 `lakana_core.query_rewrite.rewrite_query` hands DuckDB each table's resolved
 file list as a DuckDB variable — on S3, presigned URLs of the raw files. A
-placeholder in the user's own SQL would bind to that list and return it as
-an ordinary value, and anyone holding those URLs can read the raw files
+placeholder in the user's own SQL once bound to that list, and on DuckDB 2.0 an
+unbound `$name` reads the variable of that name, either way returning the list
+as an ordinary value; anyone holding those URLs can read the raw files
 directly, past every row filter and column mask. These tests drive the real
 rewriter and the real executor, the level where that leak happened.
 """
