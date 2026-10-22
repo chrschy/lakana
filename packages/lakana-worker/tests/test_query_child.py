@@ -2052,3 +2052,161 @@ def test_anything_but_one_select_is_refused_before_the_connection_is_configured(
     """In this process, for coverage; `test_query_allow_list.py` runs the real child."""
     monkeypatch.setattr(query_child, "configure", lambda *_a: pytest.fail("configured"))
     assert _failed(_request(sql)) == ErrorDocument("internal", query_child.NOT_ONE_SELECT)
+
+
+_COPY = "COPY (SELECT 1 AS a) TO '/nonexistent/lakana-test-copy.csv'"
+NESTED_WRITES = [
+    pytest.param(f"WITH x AS ({_COPY}) SELECT 1", id="COPY in a CTE"),
+    pytest.param(f"WITH x AS MATERIALIZED ({_COPY}) SELECT 1", id="COPY in a materialized CTE"),
+    pytest.param(f"SELECT * FROM (WITH x AS ({_COPY}) SELECT 1)", id="COPY in a subquery"),
+    pytest.param(f"SELECT 1 UNION ALL (WITH x AS ({_COPY}) SELECT 1)", id="COPY in a UNION"),
+    pytest.param(f"SELECT EXISTS (WITH x AS ({_COPY}) SELECT 1)", id="COPY in EXISTS"),
+    pytest.param(
+        f"SELECT list_transform([1], LAMBDA y : (WITH x AS ({_COPY}) SELECT 1))",
+        id="COPY in a lambda",
+    ),
+    pytest.param("WITH x AS (DELETE FROM t RETURNING *) SELECT * FROM x", id="DELETE in a CTE"),
+    pytest.param(
+        "SELECT * FROM (WITH x AS (UPDATE t SET a = 1 RETURNING *) SELECT * FROM x)",
+        id="UPDATE in a subquery",
+    ),
+    pytest.param(
+        "SELECT 1 UNION ALL (WITH x AS (INSERT INTO t VALUES (1) RETURNING *) SELECT 1)",
+        id="INSERT in a UNION",
+    ),
+    pytest.param(
+        "SELECT * FROM json_execute_serialized_sql(json_serialize_sql("
+        f"'WITH x AS ({_COPY.replace(chr(39), chr(39) * 2)}) SELECT 1'))",
+        id="COPY run from a serialised statement",
+    ),
+    pytest.param("SELECT * FROM main.JSON_EXECUTE_SERIALIZED_SQL('{}')", id="a qualified spelling"),
+    pytest.param("SELECT * FROM query('SELECT 1')", id="query()"),
+    pytest.param("SELECT * FROM query_table('t')", id="query_table()"),
+    pytest.param("SELECT ('SELECT 1').query()", id="query() as a method"),
+    pytest.param("SELECT 1 WHERE EXISTS (SELECT * FROM query('SELECT 1'))", id="query() in EXISTS"),
+    pytest.param("SELECT json_serialize_plan('SELECT 1')", id="json_serialize_plan()"),
+]
+"""Writes that DuckDB 2's parser reports as one ``SELECT``, and calls of functions that run (or
+plan) SQL given as a value, which the tree cannot show. The guard refuses every one first; these
+pin the second layer."""
+
+
+def _serialised_execute(target: Path) -> str:
+    """Build a SELECT that runs a nested ``COPY`` to `target` from a serialised statement.
+
+    Parameters
+    ----------
+    target
+        The file the inner ``COPY`` writes.
+
+    Returns
+    -------
+    str
+        One SELECT whose own tree holds only a table function call.
+    """
+    inner = f"WITH x AS (COPY (SELECT 9 AS a) TO ''{target}'') SELECT 1"
+    return f"SELECT * FROM json_execute_serialized_sql(json_serialize_sql('{inner}'))"
+
+
+@pytest.mark.parametrize("sql", NESTED_WRITES)
+def test_a_write_nested_in_a_select_is_refused_before_the_connection_is_configured(
+    sql: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Red on 2.0.0 before the tree check: each one parsed as one SELECT and reached DuckDB."""
+    monkeypatch.setattr(query_child, "configure", lambda *_a: pytest.fail("configured"))
+    assert _failed(_request(sql)) == ErrorDocument("internal", query_child.WRITES_IN_SELECT)
+
+
+@pytest.mark.parametrize("serialised", [False, True], ids=["nested COPY", "serialised COPY"])
+def test_a_copy_nested_in_a_select_writes_nothing_into_the_temp_directory(
+    tmp_path: Path, serialised: bool
+) -> None:
+    """Red on 2.0.0 before the second layer: the file appeared in the query's temp directory.
+
+    ``max_temp_directory_size`` limits spilling only, so in remote mode such a write could fill
+    the worker's temp file system until the time limit. The serialised form was red before the
+    function check too: its own tree shows only a table function. The guard refuses both first.
+    """
+    spill = tmp_path / "spill"
+    spill.mkdir()
+    target = spill / "f.csv"
+    sql = (
+        _serialised_execute(target)
+        if serialised
+        else f"WITH x AS (COPY (SELECT range AS a FROM range(10)) TO '{target}') SELECT 1 AS one"
+    )
+    request = _request(sql, temp_directory=str(spill), read_prefixes=("http://127.0.0.1:9/b/t1/",))
+    assert _failed(request) == ErrorDocument("internal", query_child.WRITES_IN_SELECT)
+    assert not target.exists()
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        pytest.param("not json", id="not JSON"),
+        pytest.param("[]", id="not an object"),
+        pytest.param('{"error": true, "error_message": "x"}', id="DuckDB could not serialise"),
+        pytest.param('{"error": false}', id="no statements"),
+        pytest.param('{"error": false, "statements": []}', id="zero statements"),
+        pytest.param(
+            '{"error": false, "statements": [{"node": {"type": "SELECT_NODE"}}, '
+            '{"node": {"type": "SELECT_NODE"}}]}',
+            id="two statements",
+        ),
+        pytest.param(
+            '{"error": false, "statements": [{"node": {"type": "MERGE_INTO_QUERY_NODE"}}]}',
+            id="a write node",
+        ),
+        pytest.param(
+            '{"error": false, "statements": [{"node": {"type": "STATEMENT_NODE"}}]}',
+            id="a node type not on the list",
+        ),
+        pytest.param(
+            '{"error": false, "statements": [{"node": {"type": "SELECT_NODE", "x": '
+            '{"type": "FUTURE_WRITE", "modifiers": [], "cte_map": {}}}}]}',
+            id="a query node whose type does not end in _NODE",
+        ),
+        pytest.param(
+            '{"error": false, "statements": [{"node": {"type": 7, "modifiers": [], '
+            '"cte_map": {}}}]}',
+            id="a query node whose type is not a string",
+        ),
+        pytest.param(
+            '{"error": false, "statements": [{"node": {"type": "SELECT_NODE", "from_table": '
+            '{"type": "TABLE_FUNCTION", "function": {"class": "FUNCTION", '
+            '"function_name": "Query", "schema": "other"}}}}]}',
+            id="a function that runs SQL, in any case and schema",
+        ),
+        pytest.param(
+            '{"error": false, "statements": [{"node": {"type": "SELECT_NODE", "x": '
+            '{"function_name": ["query"]}}}]}',
+            id="a function name that is not a string",
+        ),
+    ],
+)
+def test_a_serialised_tree_that_is_not_plainly_a_read_is_refused(document: str) -> None:
+    """Fail closed: anything but one statement made only of reading query nodes is refused."""
+    assert not query_child.reads_only(document)
+
+
+def test_a_serialised_read_is_accepted() -> None:
+    connection = duckdb.connect()
+    sql = "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 3) FROM r"
+    (document,) = connection.execute("SELECT json_serialize_sql(?)", [sql]).fetchone() or ("",)
+    assert query_child.reads_only(document)
+
+
+def test_the_serialiser_gives_an_empty_text_when_duckdb_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An error from the serialiser becomes the empty text that `reads_only` refuses."""
+    monkeypatch.setattr(query_child, "SERIALISE", "SELECT CAST(? AS INTEGER)")
+    assert query_child._serialised(duckdb.connect(), "SELECT 1") == ""
+    assert not query_child.reads_only("")
+
+
+def test_a_statement_duckdb_cannot_serialise_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail closed when the serialiser reports an error for SQL the statement check accepted."""
+    monkeypatch.setattr(query_child, "SERIALISE", "SELECT error('cannot serialise') || ?")
+    monkeypatch.setattr(query_child, "configure", lambda *_a: pytest.fail("configured"))
+    assert _failed(_request("SELECT 1")) == ErrorDocument("internal", query_child.WRITES_IN_SELECT)

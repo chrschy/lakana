@@ -21,8 +21,16 @@ lies outside.
 (TYPE http, HTTP_PROXY ...)`` or ``EXTRA_HTTP_HEADERS`` would still route the reads, presigned URLs
 included, through a proxy of the statement's choosing. So before anything is configured the child
 splits the text with `duckdb.DuckDBPyConnection.extract_statements` and runs it only if that is
-exactly one ``SELECT`` (`NOT_ONE_SELECT` otherwise, an ``internal`` failure). The guard refuses
-all of these first; this is the second layer.
+exactly one ``SELECT`` (`NOT_ONE_SELECT` otherwise, an ``internal`` failure). DuckDB 2 reports a
+write inside a CTE (``WITH x AS (COPY ... TO ...) SELECT 1``, or ``INSERT``, ``UPDATE`` and
+``DELETE ... RETURNING``) as one ``SELECT``, at any depth, so the child then asks DuckDB for the
+statement's parse tree (`SERIALISE`, still on the unconfigured connection) and runs it only if
+every query node in it reads (`reads_only`, `READING_QUERY_NODES`; `WRITES_IN_SELECT` otherwise,
+also when the tree cannot be had). The same check refuses a call of a function that runs SQL
+given as a value (`SQL_RUNNING_FUNCTIONS`, e.g. ``json_execute_serialized_sql``), whose SQL the
+tree shows only as text. Unchecked, such a ``COPY`` wrote into the query's temp
+directory, which ``max_temp_directory_size`` does not bound, or in local mode into a table
+directory. The guard refuses all of these first; this is the second layer.
 
 Why each configuration statement is there, and why their order matters:
 
@@ -104,6 +112,7 @@ from __future__ import annotations
 import contextlib
 import ctypes
 import functools
+import json
 import os
 import re
 import signal
@@ -183,8 +192,63 @@ NOT_ONE_SELECT = (
 )
 """What a child says, without running anything, of SQL that DuckDB's parser does not read as
 exactly one ``SELECT``. Every mode sends one (a describe wraps it in ``SELECT * FROM (...)
-LIMIT 0``); anything else (a second statement, ``CREATE SECRET``, ``SET``, ``PRAGMA``,
-``ATTACH``, ``COPY``, ``LOAD``, ``CALL``) is refused here as the layer behind the guard."""
+LIMIT 0``); anything else at the top level (a second statement, ``CREATE SECRET``, ``SET``,
+``PRAGMA``, ``ATTACH``, ``COPY``, ``INSERT``, ``MERGE``, ``LOAD``, ``CALL``) is refused here as
+the layer behind the guard. A write nested inside a ``SELECT`` passes this check on DuckDB 2 and
+is refused by `WRITES_IN_SELECT`'s check."""
+
+WRITES_IN_SELECT = (
+    "Query failed: the query process was given a SELECT that may write (a COPY, INSERT, UPDATE, "
+    "DELETE or MERGE inside it, or a call of a function that runs SQL given as a value), or one "
+    "whose parse tree it could not check. This is a defect of Lakana; please report it."
+)
+"""What a child says, without running anything, of one ``SELECT`` whose parse tree is not made of
+reading query nodes only, or that calls a function in `SQL_RUNNING_FUNCTIONS` (`reads_only`).
+DuckDB 2's parser reports ``WITH x AS (COPY ... TO ...) SELECT 1`` as one ``SELECT``, and the same
+holds for ``INSERT``, ``UPDATE`` and ``DELETE ... RETURNING`` in a CTE, at any depth: in a
+subquery, a ``UNION`` branch, ``EXISTS`` or a lambda. The guard refuses all of these first."""
+
+SERIALISE = "SELECT json_serialize_sql(?)"
+"""How the child asks DuckDB's own parser for the statement's tree, as JSON. Nothing runs: the
+function parses its argument and returns the tree; it fails, or reports ``"error": true``, for
+anything it cannot serialise."""
+
+READING_QUERY_NODES = frozenset(
+    {"SELECT_NODE", "SET_OPERATION_NODE", "RECURSIVE_CTE_NODE", "CTE_NODE"}
+)
+"""The query node types a statement the child runs may contain. Every other node type is refused,
+the writing ones (``COPY_QUERY_NODE``, ``INSERT_QUERY_NODE``, ``UPDATE_QUERY_NODE``,
+``DELETE_QUERY_NODE`` on DuckDB 2.0.0) and any a later DuckDB adds."""
+
+SQL_RUNNING_FUNCTIONS = frozenset(
+    {
+        "json_execute_serialized_sql",
+        "query",
+        "query_table",
+        "json_serialize_plan",
+        "postgres_query",
+        "postgres_execute",
+        "mysql_query",
+        "mysql_execute",
+    }
+)
+"""Functions that run, or bind and plan, SQL given as a value: SQL the parse tree shows only as a
+text or a serialised statement, so `READING_QUERY_NODES` cannot judge it. A call of any of them,
+in ``FROM`` or as an expression, by any qualified or quoted spelling or as a method, is refused
+(the serialised name is lower-cased and compared without its schema or catalog).
+``SELECT * FROM json_execute_serialized_sql(json_serialize_sql('WITH x AS (COPY ... TO ...)
+SELECT 1'))`` ran the inner ``COPY`` on 2.0.0 and wrote the file.
+
+Derived like the guard's blacklist (`lakana_core.query_rewrite`, which refuses all of these
+first): every function of DuckDB 2.0.0's ``duckdb_functions()`` whose name or description matches
+``sql``, ``query``, ``exec``, ``serial``, ``pragma``, ``eval``, ``parse``, ``prepare``,
+``statement`` or ``plan``, read one by one. ``json_execute_serialized_sql`` (table and pragma),
+``query`` and ``query_table`` execute; ``json_serialize_plan`` binds and plans (it does not write,
+but binding opens what the SQL names); ``postgres_*``/``mysql_*`` belong to extensions the child
+never loads (autoloading is off) and are listed should one ever be loaded. Left out:
+``json_serialize_sql`` and ``json_deserialize_sql`` only turn text into a tree and back;
+``aggregate``/``list_aggregate`` call an aggregate by name, not SQL; the ``pragma_*`` table
+functions read settings and metadata, which the guard governs."""
 
 NO_SPILL = (
     f"Query failed: the query ran out of memory and cannot spill to disk. {MEMORY_LIMIT_ADVICE}"
@@ -870,6 +934,79 @@ def set_variables(
             connection.execute(statement + "?", [value])
 
 
+def _serialised(connection: duckdb.DuckDBPyConnection, sql: str) -> str:
+    """Return DuckDB's parse tree of `sql` as JSON, or an empty text if it cannot give one.
+
+    Parameters
+    ----------
+    connection
+        The connection, not yet configured: only DuckDB's parser is used, nothing is read.
+    sql
+        The statement, bound as a value and never written into SQL text.
+
+    Returns
+    -------
+    str
+        The JSON document; empty (which `reads_only` refuses) when DuckDB raises or returns
+        anything but one text.
+    """
+    try:
+        row = connection.execute(SERIALISE, [sql]).fetchone()
+    except duckdb.Error:
+        return ""
+    return row[0] if row is not None and isinstance(row[0], str) else ""
+
+
+def reads_only(document: str) -> bool:
+    """Tell whether a serialised statement is one statement made of reading query nodes only.
+
+    Fails closed: a document that is not JSON, that reports an error, that holds anything but one
+    statement, or that contains a query node of a type not in `READING_QUERY_NODES` anywhere in
+    its tree is refused. A query node is an object whose ``type`` ends in ``_NODE``, or one with
+    the fields every DuckDB query node has (``modifiers`` and ``cte_map``), so that a node type
+    a later DuckDB names differently is refused as well. So is any object whose
+    ``function_name`` is not a text or, lower-cased, is in `SQL_RUNNING_FUNCTIONS`: that covers
+    function expressions and the function of a table function reference alike. The walk is
+    iterative, so a deep tree cannot exhaust the stack.
+
+    Parameters
+    ----------
+    document
+        The output of `SERIALISE`.
+
+    Returns
+    -------
+    bool
+        `True` only if the statement can be run as a read.
+    """
+    try:
+        tree = json.loads(document)
+    except (ValueError, RecursionError):
+        return False
+    if not isinstance(tree, dict) or tree.get("error") is not False:
+        return False
+    statements = tree.get("statements")
+    if not isinstance(statements, list) or len(statements) != 1:
+        return False
+    pending: list[object] = [statements[0]]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, dict):
+            kind = item.get("type")
+            named = isinstance(kind, str)
+            node = (named and kind.endswith("_NODE")) or ("modifiers" in item and "cte_map" in item)
+            if node and not (named and kind in READING_QUERY_NODES):
+                return False
+            if "function_name" in item:
+                function = item["function_name"]
+                if not isinstance(function, str) or function.lower() in SQL_RUNNING_FUNCTIONS:
+                    return False
+            pending.extend(item.values())
+        elif isinstance(item, list):
+            pending.extend(item)
+    return True
+
+
 def serve(
     request: Request, sink: BinaryIO, session: Session, asked: threading.Event
 ) -> ErrorDocument | None:
@@ -924,6 +1061,8 @@ def serve(
                     return ErrorDocument(INVALID, NO_RESULT_MESSAGE)
                 if len(statements) != 1 or statements[0].type != duckdb.StatementType.SELECT:
                     return ErrorDocument(INTERNAL, NOT_ONE_SELECT)
+                if not reads_only(_serialised(connection, request.sql)):
+                    return ErrorDocument(INTERNAL, WRITES_IN_SELECT)
                 configure(connection, request)
                 if asked.is_set():
                     return ErrorDocument(INTERRUPTED, _ASKED)

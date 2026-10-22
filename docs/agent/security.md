@@ -61,6 +61,10 @@ parse sites under `packages/*/src` are:
   owner to recreate it.` — the view the reader named, none of its text, since the reader may
   lack READ on what it references; the two re-parses of the expanded statement
   (`pipeline._resolve_and_rewrite`) say the same when the statement contains a view;
+- a stored view's SQL in the view diagnosis (`check_blacklist` in `pipeline._diagnose_views`,
+  so that no view's text reaches DuckDB unchecked, also when the guard has become stricter since
+  the view was created): `VIEW_REFUSED_BY_GUARD`, which names the view and asks its owner to
+  recreate it, none of its text, for a refusal and a syntax error alike;
 - stored row filters and column masks (`PolicyResolver`, `_substitute_context_functions`): a
   `ValidationError` that names no text; on the ordinary read path it is inside the opaque
   resolution wrapper, so the reader sees `Resolving the tables this query reads failed
@@ -2519,9 +2523,13 @@ credential to scope. The query process runs in the same allow-list mode as every
 query reads, its private temp directory and the CA bundle, and DuckDB refuses anything else
 at planning, a `..` path, a symlink out of a table directory (DuckDB compares real paths) and
 a glob above a table directory included. What remains, reachable only if the guard is
-passed: reading **and writing** (`COPY … TO`) inside the allowed table directories, which
-includes the files of a table nested in another's location and a raw claim whose listing a
-later external read would pick up; the temp directory; reading the CA bundle.
+passed: reading inside the allowed table directories, which includes the files of a table
+nested in another's location and a raw claim whose listing a later external read would pick
+up; the temp directory; reading the CA bundle. DuckDB would also let a statement write where it
+may read; the child runs no statement that writes (`COPY … TO`, `INSERT`, `UPDATE`, `DELETE`,
+`MERGE`), at the top level or nested inside a `SELECT`, nor a function that runs SQL given as a
+value (see "The child runs one SELECT" and "And that SELECT writes nothing" under "The query
+child").
 
 **An `EXTERNAL` table's `location_pattern` claims an exclusive `raw/<dir>` directory,
 never an arbitrary glob.** `lakana_core.catalog.external_location.parse_external_location`
@@ -2636,7 +2644,43 @@ own process opens no DuckDB connection and imports no `duckdb`.
   `test_a_proxy_secret_in_the_statement_is_refused_before_anything_runs` (red before the check:
   the stand-in proxy received the presigned URL) and
   `test_anything_but_one_select_is_refused_by_the_child`. Together with the lock this closes the
-  proxy and header routes for SQL past the guard. What still parses as one `SELECT`: on 1.5.5 a
+  proxy and header routes for SQL past the guard.
+- **And that SELECT writes nothing, checked by DuckDB's parse tree.** On DuckDB 2,
+  `extract_statements` reports a write inside a CTE as one `SELECT`, at any depth (a subquery, a
+  `UNION` branch, `EXISTS`, a lambda): `WITH x AS (COPY … TO …) SELECT 1`, and `INSERT`, `UPDATE`
+  and `DELETE … RETURNING` in a CTE (`MERGE` and `COPY … FROM` in a CTE are parser errors). Without
+  this check it ran on 2.0.0: in remote mode a nested `COPY` wrote into the query's private temp directory,
+  which `max_temp_directory_size` does not bound (it limits spilling only), so a query could fill
+  the worker's temp file system until its time limit; in local mode it wrote into a table
+  directory. So after the statement check, still before anything is configured, `serve` asks
+  DuckDB for the tree (`SELECT json_serialize_sql(?)`, the SQL bound as a value) and runs the
+  statement only if `query_child.reads_only` accepts it: one statement, no `"error"`, and every
+  query node anywhere in the tree of a type in `READING_QUERY_NODES` (`SELECT_NODE`,
+  `SET_OPERATION_NODE`, `RECURSIVE_CTE_NODE`, `CTE_NODE`). An allow-list, so `COPY_QUERY_NODE`,
+  `INSERT_QUERY_NODE`, `UPDATE_QUERY_NODE`, `DELETE_QUERY_NODE` and any node type a later DuckDB
+  adds are refused; an object with the fields of a query node (`modifiers`, `cte_map`) counts as
+  one whatever its type is called. The tree shows SQL given as a value only as text, so the same
+  walk refuses any call (in `FROM` or as an expression, any schema or catalog, quoted, upper-case
+  or as a method) of a function in `SQL_RUNNING_FUNCTIONS`: `json_execute_serialized_sql`,
+  `query`, `query_table`, `json_serialize_plan`, and `postgres_*`/`mysql_*` query functions of
+  extensions the child never loads. Without it, `SELECT * FROM
+  json_execute_serialized_sql(json_serialize_sql('WITH x AS (COPY … TO …) SELECT 1'))` passed the
+  node check and wrote the file in both modes on 2.0.0 (review of #286). The list was derived
+  from 2.0.0's `duckdb_functions()` like the guard's blacklist; its docstring records how and why
+  `json_serialize_sql`, `json_deserialize_sql`, `aggregate` and the `pragma_*` functions are left
+  out. Anything else, and a serialisation that raises or reports an
+  error, is an `internal` failure (`WRITES_IN_SELECT`: "the query process was given a SELECT that
+  may write … This is a defect of Lakana"), nothing run. The guard refuses all of these first
+  (sqlglot cannot parse `COPY` in a CTE; `_reject_statements_inside` refuses the other writes;
+  the table-function allow-list and the blacklist refuse the SQL-running functions). Pinned by
+  `test_a_write_nested_in_a_select_is_refused_before_the_connection_is_configured`,
+  `test_a_copy_nested_in_a_select_writes_nothing_into_the_temp_directory` and
+  `test_a_copy_nested_in_a_select_writes_nothing_into_a_table_directory` (red on 2.0.0 before the
+  check, and the serialised form before the function check: the file was written), and the
+  guard-accepted shapes in
+  `test_one_select_in_any_spelling_still_runs` (`WITH`, `WITH RECURSIVE`, `MATERIALIZED`,
+  FROM-first, `VALUES`, set operations, `PIVOT … IN`, `UNPIVOT`, lambdas, JSON arrows, window and
+  `FILTER`, subqueries) still run. What still parses as one `SELECT`: on 1.5.5 a
   reading `PRAGMA` (`PRAGMA version`, `PRAGMA table_info`, read-only `pragma_*` calls, refused by
   the guard; on 2.0.0 its type is `PRAGMA` and the child refuses it), and every function a
   `SELECT` can call, which the guard and allow-list mode govern. A `PIVOT` without an `IN` list of its `ON`
@@ -2712,8 +2756,10 @@ own process opens no DuckDB connection and imports no `duckdb`.
   - **Method and payload:** GET and HEAD only; httpfs refuses writes to http(s). No credential
     is sent (none is held); `http_proxy`/`extra_http_headers` are locked as settings, and a
     secret that sets them cannot be created, because the child runs nothing but one `SELECT`.
-  - **Local `file://` mode:** read and write inside the allowed table directories, the temp
-    directory, and reading the CA bundle (see "Known gap" above).
+  - **Local `file://` mode:** reading inside the allowed table directories, the temp
+    directory, and reading the CA bundle (see "Known gap" above). A write (`COPY … TO`, also
+    nested in a `SELECT` or run through a function that runs SQL given as a value) is refused by
+    the child's statement checks before DuckDB is configured.
   - **DNS:** the store's name is resolved per request; the operator's DNS decides.
   - Unchanged: the SeaweedFS gateway's gRPC port 18333 (not HTTP), and Python tasks (trusted
     code, not the query process).
@@ -2931,7 +2977,8 @@ whole tree: a node of a statement class (`exp.DML`, which covers `INSERT`, `UPDA
 a transaction, `DESCRIBE`, `SHOW`, `SUMMARIZE`, `COMMENT` and any `exp.Command`) is refused,
 and so is a CTE whose body is not a query or a `PIVOT` (sqlglot reads `WITH m AS (CHECKPOINT)`
 as a column named `CHECKPOINT`). DuckDB 2 executes DML inside a CTE and `extract_statements`
-reports it as a `SELECT`; DuckDB 1.5 rejects it with a parser error. `_parse_checked` runs the
+reports it as a `SELECT` (the query child refuses it as well, by its parse tree: "And that SELECT
+writes nothing"); DuckDB 1.5 rejects it with a parser error. `_parse_checked` runs the
 same walk, so `rewrite_query`, `extract_table_refs` and `expand_views` refuse it on their own.
 `test_query_rewrite_guard_properties.py` nests every statement in random read shapes.
 
