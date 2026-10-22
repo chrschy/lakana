@@ -294,6 +294,7 @@ def serving(
     """
     cert_file, key_file = _leaf(authority, certificates)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(cert_file, key_file)
     seen: list[str] = []
     handler = functools.partial(

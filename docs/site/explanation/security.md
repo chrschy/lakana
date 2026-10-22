@@ -100,9 +100,9 @@ a `VALUES` list such as `VALUES (1, 'a'), (2, 'b')`, whose columns are named `co
 so on. A statement that changes data or the session is refused wherever it sits, also inside a CTE
 or a subquery, and so is a query that reads files directly instead of a table: register the data
 as a table and select from it. A `PIVOT` lists the values of its `ON` column, as in
-`PIVOT gold.sales ON region IN ('eu', 'us') USING sum(amount)` or
-`PIVOT (sum(amount) FOR region IN ('eu', 'us'))`; without the list it is refused with `A PIVOT
-needs the values of its ON column listed`, because DuckDB would run it as two statements.
+`SELECT * FROM (PIVOT gold.sales ON region IN ('eu', 'us') USING sum(amount))`; without the list
+it is refused with `A PIVOT needs the values of its ON column listed`, because DuckDB would run it
+as two statements.
 
 ## What this does not protect
 

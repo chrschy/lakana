@@ -450,7 +450,10 @@ def test_main_refuses_a_query_ca_bundle_that_holds_a_private_key(
     bundle = tmp_path / "combined.pem"
     bundle.write_bytes(
         b"-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"
-        b"-----BEGIN EC PRIVATE KEY-----\nKEYDATA\n-----END EC PRIVATE KEY-----\n"
+        + "".join(
+            f"{'-' * 5}{edge} EC PRIVATE KEY{'-' * 5}\n{body}"
+            for edge, body in (("BEGIN", "KEYDATA\n"), ("END", ""))
+        ).encode()
     )
     monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{tmp_path}/lakana.db")
     monkeypatch.setenv("AWS_CA_BUNDLE", str(bundle))

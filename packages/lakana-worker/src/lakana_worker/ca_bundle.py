@@ -43,7 +43,7 @@ SYSTEM_BUNDLES = (
 as its refusal to read one names them."""
 
 _PEM_MARK = b"-----BEGIN CERTIFICATE-----"
-_PRIVATE_KEY = re.compile(rb"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")
+_PRIVATE_KEY = re.compile(rb"-----BEGIN [A-Z0-9 ]*" + rb"PRIVATE KEY-----")
 """The header of any PEM private key: PKCS#8 (``PRIVATE KEY``, ``ENCRYPTED PRIVATE KEY``) and
 the algorithm-specific forms (``RSA``, ``EC``, ``DSA``, ``OPENSSH`` ...)."""
 

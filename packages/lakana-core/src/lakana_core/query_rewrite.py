@@ -880,8 +880,7 @@ def _reject_recursive_ctes(parsed: exp.Expr) -> None:
 
 
 PIVOT_VALUES_MESSAGE = (
-    "A PIVOT needs the values of its ON column listed: write PIVOT ... ON a IN ('x', 'y') "
-    "USING ..., or PIVOT (... FOR a IN ('x', 'y')), with the values as literals."
+    "A PIVOT needs the values of its ON column listed: write PIVOT ... ON a IN ('x', 'y') USING ..."
 )
 """Why a PIVOT without an ``IN`` list of literals is refused, and what to write instead."""
 
