@@ -166,7 +166,7 @@ class _UvExited(VenvBuildError):
     """uv ran to its end and reported a failure; its output may say which."""
 
 
-class _Tee:
+class Tee:
     """Passes uv's output on to the redactor and keeps its last bytes for classification.
 
     Parameters
@@ -260,11 +260,14 @@ class VenvLease:
         Its interpreter, ``<path>/bin/python``.
     descriptor
         The open lock file holding the shared lock; `None` once released.
+    key
+        The environment key under DockerRunner (the launcher's volume); `None` for a local venv.
     """
 
     path: Path
     python: Path
     descriptor: int | None = field(default=None, repr=False)
+    key: str | None = None
 
     def release(self) -> None:
         """Give the venv up; it may be evicted afterwards. Safe to call twice."""
@@ -460,7 +463,7 @@ def _run_uv(
     timeout: float,
     max_bytes: int,
     watch: Path,
-    sink: _Tee,
+    sink: Tee,
 ) -> None:
     """Run uv to completion, streaming its output and enforcing both limits.
 
@@ -595,7 +598,7 @@ def _build(
     target = settings.cache / key
     build = settings.cache / f".build-{key}-{os.getpid()}-{secrets.token_hex(4)}"
     accesses = list(indexes()) if indexes is not None else []
-    sink = _Tee(
+    sink = Tee(
         OutputRedactor(
             [
                 *proxy_secrets(settings.https_proxy),

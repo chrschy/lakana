@@ -1,10 +1,16 @@
-"""Running one Python task: the `Runner` protocol, code unpacking, `LocalProcessRunner`.
+"""Running one Python task: the `Runner` protocol, code unpacking and the two runners.
+
+`LocalProcessRunner` and `DockerRunner` implement the protocol.
 
 A Python task is trusted code from a reviewed repository, and
 `LocalProcessRunner` is **not a sandbox**: the process runs as the worker's
 OS user. Its scrubbed environment and private temporary directory are
 hygiene. What bounds the task is its token (bound to the attempt, scoped to
 its inputs and its own table) and the process group the supervisor can kill.
+
+`DockerRunner` is isolation between projects: each task runs in a container of its own that the
+launcher starts (`lakana_worker.launcher`). Containers share the host's kernel, so it is not a
+sandbox for hostile code.
 
 The token is written to the child's stdin and nowhere else: never on a
 command line, never in the environment. Everything the child writes to
@@ -41,6 +47,12 @@ from typing import Protocol
 
 from lakana_core.runs.failures import FailureCode
 from lakana_worker.git import HFS_IGNORABLE, fold_name
+from lakana_worker.launcher_client import (
+    LauncherClient,
+    LauncherRefused,
+    LauncherUnavailable,
+    LogSinkFailed,
+)
 from lakana_worker.processes import (
     OutputRedactor,
     is_private_directory,
@@ -180,6 +192,11 @@ class PythonTask:
     task_run_id
         The task run this attempt belongs to, for the memory watchdog's log and record;
         `None` outside the worker (tests).
+    environment_key
+        The environment under DockerRunner (`VenvLease.key`); `None` for the local runner.
+    python
+        The Python version the task runs on, ``3.11`` to ``3.14``; DockerRunner picks the image
+        by it.
     """
 
     code_dir: Path
@@ -198,6 +215,8 @@ class PythonTask:
     input_versions: Mapping[str, int] = field(default_factory=dict)
     decimals: str = "float"
     task_run_id: uuid.UUID | None = None
+    environment_key: str | None = None
+    python: str | None = None
 
 
 @dataclass(frozen=True)
@@ -250,7 +269,7 @@ class RunOutcome:
 
 
 class Runner(Protocol):
-    """Runs one Python task to completion. `DockerRunner` implements the same."""
+    """Runs one Python task to completion: `LocalProcessRunner` or `DockerRunner`."""
 
     def run(
         self, task: PythonTask, on_log: Callable[[bytes], None], stop: StopSignal
@@ -598,12 +617,63 @@ def _outcome_from(
     )
 
 
-_NO_SDK = (
+NO_SDK_MESSAGE = (
     "the task's environment does not contain the lakana package, so nothing can run the asset. "
     "A package in a dependency group or an extra is not installed for a task: add "
     "`lakana[assets]` to `[project] dependencies` in pyproject.toml, run `uv lock`, commit and "
     "deploy again"
 )
+
+
+_INVALID_TASK = (
+    "the worker built an invalid task (a timeout that is not a finite number, or an attempt "
+    "directory that is not an absolute path), which the harness would refuse; this is a worker "
+    "defect: report it, with the worker's version"
+)
+
+
+def task_description(
+    task: PythonTask, *, result_path: str, work_dir: str, parent_pid: int | None
+) -> bytes:
+    """Write the task description the harness reads from its stdin.
+
+    Parameters
+    ----------
+    task
+        The task.
+    result_path
+        Where the harness writes its record, as the process sees it.
+    work_dir
+        The attempt's private directory, as the process sees it.
+    parent_pid
+        The worker's pid for the harness's parent check; `None` in a container, where the
+        launcher, not the worker, is the parent.
+
+    Returns
+    -------
+    bytes
+        The JSON document, version `_DESCRIPTION_VERSION`.
+    """
+    return json.dumps(
+        {
+            "version": _DESCRIPTION_VERSION,
+            "server_url": task.server_url,
+            "token": task.token,
+            "environment": task.environment,
+            "asset_path": task.asset_path,
+            "table": task.table,
+            "inputs": dict(task.inputs),
+            "expected_snapshot_id": task.expected_snapshot_id,
+            "result_path": result_path,
+            "request_timeout_seconds": float(task.timeout_seconds),
+            "parent_pid": parent_pid,
+            "output": task.output,
+            "input_kinds": {p: task.input_kinds.get(p, "table") for p in task.inputs},
+            "input_versions": dict(task.input_versions),
+            "decimals": task.decimals,
+            "work_dir": work_dir,
+        }
+    ).encode("utf-8")
 
 
 def _has_module(venv: Path, module: str) -> bool:
@@ -819,10 +889,7 @@ class LocalProcessRunner:
         if not math.isfinite(task.timeout_seconds) or not task.attempt_dir.is_absolute():
             return RunOutcome(
                 succeeded=False,
-                error_message="the worker built an invalid task (a timeout that is not a finite "
-                "number, or an attempt directory that is not an absolute path), which the "
-                "harness would refuse; this is a worker defect: report it, with the worker's "
-                "version",
+                error_message=_INVALID_TASK,
                 retryable=False,
                 failure_code=FailureCode.INTERNAL,
             )
@@ -851,33 +918,17 @@ class LocalProcessRunner:
         if not _has_module(task.venv, self._module):
             return RunOutcome(
                 succeeded=False,
-                error_message=_NO_SDK,
+                error_message=NO_SDK_MESSAGE,
                 retryable=False,
                 failure_code=FailureCode.BUILD_FAILED,
             )
         secrets_to_hide = token_secrets(task.token)
-        document = json.dumps(
-            {
-                "version": _DESCRIPTION_VERSION,
-                "server_url": task.server_url,
-                "token": task.token,
-                "environment": task.environment,
-                "asset_path": task.asset_path,
-                "table": task.table,
-                "inputs": dict(task.inputs),
-                "expected_snapshot_id": task.expected_snapshot_id,
-                "result_path": str(result_path),
-                "request_timeout_seconds": float(task.timeout_seconds),
-                "parent_pid": os.getpid(),
-                "output": task.output,
-                "input_kinds": {
-                    parameter: task.input_kinds.get(parameter, "table") for parameter in task.inputs
-                },
-                "input_versions": dict(task.input_versions),
-                "decimals": task.decimals,
-                "work_dir": str(task.attempt_dir),
-            }
-        ).encode("utf-8")
+        document = task_description(
+            task,
+            result_path=str(result_path),
+            work_dir=str(task.attempt_dir),
+            parent_pid=os.getpid(),
+        )
         try:
             process = subprocess.Popen(  # nosec B603 -- fixed argv, no shell, minimal env
                 [str(task.venv / "bin" / "python"), "-P", "-m", self._module],
@@ -997,6 +1048,311 @@ class LocalProcessRunner:
                 succeeded=False,
                 error_message="the log sink failed",
                 killed=sink_killed,
+                retryable=False,
+                failure_code=FailureCode.INTERNAL,
+            )
+        return outcome
+
+
+_MAX_KILL_GRACE_SECONDS = 300
+"""The longest grace the launcher accepts (`lakana_worker.launcher.requests.MAX_KILL_GRACE`)."""
+
+
+def memory_message(memory_mb: int) -> str:
+    """Write the failure of a task its container's memory limit ended.
+
+    Parameters
+    ----------
+    memory_mb
+        `LAKANA_RUN__TASK_MEMORY` in MiB.
+
+    Returns
+    -------
+    str
+        The cause and the next step.
+    """
+    return (
+        f"this task was ended because it used more than its container's memory limit "
+        f"({memory_mb} MB, LAKANA_RUN__TASK_MEMORY). Use less data in the task (narrow its "
+        "inputs with an upstream SQL asset), or ask the operator to raise LAKANA_RUN__TASK_MEMORY."
+    )
+
+
+def _exit_status(value: object) -> int | None:
+    """Turn a container's exit status into the local runner's convention.
+
+    Parameters
+    ----------
+    value
+        Docker's ``StatusCode``; the container's init reports 128 plus the signal of a process
+        killed by one.
+
+    Returns
+    -------
+    int or None
+        The status, negative for a signal; `None` when Docker gave none.
+    """
+    if not isinstance(value, int) or isinstance(value, bool):
+        return None
+    return -(value - 128) if 128 < value < 160 else value
+
+
+def _grace_seconds(kill_grace: float) -> int:
+    """Turn `LAKANA_RUN__KILL_GRACE` into the whole seconds the launcher accepts.
+
+    Parameters
+    ----------
+    kill_grace
+        Seconds between SIGTERM and SIGKILL.
+
+    Returns
+    -------
+    int
+        Rounded up, from 0 to `_MAX_KILL_GRACE_SECONDS`.
+    """
+    if not math.isfinite(kill_grace):
+        return _MAX_KILL_GRACE_SECONDS if kill_grace > 0 else 0
+    return min(_MAX_KILL_GRACE_SECONDS, max(0, math.ceil(kill_grace)))
+
+
+class DockerRunner:
+    """Run a task in a container of its own, through the launcher.
+
+    The container sees the attempt's code read-only at `/code`, its environment read-only at
+    `/env`, a private `/work` (the attempt's ``task`` directory) and `/tmp`, and a network on
+    which the server is the only other member. It runs as the worker's uid with no
+    capabilities, a read-only root filesystem and the limits below, enforced by the runtime;
+    when it ends, the launcher removes it with every process in it. The token travels on stdin
+    and nowhere else, as with `LocalProcessRunner`; the result record the container writes is
+    read with the same distrust.
+
+    Parameters
+    ----------
+    client
+        The launcher.
+    owner
+        This worker, for the launcher's labels.
+    memory_mb
+        `LAKANA_RUN__TASK_MEMORY` in MiB.
+    cpus
+        `LAKANA_RUN__TASK_CPUS`.
+    pids
+        `LAKANA_RUN__TASK_PIDS`.
+    kill_grace
+        Seconds between SIGTERM and SIGKILL on a stop (`LAKANA_RUN__KILL_GRACE`).
+    poll_seconds
+        How often the stop signal is checked.
+    roots
+        Allowed ingestion roots to mount.
+    """
+
+    def __init__(
+        self,
+        client: LauncherClient,
+        *,
+        owner: str,
+        memory_mb: int,
+        cpus: float,
+        pids: int,
+        kill_grace: float = 10.0,
+        poll_seconds: float = 0.2,
+        roots: tuple[str, ...] = (),
+    ) -> None:
+        self._client = client
+        self._owner = owner
+        self._memory_mb = memory_mb
+        self._cpus = cpus
+        self._pids = pids
+        self._kill_grace = kill_grace
+        self._poll_seconds = poll_seconds
+        self._roots = roots
+
+    def _stop(self, ident: str) -> None:
+        """Ask the launcher to stop the container; a launcher that cannot is not an error here.
+
+        The launcher's own timer and the deadline label still end the container.
+
+        Parameters
+        ----------
+        ident
+            The task's id.
+        """
+        with contextlib.suppress(LauncherUnavailable, LauncherRefused):
+            self._client.stop(ident)
+
+    def run(
+        self, task: PythonTask, on_log: Callable[[bytes], None], stop: StopSignal
+    ) -> RunOutcome:
+        """Ask the launcher to run the task and supervise it to its end.
+
+        Parameters
+        ----------
+        task
+            What to run; needs `environment_key` and `python`.
+        on_log
+            Receives the container's redacted output.
+        stop
+            Set to have the container stopped (SIGTERM, SIGKILL after the grace).
+
+        Returns
+        -------
+        RunOutcome
+            As `LocalProcessRunner` reports it; "runner unavailable" (transient) when the
+            launcher cannot be reached; an out-of-memory kill sets `StopReason.MEMORY`.
+
+        Raises
+        ------
+        Exception
+            Whatever the launcher client raised that is not one of its own failures: a defect,
+            not a task's failure.
+        """
+        if (
+            task.environment_key is None
+            or task.python is None
+            or not math.isfinite(task.timeout_seconds)
+            or not task.attempt_dir.is_absolute()
+        ):
+            return RunOutcome(
+                succeeded=False,
+                error_message=_INVALID_TASK,
+                retryable=False,
+                failure_code=FailureCode.INTERNAL,
+            )
+        if not is_private_directory(task.attempt_dir, 0o077):
+            return RunOutcome(
+                succeeded=False,
+                error_message="could not prepare the task directory: the attempt directory "
+                "is not private (it must exist, be owned by the worker and have no group "
+                "or other access)",
+                failure_code=FailureCode.INTERNAL,
+            )
+        work = task.attempt_dir / "task"
+        try:
+            work.mkdir(mode=0o700, exist_ok=True)
+        except OSError as exc:
+            return RunOutcome(
+                succeeded=False,
+                error_message=f"could not prepare the task directory: {exc.strerror or exc}",
+                failure_code=FailureCode.INTERNAL,
+            )
+        if not is_private_directory(work, 0o077):
+            return RunOutcome(
+                succeeded=False,
+                error_message="could not prepare the task directory: the work directory is not "
+                "private (a link, or a directory others can reach, where the worker makes its own)",
+                failure_code=FailureCode.INTERNAL,
+            )
+        try:
+            for directory in (
+                work / "home",
+                work / "tmp",
+                work / "tmp" / POLARS_SPILL_DIRECTORY,
+            ):
+                directory.mkdir(mode=0o700, exist_ok=True)
+            with contextlib.suppress(FileNotFoundError):
+                (work / RESULT_FILE).unlink()
+        except OSError as exc:
+            return RunOutcome(
+                succeeded=False,
+                error_message=f"could not prepare the task directory: {exc.strerror or exc}",
+                failure_code=FailureCode.INTERNAL,
+            )
+        secrets_to_hide = token_secrets(task.token)
+        ident = uuid.uuid4().hex
+        request: dict[str, object] = {
+            "op": "run",
+            "task": ident,
+            "owner": self._owner,
+            "python": task.python,
+            "environment": task.environment_key,
+            "attempt": task.attempt_dir.name,
+            "memory_mb": self._memory_mb,
+            "cpus": self._cpus,
+            "pids": self._pids,
+            "timeout_seconds": max(1, math.ceil(task.timeout_seconds)),
+            "kill_grace_seconds": _grace_seconds(self._kill_grace),
+            "stdin": task_description(
+                task, result_path=f"/work/{RESULT_FILE}", work_dir="/work", parent_pid=None
+            ).decode("utf-8"),
+            "roots": list(self._roots),
+        }
+        sink = OutputRedactor(secrets_to_hide, on_log)
+        box: dict[str, object] = {}
+
+        def call() -> None:
+            """Run the launcher call on its own thread, keeping what it returned or raised."""
+            try:
+                box["result"] = self._client.call(request, sink.feed)
+            except Exception as exc:  # handed back to the supervising thread below
+                box["error"] = exc
+
+        thread = threading.Thread(target=call, name="lakana-docker-task", daemon=True)
+        thread.start()
+        asked = False
+        while thread.is_alive():
+            thread.join(self._poll_seconds)
+            if stop.is_set() and not asked:
+                asked = True
+                self._stop(ident)
+        sink_failed = False
+        try:
+            sink.close()
+        except Exception:  # the caller's sink; nothing it raises may escape
+            sink_failed = True
+        error = box.get("error")
+        if isinstance(error, LogSinkFailed):
+            self._stop(ident)
+            return RunOutcome(
+                succeeded=False,
+                error_message="the log sink failed",
+                killed=True,
+                retryable=False,
+                failure_code=FailureCode.INTERNAL,
+            )
+        if isinstance(error, LauncherUnavailable):
+            return RunOutcome(
+                succeeded=False, error_message=str(error), failure_code=FailureCode.NO_RUNTIME
+            )
+        if isinstance(error, LauncherRefused):
+            return RunOutcome(
+                succeeded=False,
+                error_message=f"the launcher refused the task: {error}. An operator checks "
+                "LAKANA_LAUNCHER__IMAGES and the LAKANA_RUN__TASK_* settings against the "
+                "launcher's ceilings, or the project's python: in lakana.yaml",
+                retryable=False,
+                failure_code=FailureCode.NO_RUNTIME,
+            )
+        if isinstance(error, BaseException):
+            raise error
+        result = box.get("result")
+        assert isinstance(result, dict)  # nosec B101 -- set by `call` when nothing was raised
+        oom = result.get("oom_killed") is True
+        if oom:
+            stop.set(StopReason.MEMORY)
+        timed_out = result.get("timed_out") is True
+        stopped = result.get("stopped") is True or timed_out or oom
+        code = _exit_status(result.get("exit"))
+        if code is None and not stopped:
+            return RunOutcome(
+                succeeded=False,
+                error_message="the task's container ended without an exit status from Docker; "
+                "the launcher's log has the reason (docker compose logs launcher)",
+                failure_code=FailureCode.INTERNAL,
+            )
+        outcome = _outcome_from(
+            _read_record(work / RESULT_FILE, task.output),
+            code=-1 if code is None else code,
+            stopped=stopped,
+            timed_out=timed_out,
+            timeout_seconds=task.timeout_seconds,
+            stop=stop,
+            secrets_to_hide=secrets_to_hide,
+            memory_detail=memory_message(self._memory_mb) if oom else None,
+        )
+        if sink_failed and not outcome.succeeded:
+            return RunOutcome(
+                succeeded=False,
+                error_message="the log sink failed",
                 retryable=False,
                 failure_code=FailureCode.INTERNAL,
             )
