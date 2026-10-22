@@ -383,7 +383,6 @@ def test_a_stop_the_launcher_cannot_take_is_not_raised(tmp_path: Path) -> None:
     """The launcher's own deadline still ends the container; the run waits for its answer."""
     launcher = FakeLauncher()
     stop = StopSignal()
-    stop.set(StopReason.DRAIN)
 
     def down(ident: str) -> bool:
         """Fail like an unreachable launcher.
@@ -415,6 +414,7 @@ def test_a_stop_the_launcher_cannot_take_is_not_raised(tmp_path: Path) -> None:
         dict
             A stopped container.
         """
+        stop.set(StopReason.DRAIN)
         threading.Event().wait(0.1)
         return {"exit": 137, "stopped": True}
 
@@ -429,12 +429,28 @@ def test_a_stop_the_launcher_cannot_take_is_not_raised(tmp_path: Path) -> None:
 
 def test_a_cancel_wins_over_an_out_of_memory_kill_after_it(tmp_path: Path) -> None:
     """The first reason wins, as with the watchdog."""
-    launcher = FakeLauncher(
-        scripts={"run": _writes(None, {"exit": 137, "oom_killed": True, "stopped": True})}
-    )
-    job = _task(tmp_path)
     stop = StopSignal()
-    stop.set(StopReason.CANCELLED)
+
+    def cancelled(request: dict[str, Any], on_log: Callable[[bytes], None]) -> dict[str, object]:
+        """Be cancelled while running, then end out of memory.
+
+        Parameters
+        ----------
+        request
+            The request.
+        on_log
+            The log sink.
+
+        Returns
+        -------
+        dict
+            An out-of-memory end.
+        """
+        stop.set(StopReason.CANCELLED)
+        return {"exit": 137, "oom_killed": True, "stopped": True}
+
+    launcher = FakeLauncher(scripts={"run": cancelled})
+    job = _task(tmp_path)
 
     _runner(launcher).run(job, lambda chunk: None, stop)
 
@@ -659,7 +675,13 @@ def test_a_stopped_container_without_a_status_reads_as_stopped(tmp_path: Path) -
 
     outcome, _, _ = _run(tmp_path, launcher)
 
-    assert outcome.error_message == "stopped: stopped"
+    assert (outcome.error_message or "").startswith("the launcher stopped the task's container")
+    assert "docker compose logs launcher" in (outcome.error_message or "")
+    assert (outcome.killed, outcome.retryable, outcome.failure_code) == (
+        True,
+        True,
+        FailureCode.INTERNAL,
+    )
 
 
 def test_an_unavailable_launcher_raised_by_the_client_is_kept_as_its_text(tmp_path: Path) -> None:
@@ -720,3 +742,108 @@ def test_an_unexpected_error_of_the_client_is_raised(tmp_path: Path) -> None:
 
     with pytest.raises(KeyError):
         _run(tmp_path, launcher)
+
+
+def test_a_stop_set_before_the_run_sends_nothing(tmp_path: Path) -> None:
+    """A cancel during the environment build must not start a container."""
+    launcher = FakeLauncher(scripts={"run": _writes(None, _DONE)})
+    stop = StopSignal()
+    stop.set(StopReason.CANCELLED)
+
+    outcome = _runner(launcher).run(_task(tmp_path), lambda chunk: None, stop)
+
+    assert launcher.requests == []
+    assert (outcome.error_message, outcome.failure_code) == (
+        "stopped: cancelled",
+        FailureCode.CANCELLED,
+    )
+
+
+def test_a_stop_the_launcher_has_not_registered_yet_is_asked_again(tmp_path: Path) -> None:
+    """Before the launcher registers the run, `stop` answers False; the runner keeps asking."""
+    launcher = FakeLauncher()
+    answers = [False, False, True]
+    asked: list[str] = []
+
+    def late(ident: str) -> bool:
+        """Answer not running twice, then stop the container.
+
+        Parameters
+        ----------
+        ident
+            The task's id.
+
+        Returns
+        -------
+        bool
+            Whether it was running.
+        """
+        asked.append(ident)
+        answer = answers.pop(0) if answers else True
+        if answer:
+            launcher.released.set()
+        return answer
+
+    def blocks(request: dict[str, Any], on_log: Callable[[bytes], None]) -> dict[str, object]:
+        """Run until stopped.
+
+        Parameters
+        ----------
+        request
+            The request.
+        on_log
+            The log sink.
+
+        Returns
+        -------
+        dict
+            A stopped container.
+        """
+        launcher.released.wait(10)
+        return {"exit": 137, "stopped": True}
+
+    launcher.stop = late  # ty: ignore[invalid-assignment]
+    launcher.scripts["run"] = blocks
+    stop = StopSignal()
+    threading.Timer(0.05, stop.set, (StopReason.LEASE_LOST,)).start()
+
+    outcome = _runner(launcher).run(_task(tmp_path), lambda chunk: None, stop)
+
+    assert len(asked) == 3 and set(asked) == {launcher.requests[0]["task"]}
+    assert outcome.failure_code is FailureCode.WORKER_LOST
+
+
+def test_an_unexpected_error_stops_the_container_before_it_is_raised(tmp_path: Path) -> None:
+    """A defect must not leave the container running."""
+    launcher = FakeLauncher()
+
+    def bug(request: dict[str, Any], on_log: Callable[[bytes], None]) -> dict[str, object]:
+        """Fail like a bug.
+
+        Parameters
+        ----------
+        request
+            The request.
+        on_log
+            The log sink.
+
+        Raises
+        ------
+        KeyError
+            Always.
+        """
+        raise KeyError("bug")
+
+    launcher.scripts["run"] = bug
+
+    with pytest.raises(KeyError):
+        _run(tmp_path, launcher)
+    assert launcher.stopped == [launcher.requests[0]["task"]]
+
+
+def test_the_invalid_task_message_names_every_cause(tmp_path: Path) -> None:
+    """A missing environment key or Python is named, not only the timeout and the directory."""
+    outcome, _, _ = _run(tmp_path, FakeLauncher(), python=None)
+
+    assert "environment key" in (outcome.error_message or "")
+    assert "Python version" in (outcome.error_message or "")

@@ -983,7 +983,8 @@ access-controlled on the server; `read_only=True` seals it (0400/0500) for a tas
   1. Stop the workers (`docker compose stop worker`), so nothing builds or runs meanwhile.
   2. Remove the stack's task and build containers and their networks; the commands are in the
      docstring of `lakana_worker.launcher.service` (filter
-     `label=lakana.launcher.stack=<project>`).
+     `label=lakana.launcher.stack=<project>`, where `<project>` is the Compose project name of
+     the stack, not a Lakana project).
   3. Remove the built environments and the package caches:
      `docker volume rm $(docker volume ls -q --filter label=lakana.launcher.stack=<project>)`.
      Every environment is rebuilt from its lock on next use; a shared cache refills from the

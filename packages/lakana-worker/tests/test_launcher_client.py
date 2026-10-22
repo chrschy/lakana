@@ -283,3 +283,43 @@ def test_the_owner_is_the_host_name_made_safe(host: str, owner: str) -> None:
         The owner the launcher gets.
     """
     assert launcher_owner(host) == owner
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "the launcher is busy: too many connections at once; retry, or lower the number of workers",
+        "no request line arrived in time; send the request at once",
+    ],
+)
+def test_a_refusal_that_a_retry_can_cure_is_runner_unavailable(
+    answering: Answering, reason: str
+) -> None:
+    """A busy launcher or a late request line is transient, not the request being wrong.
+
+    Parameters
+    ----------
+    answering
+        The stand-in.
+    reason
+        The launcher's refusal.
+    """
+    answering.answers.append(json.dumps({"refused": reason}).encode() + b"\n")
+
+    with pytest.raises(LauncherUnavailable) as caught:
+        LauncherClient(Path("l.sock")).call({"op": "status"})
+    assert str(caught.value) == f"runner unavailable: {reason}"
+    assert not isinstance(caught.value, LauncherRefused)
+
+
+def test_a_log_line_over_one_mebibyte_is_read(answering: Answering) -> None:
+    """The launcher sends pieces of up to 1 MiB raw, about 1.4 MB as base64 JSON."""
+    piece = b"x" * (1 << 20)
+    answering.answers.append(
+        json.dumps({"log": base64.b64encode(piece).decode()}).encode()
+        + b'\n{"result": {"complete": true}}\n'
+    )
+    logs: list[bytes] = []
+
+    assert LauncherClient(Path("l.sock")).call({"op": "run"}, logs.append) == {"complete": True}
+    assert logs == [piece]

@@ -21,10 +21,13 @@ from pathlib import Path
 
 from lakana_worker.launcher.server import TOKEN_FILE
 
-_MAX_LINE = 1 << 20
+_MAX_LINE = 2 << 20
+"""Longest answer line: the launcher sends log pieces of up to 1 MiB, ~1.4 MB as base64 JSON."""
 _MAX_TOKEN_BYTES = 4096
 _UNSAFE_OWNER = re.compile(r"[^A-Za-z0-9._:-]")
 _NOT_PROTOCOL = "the launcher answered something that is not its protocol"
+_TRANSIENT_REFUSALS = ("the launcher is busy:", "no request line arrived in time")
+"""Refusals that say the launcher could not take the request now, not that it was wrong."""
 
 
 class LauncherUnavailable(Exception):
@@ -163,7 +166,8 @@ class LauncherClient:
             If the token or the socket cannot be reached, the connection breaks, the answer is
             not the protocol, or Docker failed.
         LauncherRefused
-            If the launcher refused the request.
+            If the launcher refused the request; a busy launcher or a request line that came
+            too late is `LauncherUnavailable` instead, since a retry may succeed.
         LogSinkFailed
             If `on_log` raised.
         ValueError
@@ -191,7 +195,10 @@ class LauncherClient:
                     elif "result" in answer and isinstance(answer["result"], dict):
                         return answer["result"]
                     elif "refused" in answer:
-                        raise LauncherRefused(str(answer["refused"]))
+                        reason = str(answer["refused"])
+                        if reason.startswith(_TRANSIENT_REFUSALS):
+                            raise LauncherUnavailable(f"runner unavailable: {reason}")
+                        raise LauncherRefused(reason)
                     elif "error" in answer:
                         raise self._unavailable(f"Docker failed: {answer['error']}")
                     else:

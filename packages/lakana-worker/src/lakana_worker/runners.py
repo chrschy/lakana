@@ -626,9 +626,15 @@ NO_SDK_MESSAGE = (
 
 
 _INVALID_TASK = (
-    "the worker built an invalid task (a timeout that is not a finite number, or an attempt "
-    "directory that is not an absolute path), which the harness would refuse; this is a worker "
+    "the worker built an invalid task (a timeout that is not a finite number, an attempt "
+    "directory that is not an absolute path, or, for a container, no environment key or no "
+    "Python version), which the harness or the launcher would refuse; this is a worker "
     "defect: report it, with the worker's version"
+)
+_LAUNCHER_STOPPED = (
+    "the launcher stopped the task's container without the worker asking (its deadline passed, "
+    "or the launcher restarted); run the task again, and if it happens again, docker compose "
+    "logs launcher has the reason"
 )
 
 
@@ -1167,7 +1173,7 @@ class DockerRunner:
         self._poll_seconds = poll_seconds
         self._roots = roots
 
-    def _stop(self, ident: str) -> None:
+    def _stop(self, ident: str) -> bool:
         """Ask the launcher to stop the container; a launcher that cannot is not an error here.
 
         The launcher's own timer and the deadline label still end the container.
@@ -1176,9 +1182,16 @@ class DockerRunner:
         ----------
         ident
             The task's id.
+
+        Returns
+        -------
+        bool
+            Whether the launcher stopped a running container. `False` also before it has
+            registered the run, so the caller asks again.
         """
         with contextlib.suppress(LauncherUnavailable, LauncherRefused):
-            self._client.stop(ident)
+            return self._client.stop(ident)
+        return False
 
     def run(
         self, task: PythonTask, on_log: Callable[[bytes], None], stop: StopSignal
@@ -1258,6 +1271,16 @@ class DockerRunner:
                 failure_code=FailureCode.INTERNAL,
             )
         secrets_to_hide = token_secrets(task.token)
+        if stop.is_set():  # a cancel, lost lease or drain before the container exists
+            return _outcome_from(
+                None,
+                code=-1,
+                stopped=True,
+                timed_out=False,
+                timeout_seconds=task.timeout_seconds,
+                stop=stop,
+                secrets_to_hide=secrets_to_hide,
+            )
         ident = uuid.uuid4().hex
         request: dict[str, object] = {
             "op": "run",
@@ -1288,12 +1311,12 @@ class DockerRunner:
 
         thread = threading.Thread(target=call, name="lakana-docker-task", daemon=True)
         thread.start()
-        asked = False
+        stopped_by_us = False
         while thread.is_alive():
             thread.join(self._poll_seconds)
-            if stop.is_set() and not asked:
-                asked = True
-                self._stop(ident)
+            if stop.is_set() and not stopped_by_us and thread.is_alive():
+                # Asked again on every poll: the launcher answers False until it registered the run.
+                stopped_by_us = self._stop(ident)
         sink_failed = False
         try:
             sink.close()
@@ -1323,6 +1346,7 @@ class DockerRunner:
                 failure_code=FailureCode.NO_RUNTIME,
             )
         if isinstance(error, BaseException):
+            self._stop(ident)
             raise error
         result = box.get("result")
         assert isinstance(result, dict)  # nosec B101 -- set by `call` when nothing was raised
@@ -1354,6 +1378,13 @@ class DockerRunner:
                 succeeded=False,
                 error_message="the log sink failed",
                 retryable=False,
+                failure_code=FailureCode.INTERNAL,
+            )
+        if not outcome.succeeded and stopped and not timed_out and not oom and stop.reason is None:
+            return RunOutcome(
+                succeeded=False,
+                error_message=_LAUNCHER_STOPPED,
+                killed=True,
                 failure_code=FailureCode.INTERNAL,
             )
         return outcome
