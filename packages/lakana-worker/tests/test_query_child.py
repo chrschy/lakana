@@ -39,6 +39,7 @@ from lakana_worker.query_protocol import (
     MEMORY_LIMIT_ADVICE,
     NO_RESULT_MESSAGE,
     READ,
+    STORE_CERTIFICATE_UNVERIFIED,
     WRITE,
     ErrorDocument,
     Request,
@@ -328,6 +329,7 @@ _SETTINGS = (
     "allowed_directories",
     "allowed_paths",
     "ca_cert_file",
+    "enable_server_cert_verification",
     "lock_configuration",
 )
 
@@ -413,9 +415,15 @@ def test_the_connection_holds_no_credential_and_loads_nothing_by_itself(
         "allowed_directories": sorted([f"{spill}/", "/data/t1/", "http://127.0.0.1:9/b/t2/"]),
         "allowed_paths": [query_ca_bundle()],
         "ca_cert_file": query_ca_bundle(),
+        "enable_server_cert_verification": True,
         "lock_configuration": True,
     }
     assert statements.index("INSTALL httpfs") > statements.index("SET extension_directory = ?")
+    assert (
+        statements.index("LOAD httpfs")
+        < statements.index("SET enable_server_cert_verification = true")
+        < statements.index("SET enable_external_access = false")
+    )
     assert statements[-1] == "SET lock_configuration = true"
 
 
@@ -431,6 +439,7 @@ def test_local_mode_may_spill_up_to_the_configured_size(tmp_path: Path) -> None:
         "SET http_proxy = 'http://127.0.0.1:9'",
         "SET extra_http_headers = MAP {'a': 'b'}",
         "SET ca_cert_file = '/etc/passwd'",
+        "SET enable_server_cert_verification = false",
         "SET enable_external_access = true",
         "SET allowed_directories = ['/']",
         "SET allowed_paths = ['/etc/passwd']",
@@ -835,6 +844,93 @@ def test_a_refused_ca_bundle_names_the_bundle_the_variables_and_the_page() -> No
     assert error.kind == "internal"
     for part in ("/etc/ca.pem", "AWS_CA_BUNDLE", "SSL_CERT_FILE", query_child.NETWORK_SETTINGS):
         assert part in error.message
+
+
+_SIGNED = "https://store.example:8333/bucket/t1/data/a.parquet?X-Amz-Signature=SECRETSIG"
+_UNVERIFIED = (
+    "IO Error: SSL peer certificate or SSH remote key was not OK error for HTTP HEAD to "
+    f"'{_SIGNED}'"
+)
+"""DuckDB's text for a store certificate it cannot verify, the same on 1.5.5 and 2.0.0."""
+
+
+@pytest.mark.parametrize("exc", [duckdb.IOException, OSError])
+def test_an_unverifiable_store_certificate_is_internal_and_names_only_the_host(
+    exc: type[BaseException],
+) -> None:
+    """Red before #277: classified ``transient`` (retried), with DuckDB's text and the URL."""
+    error = query_child.failure(
+        exc(_UNVERIFIED),
+        threading.Event(),
+        files=[_SIGNED],
+        ca_bundle="/etc/ca.pem",
+        prefixes=("https://store.example:8333/bucket/t1/",),
+    )
+    assert error.kind == "internal"
+    assert error.message.startswith(STORE_CERTIFICATE_UNVERIFIED)
+    for part in (
+        "store.example:8333",
+        "/etc/ca.pem",
+        "AWS_CA_BUNDLE",
+        "SSL_CERT_FILE",
+        query_child.STORE_CERTIFICATES,
+    ):
+        assert part in error.message
+    for secret in ("SECRETSIG", "X-Amz", "?", "/bucket", "a.parquet", "<file>"):
+        assert secret not in error.message.replace(query_child.STORE_CERTIFICATES, "")
+
+
+def test_an_unverifiable_certificate_of_a_host_the_request_does_not_name_is_not_named() -> None:
+    """Only a host of the request's own prefixes is said; anything else is "the object store"."""
+    error = query_child.failure(
+        duckdb.IOException(_UNVERIFIED.replace("store.example", "evil.example")),
+        threading.Event(),
+        ca_bundle="/etc/ca.pem",
+        prefixes=("https://store.example:8333/bucket/t1/",),
+    )
+    assert error.kind == "internal"
+    assert "evil.example" not in error.message
+    assert "the object store" in error.message
+
+
+@pytest.mark.parametrize(
+    ("text", "prefix"),
+    [
+        pytest.param(
+            "IO Error: SSL peer certificate or SSH remote key was not OK",
+            "https://store.example:8333/bucket/t1/",
+            id="no URL quoted",
+        ),
+        pytest.param(
+            _UNVERIFIED.replace("https://", "https://user@"),
+            "https://user@store.example:8333/bucket/t1/",
+            id="user information",
+        ),
+        pytest.param(
+            "IO Error: SSL peer certificate or SSH remote key was not OK error for HTTP HEAD to "
+            "'https://[::1/bucket/t1/a.parquet'",
+            "https://[::1/bucket/t1/",
+            id="a URL that does not parse",
+        ),
+    ],
+)
+def test_an_unverifiable_certificate_without_a_safe_host_says_only_the_object_store(
+    text: str, prefix: str
+) -> None:
+    """A host is said only from a quoted URL that parses, without user information."""
+    error = query_child.failure(
+        duckdb.IOException(text), threading.Event(), ca_bundle="/etc/ca.pem", prefixes=(prefix,)
+    )
+    assert error.kind == "internal"
+    assert error.message.startswith(f"{STORE_CERTIFICATE_UNVERIFIED} against ")
+    assert "user" not in error.message
+    assert "::1" not in error.message
+
+
+def test_a_certificate_text_quoted_by_another_error_type_is_not_taken_for_one() -> None:
+    """Only DuckDB's own ``IO Error`` counts: SQL can make an error of another type say it."""
+    text = "Invalid Input Error: " + _UNVERIFIED
+    assert query_child.failure(OSError(text), threading.Event()).kind == "invalid"
 
 
 def test_an_out_of_memory_message_names_the_setting_and_drops_duckdbs_own_advice() -> None:

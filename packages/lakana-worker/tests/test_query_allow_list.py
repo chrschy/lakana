@@ -22,8 +22,14 @@ import pytest
 from tls_fixture import Authority, Serving, make_authority, serving
 
 from lakana_core.errors import ValidationError
-from lakana_worker.executor import DuckDBInternalError, execute_query
-from lakana_worker.query_child import OUTSIDE_PREFIXES, REFUSED_LOCATION
+from lakana_core.models import QueryErrorCause
+from lakana_core.runs.failures import FailureCode
+from lakana_core.runs.tasks import FailureKind
+from lakana_worker.executor import INTERNAL_ADVICE, DuckDBInternalError, execute_query
+from lakana_worker.pipeline import failure_cause
+from lakana_worker.query_child import OUTSIDE_PREFIXES, REFUSED_LOCATION, STORE_CERTIFICATES
+from lakana_worker.query_protocol import STORE_CERTIFICATE_UNVERIFIED
+from lakana_worker.task_outcome import classify, failure_code_of
 
 NOT_ONE_SELECT = (
     "Query failed: the query process was given something other than one SELECT statement."
@@ -207,6 +213,75 @@ def test_known_residual_a_redirect_from_the_store_is_followed_to_another_host(
     with serving(tmp_path / "redirecting", authority, tmp_path / "certs", redirects) as redirecting:
         assert _read(redirecting.url("t1/r.parquet"), (redirecting.url("t1/"),)) == [9]
     assert other.seen and all(line.endswith("/t9/a.parquet") for line in other.seen)
+
+
+@pytest.fixture
+def foreign(tmp_path: Path, authority: Authority) -> Iterator[tuple[Serving, Authority]]:
+    """Serve ``t1/a.parquet`` (1) with a certificate of an authority the worker does not trust.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the served files and the certificates.
+    authority
+        The authority the query process trusts (requested so its bundle is the one in use).
+
+    Yields
+    ------
+    tuple of (Serving, Authority)
+        The running server and the foreign authority that signed its certificate.
+    """
+    stranger = make_authority(tmp_path / "certs", "Foreign Test CA")
+    _parquet(tmp_path / "foreign" / "t1" / "a.parquet", 1)
+    with serving(tmp_path / "foreign", stranger, tmp_path / "certs") as server:
+        yield server, stranger
+
+
+def test_a_store_certificate_of_a_foreign_authority_fails_once_and_is_not_retried(
+    foreign: tuple[Serving, Authority], authority: Authority
+) -> None:
+    """Red before #277: a transient storage error, which the worker retried, quoting the URL."""
+    server, _stranger = foreign
+    signed = server.url("t1/a.parquet") + "?X-Amz-Signature=SECRETSIG"
+    with pytest.raises(DuckDBInternalError) as caught:
+        execute_query(
+            "SELECT a FROM read_parquet(getvariable('v_0_files'))",
+            {"v_0_files": [signed]},
+            read_prefixes=(server.url("t1/"),),
+        )
+    message = str(caught.value)
+    assert message.startswith(STORE_CERTIFICATE_UNVERIFIED)
+    for part in (
+        server.base.removeprefix("https://"),
+        str(authority.ca_file),
+        "AWS_CA_BUNDLE",
+        "SSL_CERT_FILE",
+        STORE_CERTIFICATES,
+    ):
+        assert part in message
+    assert "SECRETSIG" not in message
+    assert "t1/a.parquet" not in message
+    assert INTERNAL_ADVICE not in message
+    # Not retried: the worker's retry path takes only transient failures.
+    assert classify(caught.value) is FailureKind.PERMANENT
+    assert failure_cause(caught.value) is QueryErrorCause.INTERNAL
+    assert failure_code_of(caught.value) is FailureCode.INTERNAL
+    # The handshake failed, so no request line reached the server.
+    assert server.seen == []
+
+
+def test_the_store_certificate_verifies_with_its_authority_in_the_bundle(
+    foreign: tuple[Serving, Authority], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same server reads once the request's ``ca_bundle`` holds the authority that signed it."""
+    server, stranger = foreign
+    monkeypatch.setattr("lakana_worker.executor.query_ca_bundle", lambda: str(stranger.ca_file))
+    result = execute_query(
+        "SELECT a FROM read_parquet(getvariable('v_0_files'))",
+        {"v_0_files": [server.url("t1/a.parquet") + "?X-Amz-Signature=abc"]},
+        read_prefixes=(server.url("t1/"),),
+    )
+    assert result.column("a").to_pylist() == [1]
 
 
 @pytest.fixture

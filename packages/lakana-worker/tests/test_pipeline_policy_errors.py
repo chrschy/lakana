@@ -51,7 +51,7 @@ from lakana_worker.executor import (
 )
 from lakana_worker.pipeline import _without_the_value, failure_cause, run_one
 from lakana_worker.query_process import ChildFailed, StopReason
-from lakana_worker.query_protocol import MEMORY_LIMIT_ADVICE
+from lakana_worker.query_protocol import MEMORY_LIMIT_ADVICE, STORE_CERTIFICATE_UNVERIFIED
 
 _SECRET = "HIDDEN-X"
 _BIG = 2_000_000_000
@@ -523,6 +523,16 @@ def test_an_internal_failure_under_a_policy_gets_a_fixed_text_and_stays_internal
     assert str(replaced) == f"Query failed: the query engine failed on its own. {INTERNAL_ADVICE}"
     assert failure_cause(replaced) == failure_cause(raw)
     assert untouched is raw
+
+
+def test_the_store_certificate_message_stays_under_a_policy() -> None:
+    """Lakana words it, from the request's own host and bundle: no engine text to hide (#277)."""
+    raw = DuckDBInternalError(
+        f"{STORE_CERTIFICATE_UNVERIFIED} at store.example:8333 against the certificate "
+        "authorities in /etc/ca.pem."
+    )
+
+    assert _without_the_value(raw, frozenset({"gold.people"})) is raw
 
 
 def _typeof_id(session: Session, principal: PrincipalRef, tmp_path: Path) -> object:

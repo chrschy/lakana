@@ -59,6 +59,7 @@ from lakana_worker.query_protocol import (
     MEMORY_LIMIT_ADVICE,
     OUT_OF_MEMORY,
     READ,
+    STORE_CERTIFICATE_UNVERIFIED,
     TRANSIENT,
     WRITE,
     ParameterValue,
@@ -414,7 +415,7 @@ def _translate(failed: ChildFailed, limits: QueryLimitsConfig, writing: bool) ->
         )
     if failed.error is not None and failed.error.kind in _KINDS:
         message = failed.error.message
-        if failed.error.kind == INTERNAL:
+        if failed.error.kind == INTERNAL and not message.startswith(STORE_CERTIFICATE_UNVERIFIED):
             message = f"{message} {INTERNAL_ADVICE}"
         return _KINDS[failed.error.kind](message)
     if failed.returncode is None:

@@ -79,6 +79,12 @@ MEMORY_LIMIT_ADVICE = (
 """What to do about an out-of-memory failure. Replaces DuckDB's own advice, which tells the
 caller to run `SET` statements that a query is not allowed to run."""
 
+STORE_CERTIFICATE_UNVERIFIED = (
+    "Query failed: the query process could not verify the TLS certificate of the object store"
+)
+"""The start of the message for a store certificate the query process cannot verify (#277).
+Lakana's own wording, with nothing of the engine's text in it, so it is kept under a policy."""
+
 NO_RESULT_MESSAGE = "Query produced no result — check for empty or comment-only SQL."
 """The message for SQL that DuckDB runs without a result set."""
 
