@@ -2665,9 +2665,22 @@ own process opens no DuckDB connection and imports no `duckdb`.
   bundle, both variables and the network-settings page; it should not occur once configured.
   **Both 1.5.5 and 2.0.0 verify the store's certificate already** (probed with the fixture:
   `enable_server_cert_verification = false` notwithstanding, a certificate of another
-  authority fails with `SSL peer certificate or SSH remote key was not OK`, an `IO Error`, so
-  today it is classified `transient` and retried); setting `ca_cert_file` changes which
-  authorities are trusted, not whether.
+  authority fails with `IO Error: SSL peer certificate or SSH remote key was not OK error for
+  HTTP HEAD to '<presigned URL>'`, the same text on both); setting `ca_cert_file` changes which
+  authorities are trusted, not whether. `configure` still sets
+  `enable_server_cert_verification = true` (after `ca_cert_file`, before the lock), so the
+  behaviour does not rest on a default that reads as off. A failed verification (#277) is
+  `internal`, not `transient`: a retry meets the same certificate, so the task fails on its
+  first attempt. The message (`STORE_CERTIFICATE_UNVERIFIED`) names the bundle, both variables
+  and the network-settings section, and the store by `host:port` only: DuckDB's text quotes the
+  presigned URL, so the child takes the netloc of the quoted URL and says it only when it is the
+  netloc of one of the request's own prefixes (no user information), otherwise "the object
+  store". Only an `IO Error` with that text counts (an error of another type quoting it, which
+  SQL can produce, keeps its own class). Lakana words the message itself, so the executor adds
+  no "run it again" advice and `pipeline._without_the_value` keeps it under a policy. Pinned by
+  `test_a_store_certificate_of_a_foreign_authority_fails_once_and_is_not_retried` (and its
+  right-authority twin) and the `failure` unit tests. DuckDB's own HTTP retries
+  (`http_retries`) still repeat the handshake inside the one attempt.
 - **What allow-list mode still leaves open** (reachable only past the guard; the guard is the
   first layer, credential scoping the structural one):
   - **The whole store host:port, not just the prefix**, for SQL that spells a literal URL: a

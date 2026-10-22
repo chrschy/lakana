@@ -40,7 +40,11 @@ Why each configuration statement is there, and why their order matters:
    function loads an extension the module did not load on purpose.
 5. ``ca_cert_file`` is the request's bundle. DuckDB 2 reads the bundle lazily, through the local
    file system, on the first HTTPS request; it must be named and allowed, or every HTTPS read
-   fails with ``Cannot read a CA certificate bundle``.
+   fails with ``Cannot read a CA certificate bundle``. Then
+   ``enable_server_cert_verification = true``: DuckDB 1.5.5 and 2.0.0 verify the store's
+   certificate whatever it says, but its default reads as off, and the behaviour must not rest
+   on that. A certificate the bundle cannot verify fails the query as ``internal``, not
+   retried, with a message naming the store's host and port, never the presigned URL.
 6. ``temp_directory`` before external access is switched off: afterwards DuckDB refuses to
    change it (``Modifying the temp_directory has been disabled``).
 7. ``allowed_paths`` (the bundle) and ``allowed_directories`` (the prefixes), before external
@@ -114,6 +118,7 @@ from lakana_worker.query_protocol import (
     NO_RESULT_MESSAGE,
     OUT_OF_MEMORY,
     READ,
+    STORE_CERTIFICATE_UNVERIFIED,
     TRANSIENT,
     UNCONVERTED_VALUE,
     ErrorDocument,
@@ -135,6 +140,13 @@ _DUCKDB_ERROR_TYPE = re.compile(r"^([A-Z][A-Za-z]*(?: [A-Za-z]+)*) Error:")
 _TRANSIENT_ERROR_TYPES = frozenset({"IO", "HTTP"})
 _OUT_OF_MEMORY_ERROR_TYPES = frozenset({"Out of Memory"})
 _INTERNAL_ERROR_TYPES = frozenset({"INTERNAL", "FATAL"})
+_UNVERIFIED_CERTIFICATE = re.compile(
+    r"^IO Error: SSL peer certificate or SSH remote key was not OK\b"
+    r"(?:.*?'(?P<url>https://[^'\s]+)')?"
+)
+"""DuckDB's report of a server certificate it cannot verify against ``ca_cert_file``: the same
+text on 1.5.5 and 2.0.0, as a `duckdb.IOException` or, from a later batch, an `OSError`. It
+quotes the URL it asked for, a presigned one; only its host and port are ever used."""
 _CA_REFUSAL = "Cannot read a CA certificate bundle"
 """DuckDB 2's refusal to load the CA bundle under the restriction. It should not occur once
 ``ca_cert_file`` and ``allowed_paths`` name the bundle; pinned so that a DuckDB change shows."""
@@ -169,6 +181,9 @@ NO_SPILL = (
 
 NETWORK_SETTINGS = "https://lakana-labs.github.io/lakana/reference/network-settings/"
 """The page that says how to trust a private certificate authority."""
+
+STORE_CERTIFICATES = f"{NETWORK_SETTINGS}#object-store-certificates-for-queries"
+"""The section that says which certificate authorities a query process trusts."""
 
 _REMOTE_PREFIX = re.compile(
     r"https?://(?:[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?|\[[0-9A-Fa-f:.]+\])(?::[0-9]{1,5})?"
@@ -488,6 +503,7 @@ def configure(connection: duckdb.DuckDBPyConnection, request: Request) -> None:
     connection.execute("SET autoinstall_known_extensions = false")
     connection.execute("SET autoload_known_extensions = false")
     connection.execute("SET ca_cert_file = ?", [request.ca_bundle])
+    connection.execute("SET enable_server_cert_verification = true")
     connection.execute("SET temp_directory = ?", [request.temp_directory])
     connection.execute("SET allowed_paths = ?", [[request.ca_bundle]])
     connection.execute("SET allowed_directories = ?", [list(request.read_prefixes)])
@@ -503,6 +519,34 @@ def configure(connection: duckdb.DuckDBPyConnection, request: Request) -> None:
     connection.execute("SET lock_configuration = true")
 
 
+def _store_host(text: str, prefixes: Sequence[str]) -> str:
+    """Name the store whose certificate failed, by host and port only.
+
+    Parameters
+    ----------
+    text
+        DuckDB's message, which may quote the presigned URL it asked for.
+    prefixes
+        The request's prefixes. Only a host one of them names is said; DuckDB's text is not
+        trusted further than that.
+
+    Returns
+    -------
+    str
+        `` at <host>[:<port>]`` when the quoted URL's host and port are a prefix's, otherwise
+        the empty string (the message then says "the object store" alone).
+    """
+    matched = _UNVERIFIED_CERTIFICATE.match(text)
+    if matched is None or matched["url"] is None:
+        return ""
+    with contextlib.suppress(ValueError):
+        netloc = urllib.parse.urlsplit(matched["url"]).netloc
+        known = {urllib.parse.urlsplit(prefix).netloc for prefix in prefixes}
+        if netloc and "@" not in netloc and netloc in known:
+            return f" at {netloc}"
+    return ""
+
+
 def failure(
     exc: BaseException,
     asked: threading.Event,
@@ -511,6 +555,7 @@ def failure(
     *,
     spill: bool = False,
     ca_bundle: str = "",
+    prefixes: Sequence[str] = (),
 ) -> ErrorDocument:
     """Classify a DuckDB failure and word it for the user.
 
@@ -535,7 +580,11 @@ def failure(
         Whether the request allowed spilling. Without it, running out of memory is worded as
         "cannot spill to disk": decided by the request, never by DuckDB's text.
     ca_bundle
-        The request's CA bundle, named in the message of a refused bundle.
+        The request's CA bundle, named in the message of a refused bundle and of a store
+        certificate it cannot verify.
+    prefixes
+        The request's prefixes. A store certificate that cannot be verified is named by host
+        and port only, and only when one of these names that host and port.
 
     Returns
     -------
@@ -562,6 +611,16 @@ def failure(
     elif mapped and text.startswith("Conversion Error"):
         text = UNCONVERTED_VALUE
     message = f"Query failed: {text}"
+    raw = str(exc)
+    if isinstance(exc, (duckdb.IOException, OSError)) and _UNVERIFIED_CERTIFICATE.match(raw):
+        # Not transient: a retry meets the same certificate. The text quotes a presigned URL.
+        return ErrorDocument(
+            INTERNAL,
+            f"{STORE_CERTIFICATE_UNVERIFIED}{_store_host(raw, prefixes)} against the "
+            f"certificate authorities in {ca_bundle or 'its bundle'}. Set AWS_CA_BUNDLE or "
+            f"SSL_CERT_FILE on the worker to a PEM file of your object store's certificate "
+            f"authority, then restart the worker; see {STORE_CERTIFICATES}.",
+        )
     if _is_transient(exc):
         return ErrorDocument(TRANSIENT, message)
     if _is_out_of_memory(exc):
@@ -797,6 +856,7 @@ def serve(
             mapped=any(isinstance(value, tuple) for value in request.parameters.values()),
             spill=request.spill,
             ca_bundle=request.ca_bundle,
+            prefixes=request.read_prefixes,
         )
         try:
             if request.mode == CHECK:

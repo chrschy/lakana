@@ -185,6 +185,7 @@ from lakana_worker.executor import (
     stream_query,
 )
 from lakana_worker.memory import MACHINE_MEMORY_ADVICE
+from lakana_worker.query_protocol import STORE_CERTIFICATE_UNVERIFIED
 
 if TYPE_CHECKING:
     from pyiceberg.table.metadata import TableMetadata
@@ -376,7 +377,9 @@ def _without_the_value(failure: LakanaError, restricted: frozenset[str]) -> Laka
     if not restricted:
         return failure
     only = next(iter(restricted)) if len(restricted) == 1 else None
-    if isinstance(failure, DuckDBInternalError):
+    if isinstance(failure, DuckDBInternalError) and not str(failure).startswith(
+        STORE_CERTIFICATE_UNVERIFIED
+    ):
         # The engine's internal errors can format a value too; the type stays, so the cause and
         # a retry are as before, and the worker's log keeps the details.
         return DuckDBInternalError(
