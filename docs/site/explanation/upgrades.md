@@ -140,9 +140,9 @@ what to write instead. Each refusal names its cause in the run's error message.
 
 **Installing the worker**
 
-- **Python 3.11 or newer, as before.** DuckDB 2.0 has no wheels for musl (Alpine Linux) and needs
-  macOS 10.15 or newer. On Alpine, run the worker from the container image or on a glibc
-  distribution.
+- **Python 3.11 or newer, as before.** DuckDB 2.0 needs macOS 10.15 or newer (was 10.9) and, on
+  x86_64 Linux, glibc 2.27 or newer (was 2.26). As before, there are no wheels for musl (Alpine
+  Linux): run the worker from the container image or on a glibc distribution.
 - **One more download for a worker installed with `pip`.** Each DuckDB release has its own build
   of the `httpfs` extension, so such a worker downloads it once more on its first query (from
   `extensions.duckdb.org`; see [What leaves the machine](what-leaves-the-machine.md)). The
