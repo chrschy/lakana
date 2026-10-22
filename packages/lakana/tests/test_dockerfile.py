@@ -287,3 +287,17 @@ def test_the_task_image_pins_the_same_uv_as_the_main_image() -> None:
         )
 
     assert uv_line(_TASK_DOCKERFILE) == uv_line(_DOCKERFILE)
+
+
+def test_the_task_image_drops_every_setuid_and_setgid_bit() -> None:
+    """Without no-new-privileges (snap Docker) a setuid `su` or `mount` would be uid 0 again.
+
+    The real-engine test (`test_docker_isolation_integration.py`) finds no such file in the
+    built image; this one keeps the step in place and before `USER`.
+    """
+    text = _TASK_DOCKERFILE.read_text(encoding="utf-8")
+    step = "find / -xdev -perm /6000 -type f -exec chmod a-s {} +"
+
+    assert step in text
+    assert text.index(step) < text.index("USER 10001:10003")
+    assert text.index(step) > text.index("useradd --system --uid 10002")
