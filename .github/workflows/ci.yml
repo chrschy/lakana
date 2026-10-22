@@ -355,8 +355,10 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.draft != 'true' && needs.changes.outputs.already_tested != 'true' }}
     runs-on: ${{ (github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER) || 'ubuntu-latest' }}
-    # No test waits without a bound, and nothing here may hold a runner if one does.
-    timeout-minutes: 30
+    # No test waits without a bound, and nothing here may hold a runner if one does. 45, not
+    # 30: the job took 22-24 minutes before the Docker isolation step, which adds an image
+    # build and about two minutes of tests.
+    timeout-minutes: 45
     # A separate job, rather than folded into `test` above, so a Docker or
     # testcontainers hiccup shows up as its own failure instead of masking
     # unit test results in the same job.

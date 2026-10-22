@@ -1781,3 +1781,12 @@ def test_the_docker_isolation_tests_have_a_step_of_their_own_that_needs_docker()
     assert docker["if"] == "${{ !cancelled() }}"
     assert docker["run"] == "uv run pytest -m docker packages/lakana-worker/tests"
     assert steps.index(docker) == steps.index(first) + 1
+
+
+def test_the_integration_job_has_room_for_the_docker_isolation_tests() -> None:
+    """The integration job's timeout leaves room for the Docker isolation step.
+
+    The job took 22 to 24 minutes before the Docker step; that step adds an image build (four
+    Python bases and uv: the legacy builder builds every stage) and two minutes of tests.
+    """
+    assert _jobs("ci.yml")["integration"]["timeout-minutes"] == 45
