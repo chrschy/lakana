@@ -21,7 +21,13 @@ from launcher_fakes import FakeEngine, settings
 from lakana_worker.launcher import server as server_module
 from lakana_worker.launcher.engine import EngineError
 from lakana_worker.launcher.requests import StopRequest, environment_volume
-from lakana_worker.launcher.server import TOKEN_FILE, LauncherServer, serve, write_token
+from lakana_worker.launcher.server import (
+    TOKEN_FILE,
+    LauncherServer,
+    remove_stale_socket,
+    serve,
+    write_token,
+)
 from lakana_worker.launcher.service import Launcher, StartError
 
 RUN = {
@@ -689,3 +695,70 @@ def test_a_caller_that_stops_reading_loses_its_run_after_the_send_timeout(
 
     _wait_for(lambda: not served.engine.containers and not served.engine.networks, seconds=20)
     client.close()
+
+
+def test_a_connection_that_sends_nothing_gets_no_answer_and_no_log_line(
+    served: Served, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The bundle's healthcheck connects and closes every 5 s: that is no refused request."""
+    caplog.set_level(logging.DEBUG, logger="lakana_worker.launcher")
+
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.connect("l.sock")
+        client.shutdown(socket.SHUT_WR)
+        data = client.recv(65536)  # the server closes once its handler has returned
+
+    assert data == b""
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+    assert _call({"op": "stop", "token": served.token, "id": "t9"}) == [
+        {"result": {"stopped": False}}
+    ]
+
+
+def test_a_stale_socket_is_removed_before_the_launcher_starts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A socket left in the volume by an earlier launcher must not answer a healthcheck.
+
+    Parameters
+    ----------
+    tmp_path
+        The socket directory.
+    monkeypatch
+        Makes the current user stand in for root.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(server_module, "_ROOT_UID", os.getuid())
+    tmp_path.chmod(0o3770)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as stale:
+        stale.bind("l.sock")
+
+    remove_stale_socket(tmp_path / "l.sock")
+    remove_stale_socket(tmp_path / "l.sock")  # nothing there: nothing to do
+
+    assert not os.path.lexists(tmp_path / "l.sock")
+
+
+def test_removing_a_stale_socket_refuses_a_planted_file_and_a_wrong_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a socket is removed, and only in a directory as the image prepares it.
+
+    Parameters
+    ----------
+    tmp_path
+        The socket directory.
+    monkeypatch
+        Makes the current user stand in for root, then not.
+    """
+    monkeypatch.setattr(server_module, "_ROOT_UID", os.getuid())
+    tmp_path.chmod(0o3770)
+    (tmp_path / "l.sock").write_text("planted", encoding="ascii")
+
+    with pytest.raises(StartError, match="is not a socket"):
+        remove_stale_socket(tmp_path / "l.sock")
+    assert (tmp_path / "l.sock").read_text(encoding="ascii") == "planted"
+
+    monkeypatch.setattr(server_module, "_ROOT_UID", os.getuid() + 1)
+    with pytest.raises(StartError, match="must belong to root"):
+        remove_stale_socket(tmp_path / "l.sock")

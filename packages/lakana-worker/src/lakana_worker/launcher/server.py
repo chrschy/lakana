@@ -212,6 +212,10 @@ class _Handler(socketserver.StreamRequestHandler):
         raw = self._read_line()
         if raw is None:
             return
+        if not raw:
+            # A connection closed without a byte: the bundle's healthcheck, every 5 seconds.
+            logger.debug("A connection closed without a request (a healthcheck).")
+            return
         try:
             request = parse_request(raw, token=self._owner.token, settings=launcher.settings)
         except Refused as exc:
@@ -389,6 +393,37 @@ def _check_directory(directory: Path) -> None:
         raise StartError(f"The socket directory lacks the set-group-id bit. {fix}")
     if info.st_mode & stat.S_IWOTH:
         raise StartError(f"The socket directory must not be writable by everyone. {fix}")
+
+
+def remove_stale_socket(path: Path) -> None:
+    """Remove the socket an earlier launcher left, before this one starts.
+
+    The socket volume outlives the container, and the bundle's healthcheck connects to the
+    socket: a socket nobody listens on refuses the connection, but the start (the engine check,
+    the probes, a pull) takes long enough that removing it first keeps the meaning plain: a
+    socket at the path is this launcher's.
+
+    Parameters
+    ----------
+    path
+        The socket path.
+
+    Raises
+    ------
+    StartError
+        If the socket's directory is not as the image prepares it, or something that is not a
+        socket sits at the path.
+    """
+    _check_directory(path.parent)
+    try:
+        existing = path.lstat()
+    except FileNotFoundError:
+        return
+    if not stat.S_ISSOCK(existing.st_mode):
+        raise StartError(
+            f"{path} exists and is not a socket; remove it from the launcher's socket volume"
+        )
+    path.unlink(missing_ok=True)
 
 
 def serve(launcher: Launcher) -> None:

@@ -32,12 +32,15 @@ def test_main_starts_the_launcher_and_serves(monkeypatch: pytest.MonkeyPatch) ->
     for name, value in _ENV.items():
         monkeypatch.setenv(name, value)
     calls: list[str] = []
+    monkeypatch.setattr(entry, "remove_stale_socket", lambda path: calls.append(f"clear {path}"))
     monkeypatch.setattr(Launcher, "start", lambda self: calls.append("start"))
     monkeypatch.setattr(entry, "serve", lambda launcher: calls.append("serve"))
 
     entry.main()
 
-    assert calls == ["start", "serve"]
+    # The stale socket goes first: the start (engine check, probes, pulls) can take minutes, and
+    # the bundle's healthcheck must not find an earlier launcher's socket meanwhile.
+    assert calls == ["clear /run/lakana-launcher/launcher.sock", "start", "serve"]
 
 
 def test_main_exits_2_and_logs_the_reason_for_a_wrong_setting(
@@ -67,6 +70,7 @@ def test_main_exits_2_when_the_engine_is_not_fit_or_not_there(
     def fail(self: Launcher) -> None:
         raise error
 
+    monkeypatch.setattr(entry, "remove_stale_socket", lambda path: None)
     monkeypatch.setattr(Launcher, "start", fail)
     caplog.set_level(logging.ERROR)
 
@@ -86,6 +90,7 @@ def test_main_exits_2_when_the_socket_cannot_be_served(
     """A planted entry or a wrong directory is a message, not a traceback."""
     for name, value in _ENV.items():
         monkeypatch.setenv(name, value)
+    monkeypatch.setattr(entry, "remove_stale_socket", lambda path: None)
     monkeypatch.setattr(Launcher, "start", lambda self: None)
 
     def fail(launcher: Launcher) -> None:

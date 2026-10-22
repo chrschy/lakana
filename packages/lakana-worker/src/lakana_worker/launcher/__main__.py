@@ -6,7 +6,7 @@ import logging
 import os
 
 from lakana_worker.launcher.engine import DockerEngine, EngineError
-from lakana_worker.launcher.server import serve
+from lakana_worker.launcher.server import remove_stale_socket, serve
 from lakana_worker.launcher.service import Launcher, StartError
 from lakana_worker.launcher.settings import SettingsError, load_settings
 
@@ -14,7 +14,7 @@ logger = logging.getLogger("lakana_worker.launcher")
 
 
 def main() -> None:
-    """Read the settings, start the launcher and serve its socket.
+    """Read the settings, remove a stale socket, start the launcher and serve its socket.
 
     Raises
     ------
@@ -28,6 +28,7 @@ def main() -> None:
     )
     try:
         settings = load_settings(os.environ)
+        remove_stale_socket(settings.socket)
         launcher = Launcher(settings, DockerEngine(settings.docker_socket))
         launcher.start()
         serve(launcher)
