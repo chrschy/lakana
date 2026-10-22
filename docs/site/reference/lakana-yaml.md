@@ -39,9 +39,9 @@ Unknown keys are errors. An override for an environment that does not exist is a
 
 ## The Python of your tasks
 
-`python:` chooses the Python your Python assets run on, when the worker runs tasks in containers
-(`LAKANA_RUN__RUNNER=docker`, the default of the Compose bundle). Write it in quotes: YAML reads
-`3.10` as the number 3.1.
+`python:` chooses the Python your Python assets run on, when the worker runs tasks in containers.
+Write it in quotes: YAML reads `3.10` as the
+number 3.1.
 
 ```yaml
 python: "3.12"

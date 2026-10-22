@@ -418,6 +418,7 @@ def _secret_name(value: str) -> str:
 
 
 WebhookSecret = Annotated[str, AfterValidator(_secret_name)]
+"""The name of a secret of the environment; its value holds the webhook URL."""
 
 SUPPORTED_TASK_PYTHONS = ("3.11", "3.12", "3.13", "3.14")
 """The Python versions Lakana ships a task image for (`lakana.yaml`'s `python:`)."""
@@ -448,14 +449,13 @@ def _task_python(value: object) -> object:
     if not isinstance(value, str) or value not in SUPPORTED_TASK_PYTHONS:
         raise ValueError(
             'must be one of "3.11", "3.12", "3.13", "3.14" (the Python versions Lakana ships a '
-            f"task image for), in quotes; got '{shown(str(value))}'"
+            f"task image for), in quotes; got '{shown(str(value))}'."
         )
     return value
 
 
 TaskPython = Annotated[str, BeforeValidator(_task_python)]
 """A Python version Lakana ships a task image for."""
-"""The name of a secret of the environment; its value holds the webhook URL."""
 
 
 def _notify_format(value: str) -> str:

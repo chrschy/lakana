@@ -817,7 +817,7 @@ def test_python_names_one_of_the_task_images_and_is_not_per_environment() -> Non
         (
             'python: "3.10"\n',
             'must be one of "3.11", "3.12", "3.13", "3.14" (the Python versions Lakana ships a '
-            "task image for), in quotes; got '3.10'",
+            "task image for), in quotes; got '3.10'.",
         ),
         ("python: 3.12\n", 'write the version in quotes, such as python: "3.12"'),
         ("python: 3.10\n", 'write the version in quotes, such as python: "3.12"'),
