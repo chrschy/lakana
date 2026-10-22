@@ -86,8 +86,15 @@ is shown per environment and the worker's package cache trims itself (#206). The
 and the webhook allow-list are hardened (#231, #243, #260). The REST API is declared a versioned
 contract with a CI schema check, and the promise starts at v1.0.0 (#7); routes carry
 descriptions (#268). A guide and a tutorial show how to move SQL transformations (#61), and the
-output blocks in the documentation are checked (#54). The next element is the move to DuckDB 2
+output blocks in the documentation are checked (#54). The next element was the move to DuckDB 2
 (item 2 below).
+
+0.19.0 (2026-10-22) moved query execution to DuckDB 2.0, a long-term-support release supported
+until at least October 2027 (#96 is closed). A few SQL forms behave differently; see the
+[notes for 0.19.0](upgrades.md). The query sandbox was hardened for DuckDB 2. A store
+certificate that cannot be verified now fails at once with a message that says why (#277). The
+next elements are the rest of M7b (pull requests 3 to 5, #38), then M6 and the public beta (M7c,
+#33).
 
 ## To v1.0.0
 
@@ -105,13 +112,11 @@ ingestion helpers and named connections.
    check fails and when it recovers (built). Triggers by other jobs or by events
    come after v1.0.0. Done when a failing check stops a downstream build, its result is kept, and the
    failure is announced.
-2. **The move to DuckDB 2.** Lakana runs on DuckDB 1.5 and moves to DuckDB 2 before M7b. It is a
-   migration, not a milestone; it is tracked in #96. DuckDB 2.0.0 was released on 2026-10-21 and
-   the move is the next element. DuckDB 1.5 will reach its end of life
-   ([release calendar](https://duckdb.org/release_calendar)). On a 2.0 development build, reading Parquet over HTTP was 2 to 14
-   times faster in the way Lakana queries it, and about equal on local files. From the release
-   that ships the move, the worker requires `duckdb>=2.0,<3` (2.0 has long-term support until at
-   least October 2027); what it changes for SQL is in [Upgrade policy](upgrades.md).
+2. **The move to DuckDB 2 (built, 0.19.0).** Lakana runs on DuckDB 2.0, a long-term-support
+   release supported until at least October 2027. It was a migration, not a milestone, tracked in
+   #96. The worker requires `duckdb>=2.0,<3`; what changed for SQL is in
+   [Upgrade policy](upgrades.md). Reading Parquet over HTTP is faster in the way Lakana queries
+   it, and about equal on local files.
 3. **M7b, task isolation.** A Docker runner executes each Python task in its own container. A
    short design trial comes first: how the worker reaches a container runtime without gaining
    root on the host. Done when a task cannot read the worker's credentials or another project's
@@ -154,7 +159,7 @@ ingestion helpers and named connections.
     a token as the password. A service account is refused on a table that has a row filter or
     column mask; a dashboard on restricted data reads a table built for its audience. Done when
     each tool on the tested list connects and sees only what its identity may.
-10. **Data modelling (epic #249).** Decided on 2026-10-20 and built before v1.0.0, after M8c
+10. **M8d, data modelling (epic #249).** Decided on 2026-10-20 and built before v1.0.0, after M8c
     and before M9. Opinionated support for medallion layers (bronze, silver, gold) and
     Kimball-lite star schemas, with optional wide tables. The parts: model metadata in the asset
     header (#250); translated labels and descriptions with a main language (#251); layer rules,
