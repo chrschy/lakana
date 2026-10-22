@@ -1882,3 +1882,20 @@ def test_no_generated_file_that_passes_reaches_outside_its_prefix(rest: str, rem
     assert (posixpath.normpath(path) + "/").startswith(base) or posixpath.normpath(
         path
     ) + "/" == base
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "CREATE SECRET p (TYPE http, HTTP_PROXY '127.0.0.1:9'); SELECT 1",
+        "SELECT 1; SELECT 2",
+        "SET threads = 1",
+        "ATTACH ':memory:' AS m",
+    ],
+)
+def test_anything_but_one_select_is_refused_before_the_connection_is_configured(
+    sql: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """In this process, for coverage; `test_query_allow_list.py` runs the real child."""
+    monkeypatch.setattr(query_child, "configure", lambda *_a: pytest.fail("configured"))
+    assert _failed(_request(sql)) == ErrorDocument("internal", query_child.NOT_ONE_SELECT)

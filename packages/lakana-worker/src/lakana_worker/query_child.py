@@ -816,11 +816,10 @@ def serve(
                 set_variables(connection, request.parameters)
                 # `sql` and not `execute`: its relation streams through `to_arrow_reader`, and it
                 # is the call whose result keeps an Arrow export in DuckDB 2. Nothing is bound to
-                # the statement; what it reads was set as variables above.
-                result = connection.sql(request.sql)
-                if result is None:
-                    return ErrorDocument(INVALID, NO_RESULT_MESSAGE)
-                reader = result.to_arrow_reader(request.batch_rows)
+                # the statement; what it reads was set as variables above. One SELECT always
+                # gives a relation, so there is no `None` to handle here (an empty text was
+                # answered above).
+                reader = connection.sql(request.sql).to_arrow_reader(request.batch_rows)
         except (duckdb.Error, OSError) as exc:
             return classify(exc)
         return _stream(reader, sink, asked, classify)
