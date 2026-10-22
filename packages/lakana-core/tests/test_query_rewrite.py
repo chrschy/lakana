@@ -290,6 +290,181 @@ def test_rewrite_never_puts_a_resolved_url_in_the_sql() -> None:
     assert list(rewritten.parameters.values()) == [[evil]]
 
 
+@pytest.mark.parametrize(
+    ("sql", "rendered"),
+    [
+        (
+            "SELECT list_transform([1, 2], x -> x + 1)",
+            "SELECT LIST_TRANSFORM([1, 2], LAMBDA x : x + 1)",
+        ),
+        (
+            "SELECT list_reduce([1, 2, 3], (x, y) -> x + y)",
+            "SELECT LIST_REDUCE([1, 2, 3], LAMBDA x, y : x + y)",
+        ),
+        (
+            "SELECT list_transform([[1]], x -> list_transform(x, y -> y * 2))",
+            "SELECT LIST_TRANSFORM([[1]], LAMBDA x : LIST_TRANSFORM(x, LAMBDA y : y * 2))",
+        ),
+        (
+            "SELECT list_transform([1, 2], lambda x: x + 1)",
+            "SELECT LIST_TRANSFORM([1, 2], LAMBDA x : x + 1)",
+        ),
+    ],
+)
+def test_rewrite_renders_every_lambda_in_the_keyword_form(sql: str, rendered: str) -> None:
+    """DuckDB 2 refuses `x -> …`; the rewrite renders `LAMBDA x : …`, which 1.5 runs too.
+
+    Parameters
+    ----------
+    sql
+        The query as the caller wrote it.
+    rendered
+        The SQL the rewrite hands to DuckDB.
+    """
+    assert rewrite_query(sql, {}).sql == rendered
+
+
+def test_rewrite_renders_a_lambda_in_the_keyword_form_beside_a_table_read() -> None:
+    """The query that reads a table goes through the same rendering as one that reads none."""
+    rewritten = rewrite_query(
+        "SELECT list_filter(e.tags, t -> t <> 'x') FROM raw.events AS e",
+        sources={"raw.events": _parquet("a.parquet")},
+    )
+
+    assert "LIST_FILTER(e.tags, LAMBDA t : t <> 'x')" in rewritten.sql
+    assert "->" not in rewritten.sql
+
+
+_JSON = 'FROM (SELECT \'{"a": "b"}\'::JSON AS j) AS d'
+"""A derived table with one JSON column `j`, for the JSON-arrow cases."""
+
+
+@pytest.mark.parametrize(
+    ("expression", "rendered"),
+    [
+        ("upper(j -> '$.a')", "UPPER(j -> '$.a')"),
+        ("coalesce(j -> 'a', 'x')", "COALESCE(j -> 'a', 'x')"),
+        ("json_extract_string(j -> 'n', '$.m')", "(j -> 'n') ->> '$.m'"),
+        ("count(j -> 'a')", "COUNT(j -> 'a')"),
+        ("upper(j ->> 'a')", "UPPER(j ->> '$.a')"),
+        ("upper(j -> 'n' -> 'm')", "UPPER(j -> 'n' -> '$.m')"),
+        ("upper(j -> 'n' ->> 'm')", "UPPER((j -> 'n') ->> '$.m')"),
+        ("upper(\"j\" -> 'a')", "UPPER(\"j\" -> 'a')"),
+        ("upper(j -> '$.a' || 'x')", "UPPER(j -> ('$.a' || 'x'))"),
+    ],
+)
+def test_a_json_arrow_as_a_function_argument_stays_a_json_extract(
+    expression: str, rendered: str
+) -> None:
+    """A JSON arrow in a function's arguments runs as DuckDB runs it: as a JSON extract.
+
+    Only a function that takes a lambda gets one: anywhere else the arrow is turned into the JSON
+    extract DuckDB runs before the guard sees the tree, and is rendered as an arrow again.
+
+    Parameters
+    ----------
+    expression
+        The select-list expression as the caller wrote it.
+    rendered
+        What the rewrite renders it as.
+    """
+    sql = f"SELECT {expression} AS v {_JSON}"
+    check_blacklist(sql)
+
+    rewritten = rewrite_query(sql, {}).sql
+
+    assert "LAMBDA" not in rewritten
+    assert f"{rendered} AS v" in rewritten
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "list_transform(l, x -> x + 1)",
+        "array_transform(l, x -> x + 1)",
+        "list_apply(l, x -> x + 1)",
+        "array_apply(l, x -> x + 1)",
+        "list_filter(l, x -> x > 1)",
+        "array_filter(l, x -> x > 1)",
+        "filter(l, x -> x > 1)",
+        "list_reduce(l, (x, y) -> x + y)",
+        "array_reduce(l, (x, y) -> x + y)",
+        "reduce(l, (x, y) -> x + y, 0)",
+        "list_transform(l, x -> x -> 'a')",
+    ],
+)
+def test_a_lambda_in_a_function_that_takes_one_stays_a_lambda(expression: str) -> None:
+    """Every function DuckDB's catalog lists with a LAMBDA parameter keeps its lambda.
+
+    Parameters
+    ----------
+    expression
+        A call with a lambda argument.
+    """
+    rewritten = rewrite_query(f"SELECT {expression} AS v FROM (SELECT [1] AS l) AS d", {}).sql
+
+    assert "LAMBDA" in rewritten
+    assert "->" not in rewritten.replace("x -> 'a'", "").replace("x -> '$.a'", "")
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT COLUMNS(c -> c LIKE 'a%') FROM (SELECT 1 AS ab) AS d",
+        "SELECT upper(lambda j: 'a') FROM (SELECT 1 AS j) AS d",
+        "SELECT upper((j, k) -> 'a') FROM (SELECT 1 AS j) AS d",
+    ],
+)
+def test_columns_a_keyword_lambda_and_two_parameters_stay_lambdas(sql: str) -> None:
+    """`COLUMNS` takes a lambda; a keyword lambda or one of two parameters is never JSON.
+
+    Parameters
+    ----------
+    sql
+        A query whose lambda must stay a lambda.
+    """
+    assert "LAMBDA" in rewrite_query(sql, {}).sql
+
+
+def test_the_lambda_functions_sqlglot_gives_a_class_are_matched_by_that_class() -> None:
+    """`list_transform`, `list_filter` and `reduce` parse to classes; `COLUMNS` is one too."""
+    assert set(query_rewrite._LAMBDA_FUNCTION_TYPES) == {
+        exp.Columns,
+        exp.Transform,
+        exp.ArrayFilter,
+        exp.Reduce,
+    }
+
+
+def test_a_refused_function_in_a_json_arrow_argument_is_still_refused() -> None:
+    """Turning the arrow into a JSON extract keeps its right side in the tree the guard checks."""
+    with pytest.raises(ValidationError, match="getvariable"):
+        check_blacklist(f"SELECT upper(j -> getvariable('v_0_files')) {_JSON}")
+
+
+def test_the_lambda_functions_are_the_ones_duckdbs_catalog_lists() -> None:
+    """The union of `duckdb_functions()` with a LAMBDA parameter on 1.5.5 and 2.0.0."""
+    assert (
+        frozenset(
+            {
+                "apply",
+                "array_apply",
+                "array_filter",
+                "array_reduce",
+                "array_transform",
+                "filter",
+                "invoke",
+                "list_apply",
+                "list_filter",
+                "list_reduce",
+                "list_transform",
+                "reduce",
+            }
+        )
+        == query_rewrite._LAMBDA_FUNCTIONS
+    )
+
+
 def test_rewrite_keeps_the_original_table_alias() -> None:
     """Dropping the alias left the rest of the query unable to resolve `e.id`."""
     rewritten = rewrite_query(
@@ -716,6 +891,9 @@ _FUNCTION_CALL_FORMS = {
     "method_call": "SELECT 's'.{f}(1)",
     "method_call_on_column": "SELECT x.{f}(1) FROM range(1) AS t(x)",
     "lambda": "SELECT list_transform([1], x -> {f}(x, 2))",
+    "lambda_keyword": "SELECT list_transform([1], lambda x: {f}(x, 2))",
+    "lambda_duckdb_keyword": "SELECT list_transform([1], LAMBDA x : {f}(x, 2))",
+    "lambda_two_parameters": "SELECT list_reduce([1], (x, y) -> {f}(x, y))",
     "cte": "WITH c AS (SELECT {f}(1, 2) AS v) SELECT v FROM c",
     "subquery": "SELECT (SELECT {f}(1, 2))",
     "derived_table": "SELECT v FROM (SELECT {f}(1, 2) AS v) AS d",
@@ -756,6 +934,40 @@ def test_blacklist_refuses_duckdb_internal_and_state_changing_functions_in_every
 
     with pytest.raises(ValidationError, match=re.escape(function_name)):
         check_blacklist(sql)
+
+
+@pytest.mark.parametrize(
+    ("function_name", "cause"),
+    [
+        ("setval", "changes or reads a sequence"),
+        ("nextval", "changes or reads a sequence"),
+        ("currval", "changes or reads a sequence"),
+        ("to_aggregate_state", "picks an aggregate function by a name given as data"),
+    ],
+)
+def test_blacklist_names_the_cause_and_the_next_step_for_a_state_or_dispatch_function(
+    function_name: str, cause: str
+) -> None:
+    """A sequence function or `to_aggregate_state` is refused with its own reason.
+
+    "Query the catalog instead" is no next step for these: the message names what the call
+    does and says to remove it.
+
+    Parameters
+    ----------
+    function_name
+        The refused function.
+    cause
+        The part of the message that names what the function does.
+    """
+    with pytest.raises(ValidationError) as caught:
+        check_blacklist(f"SELECT {function_name}('s')")
+
+    message = str(caught.value)
+    assert message.startswith(f"{function_name} ")
+    assert cause in message
+    assert "Remove the call; a query reads tables only." in message
+    assert "catalog" not in message
 
 
 def test_blacklist_tells_the_user_what_to_write_instead_of_an_internal_function() -> None:
@@ -1322,6 +1534,15 @@ def test_a_source_that_lists_only_its_declared_columns_needs_some() -> None:
 
     with pytest.raises(ValidationError, match="no declared column list"):
         rewrite_query("SELECT * FROM gold.t", {"gold.t": source})
+
+
+def test_named_columns_counts_the_column_of_a_json_arrow_argument() -> None:
+    """`upper(j -> 'a')` names the column `j`, as DuckDB reads it; a lambda's parameter is none."""
+    named = query_rewrite.named_columns(
+        "SELECT upper(j -> 'a'), list_transform(l, x -> x) FROM bronze.t"
+    )
+
+    assert named == frozenset({"j", "l"})
 
 
 def test_named_columns_of_a_statement_that_does_not_parse_is_empty() -> None:

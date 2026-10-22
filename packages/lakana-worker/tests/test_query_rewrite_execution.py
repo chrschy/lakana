@@ -212,6 +212,89 @@ def _run(sql: str, sources: dict[str, TableSource]) -> list[tuple[object, ...]]:
 @pytest.mark.parametrize(
     ("sql", "expected"),
     [
+        ("SELECT list_transform([1, 2], x -> x + 1)", [[2, 3]]),
+        ("SELECT list_transform([1, 2], lambda x: x + 1)", [[2, 3]]),
+        ("SELECT list_transform([1, 2], LAMBDA x : x + 1)", [[2, 3]]),
+        ("SELECT list_reduce([1, 2, 3], (x, y) -> x + y)", [6]),
+        ("SELECT list_transform([10, 20], (x, i) -> x * i)", [[10, 40]]),
+        ("SELECT list_transform([[1], [2]], x -> list_transform(x, y -> y + 1))", [[[2], [3]]]),
+        ("SELECT list_transform([1, 2], x -> CAST(x AS VARCHAR) || ':')", [["1:", "2:"]]),
+        ("SELECT list_transform([[1, 2, 3]], x -> x[1:2])", [[[1, 2]]]),
+        ("SELECT list_transform([1, 2], x -> {'a': x})", [[{"a": 1}, {"a": 2}]]),
+        ("SELECT list_filter([1, 2, 3], x -> x > 1 AND x < 3 OR x = 1)", [[1, 2]]),
+        ("SELECT list_transform(['{\"a\": 1}'], x -> x -> '$.a')", [["1"]]),
+    ],
+)
+def test_a_lambda_runs_as_the_guard_parsed_it(sql: str, expected: list[object]) -> None:
+    """Every lambda runs on DuckDB 1.5 and 2.0, with the meaning sqlglot gave it.
+
+    The rewrite renders `LAMBDA x : …`, which DuckDB parses the way sqlglot parsed the
+    caller's `x -> …`; the JSON case (`x -> x -> '$.a'`, a lambda whose body is a JSON
+    extract) failed to bind in the arrow form on DuckDB 1.5.
+
+    Parameters
+    ----------
+    sql
+        The query as the caller wrote it.
+    expected
+        The single row's single value.
+    """
+    check_blacklist(sql)
+
+    assert [row[0] for row in _run(sql, {})] == expected
+
+
+@pytest.mark.parametrize(
+    ("expression", "expected"),
+    [
+        ("upper(j -> '$.a')", '"B"'),
+        ("coalesce(j -> 'a', 'x')", '"b"'),
+        ("json_extract_string(j -> 'n', '$.m')", "1"),
+        ("count(j -> 'a')", 1),
+        ("upper(j ->> 'a')", "B"),
+        ("json_extract_string(j -> 'n' -> 'm', '$')", "1"),
+        ("upper(j -> 'n' ->> 'm')", "1"),
+        ("upper(\"j\" -> 'a')", '"B"'),
+        ("upper(j -> '$.a' || 'x')", None),
+    ],
+)
+def test_a_json_arrow_as_a_function_argument_runs_as_duckdb_runs_its_text(
+    expression: str, expected: object
+) -> None:
+    """`f(j -> 'a')` is a JSON extract, as DuckDB 1.5 and 2.0 run the text itself.
+
+    sqlglot reads it as a lambda; rendered as `LAMBDA j : 'a'` DuckDB refused it (review of
+    #284). The expected values are what DuckDB returns for the caller's own text.
+
+    Parameters
+    ----------
+    expression
+        The select-list expression as the caller wrote it.
+    expected
+        The value DuckDB returns for it.
+    """
+    sql = f'SELECT {expression} FROM (SELECT \'{{"a": "b", "n": {{"m": 1}}}}\'::JSON AS j)'
+    check_blacklist(sql)
+
+    assert duckdb.connect().execute(sql).fetchall() == [(expected,)]
+    assert [row[0] for row in _run(sql, {})] == [expected]
+
+
+def test_a_lambda_over_a_table_read_runs(tmp_path: Path) -> None:
+    """A lambda in a query that reads a table runs through the rewrite's reader CTE."""
+    source = _parquet(str(_orders(tmp_path)))
+
+    rows = _run(
+        "SELECT list_transform([id, id], x -> x * 10) AS v FROM gold.orders",
+        {"gold.orders": source},
+    )
+
+    assert [row[0] for row in rows] == [[10, 10], [20, 20], [30, 30]]
+
+
+@pytest.mark.parametrize(
+    ("sql", "expected"),
+    [
         ("SELECT orders.id FROM gold.orders", [1, 2, 3]),
         ("SELECT gold.orders.id FROM gold.orders", [1, 2, 3]),
         ("SELECT o.id FROM gold.orders o", [1, 2, 3]),

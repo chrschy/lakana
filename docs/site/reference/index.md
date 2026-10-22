@@ -22,6 +22,7 @@ Pages:
 - [Settings](settings.md): every `LAKANA_*` environment variable with its type, default, reader and description. Generated from the code.
 - [The REST API as a contract](rest-api.md): the platform API and the Iceberg REST catalog, what Lakana promises, what counts as breaking, how deprecations are announced, and where to get the [OpenAPI document](openapi.json) (generated from the code).
 
+- [SQL in queries](sql-in-queries.md): lambdas, a column that is only `NULL`, and the functions a query may not call, with the message and the next step for each.
 - [Project layout](project-layout.md): the files a deploy reads and the table names they give.
 - [Asset front-matter](asset-front-matter.md): every key of the `/* lakana */` block of an asset.
 - [`lakana.yaml`](lakana-yaml.md): defaults, requirements, jobs, notifications, check defaults, retries and per-environment overrides.

@@ -2676,7 +2676,8 @@ own process opens no DuckDB connection and imports no `duckdb`.
   presigned URL, so the child takes the netloc of the quoted URL and says it only when it is the
   netloc of one of the request's own prefixes (no user information), otherwise "the object
   store". Only an `IO Error` with that text counts (an error of another type quoting it, which
-  SQL can produce, keeps its own class). Lakana words the message itself, so the executor adds
+  SQL can produce, keeps its own class; and the class is checked beside the text, pinned by
+`test_a_certificate_text_on_an_error_that_is_not_an_io_error_is_not_taken_for_one`). Lakana words the message itself, so the executor adds
   no "run it again" advice and `pipeline._without_the_value` keeps it under a policy. Pinned by
   `test_a_store_certificate_of_a_foreign_authority_fails_once_and_is_not_retried` (and its
   right-authority twin) and the `failure` unit tests. DuckDB's own HTTP retries
@@ -2694,7 +2695,10 @@ own process opens no DuckDB connection and imports no `duckdb`.
   - **Redirects are followed.** httpfs follows a 3xx from an allowed URL to another host
     without consulting the allow-list (1.5.5 and 2.0.0;
     `test_known_residual_a_redirect_from_the_store_is_followed_to_another_host`). The reach is
-    what the store itself redirects to; a query cannot choose the target.
+    what the store itself redirects to; a query cannot choose the target. When the host
+    redirected to presents a certificate that fails, DuckDB quotes the original URL, so the
+    certificate message names the trusted store's host:port, not the failing host: misleading
+    for the operator, but nothing leaks.
   - **Method and payload:** GET and HEAD only; httpfs refuses writes to http(s). No credential
     is sent (none is held); `http_proxy`/`extra_http_headers` are locked as settings, and a
     secret that sets them cannot be created, because the child runs nothing but one `SELECT`.
@@ -2770,6 +2774,9 @@ sequence (and `nextval`/`currval`, older, are refused with it: sequence state is
 governed read needs), `index_key` reads a catalog index by name, and `to_aggregate_state` picks an
 aggregate by a name given as data (nothing harmful found behind it, but dispatch by a name in
 a string is the class that made `json_execute_serialized_sql` a bypass); all five are listed.
+The four sequence and dispatch functions are refused with a message of their own
+(`_NO_QUERY_USE_REASONS`): it names what the call does and says to remove it, since "query the
+catalog instead" is no next step for them.
 **DuckDB's internal namespace is refused as a prefix:** any function whose name starts with
 `__` (`__cast`, `__between`, `__internal_barrier`, `__internal_tablefilter_*`, and the
 `__internal_compress_*`/`__internal_decompress_*` 1.5.5 already had) is refused by
@@ -2787,6 +2794,26 @@ any table function except the generators in `_ALLOWED_TABLE_FUNCTIONS` (`range`,
 `generate_series`, `unnest`) in any FROM-item position (`FROM fn()`, `LATERAL fn()`, `TABLE(fn())`),
 so a function DuckDB adds later is refused by default.
 `extract_table_refs` never reports a function call as a table.
+
+**Lambdas are re-spelled, not passed through.** DuckDB 2.0 refuses the arrow lambda
+(`x -> x + 1`), so `query_rewrite._render` marks every `exp.Lambda` for sqlglot's keyword form
+and the rewrite (and view expansion) hands DuckDB `LAMBDA x : x + 1`. Only the node's spelling
+changes: its parameters and body are subtrees the guard checked, rendered by sqlglot like any
+other expression, and a lambda only occurs as a function argument, delimited by `,` or `)`.
+DuckDB parses the keyword form as sqlglot does where the arrow form diverged (`x -> x -> '$.a'`,
+a lambda whose body is a JSON extract, failed to bind on 1.5.5). Probed on 1.5.5 and 2.0.0 for
+casts, `::`, slices, struct literals, nested and two-parameter lambdas, `AND`/`OR`, `CASE`,
+`BETWEEN`, `IN`, quoted parameters (`test_a_lambda_runs_as_the_guard_parsed_it`); a refused
+function inside a lambda is refused in all three input spellings (`_FUNCTION_CALL_FORMS`).
+Not every arrow is a lambda: sqlglot parses `j -> 'a'` in *any* function's arguments as one,
+while DuckDB reads it as a JSON extract except in a function with a `LAMBDA` parameter
+(`_LAMBDA_FUNCTIONS`: the union of `duckdb_functions()` on 1.5.5 and 2.0.0) or `COLUMNS`. So
+`_parse_sql`, before any check, turns such a one-parameter arrow lambda into the JSON extract
+(`_json_arrows_outside_lambda_functions`, chained arrows associated to the left as DuckDB does);
+its right side is the same subtree, so the guard checks it either way, and the extract renders
+as an arrow again. A lambda-taking function a later DuckDB adds and the list misses only fails
+to bind (its lambda reaches DuckDB as JSON); it never runs anything the guard did not see
+(review of #284).
 
 **User SQL cannot reach the values the platform sets, and may not contain a placeholder
 (`?`, `$1`, `$name`).** The rewriter reads each table's resolved file list — on S3, presigned

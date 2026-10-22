@@ -259,6 +259,78 @@ Beside this list, `check_blacklist` refuses every function whose name starts wit
 `_INTERNAL_FUNCTION_PREFIX` — see there.
 """
 
+_LAMBDA_FUNCTIONS = frozenset(
+    {
+        "apply",
+        "array_apply",
+        "array_filter",
+        "array_reduce",
+        "array_transform",
+        "filter",
+        "invoke",
+        "list_apply",
+        "list_filter",
+        "list_reduce",
+        "list_transform",
+        "reduce",
+    }
+)
+"""The DuckDB functions that take a lambda argument.
+
+The union, over DuckDB 1.5.5 and 2.0.0, of `SELECT DISTINCT function_name FROM
+duckdb_functions() WHERE list_contains(parameter_types, 'LAMBDA')` (`invoke` is 2.0.0's only
+addition). `COLUMNS(c -> …)` is the one other place DuckDB reads a lambda; sqlglot parses it to
+`exp.Columns`. Everywhere else DuckDB reads `j -> 'a'` in a function's arguments as a JSON
+extract, which sqlglot parses as a lambda: `_json_arrows_outside_lambda_functions` turns it back.
+A new lambda-taking function in a DuckDB upgrade needs adding here, or its lambda becomes a JSON
+extract that DuckDB refuses to bind: a failure, never a bypass.
+"""
+
+
+def _lambda_function_types() -> tuple[type[exp.Expr], ...]:
+    """Find the sqlglot classes the functions of `_LAMBDA_FUNCTIONS` parse to.
+
+    sqlglot gives some of them a class of their own (`list_transform` is `exp.Transform`); the
+    rest stay `exp.Anonymous` and are matched by name. A name sqlglot cannot parse as a call
+    (`apply`, a keyword to it) is refused at parse time anyway.
+
+    Returns
+    -------
+    tuple of type
+        The classes, `exp.Columns` included.
+    """
+    found: set[type[exp.Expr]] = {exp.Columns}
+    for name in _LAMBDA_FUNCTIONS:
+        for arguments in ("x -> x", "(x, y) -> x, 0"):
+            try:
+                parsed = sqlglot.parse_one(f"SELECT {name}(l, {arguments})", dialect="duckdb")
+            except sqlglot.errors.SqlglotError:
+                continue
+            node = parsed.find(exp.Lambda)
+            parent = None if node is None else node.parent
+            if parent is not None and not isinstance(parent, exp.Anonymous):
+                found.add(type(parent))
+    return tuple(found)
+
+
+_LAMBDA_FUNCTION_TYPES = _lambda_function_types()
+"""`exp.Columns` and the sqlglot classes of the functions in `_LAMBDA_FUNCTIONS`."""
+
+
+_SEQUENCE_REASON = "changes or reads a sequence, which is connection state, not data"
+
+_NO_QUERY_USE_REASONS: dict[str, str] = {
+    "setval": _SEQUENCE_REASON,
+    "nextval": _SEQUENCE_REASON,
+    "currval": _SEQUENCE_REASON,
+    "to_aggregate_state": "picks an aggregate function by a name given as data",
+}
+"""Blacklisted functions refused with their own cause instead of "query the catalog instead".
+
+Each is in `_BLACKLISTED_FUNCTIONS`; this only words the refusal. The catalog holds nothing
+these calls were after, so the message names what the call does and says to remove it.
+"""
+
 _INTERNAL_FUNCTION_PREFIX = "__"
 """The prefix of DuckDB's internal function namespace, refused as a whole.
 
@@ -754,7 +826,8 @@ def _parse_sql(sql: str, dialect: str) -> exp.Expr:
     Returns
     -------
     sqlglot.expressions.Expr
-        The parsed statement.
+        The parsed statement, with every arrow DuckDB reads as a JSON extract turned into one
+        (`_json_arrows_outside_lambda_functions`), so every check sees what DuckDB runs.
 
     Raises
     ------
@@ -766,9 +839,130 @@ def _parse_sql(sql: str, dialect: str) -> exp.Expr:
         that names a broken stored view, treats it as the syntax error it is.
     """
     try:
-        return sqlglot.parse_one(sql, dialect=dialect)
+        parsed = sqlglot.parse_one(sql, dialect=dialect)
     except _PARSER_FAULTS as exc:
         raise sqlglot.errors.ParseError("the text could not be read") from exc
+    return _json_arrows_outside_lambda_functions(parsed)
+
+
+def _render(parsed: exp.Expr, dialect: str) -> str:
+    """Render a checked tree as the SQL the query process runs, every lambda in keyword form.
+
+    DuckDB 2.0 refuses the arrow lambda (`x -> x + 1` is a Binder Error) and DuckDB 1.5
+    accepts both forms, so every `exp.Lambda` is rendered `LAMBDA x : x + 1` (`LAMBDA x, y :
+    …` for two parameters) whichever form the caller wrote. Only the spelling of the node
+    changes: its parameters and body are the subtrees the guard already checked, rendered by
+    sqlglot as any other expression, so no text reaches DuckDB that the guard did not see.
+    The keyword form is also the one DuckDB parses as sqlglot does: `x -> x -> '$.a'` (a
+    lambda whose body is a JSON extract) did not bind in the arrow form on DuckDB 1.5.
+
+    Parameters
+    ----------
+    parsed
+        The tree to render; its lambdas are marked for the keyword form in place.
+    dialect
+        The SQL dialect to render in.
+
+    Returns
+    -------
+    str
+        The SQL text.
+    """
+    for node in parsed.find_all(exp.Lambda):
+        node.set("colon", True)
+    return parsed.sql(dialect=dialect)
+
+
+def _takes_a_lambda(function: exp.Expr | None) -> bool:
+    """Say whether DuckDB reads a lambda in the arguments of `function`.
+
+    Parameters
+    ----------
+    function
+        The parent of a parsed `exp.Lambda`.
+
+    Returns
+    -------
+    bool
+        Whether it is `COLUMNS` or a function of `_LAMBDA_FUNCTIONS`.
+    """
+    if isinstance(function, exp.Anonymous):
+        return function.name.lower() in _LAMBDA_FUNCTIONS
+    return isinstance(function, _LAMBDA_FUNCTION_TYPES)
+
+
+def _is_arrow(node: exp.Expr) -> bool:
+    """Say whether `node` is a JSON extract written as `->` or `->>`, not as a function call.
+
+    Parameters
+    ----------
+    node
+        A node of a lambda's body.
+
+    Returns
+    -------
+    bool
+        Whether it is the operator form (sqlglot sets `only_json_types` only for it).
+    """
+    return (
+        isinstance(node, (exp.JSONExtract, exp.JSONExtractScalar))
+        and "only_json_types" in node.args
+    )
+
+
+def _json_extract(subject: exp.Expr, right: exp.Expr) -> exp.Expr:
+    """Build `subject -> right`, associating a chain of arrows to the left as DuckDB does.
+
+    Parameters
+    ----------
+    subject
+        The left operand: the column the caller named.
+    right
+        What followed the first arrow, as sqlglot parsed it.
+
+    Returns
+    -------
+    sqlglot.expressions.Expr
+        `subject -> right`; for `right` = `'a' -> 'b'`, `(subject -> 'a') -> 'b'`.
+    """
+    if _is_arrow(right):
+        right.set("this", _json_extract(subject, right.this))
+        return right
+    return exp.JSONExtract(this=subject, expression=right, only_json_types=False)
+
+
+def _json_arrows_outside_lambda_functions(parsed: exp.Expr) -> exp.Expr:
+    """Turn a lambda DuckDB reads as a JSON extract into that extract.
+
+    sqlglot parses `j -> 'a'` in any function's arguments as a lambda; DuckDB reads it as a
+    lambda only in a function that takes one (`_LAMBDA_FUNCTIONS`, `COLUMNS`) and as the JSON
+    extract `j -> 'a'` everywhere else. Done right after parsing, so the guard checks, and the
+    rewrite renders, what DuckDB runs: `_render` gives a real lambda the keyword form, and the
+    extract renders as an arrow again. A lambda of two parameters, or one written with the
+    keyword, is never JSON.
+
+    Parameters
+    ----------
+    parsed
+        The parsed statement; changed in place.
+
+    Returns
+    -------
+    sqlglot.expressions.Expr
+        `parsed`. A lambda's parent is always a function, so the root is never replaced.
+    """
+    for node in list(parsed.find_all(exp.Lambda, bfs=False))[::-1]:
+        parameters = node.expressions
+        if (
+            node.args.get("colon")
+            or len(parameters) != 1
+            or not isinstance(node.parent, exp.Func)
+            or _takes_a_lambda(node.parent)
+        ):
+            continue
+        subject = exp.column(parameters[0].copy())
+        node.replace(_json_extract(subject, node.this))
+    return parsed
 
 
 def _fail_closed(func: Callable[_P, _R]) -> Callable[_P, _R]:
@@ -1504,7 +1698,7 @@ def named_columns(sql: str, dialect: str = "duckdb") -> frozenset[str]:
         the statement cannot be parsed, which `rewrite_query` refuses before this is asked.
     """
     try:
-        parsed = sqlglot.parse_one(sql, dialect=dialect)
+        parsed = _parse_sql(sql, dialect)
     except SQL_SYNTAX_ERRORS:
         return frozenset()
     return frozenset(column.name.lower() for column in parsed.find_all(exp.Column))
@@ -1644,7 +1838,7 @@ def expand_views(
         list(traverse_scope(parsed)),
         [(key, node) for key, node in named_views if counts[key[2]] == 1],
     )
-    return ExpandedQuery(sql=parsed.sql(dialect=dialect), views=tuple(expanded))
+    return ExpandedQuery(sql=_render(parsed, dialect), views=tuple(expanded))
 
 
 _SAFE_TABLE_ARGS = frozenset({"this", "db", "catalog", "alias"})
@@ -1975,7 +2169,7 @@ def rewrite_query(
         table.replace(replacement)
     _drop_schema_from_qualified_columns(scopes, named)
     if not ctes:
-        return RewrittenQuery(sql=parsed.sql(dialect=dialect), parameters=parameters)
+        return RewrittenQuery(sql=_render(parsed, dialect), parameters=parameters)
     if not isinstance(parsed, exp.Query):
         raise ValidationError(f"{parsed.key.upper()} may not reference a catalog table.")
     new_ctes = [
@@ -1989,7 +2183,7 @@ def rewrite_query(
         # The query's own CTEs may read the tables being rewritten, so the
         # generated ones have to be defined first, not appended after.
         existing.set("expressions", [*new_ctes, *existing.expressions])
-    return RewrittenQuery(sql=parsed.sql(dialect=dialect), parameters=parameters)
+    return RewrittenQuery(sql=_render(parsed, dialect), parameters=parameters)
 
 
 @_fail_closed
@@ -2062,6 +2256,11 @@ def check_blacklist(sql: str, dialect: str = "duckdb") -> None:
             )
     for func in parsed.find_all(exp.Func):
         name = func.name.lower() if isinstance(func, exp.Anonymous) else func.sql_name().lower()
+        if name in _NO_QUERY_USE_REASONS:
+            raise ValidationError(
+                f"{name} {_NO_QUERY_USE_REASONS[name]}, which no query needs, so it may not be "
+                "called. Remove the call; a query reads tables only."
+            )
         if name in _BLACKLISTED_FUNCTIONS:
             raise ValidationError(f"{name} may not be called directly; query the catalog instead.")
         if name.startswith(_INTERNAL_FUNCTION_PREFIX):
