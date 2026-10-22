@@ -515,24 +515,41 @@ def test_one_select_in_any_spelling_still_runs(sql: str) -> None:
         "WITH x AS (DELETE FROM t RETURNING *) SELECT * FROM x",
         "WITH x AS (UPDATE t SET a = 1 RETURNING *) SELECT * FROM x",
         "WITH x AS (INSERT INTO t VALUES (1) RETURNING *) SELECT * FROM x",
+        "SELECT * FROM json_execute_serialized_sql(json_serialize_sql('SELECT 1'))",
+        "SELECT * FROM query('SELECT 1')",
+        "SELECT * FROM query_table('t')",
     ],
 )
 def test_a_write_nested_in_a_select_is_refused_by_the_child(sql: str) -> None:
-    """Red on 2.0.0 before the tree check: DuckDB's parser reports each as one SELECT."""
+    """Red on 2.0.0 before the second layer: each parses as one SELECT and reached DuckDB.
+
+    The last three run SQL given as a value, which the parse tree cannot show; the guard refuses
+    all of them first.
+    """
     with pytest.raises(DuckDBInternalError) as caught:
         execute_query(sql)
     assert str(caught.value).startswith(WRITES_IN_SELECT)
 
 
-def test_a_copy_nested_in_a_select_writes_nothing_into_a_table_directory(tmp_path: Path) -> None:
-    """Red on 2.0.0 before the tree check: local mode wrote ``t1/b.parquet`` and returned 1.
+@pytest.mark.parametrize("serialised", [False, True], ids=["nested COPY", "serialised COPY"])
+def test_a_copy_nested_in_a_select_writes_nothing_into_a_table_directory(
+    tmp_path: Path, serialised: bool
+) -> None:
+    """Red on 2.0.0 before the second layer: local mode wrote ``t1/b.parquet`` and returned 1.
 
     DuckDB may write wherever it may read, so a nested ``COPY`` could add a file to a table
-    the query reads; the child refuses it before anything is configured.
+    the query reads; the child refuses it before anything is configured. The serialised form
+    (``json_execute_serialized_sql``) was red before the function check too. The guard refuses
+    both first.
     """
     _parquet(tmp_path / "t1" / "a.parquet", 1)
     target = tmp_path / "t1" / "b.parquet"
-    sql = f"WITH x AS (COPY (SELECT 9 AS a) TO '{target}') SELECT 1 AS one"
+    inner = f"WITH x AS (COPY (SELECT 9 AS a) TO ''{target}'') SELECT 1"
+    sql = (
+        f"SELECT * FROM json_execute_serialized_sql(json_serialize_sql('{inner}'))"
+        if serialised
+        else f"WITH x AS (COPY (SELECT 9 AS a) TO '{target}') SELECT 1 AS one"
+    )
     with pytest.raises(DuckDBInternalError) as caught:
         execute_query(sql, read_prefixes=(f"{tmp_path / 't1'}/",))
     assert str(caught.value).startswith(WRITES_IN_SELECT)

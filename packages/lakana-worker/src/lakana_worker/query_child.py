@@ -26,7 +26,9 @@ write inside a CTE (``WITH x AS (COPY ... TO ...) SELECT 1``, or ``INSERT``, ``U
 ``DELETE ... RETURNING``) as one ``SELECT``, at any depth, so the child then asks DuckDB for the
 statement's parse tree (`SERIALISE`, still on the unconfigured connection) and runs it only if
 every query node in it reads (`reads_only`, `READING_QUERY_NODES`; `WRITES_IN_SELECT` otherwise,
-also when the tree cannot be had). Unchecked, such a ``COPY`` wrote into the query's temp
+also when the tree cannot be had). The same check refuses a call of a function that runs SQL
+given as a value (`SQL_RUNNING_FUNCTIONS`, e.g. ``json_execute_serialized_sql``), whose SQL the
+tree shows only as text. Unchecked, such a ``COPY`` wrote into the query's temp
 directory, which ``max_temp_directory_size`` does not bound, or in local mode into a table
 directory. The guard refuses all of these first; this is the second layer.
 
@@ -197,13 +199,14 @@ is refused by `WRITES_IN_SELECT`'s check."""
 
 WRITES_IN_SELECT = (
     "Query failed: the query process was given a SELECT that may write (a COPY, INSERT, UPDATE, "
-    "DELETE or MERGE inside it), or one whose parse tree it could not check. This is a defect of "
-    "Lakana; please report it."
+    "DELETE or MERGE inside it, or a call of a function that runs SQL given as a value), or one "
+    "whose parse tree it could not check. This is a defect of Lakana; please report it."
 )
 """What a child says, without running anything, of one ``SELECT`` whose parse tree is not made of
-reading query nodes only (`reads_only`). DuckDB 2's parser reports ``WITH x AS (COPY ... TO ...)
-SELECT 1`` as one ``SELECT``, and the same holds for ``INSERT``, ``UPDATE`` and ``DELETE ...
-RETURNING`` in a CTE, at any depth: in a subquery, a ``UNION`` branch, ``EXISTS`` or a lambda."""
+reading query nodes only, or that calls a function in `SQL_RUNNING_FUNCTIONS` (`reads_only`).
+DuckDB 2's parser reports ``WITH x AS (COPY ... TO ...) SELECT 1`` as one ``SELECT``, and the same
+holds for ``INSERT``, ``UPDATE`` and ``DELETE ... RETURNING`` in a CTE, at any depth: in a
+subquery, a ``UNION`` branch, ``EXISTS`` or a lambda. The guard refuses all of these first."""
 
 SERIALISE = "SELECT json_serialize_sql(?)"
 """How the child asks DuckDB's own parser for the statement's tree, as JSON. Nothing runs: the
@@ -216,6 +219,36 @@ READING_QUERY_NODES = frozenset(
 """The query node types a statement the child runs may contain. Every other node type is refused,
 the writing ones (``COPY_QUERY_NODE``, ``INSERT_QUERY_NODE``, ``UPDATE_QUERY_NODE``,
 ``DELETE_QUERY_NODE`` on DuckDB 2.0.0) and any a later DuckDB adds."""
+
+SQL_RUNNING_FUNCTIONS = frozenset(
+    {
+        "json_execute_serialized_sql",
+        "query",
+        "query_table",
+        "json_serialize_plan",
+        "postgres_query",
+        "postgres_execute",
+        "mysql_query",
+        "mysql_execute",
+    }
+)
+"""Functions that run, or bind and plan, SQL given as a value: SQL the parse tree shows only as a
+text or a serialised statement, so `READING_QUERY_NODES` cannot judge it. A call of any of them,
+in ``FROM`` or as an expression, by any qualified or quoted spelling or as a method, is refused
+(the serialised name is lower-cased and compared without its schema or catalog).
+``SELECT * FROM json_execute_serialized_sql(json_serialize_sql('WITH x AS (COPY ... TO ...)
+SELECT 1'))`` ran the inner ``COPY`` on 2.0.0 and wrote the file.
+
+Derived like the guard's blacklist (`lakana_core.query_rewrite`, which refuses all of these
+first): every function of DuckDB 2.0.0's ``duckdb_functions()`` whose name or description matches
+``sql``, ``query``, ``exec``, ``serial``, ``pragma``, ``eval``, ``parse``, ``prepare``,
+``statement`` or ``plan``, read one by one. ``json_execute_serialized_sql`` (table and pragma),
+``query`` and ``query_table`` execute; ``json_serialize_plan`` binds and plans (it does not write,
+but binding opens what the SQL names); ``postgres_*``/``mysql_*`` belong to extensions the child
+never loads (autoloading is off) and are listed should one ever be loaded. Left out:
+``json_serialize_sql`` and ``json_deserialize_sql`` only turn text into a tree and back;
+``aggregate``/``list_aggregate`` call an aggregate by name, not SQL; the ``pragma_*`` table
+functions read settings and metadata, which the guard governs."""
 
 NO_SPILL = (
     f"Query failed: the query ran out of memory and cannot spill to disk. {MEMORY_LIMIT_ADVICE}"
@@ -931,8 +964,10 @@ def reads_only(document: str) -> bool:
     statement, or that contains a query node of a type not in `READING_QUERY_NODES` anywhere in
     its tree is refused. A query node is an object whose ``type`` ends in ``_NODE``, or one with
     the fields every DuckDB query node has (``modifiers`` and ``cte_map``), so that a node type
-    a later DuckDB names differently is refused as well. The walk is iterative, so a deep tree
-    cannot exhaust the stack.
+    a later DuckDB names differently is refused as well. So is any object whose
+    ``function_name`` is not a text or, lower-cased, is in `SQL_RUNNING_FUNCTIONS`: that covers
+    function expressions and the function of a table function reference alike. The walk is
+    iterative, so a deep tree cannot exhaust the stack.
 
     Parameters
     ----------
@@ -962,6 +997,10 @@ def reads_only(document: str) -> bool:
             node = (named and kind.endswith("_NODE")) or ("modifiers" in item and "cte_map" in item)
             if node and not (named and kind in READING_QUERY_NODES):
                 return False
+            if "function_name" in item:
+                function = item["function_name"]
+                if not isinstance(function, str) or function.lower() in SQL_RUNNING_FUNCTIONS:
+                    return False
             pending.extend(item.values())
         elif isinstance(item, list):
             pending.extend(item)

@@ -2527,8 +2527,9 @@ passed: reading inside the allowed table directories, which includes the files o
 nested in another's location and a raw claim whose listing a later external read would pick
 up; the temp directory; reading the CA bundle. DuckDB would also let a statement write where it
 may read; the child runs no statement that writes (`COPY … TO`, `INSERT`, `UPDATE`, `DELETE`,
-`MERGE`), at the top level or nested inside a `SELECT` (see "The child runs one SELECT" under
-"The query child").
+`MERGE`), at the top level or nested inside a `SELECT`, nor a function that runs SQL given as a
+value (see "The child runs one SELECT" and "And that SELECT writes nothing" under "The query
+child").
 
 **An `EXTERNAL` table's `location_pattern` claims an exclusive `raw/<dir>` directory,
 never an arbitrary glob.** `lakana_core.catalog.external_location.parse_external_location`
@@ -2658,14 +2659,25 @@ own process opens no DuckDB connection and imports no `duckdb`.
   `SET_OPERATION_NODE`, `RECURSIVE_CTE_NODE`, `CTE_NODE`). An allow-list, so `COPY_QUERY_NODE`,
   `INSERT_QUERY_NODE`, `UPDATE_QUERY_NODE`, `DELETE_QUERY_NODE` and any node type a later DuckDB
   adds are refused; an object with the fields of a query node (`modifiers`, `cte_map`) counts as
-  one whatever its type is called. Anything else, and a serialisation that raises or reports an
+  one whatever its type is called. The tree shows SQL given as a value only as text, so the same
+  walk refuses any call (in `FROM` or as an expression, any schema or catalog, quoted, upper-case
+  or as a method) of a function in `SQL_RUNNING_FUNCTIONS`: `json_execute_serialized_sql`,
+  `query`, `query_table`, `json_serialize_plan`, and `postgres_*`/`mysql_*` query functions of
+  extensions the child never loads. Without it, `SELECT * FROM
+  json_execute_serialized_sql(json_serialize_sql('WITH x AS (COPY … TO …) SELECT 1'))` passed the
+  node check and wrote the file in both modes on 2.0.0 (review of #286). The list was derived
+  from 2.0.0's `duckdb_functions()` like the guard's blacklist; its docstring records how and why
+  `json_serialize_sql`, `json_deserialize_sql`, `aggregate` and the `pragma_*` functions are left
+  out. Anything else, and a serialisation that raises or reports an
   error, is an `internal` failure (`WRITES_IN_SELECT`: "the query process was given a SELECT that
   may write … This is a defect of Lakana"), nothing run. The guard refuses all of these first
-  (sqlglot cannot parse `COPY` in a CTE; `_reject_statements_inside` refuses the rest). Pinned by
+  (sqlglot cannot parse `COPY` in a CTE; `_reject_statements_inside` refuses the other writes;
+  the table-function allow-list and the blacklist refuse the SQL-running functions). Pinned by
   `test_a_write_nested_in_a_select_is_refused_before_the_connection_is_configured`,
   `test_a_copy_nested_in_a_select_writes_nothing_into_the_temp_directory` and
   `test_a_copy_nested_in_a_select_writes_nothing_into_a_table_directory` (red on 2.0.0 before the
-  check: the file was written), and the guard-accepted shapes in
+  check, and the serialised form before the function check: the file was written), and the
+  guard-accepted shapes in
   `test_one_select_in_any_spelling_still_runs` (`WITH`, `WITH RECURSIVE`, `MATERIALIZED`,
   FROM-first, `VALUES`, set operations, `PIVOT … IN`, `UNPIVOT`, lambdas, JSON arrows, window and
   `FILTER`, subqueries) still run. What still parses as one `SELECT`: on 1.5.5 a
@@ -2746,7 +2758,8 @@ own process opens no DuckDB connection and imports no `duckdb`.
     secret that sets them cannot be created, because the child runs nothing but one `SELECT`.
   - **Local `file://` mode:** reading inside the allowed table directories, the temp
     directory, and reading the CA bundle (see "Known gap" above). A write (`COPY … TO`, also
-    nested in a `SELECT`) is refused by the child's statement checks before DuckDB is configured.
+    nested in a `SELECT` or run through a function that runs SQL given as a value) is refused by
+    the child's statement checks before DuckDB is configured.
   - **DNS:** the store's name is resolved per request; the operator's DNS decides.
   - Unchanged: the SeaweedFS gateway's gRPC port 18333 (not HTTP), and Python tasks (trusted
     code, not the query process).
