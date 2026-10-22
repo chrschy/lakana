@@ -286,6 +286,26 @@ def test_a_view_stored_with_an_arrow_lambda_runs_and_is_read_through(
     assert rows == [{"tens": [10, 10]}, {"tens": [20, 20]}, {"tens": [30, 30]}]
 
 
+def test_a_view_with_a_json_arrow_as_a_function_argument_runs_and_is_read_through(
+    session: Session, admin: PrincipalRef, catalog: CatalogService, tmp_path: Path
+) -> None:
+    """`upper(j -> '$.r')` in a stored view stays a JSON extract (review of #284)."""
+    run = _view(
+        session,
+        admin,
+        "gold.v",
+        "SELECT id, upper(j -> '$.r') AS r, list_transform([id], x -> x + 1) AS l "
+        "FROM (SELECT id, json_object('r', region) AS j FROM bronze.orders)",
+    )
+
+    assert run.status == QueryRunStatus.SUCCEEDED, run.error_message
+    read, rows = _query(
+        session, admin, tmp_path, "SELECT r, l FROM gold.v ORDER BY id", granted=False
+    )
+    assert read.status == QueryRunStatus.SUCCEEDED, read.error_message
+    assert rows == [{"r": '"EU"', "l": [2]}, {"r": '"US"', "l": [3]}, {"r": '"EU"', "l": [4]}]
+
+
 def test_a_view_over_an_untyped_null_is_created_and_read_through(
     session: Session, admin: PrincipalRef, catalog: CatalogService, tmp_path: Path
 ) -> None:

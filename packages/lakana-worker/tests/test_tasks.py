@@ -580,6 +580,23 @@ def test_a_generator_only_asset_runs_and_writes(world: World) -> None:
     assert _exists(world, "gold.series")
 
 
+def test_a_sql_asset_with_a_lambda_and_a_json_arrow_argument_runs(world: World) -> None:
+    """An asset written for DuckDB 1.5 with `x -> …` and `upper(j -> 'a')` builds (#96, #284)."""
+    world.set_manifest(
+        _entry(
+            "gold.series",
+            "SELECT i::BIGINT AS id, list_transform([i], x -> x + 1)[1] AS next, "
+            "upper(j -> 'a') AS a "
+            "FROM (SELECT i, json_object('a', 'b') AS j FROM range(2) AS r(i))",
+        )
+    )
+    _start(world)
+    run_claimed(_engine(world), _claim(world))
+    task = _task(world, "gold.series")
+    assert task.status is TaskStatus.SUCCEEDED, task.error_message
+    assert _exists(world, "gold.series")
+
+
 def test_an_unbuilt_upstream_outside_the_selection_fails_the_task(world: World) -> None:
     """An unbuilt upstream outside the selection fails the task."""
     _start(world, Selection(patterns=("gold.daily",)))

@@ -2805,6 +2805,15 @@ a lambda whose body is a JSON extract, failed to bind on 1.5.5). Probed on 1.5.5
 casts, `::`, slices, struct literals, nested and two-parameter lambdas, `AND`/`OR`, `CASE`,
 `BETWEEN`, `IN`, quoted parameters (`test_a_lambda_runs_as_the_guard_parsed_it`); a refused
 function inside a lambda is refused in all three input spellings (`_FUNCTION_CALL_FORMS`).
+Not every arrow is a lambda: sqlglot parses `j -> 'a'` in *any* function's arguments as one,
+while DuckDB reads it as a JSON extract except in a function with a `LAMBDA` parameter
+(`_LAMBDA_FUNCTIONS`: the union of `duckdb_functions()` on 1.5.5 and 2.0.0) or `COLUMNS`. So
+`_parse_sql`, before any check, turns such a one-parameter arrow lambda into the JSON extract
+(`_json_arrows_outside_lambda_functions`, chained arrows associated to the left as DuckDB does);
+its right side is the same subtree, so the guard checks it either way, and the extract renders
+as an arrow again. A lambda-taking function a later DuckDB adds and the list misses only fails
+to bind (its lambda reaches DuckDB as JSON); it never runs anything the guard did not see
+(review of #284).
 
 **User SQL cannot reach the values the platform sets, and may not contain a placeholder
 (`?`, `$1`, `$name`).** The rewriter reads each table's resolved file list — on S3, presigned

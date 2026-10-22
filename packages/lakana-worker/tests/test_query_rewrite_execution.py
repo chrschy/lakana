@@ -244,6 +244,42 @@ def test_a_lambda_runs_as_the_guard_parsed_it(sql: str, expected: list[object]) 
     assert [row[0] for row in _run(sql, {})] == expected
 
 
+@pytest.mark.parametrize(
+    ("expression", "expected"),
+    [
+        ("upper(j -> '$.a')", '"B"'),
+        ("coalesce(j -> 'a', 'x')", '"b"'),
+        ("json_extract_string(j -> 'n', '$.m')", "1"),
+        ("count(j -> 'a')", 1),
+        ("upper(j ->> 'a')", "B"),
+        ("json_extract_string(j -> 'n' -> 'm', '$')", "1"),
+        ("upper(j -> 'n' ->> 'm')", "1"),
+        ("upper(\"j\" -> 'a')", '"B"'),
+        ("upper(j -> '$.a' || 'x')", None),
+    ],
+)
+def test_a_json_arrow_as_a_function_argument_runs_as_duckdb_runs_its_text(
+    expression: str, expected: object
+) -> None:
+    """`f(j -> 'a')` is a JSON extract, as DuckDB 1.5 and 2.0 run the text itself.
+
+    sqlglot reads it as a lambda; rendered as `LAMBDA j : 'a'` DuckDB refused it (review of
+    #284). The expected values are what DuckDB returns for the caller's own text.
+
+    Parameters
+    ----------
+    expression
+        The select-list expression as the caller wrote it.
+    expected
+        The value DuckDB returns for it.
+    """
+    sql = f'SELECT {expression} FROM (SELECT \'{{"a": "b", "n": {{"m": 1}}}}\'::JSON AS j)'
+    check_blacklist(sql)
+
+    assert duckdb.connect().execute(sql).fetchall() == [(expected,)]
+    assert [row[0] for row in _run(sql, {})] == [expected]
+
+
 def test_a_lambda_over_a_table_read_runs(tmp_path: Path) -> None:
     """A lambda in a query that reads a table runs through the rewrite's reader CTE."""
     source = _parquet(str(_orders(tmp_path)))

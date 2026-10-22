@@ -19,6 +19,12 @@ Lakana hands DuckDB every lambda as `LAMBDA x : x + 1`, the only form DuckDB 2.0
 (it refuses `x -> x + 1` with "Deprecated lambda arrow (->) detected"). Queries, views and
 SQL assets written with `->` keep running; there is nothing to change.
 
+An arrow is a lambda only in a function that takes one: `list_transform`, `list_apply`,
+`list_filter`, `list_reduce`, their `array_` names, `apply`, `filter`, `reduce` and `COLUMNS`.
+Anywhere else, as in `upper(j -> '$.a')` or `coalesce(j -> 'a', 'x')`, it is the JSON operator,
+as in DuckDB, and runs as one. A lambda written `lambda x:` or with two parameters is always
+a lambda.
+
 A lambda's body is checked like the rest of the query: a function a query may not call is
 refused inside a lambda too. A row filter or a column mask may not contain a lambda.
 
