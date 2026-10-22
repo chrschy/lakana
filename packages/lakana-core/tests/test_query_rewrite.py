@@ -1846,6 +1846,29 @@ def test_user_sql_cannot_plan_sql_given_as_a_value(sql: str) -> None:
         check_blacklist(sql)
 
 
+@pytest.mark.parametrize("function_name", ["postgres_execute", "mysql_execute"])
+@pytest.mark.parametrize(
+    "template",
+    [
+        "SELECT {f}('db', 'SELECT 1') AS v",
+        "SELECT id FROM bronze.t WHERE {f}('db', 'SELECT 1') IS NOT NULL",
+        "SELECT * FROM {f}('db', 'SELECT 1')",
+    ],
+)
+def test_user_sql_cannot_call_an_extensions_sql_executor(function_name: str, template: str) -> None:
+    """An extension function that runs SQL on another database is refused in every position.
+
+    Parameters
+    ----------
+    function_name
+        The function, from an extension the query process never loads.
+    template
+        A query with a placeholder for the function's name.
+    """
+    with pytest.raises(ValidationError, match=function_name):
+        check_blacklist(template.format(f=function_name))
+
+
 @pytest.mark.parametrize(
     ("sql", "message"),
     [
