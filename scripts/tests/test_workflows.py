@@ -1764,3 +1764,20 @@ def test_the_task_images_wait_for_the_approval_and_are_attested() -> None:
     assert step["with"]["subject-name"] == "ghcr.io/lakana-labs/lakana-task"
     assert step["with"]["subject-digest"] == "${{ steps.digest.outputs.digest }}"
     assert attest["strategy"]["matrix"]["python"] == ["3.11", "3.12", "3.13", "3.14"]
+
+
+def test_the_docker_isolation_tests_have_a_step_of_their_own_that_needs_docker() -> None:
+    """The exit criterion of task isolation runs on the integration job's Docker Engine.
+
+    Its own step, so a Docker failure is named as such; `LAKANA_TEST_DOCKER=1` makes a missing
+    Docker a failure instead of a skip, and the first step leaves these tests out.
+    """
+    steps = _jobs("ci.yml")["integration"]["steps"]
+    first = next(step for step in steps if step.get("name") == "Integration tests")
+    docker = next(step for step in steps if step.get("name") == "Docker isolation tests")
+
+    assert '-m "integration and not docker"' in first["run"]
+    assert docker["env"] == {"LAKANA_TEST_DOCKER": "1"}
+    assert docker["if"] == "${{ !cancelled() }}"
+    assert docker["run"] == "uv run pytest -m docker packages/lakana-worker/tests"
+    assert steps.index(docker) == steps.index(first) + 1
