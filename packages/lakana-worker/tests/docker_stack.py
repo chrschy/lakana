@@ -437,12 +437,36 @@ class Stack:
         list of str
             Names of containers and networks with this stack's label.
         """
-        label = f"{LABEL_STACK}={self.name}"
-        containers = [
-            c.name for c in self.client.containers.list(all=True, filters={"label": label})
-        ]
-        networks = [n.name for n in self.client.networks.list(filters={"label": label})]
-        return containers + networks
+        return labelled_names(self.client.api, f"{LABEL_STACK}={self.name}")
+
+
+def labelled_names(api: Any, label: str) -> list[str]:
+    """Name the containers and networks with a label, from the list calls' own answers.
+
+    The high-level `containers.list` inspects every container it lists, and a container the
+    launcher removes in between raises `NotFound`: the very moment a test waits for. The list
+    answers already carry the names, so nothing is inspected and a removed object is simply
+    not listed.
+
+    Parameters
+    ----------
+    api
+        The low-level client (`DockerClient.api`).
+    label
+        ``key=value``.
+
+    Returns
+    -------
+    list of str
+        Container names (without Docker's leading ``/``), then network names.
+    """
+    containers = [
+        str(name).lstrip("/")
+        for container in api.containers(all=True, filters={"label": [label]})
+        for name in container.get("Names") or []
+    ]
+    networks = [str(network["Name"]) for network in api.networks(filters={"label": [label]})]
+    return containers + networks
 
 
 def host_processes(marker: str) -> list[str]:
@@ -539,7 +563,7 @@ def stack(client: Any, image: str, root: Path) -> Generator[Stack]:
         (root / "state" / "environments" / f"{env}.complete").write_text(env)
         yield current
     finally:
-        for container in client.containers.list(all=True, filters=mine):
+        for container in client.containers.list(all=True, filters=mine, ignore_removed=True):
             with contextlib.suppress(Exception):
                 container.remove(force=True)
         if current.launcher is not None:
