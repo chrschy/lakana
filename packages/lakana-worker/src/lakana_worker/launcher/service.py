@@ -44,7 +44,7 @@ from typing import Any, Protocol
 from urllib.parse import quote
 
 from lakana_worker.launcher.egress import PORT as EGRESS_PORT
-from lakana_worker.launcher.egress_token import ensure_key, mint
+from lakana_worker.launcher.egress_token import mint, rotate_key
 from lakana_worker.launcher.engine import API_VERSION, Engine, EngineError
 from lakana_worker.launcher.requests import (
     DEADLINE_MARGIN,
@@ -438,7 +438,9 @@ class Launcher:
         (self.settings.state_dir / "environments").mkdir(mode=0o700, parents=True, exist_ok=True)
         self._key = self._load_cache_key()
         try:
-            self._egress_key = ensure_key(self.settings.egress_key)
+            # A new key at every start: no token of an earlier launcher stays valid, so the
+            # subnets it kept resting (in its memory only) are safe to hand out again.
+            self._egress_key = rotate_key(self.settings.egress_key)
         except OSError as exc:
             raise StartError(
                 f"cannot write the egress proxy's key {self.settings.egress_key} "
@@ -1810,14 +1812,16 @@ class Launcher:
             If as many networks as the bound allows are in use, or the range is used up.
         """
         with self._lock:
-            if len(self._subnets) >= self._max_networks:
-                raise EngineError(
-                    f"too many task networks in use ({len(self._subnets)} of "
-                    f"{self._max_networks}); wait for runs to end, or enlarge "
-                    "LAKANA_LAUNCHER__NETWORK_RANGE"
-                )
             now = time.time()
             self._resting = {k: v for k, v in self._resting.items() if v > now}
+            if len(self._subnets) + len(self._resting) >= self._max_networks:
+                raise EngineError(
+                    "too many task networks in use "
+                    f"({len(self._subnets) + len(self._resting)} of {self._max_networks}: "
+                    f"{len(self._subnets)} running, {len(self._resting)} resting until the "
+                    "egress tokens of ended builds expire); wait for runs to end, or enlarge "
+                    "LAKANA_LAUNCHER__NETWORK_RANGE"
+                )
             for candidate in self._pool.subnets(new_prefix=29):
                 text = str(candidate)
                 if text not in self._used_subnets and text not in self._resting:

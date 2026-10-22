@@ -2396,15 +2396,21 @@ def test_a_build_without_the_egress_service_says_so_and_has_no_way_out(tmp_path:
     assert b"docker compose up -d egress" in _logs(emitted)
 
 
-def test_the_launcher_writes_the_egress_key_at_start(tmp_path: Path) -> None:
-    """The proxy reads it from the volume they share; a restart keeps it."""
+def test_the_launcher_writes_a_new_egress_key_at_every_start(tmp_path: Path) -> None:
+    """No token from before a restart stays valid: the resting /29s were forgotten with it."""
     launcher = _started(FakeEngine(), tmp_path)
     key = read_key(tmp_path / "egress.key")
+    _, proxy = launcher.open_build_network("b1", "w1", [("pypi.org", 443)], 60)
+    assert key is not None and proxy is not None
+    token = proxy.split(":", 2)[2].split("@")[0]
+    assert verify(key, token, time.time()) is not None
 
-    assert key is not None
-    assert len(key) == 32
     Launcher(launcher.settings, FakeEngine()).start()
-    assert read_key(tmp_path / "egress.key") == key
+
+    fresh = read_key(tmp_path / "egress.key")
+    assert fresh is not None and fresh != key
+    assert verify(fresh, token, time.time()) is None
+    assert stat.S_IMODE((tmp_path / "egress.key").stat().st_mode) == 0o640
 
 
 def test_a_network_is_closed_by_its_public_name(tmp_path: Path) -> None:
@@ -2484,3 +2490,16 @@ def test_a_build_whose_token_would_be_too_long_is_refused_and_leaves_no_network(
     with pytest.raises(Refused, match="too long"):
         launcher.open_build_network("b1", "w1", hosts, 60)
     assert not [n for n in engine.networks if n.startswith("lakana-build")]
+
+
+def test_resting_subnets_count_against_the_network_cap(tmp_path: Path) -> None:
+    """The cap trips, naming the resting subnets, before the address range runs out."""
+    engine = FakeEngine()
+    launcher = _started(engine, tmp_path, network_range="10.207.0.0/26")
+    assert launcher._max_networks == 6
+    for n in range(6):
+        network, _ = launcher.open_build_network(f"b{n}", "w1", [("pypi.org", 443)], 60)
+        launcher.close_network(network)
+
+    with pytest.raises(EngineError, match="6 resting"):
+        launcher.open_build_network("b9", "w1", [("pypi.org", 443)], 60)

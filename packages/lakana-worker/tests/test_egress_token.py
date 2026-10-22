@@ -14,7 +14,14 @@ from pathlib import Path
 
 import pytest
 
-from lakana_worker.launcher.egress_token import Grant, ensure_key, mint, read_key, verify
+from lakana_worker.launcher.egress_token import (
+    Grant,
+    ensure_key,
+    mint,
+    read_key,
+    rotate_key,
+    verify,
+)
 
 KEY = b"k" * 32
 NETWORK = ipaddress.ip_network("10.207.0.8/29")
@@ -297,3 +304,22 @@ def test_an_existing_key_gets_its_mode_back(tmp_path: Path) -> None:
 
     assert ensure_key(path) == first
     assert stat.S_IMODE(path.stat().st_mode) == 0o640
+
+
+def test_a_rotated_key_is_new_whole_and_never_written_through_a_link(tmp_path: Path) -> None:
+    """Each launcher start makes a new key: replaced in one step, a planted link replaced too."""
+    path = tmp_path / "egress.key"
+    first = rotate_key(path)
+    second = rotate_key(path)
+
+    assert first != second
+    assert read_key(path) == second
+    assert stat.S_IMODE(path.stat().st_mode) == 0o640
+    target = tmp_path / "elsewhere"
+    target.write_text("x", encoding="ascii")
+    path.unlink()
+    os.symlink(target, path)
+    third = rotate_key(path)
+    assert read_key(path) == third
+    assert target.read_text(encoding="ascii") == "x"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["egress.key", "elsewhere"]

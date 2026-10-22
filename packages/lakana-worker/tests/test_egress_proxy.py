@@ -23,7 +23,7 @@ from lakana_worker.launcher.egress import (
     connected_networks,
     load_settings,
 )
-from lakana_worker.launcher.egress_token import ensure_key, mint
+from lakana_worker.launcher.egress_token import ensure_key, mint, rotate_key
 
 LOOPBACK = ipaddress.ip_network("127.0.0.0/8")
 
@@ -556,20 +556,58 @@ def test_a_connected_network_is_read_from_the_routing_table(tmp_path: Path) -> N
     )
 
 
-def test_a_bad_route_line_is_skipped_alone(tmp_path: Path) -> None:
-    """One line the parser does not understand costs that line, not the table."""
-    route = tmp_path / "route"
-    route.write_text(
-        "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\n"
-        "eth0\tZZZZ\t00000000\t0001\t0\t0\t0\t0000FFFF\n"
-        "short\n"
-        "eth1\t0800CF0A\t00000000\t0001\t0\t0\t0\tF8FFFFFF\n",
-        encoding="ascii",
-    )
-    route6 = tmp_path / "ipv6_route"
-    route6.write_text("zz 40 x x 00 x x x x eth0\n", encoding="ascii")
+_HEADER = "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\n"
+_GOOD = "eth1\t0800CF0A\t00000000\t0001\t0\t0\t0\tF8FFFFFF\n"
+_GOOD6 = (
+    "fd000000000000000000000000000000 40 00000000000000000000000000000000 00 "
+    "00000000000000000000000000000000 00000100 00000001 00000000 00000001 eth0\n"
+)
 
-    assert connected_networks(route, route6) == frozenset({ipaddress.ip_network("10.207.0.8/29")})
+
+@pytest.mark.parametrize(
+    ("route", "route6"),
+    [
+        (_HEADER + "eth0\tZZZZ\t00000000\t0001\t0\t0\t0\t0000FFFF\n" + _GOOD, _GOOD6),
+        (_HEADER + "short\n" + _GOOD, _GOOD6),
+        (_HEADER + _GOOD, "zz 40 x x 00 x x x x eth0\n"),
+        (_HEADER + _GOOD, "fd00 40\n"),
+    ],
+    ids=["bad-ipv4-field", "short-ipv4-line", "bad-ipv6-field", "short-ipv6-line"],
+)
+def test_one_route_line_not_understood_fails_closed(
+    tmp_path: Path, route: str, route6: str
+) -> None:
+    """A line the parser cannot read might be the attached network it would have refused.
+
+    Parameters
+    ----------
+    tmp_path
+        For the tables.
+    route
+        The IPv4 table.
+    route6
+        The IPv6 table.
+    """
+    (tmp_path / "route").write_text(route, encoding="ascii")
+    (tmp_path / "ipv6_route").write_text(route6, encoding="ascii")
+
+    assert connected_networks(tmp_path / "route", tmp_path / "ipv6_route") is None
+    (tmp_path / "ipv6_route").write_text(_GOOD6 + "\n", encoding="ascii")
+    (tmp_path / "route").write_text(_HEADER + _GOOD + "\n", encoding="ascii")
+    assert len(connected_networks(tmp_path / "route", tmp_path / "ipv6_route") or ()) == 2
+
+
+def test_an_unreadable_ipv6_table_fails_closed_and_a_missing_one_means_ipv6_is_off(
+    tmp_path: Path,
+) -> None:
+    """Only a table that does not exist is IPv6 switched off; any other error refuses."""
+    (tmp_path / "route").write_text(_HEADER + _GOOD, encoding="ascii")
+    (tmp_path / "ipv6_route").mkdir()
+
+    assert connected_networks(tmp_path / "route", tmp_path / "ipv6_route") is None
+    assert connected_networks(tmp_path / "route", tmp_path / "missing") == frozenset(
+        {ipaddress.ip_network("10.207.0.8/29")}
+    )
 
 
 def test_without_a_routing_table_no_direct_connection_is_made(
@@ -751,10 +789,10 @@ def test_an_unreachable_upstream_is_a_bad_gateway(tmp_path: Path) -> None:
 
 
 def test_a_new_key_is_picked_up_without_a_restart(proxy: Running, tmp_path: Path) -> None:
-    """The launcher may replace the key; old tokens then fail and new ones work."""
+    """A launcher start replaces the key; at its next connection the proxy reads the new one."""
     old = proxy.token()
-    (tmp_path / "egress.key").unlink()
-    fresh = ensure_key(tmp_path / "egress.key")
+    assert _status(proxy.port, f"localhost:{proxy.index}", old) == b"200"
+    fresh = rotate_key(tmp_path / "egress.key")  # what a launcher start does
 
     assert _status(proxy.port, f"localhost:{proxy.index}", old) == b"407"
     new = mint(fresh, [("localhost", proxy.index)], 2**40, purpose="build", network=LOOPBACK)

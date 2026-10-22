@@ -15,8 +15,10 @@ database and the object store, and every build network). A host is resolved once
 connection goes to an address that passed the check, so a name that resolves elsewhere a moment
 later (DNS rebinding) gains nothing. Private addresses outside those networks stay reachable: a
 company's package index is often one. With `LAKANA_EGRESS__UPSTREAM_PROXY` the proxy tunnels
-through a company proxy instead, which resolves and decides. When the IPv4 routing table cannot be
-read, the proxy cannot tell internal addresses from others and makes no direct connection.
+through a company proxy instead, which resolves and decides. When a routing table cannot be read
+or has a line the proxy does not understand, it cannot tell internal addresses from others and
+makes no direct connection. The launcher writes a new key at every start; the proxy reads the key
+file again whenever its inode, time or size changes, so it needs no restart.
 
 Limits: a request head must arrive whole within 10 seconds and 16 KiB; at most
 `LAKANA_EGRESS__MAX_CONNECTIONS` connections at once (256); a tunnel ends after five idle minutes
@@ -36,7 +38,7 @@ import socket
 import socketserver
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
@@ -231,20 +233,23 @@ def _ipv4_route(line: str) -> Network | None:
     Returns
     -------
     IPv4Network or None
-        The network of a route without a gateway; `None` for any other line or one not
-        understood.
+        The network of a route without a gateway; `None` for a route through a gateway or a
+        default route.
+
+    Raises
+    ------
+    ValueError
+        For a line not in the kernel's form.
     """
     fields = line.split()
-    try:
-        if len(fields) < 8 or int(fields[2], 16) != 0:
-            return None
-        destination = ipaddress.IPv4Address(bytes.fromhex(fields[1])[::-1])
-        mask = ipaddress.IPv4Address(bytes.fromhex(fields[7])[::-1])
-        if not int(mask):
-            return None
-        return ipaddress.IPv4Network(f"{destination}/{mask}", strict=False)
-    except ValueError:
+    if len(fields) < 8:
+        raise ValueError(f"a route line has {len(fields)} fields")
+    destination = ipaddress.IPv4Address(bytes.fromhex(fields[1])[::-1])
+    gateway = int(fields[2], 16)
+    mask = ipaddress.IPv4Address(bytes.fromhex(fields[7])[::-1])
+    if gateway or not int(mask):
         return None
+    return ipaddress.IPv4Network(f"{destination}/{mask}", strict=False)
 
 
 def _ipv6_route(line: str) -> Network | None:
@@ -258,26 +263,58 @@ def _ipv6_route(line: str) -> Network | None:
     Returns
     -------
     IPv6Network or None
-        The network of a route without a next hop; `None` for any other line or one not
-        understood.
+        The network of a route without a next hop; `None` for a route through one or a
+        default route.
+
+    Raises
+    ------
+    ValueError
+        For a line not in the kernel's form.
     """
     fields = line.split()
-    try:
-        if len(fields) < 10 or int(fields[4], 16) != 0:
-            return None
-        prefix = int(fields[1], 16)
-        if not prefix:
-            return None
-        address = ipaddress.IPv6Address(bytes.fromhex(fields[0]))
-        return ipaddress.IPv6Network(f"{address}/{prefix}", strict=False)
-    except ValueError:
+    if len(fields) < 10:
+        raise ValueError(f"a route line has {len(fields)} fields")
+    address = ipaddress.IPv6Address(bytes.fromhex(fields[0]))
+    prefix = int(fields[1], 16)
+    next_hop = int(fields[4], 16)
+    if next_hop or not prefix:
         return None
+    return ipaddress.IPv6Network(f"{address}/{prefix}", strict=False)
+
+
+def _routes(path: Path, skip: int, parse: Callable[[str], Network | None]) -> set[Network]:
+    """Read the attached networks of one routing table.
+
+    Parameters
+    ----------
+    path
+        The table.
+    skip
+        Header lines.
+    parse
+        Reads one line.
+
+    Returns
+    -------
+    set
+        The networks.
+
+    Raises
+    ------
+    OSError
+        If the table cannot be read.
+    ValueError
+        If any line is not in the kernel's form: it might be the network that must be refused.
+    """
+    lines = path.read_text(encoding="ascii").splitlines()[skip:]
+    return {n for n in (parse(line) for line in lines if line.strip()) if n is not None}
 
 
 def connected_networks(route: Path = _ROUTE, route6: Path = _ROUTE6) -> frozenset[Network] | None:
     """Read the networks this container is attached to from the kernel's routing tables.
 
-    A line not understood is skipped on its own. The IPv6 table may be missing (IPv6 off).
+    Fail closed: any table that cannot be read or any line not understood gives `None`. Only an
+    IPv6 table that does not exist (IPv6 off) counts as no IPv6 networks.
 
     Parameters
     ----------
@@ -289,19 +326,17 @@ def connected_networks(route: Path = _ROUTE, route6: Path = _ROUTE6) -> frozense
     Returns
     -------
     frozenset or None
-        Every network reached without a gateway; `None` when the IPv4 table cannot be read or
-        names no attached network, so the caller cannot tell internal addresses from others.
+        Every network reached without a gateway; `None` when the caller cannot tell internal
+        addresses from others (also when the IPv4 table names no attached network).
     """
     try:
-        lines = route.read_text(encoding="ascii").splitlines()[1:]
+        found = _routes(route, 1, _ipv4_route)
+        if not found:
+            return None
+        with contextlib.suppress(FileNotFoundError):  # IPv6 is off
+            found |= _routes(route6, 0, _ipv6_route)
     except (OSError, ValueError):
         return None
-    found: set[Network] = {n for n in map(_ipv4_route, lines) if n is not None}
-    if not found:
-        return None
-    with contextlib.suppress(OSError, ValueError):
-        lines6 = route6.read_text(encoding="ascii").splitlines()
-        found |= {n for n in map(_ipv6_route, lines6) if n is not None}
     return frozenset(found)
 
 

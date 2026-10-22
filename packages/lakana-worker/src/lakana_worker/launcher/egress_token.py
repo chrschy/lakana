@@ -302,7 +302,45 @@ def ensure_key(path: Path) -> bytes:
     if existing is not None:
         _restrict(path)
         return existing
-    present = os.path.lexists(path)
+    return _write_key(path, replace=os.path.lexists(path))
+
+
+def rotate_key(path: Path) -> bytes:
+    """Make a new shared key, replacing the old one in one step.
+
+    The launcher calls it at every start: no token from before the restart stays valid, so the
+    subnets an earlier launcher kept resting cannot be reached by a leaked token. The proxy reads
+    the new file at its next connection (it compares the file's inode, time and size).
+
+    Parameters
+    ----------
+    path
+        The key file; a link planted there is replaced, never written through.
+
+    Returns
+    -------
+    bytes
+        The new key.
+    """
+    return _write_key(path, replace=True)
+
+
+def _write_key(path: Path, *, replace: bool) -> bytes:
+    """Write a new key to a temporary file, flushed, then move it into place.
+
+    Parameters
+    ----------
+    path
+        The key file.
+    replace
+        Replace what is at the path; otherwise link, and use the key of a launcher that linked
+        first.
+
+    Returns
+    -------
+    bytes
+        The key now at the path.
+    """
     key = secrets.token_bytes(_KEY_BYTES)
     temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o640)
@@ -312,7 +350,7 @@ def ensure_key(path: Path) -> bytes:
             handle.flush()
             os.fsync(handle.fileno())
         os.chmod(temporary, 0o640)
-        if present:
+        if replace:
             os.replace(temporary, path)
         else:
             try:

@@ -1026,14 +1026,18 @@ access-controlled on the server; `read_only=True` seals it (0400/0500) for a tas
   connects to loopback, link-local (cloud metadata), multicast, unspecified, reserved or known
   metadata addresses, nor to a network its own container is attached to (read from
   `/proc/net/route`: the Compose network and every build network; a table it cannot read means
-  no direct connection at all, 503), resolving once and
+  no direct connection at all, 503, and so does any line it cannot parse or an IPv6 table that
+  exists but cannot be read; a missing IPv6 table means IPv6 is off), resolving once and
   connecting to a checked address (no DNS rebinding); other private addresses stay reachable,
   because a company index often is one. The head must arrive whole within 10 s and 16 KiB,
   strictly CRLF, one `Proxy-Authorization`, at most 64 lines; at most 256 connections (503
   beyond, then closed without a thread); a tunnel ends idle after 5 minutes and at the token's
   expiry. A released build's /29 rests until its token's expiry plus a minute before any network
-  gets it again (in memory: a launcher restart forgets it, but also removes every build
-  container). `mint` refuses a token longer than `verify` accepts (the launcher answers the
+  gets it again, running and resting networks counting together against the network cap. The
+  rest lives in the launcher's memory, so every launcher start writes a new `egress.key`
+  (`egress_token.rotate_key`, replaced in one step): no token from before the restart is valid.
+  The proxy needs no restart: it compares the key file's inode, modification time and size at
+  each connection and reads it again when they change. `mint` refuses a token longer than `verify` accepts (the launcher answers the
   build with a refusal). With the docker runner an `http://` `LAKANA_RUN__INDEX_URL` is refused
   at worker start (`RunConfig`): the proxy tunnels https only. `LAKANA_EGRESS__UPSTREAM_PROXY` chains a company proxy, which then resolves and
   decides. M6 is meant to give ingestion tasks tokens of another purpose through the same proxy.
