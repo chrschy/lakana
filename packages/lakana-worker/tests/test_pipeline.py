@@ -3182,6 +3182,34 @@ def test_run_one_refuses_an_innocent_recursive_cte(
     assert run.result_location is None
 
 
+def test_run_one_refuses_a_connect_by_query_and_says_what_to_write(
+    session: Session, principal: PrincipalRef, tmp_path: Path
+) -> None:
+    """A hierarchical query is refused before it runs, with the cause and the next step.
+
+    sqlglot would hand DuckDB a `CONNECT BY` as a `WITH RECURSIVE` query, which the guard
+    refuses when written directly, so it refuses this spelling too.
+    """
+    _local_catalog(session, principal, tmp_path)
+
+    query_service = QueryService(session, AllowAllAuthorization())
+    run = query_service.submit_query(
+        principal,
+        "dev",
+        "SELECT a FROM range(3) AS t(a) START WITH a = 0 CONNECT BY PRIOR a = a - 1",
+    )
+
+    run_one(session, run.id, AllowAllAuthorization())
+
+    session.refresh(run)
+    assert run.status == QueryRunStatus.FAILED
+    assert run.error_message == (
+        "CONNECT BY is not supported in submitted queries: it runs as a recursive query. "
+        "Write the query without hierarchical recursion, for example with one join per level."
+    )
+    assert run.result_location is None
+
+
 def test_run_one_executes_an_aggregate_whose_column_has_no_lineage(
     session: Session, principal: PrincipalRef, tmp_path: Path
 ) -> None:

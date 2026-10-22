@@ -279,7 +279,7 @@ def test_expansion_is_capped_against_reference_blowup() -> None:
     "stored", ["SELECT id, $1 AS u FROM bronze.orders", "SELECT id FROM bronze.orders WHERE id > ?"]
 )
 def test_a_stored_view_with_a_placeholder_is_refused_at_expansion(stored: str) -> None:
-    """The named-parameter rule applies to stored view SQL: a placeholder would bind a URL list too.
+    """The placeholder rule applies to stored view SQL: a placeholder could read a URL list too.
 
     Creation refuses one, but a row predating the fix, or written some other
     way, must still never reach the rewriter. The message is the fixed

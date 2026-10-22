@@ -17,12 +17,15 @@ takes no parameters at all — see `RewrittenQuery`.
 Those variables must in turn be unreachable from the user's own SQL: on S3
 they hold presigned URLs of the raw files, and a caller holding one reads the
 file directly, past every row filter and column mask. `getvariable` and
-`duckdb_variables` are blacklisted, a `SET` or `RESET` of a variable is a
-statement that is not a read and is refused, and every `exp.Placeholder`/
-`exp.Parameter` in the user's tree is refused too (`check_blacklist`, and
-again in every parse `rewrite_query`/`extract_table_refs` make — see
-`_reject_placeholders`): nothing is bound to the statement, so a placeholder
-has no use, and DuckDB refuses a statement with one.
+`duckdb_variables` are blacklisted, `json_serialize_plan` is blacklisted (it
+plans the SQL text it is given, and the plan shows a variable's value), a `SET`
+or `RESET` of a variable is a statement that is not a read and is refused, and
+every `exp.Placeholder`/`exp.Parameter` in the user's tree is refused too
+(`check_blacklist`, and again in every parse `rewrite_query`/`extract_table_refs`
+make — see `_reject_placeholders`). That last rule is load-bearing, not
+tidiness: DuckDB 2.0 reads the session variable of that name for a `$name`
+nothing is bound to, so `SELECT $v_0_files` would return the URL list, and the
+placeholder refusal is what keeps it out of reach.
 
 A `TableSource`'s `row_filters` and `column_masks` are a second kind of data
 reaching the generated SQL, and unlike the URLs they are spliced into the SQL
@@ -88,6 +91,7 @@ _BLACKLISTED_FUNCTIONS = frozenset(
         "parquet_full_metadata",
         "parquet_bloom_probe",
         "json_execute_serialized_sql",
+        "json_serialize_plan",
         "which_secret",
         "current_query",
         "current_setting",
@@ -163,7 +167,10 @@ in particular takes `json_serialize_sql`'s own output, so a query naming
 only `json_execute_serialized_sql` in its own text (nothing that looks like
 `read_parquet` to an AST walk) can still read an arbitrary file once
 executed — see `test_json_execute_serialized_sql_would_otherwise_read_another_files_rows`
-for a reproduction against a raw connection. `sniff_csv`/`parquet_metadata`/
+for a reproduction against a raw connection. `json_serialize_plan` is a scalar that
+plans the SQL text it is given, and DuckDB folds `getvariable(...)` into that plan, so it
+would show the session variables that carry a table's file URLs; see
+`test_json_serialize_plan_would_otherwise_show_a_variables_value`. `sniff_csv`/`parquet_metadata`/
 `parquet_schema`/`parquet_file_metadata`/`parquet_kv_metadata`/
 `parquet_full_metadata`/`parquet_bloom_probe` all read a named file's
 structure or contents directly, the same class of bypass as `read_parquet`
@@ -368,6 +375,22 @@ written, `None` otherwise. Verified against sqlglot 30.18.0.
 _RECURSIVE_CTE_MESSAGE = "Recursive CTEs (WITH RECURSIVE) are not supported in submitted queries."
 """Why a `WITH RECURSIVE` query is refused, stated once for all three callers."""
 
+_CONNECT_BY_MESSAGE = (
+    "CONNECT BY is not supported in submitted queries: it runs as a recursive query. "
+    "Write the query without hierarchical recursion, for example with one join per level."
+)
+"""Why a hierarchical query (`CONNECT BY`, `PRIOR`, `CONNECT_BY_ROOT`) is refused."""
+
+_CONNECT_BY_NODES: tuple[type[exp.Expr], ...] = (exp.Connect, exp.ConnectByRoot, exp.Prior)
+"""The nodes sqlglot parses Oracle's hierarchical-query syntax to.
+
+`exp.Connect` (`[START WITH ...] CONNECT BY [NOCYCLE] ...`) hangs off a plain `exp.Select`;
+sqlglot's duckdb generator writes it as a `WITH RECURSIVE` CTE only when it renders the tree,
+so the parsed tree the guard checks carries no recursive `WITH` at all. `exp.Prior` and
+`exp.ConnectByRoot` mean nothing outside such a query and are refused with it. Verified against
+sqlglot 30.23.0.
+"""
+
 _PLACEHOLDER_MESSAGE = "Query parameters/placeholders are not allowed in a submitted query."
 """Why a query carrying a placeholder is refused.
 
@@ -467,9 +490,12 @@ def _schema_variable(index: int) -> str:
 def _files_variable(index: int) -> str:
     """Name the variable one read's file list is set under.
 
-    The name is predictable on purpose: no user SQL can reach a variable (`getvariable` and
-    `duckdb_variables` are blacklisted, `SET` and `RESET` are refused), so a random part would
-    protect nothing.
+    The name is predictable on purpose: no user SQL can reach a variable, so a random part would
+    protect nothing. `getvariable` and `duckdb_variables` are blacklisted; `json_serialize_plan`
+    is blacklisted too, because a function that plans SQL given to it as a value folds
+    `getvariable(...)` into the plan it returns; `SET` and `RESET` are refused; and every
+    placeholder is refused, because DuckDB 2.0 reads the variable `v` for an unbound `$v` (see
+    `_reject_placeholders`).
 
     Parameters
     ----------
@@ -1039,7 +1065,15 @@ def _fail_closed(func: Callable[_P, _R]) -> Callable[_P, _R]:
 
 
 def _reject_recursive_ctes(parsed: exp.Expr) -> None:
-    """Refuse a statement containing a `WITH RECURSIVE` clause anywhere in it.
+    """Refuse a statement that would reach DuckDB as a recursive query, anywhere in it.
+
+    Two spellings reach DuckDB as `WITH RECURSIVE`: the clause itself, and a
+    hierarchical `CONNECT BY` query, which sqlglot parses to an `exp.Connect`
+    on a plain `SELECT` and writes as a recursive CTE only when it renders the
+    tree (see `_CONNECT_BY_NODES`). Checking the parsed tree for the
+    `RECURSIVE` keyword alone would miss the second, so both are refused here
+    and the invariant holds for the SQL DuckDB is actually given: no
+    submitted query runs as a recursive query.
 
     This closes a whole feature surface rather than one more spelling of a
     bypass. sqlglot's `optimizer/scope.py::_traverse_ctes` pre-seeds a
@@ -1069,7 +1103,14 @@ def _reject_recursive_ctes(parsed: exp.Expr) -> None:
     `find_all` rather than reading the statement's own `WITH` clause: a
     recursive CTE nested inside a subquery, a derived table, or an `IN`
     predicate is the same bug, and the outermost clause is not the only
-    place one can appear.
+    place one can appear. The same holds for a `CONNECT BY`.
+
+    A `CONNECT BY` query is not known to reach the base-term disagreement
+    above: sqlglot's scope reads its tree before rendering, where it holds
+    no recursive CTE, so its table is classified and rewritten like any
+    other. It is refused because it still hands DuckDB a recursive query —
+    the feature this function closes — and a check that holds only for the
+    keyword would be one more special case to get wrong.
 
     Parameters
     ----------
@@ -1079,11 +1120,14 @@ def _reject_recursive_ctes(parsed: exp.Expr) -> None:
     Raises
     ------
     ValidationError
-        If any `WITH` clause in `parsed` carries the `RECURSIVE` keyword.
+        If any `WITH` clause in `parsed` carries the `RECURSIVE` keyword, or
+        `parsed` holds a `CONNECT BY`, `PRIOR` or `CONNECT_BY_ROOT` anywhere.
     """
     for with_clause in parsed.find_all(exp.With):
         if with_clause.args.get(_RECURSIVE_ARG):
             raise ValidationError(_RECURSIVE_CTE_MESSAGE)
+    if parsed.find(*_CONNECT_BY_NODES) is not None:
+        raise ValidationError(_CONNECT_BY_MESSAGE)
 
 
 PIVOT_VALUES_MESSAGE = (
@@ -1132,12 +1176,15 @@ def _reject_pivot_without_values(parsed: exp.Expr) -> None:
 def _reject_placeholders(parsed: exp.Expr) -> None:
     """Refuse a statement carrying a query parameter or placeholder anywhere.
 
-    The rewriter binds every resolved file list as a query parameter, and on
-    S3 those lists are presigned URLs of the raw files. A `?`, `$1`, or
-    `$name` in the user's own SQL would bind to one and return it as an
-    ordinary value — a URL anyone can then fetch directly, bypassing every
-    row filter and column mask. No submitted query has a legitimate use for
-    a placeholder: the platform binds no user-supplied values.
+    The query process sets every resolved file list as a session variable
+    (`v_<n>_files`, see `_files_variable`), and on S3 those lists are
+    presigned URLs of the raw files. DuckDB 2.0 resolves a `$name` that no
+    parameter is bound to as the session variable of that name, so
+    `SELECT $v_0_files` would return the list as an ordinary value — a URL
+    anyone can then fetch directly, bypassing every row filter and column
+    mask. This refusal is what keeps the variables unreachable through a
+    placeholder; do not relax it. No submitted query has a legitimate use
+    for a placeholder anyway: the statement runs with no parameters bound.
 
     `find` rather than a top-level check: a placeholder nested in a
     subquery, a CTE, a `WHERE`, or a function argument binds all the same.
@@ -1382,10 +1429,10 @@ def _parse_checked(sql: str, dialect: str) -> exp.Expr:
     ------
     ValidationError
         If the statement contains a query parameter or placeholder, which
-        would bind to the rewriter's own URL lists — see
+        would read the session variables holding the URL lists — see
         `_reject_placeholders`. Or if it contains a `WITH RECURSIVE` clause, whose scope
-        bindings `_cte_reference_ids` cannot classify soundly — see
-        `_reject_recursive_ctes`. Or if it holds a statement that is not a read
+        bindings `_cte_reference_ids` cannot classify soundly, or a `CONNECT BY`, which
+        renders as one — see `_reject_recursive_ctes`. Or if it holds a statement that is not a read
         anywhere, see `_reject_statements_inside`. Or if it is a bare `VALUES` list with an
         alias or a clause other than `ORDER BY`, `LIMIT` and `OFFSET`, see
         `_reject_values_clauses`. `check_blacklist` already refuses these
@@ -1747,7 +1794,8 @@ def extract_table_refs(sql: str, dialect: str = "duckdb") -> list[str]:
         never checked: where the meaning of a name is in doubt, the query is
         refused rather than classified. Also if the query contains a `WITH
         RECURSIVE` clause, whose base-term bindings no scope-based classifier
-        here can read the way DuckDB does — see `_reject_recursive_ctes`.
+        here can read the way DuckDB does, or a `CONNECT BY`, which renders as
+        one — see `_reject_recursive_ctes`.
     """
     parsed = _parse_checked(sql, dialect)
     bound = _cte_reference_ids(parsed)
@@ -2119,7 +2167,7 @@ def rewrite_query(
         Or if the query contains a query parameter or placeholder (see
         `_reject_placeholders`), if sqlglot cannot resolve the query's
         references unambiguously, or if the query contains a `WITH
-        RECURSIVE` clause — all checked
+        RECURSIVE` clause or a `CONNECT BY` — all checked
         here independently of `extract_table_refs`, so that this function
         never depends on that one having been called first. Or, for a source
         with an applicable row filter or column mask, if it declares no
@@ -2219,17 +2267,19 @@ def check_blacklist(sql: str, dialect: str = "duckdb") -> None:
     statements a user is most likely to try; they are not what makes the check
     sound.
 
-    A second structural rule stands beside it: no submitted query may contain
-    a `WITH RECURSIVE` clause anywhere. That is a deliberate non-support
-    decision, not an oversight — sqlglot and DuckDB disagree about what a
-    recursive CTE's name binds to inside its *base* term, and every
-    scope-based classifier here inherits that disagreement as an
-    authorization bypass. See `_reject_recursive_ctes`.
+    A second structural rule stands beside it: no submitted query may run as
+    a recursive query — neither a `WITH RECURSIVE` clause nor a `CONNECT BY`
+    (which sqlglot renders as `WITH RECURSIVE`) may appear anywhere. That is a
+    deliberate non-support decision, not an oversight — sqlglot and DuckDB
+    disagree about what a recursive CTE's name binds to inside its *base*
+    term, and every scope-based classifier here inherits that disagreement
+    as an authorization bypass. See `_reject_recursive_ctes`.
 
     A third structural rule: no submitted query may contain a query parameter
-    or placeholder (`?`, `$1`, `$name`) anywhere. The rewrite binds each
-    table's resolved file URLs as parameters, and a user placeholder would
-    bind to them and return them as data — see `_reject_placeholders`.
+    or placeholder (`?`, `$1`, `$name`) anywhere. The query process sets each
+    table's resolved file URLs as session variables, and DuckDB 2.0 reads the
+    variable for an unbound `$name`, so a user placeholder would return them
+    as data — see `_reject_placeholders`.
 
     A fourth structural rule: no statement that is not a read may sit anywhere
     inside the query, in a CTE, a subquery, a set operation or a `LATERAL` join,
@@ -2257,7 +2307,7 @@ def check_blacklist(sql: str, dialect: str = "duckdb") -> None:
         list, or is a `VALUES` list with an alias or a clause other than `ORDER BY`,
         `LIMIT` and `OFFSET`; if a statement that
         is not a read sits anywhere inside it; or if it
-        contains a `WITH RECURSIVE` clause.
+        contains a `WITH RECURSIVE` clause or a `CONNECT BY`.
     """
     parsed = _parse_sql(sql, dialect)
     for item in parsed.find_all(exp.Table, exp.Lateral):
