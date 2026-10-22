@@ -2040,13 +2040,16 @@ def test_main_builds_a_docker_runtime_and_cleans_up_what_it_left(
     python = poll_forever_mock.call_args.kwargs["engine"].python
     assert isinstance(python.runner, DockerRunner)
     assert isinstance(python.environments, DockerEnvironments)
-    assert (python.environments.owner, python.environments.memory_mb) == ("worker-7", 1024)
+    owner = python.environments.owner
+    token = (tmp_path / "xdg" / "lakana-worker" / "launcher-owner").read_text()
+    assert (owner, python.environments.memory_mb) == (f"worker-7.{token}", 1024)
+    assert python.runner._owner == owner
     assert python.environments.client.socket_path == Path("/run/lakana-launcher/launcher.sock")
     assert python.support.reason() is None
-    assert cleaned == ["worker-7"]
+    assert cleaned == [owner]
     assert "Python tasks run in containers through the launcher" in caplog.text
     assert "Python assets: enabled (in containers)." in caplog.text
-    assert "Removed 2 task containers an earlier worker on this host left." in caplog.text
+    assert "Removed 2 task containers an earlier process of this worker left." in caplog.text
     assert str(tmp_path / "xdg" / "lakana-worker" / "attempts") in caplog.text
 
 

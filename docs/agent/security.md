@@ -963,6 +963,15 @@ access-controlled on the server; `read_only=True` seals it (0400/0500) for a tas
   Docker frames or log lines included; the result record in `<attempt>/task` is read with the
   same distrust (`O_NOFOLLOW`, regular file, bounded) and a stale one is removed before the run.
   Docker's `OOMKilled` sets the memory stop reason; a cancel set first wins.
+- **A stop is asked for until the launcher confirms it, and the worker does not wait forever.**
+  The launcher's `stop` answers `stopped: true` only when Docker stopped the container, found it
+  not running or gone, or the run has no container yet; a failed or refused Docker call is
+  logged and answered `false`. `DockerRunner` asks again on `false` (also before the launcher
+  registered the run): the first retry at the next poll, then a gap that doubles up to 5 s
+  (`runners.stop_retry_gap`). Its launcher call has a deadline of the task's timeout, the kill
+  grace and `runners.DEADLINE_MARGIN_SECONDS` (900 s: the launcher's image pull and wait
+  margin); past it the client closes the connection (`LauncherTimedOut`), which makes the
+  launcher kill and remove the container, and the task fails as timed out naming the launcher.
 - **An environment belongs to one project.** Its key (`docker_environments.environment_key`) is
   the SHA-256 of the project's id, the lock digest, `pyproject.toml`'s digest, the Python version
   and the credential-free index set; the launcher adds the image to the volume's name. The
@@ -980,9 +989,15 @@ access-controlled on the server; `read_only=True` seals it (0400/0500) for a tas
   token. A project deleted and registered again gets a new repository id and a new key.
 - **The worker's start with `LAKANA_RUN__RUNNER=docker`** (`__main__._python_runtime`): one
   `LauncherClient` on `LAKANA_RUN__LAUNCHER_SOCKET` serves `DockerRunner` and
-  `DockerEnvironments`, both owned by `launcher_owner(socket.gethostname())`; the worker asks
-  the launcher once at start to remove what an earlier process of this host left (`cleanup`),
-  and starts anyway if the launcher cannot be reached. The attempt directory is
+  `DockerEnvironments`, both owned by `launcher_client.claim_owner`: the host name and a random
+  token kept in `launcher-owner` in the worker's cache directory, locked (`flock`) for as long as
+  the worker runs. A second live worker on the same directory takes `launcher-owner.1` and so
+  on, so two workers that share a host name never share an owner: the `cleanup` one asks for at
+  its start removes only what an earlier process of the same worker left, never the other's
+  running tasks. Without a writable directory the token is random and nothing is kept (the
+  launcher's deadline label still removes leftovers). The worker asks the launcher once at
+  start to remove what its earlier process left (`cleanup`), and starts anyway if the launcher
+  cannot be reached. The attempt directory is
   `tempfile.mkdtemp(prefix="attempt-")` directly under the work directory, which must be the
   mount of the launcher's work volume: the launcher mounts `<attempt>/code` and `<attempt>/task`
   by name (`requests._ATTEMPT` accepts mkdtemp's names; a test pins the agreement). The local

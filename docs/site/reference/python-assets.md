@@ -295,8 +295,13 @@ trusts only the publicly trusted certificate authorities of its task image. A pa
 proxy whose certificate a private certificate authority signed therefore needs
 `LAKANA_RUN__RUNNER=local` for now (see [Python assets](../how-to/deploy-with-compose.md#python-assets)
 in "Deploying with Compose"). At start a `docker` worker asks the launcher to remove the containers
-an earlier worker process on the same host left; a launcher that cannot be reached is logged, the
-worker starts anyway, and each Python task fails with `runner unavailable: …` until it is reached.
+its own earlier process left (the worker keeps its name for the launcher in `launcher-owner` in its
+cache directory, so workers that share a host name never remove each other's tasks); a launcher
+that cannot be reached is logged, the worker starts anyway, and each Python task fails with
+`runner unavailable: …` until it is reached. A task whose launcher reports no end within its timeout, its
+kill grace and 15 minutes fails as `timed out: the launcher reported no end of the task's container …`; the
+worker then closes its connection, which makes the launcher remove the container, and
+`docker compose logs launcher` has the reason.
 
 `LAKANA_RUN__INDEX_URL`, `LAKANA_RUN__HTTPS_PROXY`, `LAKANA_RUN__NO_PROXY` and
 `LAKANA_RUN__CA_BUNDLE` follow the rules of the `LAKANA_GIT__*` settings (see [Git network settings](network-settings.md#git-network-settings)); the

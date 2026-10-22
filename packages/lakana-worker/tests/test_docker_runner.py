@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 import threading
+import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
@@ -12,7 +14,12 @@ import pytest
 from fake_launcher import FakeLauncher, refusing
 
 from lakana_core.runs.failures import FailureCode
-from lakana_worker.launcher_client import LauncherUnavailable, LogSinkFailed
+from lakana_worker.launcher_client import (
+    LauncherClient,
+    LauncherTimedOut,
+    LauncherUnavailable,
+    LogSinkFailed,
+)
 from lakana_worker.runners import (
     DockerRunner,
     PythonTask,
@@ -20,6 +27,7 @@ from lakana_worker.runners import (
     StopReason,
     StopSignal,
     memory_message,
+    stop_retry_gap,
 )
 
 TOKEN = "lakana_task_key01_" + "s" * 40
@@ -165,7 +173,10 @@ def _run(
     original = launcher.call
 
     def call(
-        request: dict[str, Any], on_log: Callable[[bytes], None] | None = None
+        request: dict[str, Any],
+        on_log: Callable[[bytes], None] | None = None,
+        *,
+        timeout: float | None = None,
     ) -> dict[str, object]:
         """Pass the attempt directory to the script.
 
@@ -175,13 +186,15 @@ def _run(
             The request.
         on_log
             The log sink.
+        timeout
+            The runner's deadline.
 
         Returns
         -------
         dict
             The script's result.
         """
-        return original({**request, "_attempt_dir": str(job.attempt_dir)}, on_log)
+        return original({**request, "_attempt_dir": str(job.attempt_dir)}, on_log, timeout=timeout)
 
     launcher.call = call  # ty: ignore[invalid-assignment]
     logs: list[bytes] = []
@@ -847,3 +860,198 @@ def test_the_invalid_task_message_names_every_cause(tmp_path: Path) -> None:
 
     assert "environment key" in (outcome.error_message or "")
     assert "Python version" in (outcome.error_message or "")
+
+
+def test_the_launcher_call_has_a_deadline_past_the_launchers_own_end(tmp_path: Path) -> None:
+    """Timeout, kill grace and a margin for the launcher's image pull and wait: then give up."""
+    launcher = FakeLauncher(scripts={"run": _writes({"status": "succeeded"}, _DONE)})
+
+    _run(tmp_path, launcher, {"deadline_margin": 7.5}, timeout_seconds=29.5)
+
+    assert launcher.timeouts == [30 + 3 + 7.5]
+
+
+def test_the_default_deadline_margin_covers_an_image_pull() -> None:
+    """The launcher pulls a missing image (up to 600 s) before its own timer starts."""
+    runner = DockerRunner(LauncherClient(Path("l.sock")), owner="w", memory_mb=64, cpus=1, pids=16)
+
+    assert runner._deadline_margin >= 600 + 60
+
+
+def _hangs(launcher: FakeLauncher) -> Callable[..., dict[str, object]]:
+    """Build a run script that behaves like the client reaching its deadline.
+
+    Parameters
+    ----------
+    launcher
+        The fake, whose recorded deadline the script checks.
+
+    Returns
+    -------
+    callable
+        The script.
+    """
+
+    def script(request: dict[str, Any], on_log: Callable[[bytes], None]) -> dict[str, object]:
+        """Raise what the client raises when no result came in time.
+
+        Parameters
+        ----------
+        request
+            The request.
+        on_log
+            The log sink.
+
+        Raises
+        ------
+        LauncherTimedOut
+            Always.
+        """
+        assert launcher.timeouts[-1] is not None
+        raise LauncherTimedOut("the launcher sent no result within 993s; the connection is closed")
+
+    return script
+
+
+def test_a_launcher_that_never_answers_ends_the_run_at_the_worker_deadline(tmp_path: Path) -> None:
+    """Before, only the launcher's timer and reaper ended an overrunning container."""
+    launcher = FakeLauncher()
+    launcher.scripts["run"] = _hangs(launcher)
+
+    outcome, _, _ = _run(tmp_path, launcher)
+
+    assert (outcome.succeeded, outcome.timed_out, outcome.killed) == (False, True, True)
+    assert outcome.failure_code is FailureCode.TIMEOUT
+    message = outcome.error_message or ""
+    assert "launcher" in message and "docker compose logs launcher" in message
+    assert launcher.stopped == [launcher.requests[0]["task"]]
+
+
+def test_a_cancel_the_launcher_never_confirmed_is_still_a_cancel(tmp_path: Path) -> None:
+    """The deadline does not turn a stop the worker asked for into a timeout."""
+    launcher = FakeLauncher()
+    hangs = _hangs(launcher)
+    stop = StopSignal()
+
+    def cancelled(request: dict[str, Any], on_log: Callable[[bytes], None]) -> dict[str, object]:
+        """Cancel, then reach the deadline.
+
+        Parameters
+        ----------
+        request
+            The request.
+        on_log
+            The log sink.
+
+        Returns
+        -------
+        dict
+            Never; the deadline is raised.
+        """
+        stop.set(StopReason.CANCELLED)
+        return hangs(request, on_log)
+
+    launcher.scripts["run"] = cancelled
+
+    outcome = _runner(launcher).run(_task(tmp_path), lambda chunk: None, stop)
+
+    assert (outcome.error_message, outcome.failure_code) == (
+        "stopped: cancelled",
+        FailureCode.CANCELLED,
+    )
+
+
+def test_a_success_recorded_before_the_launcher_hung_still_succeeds(tmp_path: Path) -> None:
+    """The record is read as after a timeout: written after the upload returned."""
+    launcher = FakeLauncher()
+    hangs = _hangs(launcher)
+
+    def recorded(request: dict[str, Any], on_log: Callable[[bytes], None]) -> dict[str, object]:
+        """Write a success record, then reach the deadline.
+
+        Parameters
+        ----------
+        request
+            The request, with the test's ``_attempt_dir``.
+        on_log
+            The log sink.
+
+        Returns
+        -------
+        dict
+            Never; the deadline is raised.
+        """
+        work = Path(request["_attempt_dir"]) / "task"
+        (work / "result.json").write_text(json.dumps({"status": "succeeded", "rows": 1}))
+        return hangs(request, on_log)
+
+    launcher.scripts["run"] = recorded
+
+    outcome, _, _ = _run(tmp_path, launcher)
+
+    assert outcome.succeeded is True
+
+
+def test_a_stop_the_launcher_keeps_refusing_is_asked_again_less_and_less_often(
+    tmp_path: Path,
+) -> None:
+    """The first retry is immediate, then the gap doubles: a stuck launcher is not flooded."""
+    launcher = FakeLauncher()
+    asked: list[float] = []
+    stop = StopSignal()
+
+    def refuses(ident: str) -> bool:
+        """Answer that Docker did not stop the container.
+
+        Parameters
+        ----------
+        ident
+            The task's id.
+
+        Returns
+        -------
+        bool
+            `False`.
+        """
+        asked.append(time.monotonic())
+        return False
+
+    def runs_a_second(
+        request: dict[str, Any], on_log: Callable[[bytes], None]
+    ) -> dict[str, object]:
+        """Ask for a stop, then end by itself a second later.
+
+        Parameters
+        ----------
+        request
+            The request.
+        on_log
+            The log sink.
+
+        Returns
+        -------
+        dict
+            A stopped container.
+        """
+        stop.set(StopReason.CANCELLED)
+        threading.Event().wait(1.0)
+        return {"exit": 137, "stopped": True}
+
+    launcher.stop = refuses  # ty: ignore[invalid-assignment]
+    launcher.scripts["run"] = runs_a_second
+
+    _runner(launcher, poll_seconds=0.01).run(_task(tmp_path), lambda chunk: None, stop)
+
+    gaps = [later - earlier for earlier, later in itertools.pairwise(asked)]
+    assert 4 <= len(asked) <= 14, f"asked {len(asked)} times in a second"
+    assert gaps[0] < 0.1
+    assert gaps[-1] > gaps[1]
+
+
+def test_the_stop_retry_gap_doubles_from_the_poll_and_stops_growing_at_five_seconds() -> None:
+    """0 (the first retry is immediate), then the poll interval, doubling, at most 5 s."""
+    gaps = [0.0]
+    for _ in range(7):
+        gaps.append(stop_retry_gap(gaps[-1], 0.2))
+
+    assert gaps == [0.0, 0.2, 0.4, 0.8, 1.6, 3.2, 5.0, 5.0]

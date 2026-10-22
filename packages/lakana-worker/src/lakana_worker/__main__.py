@@ -56,7 +56,7 @@ from lakana_worker.deploy_sweep import DeploySweeper, sweep_deploy_checkouts
 from lakana_worker.docker_environments import DockerEnvironments
 from lakana_worker.executor import check_limits, install_drain, install_heartbeat
 from lakana_worker.heartbeat import WorkerHeartbeat
-from lakana_worker.launcher_client import LauncherClient, LauncherUnavailable, launcher_owner
+from lakana_worker.launcher_client import LauncherClient, LauncherUnavailable, claim_owner
 from lakana_worker.memory import resolve_limit, start_watchdog
 from lakana_worker.notify import DeliveryLoop, NotifySettings
 from lakana_worker.pipeline import install_maintenance_timeout
@@ -241,7 +241,8 @@ def _python_runtime(
         directories and, with `uv` and `LAKANA_WORKER__PACKAGE_CACHE_MAX_BYTES` above 0, trims
         uv's cache (`lakana_worker.caches`). With `LAKANA_RUN__RUNNER=docker`, a
         `DockerRunner` and `DockerEnvironments` on the launcher at
-        `LAKANA_RUN__LAUNCHER_SOCKET`, owned by this host's name; the attempt directories
+        `LAKANA_RUN__LAUNCHER_SOCKET`, owned by this worker (`claim_owner`: the host name and a
+        token kept in the cache directory, unique among live workers); the attempt directories
         must then be the launcher's work volume, which it mounts by attempt name.
     """
     cache = worker_cache_dir()
@@ -286,7 +287,7 @@ def _python_runtime(
     environments: DockerEnvironments | None = None
     if run.runner == "docker":
         client = LauncherClient(run.launcher_socket)
-        owner = launcher_owner(socket.gethostname())
+        owner = claim_owner(cache, socket.gethostname())
         memory_mb = parse_task_memory(run.task_memory) // 1024**2
         runner = DockerRunner(
             client,
@@ -344,7 +345,7 @@ def _python_runtime(
 
 
 def _clean_up_after_restart(runtime: PythonRuntime) -> None:
-    """Ask the launcher to remove what this host's earlier worker process left running.
+    """Ask the launcher to remove what this worker's earlier process left running.
 
     A launcher that cannot be reached is logged and the worker starts anyway: the launcher may
     start after it, and each task then says the same until it does.
@@ -369,7 +370,7 @@ def _clean_up_after_restart(runtime: PythonRuntime) -> None:
         logger.warning("%s", exc)
         return
     if removed:
-        logger.info("Removed %d task containers an earlier worker on this host left.", removed)
+        logger.info("Removed %d task containers an earlier process of this worker left.", removed)
 
 
 def make_worker_id(host: str) -> str:
@@ -433,11 +434,11 @@ def main() -> None:
     `PythonRuntime` either way, which runs a Python task as a supervised subprocess (or, with
     `LAKANA_RUN__RUNNER=docker`, a container the launcher starts) while the
     loop keeps serving query runs. A docker worker first asks the launcher to remove the
-    containers an earlier worker process on this host left; a launcher that cannot be reached
-    is logged and the worker starts anyway. The tokens it mints for those tasks
-    are capped by `LAKANA_TASK_TOKENS__MAX_TTL_SECONDS`. Before anything else a
-    watchdog thread starts (`LAKANA_WORKER__MEMORY_LIMIT`, default 4GB): over the limit
-    the worker records why against what it runs, kills its tasks and exits with
+    containers an earlier process of this worker left (its owner is kept in the cache
+    directory); a launcher that cannot be reached is logged and the worker starts anyway.
+    The tokens it mints for those tasks are capped by `LAKANA_TASK_TOKENS__MAX_TTL_SECONDS`.
+    Before anything else a watchdog thread starts (`LAKANA_WORKER__MEMORY_LIMIT`, default
+    4GB): over the limit the worker records why against what it runs, kills its tasks and exits with
     `lakana_worker.memory.EXIT_CODE`. While it holds the scheduler role it
     also sweeps the artifact store every `LAKANA_RUN__SWEEP_INTERVAL` seconds (expired uploads,
     files and manifest objects no version names) and the table locations (the files of creates

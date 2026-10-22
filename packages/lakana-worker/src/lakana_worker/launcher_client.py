@@ -13,9 +13,16 @@ from __future__ import annotations
 
 import base64
 import binascii
+import contextlib
+import errno
+import fcntl
 import json
+import os
 import re
+import secrets
 import socket
+import stat
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -26,6 +33,14 @@ _MAX_LINE = 2 << 20
 _MAX_TOKEN_BYTES = 4096
 _UNSAFE_OWNER = re.compile(r"[^A-Za-z0-9._:-]")
 _NOT_PROTOCOL = "the launcher answered something that is not its protocol"
+_OWNER_FILE = "launcher-owner"
+_OWNER_SLOTS = 16
+"""How many workers sharing one cache directory each keep an owner of their own."""
+_OWNER_TOKEN = re.compile(r"\A[0-9a-f]{16}\Z")
+_HOST_PART = 110
+"""Longest host part of an owner: with ``.`` and the token it stays within the launcher's 128."""
+_CLAIMS: list[int] = []
+"""Descriptors of the owner files this process holds locked, open until it ends."""
 _TRANSIENT_REFUSALS = ("the launcher is busy:", "no request line arrived in time")
 """Refusals that say the launcher could not take the request now, not that it was wrong."""
 
@@ -36,6 +51,14 @@ class LauncherUnavailable(Exception):
 
 class LauncherRefused(Exception):
     """The launcher refused the request; the text is its reason."""
+
+
+class LauncherTimedOut(Exception):
+    """No result arrived before the caller's deadline; the connection was closed.
+
+    Closing it is what makes the launcher remove the container: its watcher takes a closed
+    connection for a worker that is gone.
+    """
 
 
 class LogSinkFailed(Exception):
@@ -65,10 +88,7 @@ def unavailable_message(detail: str, socket_path: Path) -> str:
 
 
 def launcher_owner(host: str) -> str:
-    """Name this worker for the launcher's labels: its host name, made safe.
-
-    A Compose replica keeps its host name across a restart of its container, so a restarted
-    worker's `cleanup` finds what the earlier process left.
+    """Make a host name safe for the launcher's owner label: the host part of `claim_owner`.
 
     Parameters
     ----------
@@ -85,6 +105,105 @@ def launcher_owner(host: str) -> str:
     if not owner:
         return "worker"
     return owner if owner[0].isalnum() else f"w{owner}"
+
+
+def _left(deadline: float | None) -> float | None:
+    """Turn a deadline into the timeout of the next read.
+
+    Parameters
+    ----------
+    deadline
+        A `time.monotonic` moment, or `None`.
+
+    Returns
+    -------
+    float or None
+        Seconds until then, at least a millisecond; `None` without a deadline.
+    """
+    return None if deadline is None else max(deadline - time.monotonic(), 0.001)
+
+
+def _claim_slot(path: Path) -> str | None:
+    """Lock one owner file for this process and read its token, writing one if it has none.
+
+    Parameters
+    ----------
+    path
+        ``launcher-owner`` or ``launcher-owner.<n>`` in the worker's cache directory.
+
+    Returns
+    -------
+    str or None
+        The token; `None` when another live worker holds the file, or it is a link or not a
+        regular file (never followed or used).
+
+    Raises
+    ------
+    OSError
+        If the file cannot be created, read or written.
+    """
+    try:
+        descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            return None
+        raise
+    claimed = False
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            return None
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return None
+        token = os.read(descriptor, 64).decode("ascii", errors="replace").strip()
+        if _OWNER_TOKEN.match(token) is None:
+            token = secrets.token_hex(8)
+            os.ftruncate(descriptor, 0)
+            os.pwrite(descriptor, token.encode("ascii"), 0)
+            os.fsync(descriptor)
+        _CLAIMS.append(descriptor)
+        claimed = True
+        return token
+    finally:
+        if not claimed:
+            os.close(descriptor)
+
+
+def claim_owner(directory: Path, host: str) -> str:
+    """Name this worker for the launcher's labels: unique among live workers, kept on restart.
+
+    The owner is ``<host>.<token>``: the host name made safe (`launcher_owner`) and a random
+    token kept in ``launcher-owner`` in the worker's cache directory. The worker holds a lock on
+    that file for as long as it runs, so a second live worker sharing the directory takes
+    ``launcher-owner.1`` and so on, and two workers that share only a host name have tokens of
+    their own: the `cleanup` one asks for at its start never removes the other's tasks. A worker
+    restarted on the same directory takes a free file again and, with it, an earlier process's
+    leftovers to remove; whatever owner held a free file has no live process. Without a usable
+    directory, or with every file held, the token is random: unique, but nothing an earlier
+    process left is found by it (the launcher's deadline still removes that).
+
+    Parameters
+    ----------
+    directory
+        The worker's cache directory (`python_support.worker_cache_dir`).
+    host
+        `socket.gethostname()`.
+
+    Returns
+    -------
+    str
+        Within the launcher's rule for an owner: letters, digits, ``.``, ``_``, ``:`` and ``-``,
+        at most 128 characters.
+    """
+    prefix = launcher_owner(host)[:_HOST_PART]
+    with contextlib.suppress(OSError):
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        for slot in range(_OWNER_SLOTS):
+            token = _claim_slot(directory / (f"{_OWNER_FILE}.{slot}" if slot else _OWNER_FILE))
+            if token is not None:
+                return f"{prefix}.{token}"
+    return f"{prefix}.{secrets.token_hex(8)}"
 
 
 class LauncherClient:
@@ -144,7 +263,11 @@ class LauncherClient:
         return data.decode("ascii").strip()
 
     def call(
-        self, request: dict[str, object], on_log: Callable[[bytes], None] | None = None
+        self,
+        request: dict[str, object],
+        on_log: Callable[[bytes], None] | None = None,
+        *,
+        timeout: float | None = None,
     ) -> dict[str, object]:
         """Send one request and read its answers to the result.
 
@@ -154,6 +277,9 @@ class LauncherClient:
             The request without the token.
         on_log
             Receives each log chunk; `None` drops them.
+        timeout
+            Seconds from the call to the result, however much output arrives meanwhile;
+            `None` waits as long as the launcher keeps the connection open.
 
         Returns
         -------
@@ -168,20 +294,30 @@ class LauncherClient:
         LauncherRefused
             If the launcher refused the request; a busy launcher or a request line that came
             too late is `LauncherUnavailable` instead, since a retry may succeed.
+        LauncherTimedOut
+            If `timeout` passed first; the connection is closed.
         LogSinkFailed
             If `on_log` raised.
         ValueError
             Never escapes: an answer outside the protocol becomes `LauncherUnavailable`.
+        TimeoutError
+            Never escapes: a deadline that passed becomes `LauncherTimedOut`.
         """
+        deadline = None if timeout is None else time.monotonic() + timeout
         token = self._token()
         connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        reading = False
         try:
             connection.settimeout(self.connect_timeout)
             connection.connect(str(self.socket_path))
             connection.sendall(json.dumps({**request, "token": token}).encode("utf-8") + b"\n")
-            connection.settimeout(None)
+            reading = True
+            connection.settimeout(_left(deadline))
             with connection.makefile("rb") as reader:
                 while line := reader.readline(_MAX_LINE):
+                    if deadline is not None and time.monotonic() >= deadline:
+                        raise TimeoutError  # handled below, as a read that timed out
+                    connection.settimeout(_left(deadline))
                     answer = json.loads(line)
                     if not isinstance(answer, dict):
                         raise ValueError(_NOT_PROTOCOL)
@@ -204,6 +340,10 @@ class LauncherClient:
                     else:
                         raise ValueError(_NOT_PROTOCOL)
         except OSError as exc:
+            if reading and deadline is not None and isinstance(exc, TimeoutError):
+                raise LauncherTimedOut(
+                    f"the launcher sent no result within {timeout:g}s; the connection is closed"
+                ) from None
             reason = exc.strerror or type(exc).__name__
             raise self._unavailable(f"the launcher's socket cannot be reached ({reason})") from None
         except (ValueError, binascii.Error, RecursionError):

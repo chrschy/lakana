@@ -50,6 +50,7 @@ from lakana_worker.git import HFS_IGNORABLE, fold_name
 from lakana_worker.launcher_client import (
     LauncherClient,
     LauncherRefused,
+    LauncherTimedOut,
     LauncherUnavailable,
     LogSinkFailed,
 )
@@ -1062,6 +1063,54 @@ class LocalProcessRunner:
 
 _MAX_KILL_GRACE_SECONDS = 300
 """The longest grace the launcher accepts (`lakana_worker.launcher.requests.MAX_KILL_GRACE`)."""
+DEADLINE_MARGIN_SECONDS = 900.0
+"""Seconds past a task's timeout and kill grace after which the worker stops waiting for the
+launcher: its image pull before the timer starts (up to 600 s), its wait margin (60 s), slack."""
+STOP_RETRY_CAP_SECONDS = 5.0
+"""The longest gap between two requests to stop a container the launcher has not stopped."""
+
+
+def stop_retry_gap(gap: float, poll_seconds: float) -> float:
+    """Say how long to wait before the next request to stop a container, after one failed.
+
+    Parameters
+    ----------
+    gap
+        The gap before the request that just failed; 0 after the first, so that the first
+        retry comes at the next poll.
+    poll_seconds
+        How often the runner checks.
+
+    Returns
+    -------
+    float
+        The poll interval after the first retry, then double the last gap, at most
+        `STOP_RETRY_CAP_SECONDS`.
+    """
+    return min(STOP_RETRY_CAP_SECONDS, gap * 2 if gap else poll_seconds)
+
+
+def _deadline_message(seconds: float, margin: float) -> str:
+    """Write the failure of a task whose launcher sent no result in time.
+
+    Parameters
+    ----------
+    seconds
+        How long the worker waited.
+    margin
+        The part of it past the timeout and the kill grace.
+
+    Returns
+    -------
+    str
+        The cause and the next step.
+    """
+    return (
+        f"timed out: the launcher reported no end of the task's container within "
+        f"{_seconds(seconds)} (its timeout, the kill grace and {_seconds(margin)} "
+        "for the launcher). The worker stopped waiting and closed its connection, which makes "
+        "the launcher remove the container; docker compose logs launcher has the reason"
+    )
 
 
 def memory_message(memory_mb: int) -> str:
@@ -1150,6 +1199,9 @@ class DockerRunner:
         How often the stop signal is checked.
     roots
         Allowed ingestion roots to mount.
+    deadline_margin
+        Seconds past the timeout and the kill grace after which the worker gives up on the
+        launcher's answer and closes the connection, so the launcher removes the container.
     """
 
     def __init__(
@@ -1163,6 +1215,7 @@ class DockerRunner:
         kill_grace: float = 10.0,
         poll_seconds: float = 0.2,
         roots: tuple[str, ...] = (),
+        deadline_margin: float = DEADLINE_MARGIN_SECONDS,
     ) -> None:
         self._client = client
         self._owner = owner
@@ -1172,6 +1225,7 @@ class DockerRunner:
         self._kill_grace = kill_grace
         self._poll_seconds = poll_seconds
         self._roots = roots
+        self._deadline_margin = deadline_margin
 
     def _stop(self, ident: str) -> bool:
         """Ask the launcher to stop the container; a launcher that cannot is not an error here.
@@ -1282,6 +1336,8 @@ class DockerRunner:
                 secrets_to_hide=secrets_to_hide,
             )
         ident = uuid.uuid4().hex
+        timeout_seconds = max(1, math.ceil(task.timeout_seconds))
+        grace_seconds = _grace_seconds(self._kill_grace)
         request: dict[str, object] = {
             "op": "run",
             "task": ident,
@@ -1292,8 +1348,8 @@ class DockerRunner:
             "memory_mb": self._memory_mb,
             "cpus": self._cpus,
             "pids": self._pids,
-            "timeout_seconds": max(1, math.ceil(task.timeout_seconds)),
-            "kill_grace_seconds": _grace_seconds(self._kill_grace),
+            "timeout_seconds": timeout_seconds,
+            "kill_grace_seconds": grace_seconds,
             "stdin": task_description(
                 task, result_path=f"/work/{RESULT_FILE}", work_dir="/work", parent_pid=None
             ).decode("utf-8"),
@@ -1301,22 +1357,29 @@ class DockerRunner:
         }
         sink = OutputRedactor(secrets_to_hide, on_log)
         box: dict[str, object] = {}
+        deadline = timeout_seconds + grace_seconds + self._deadline_margin
 
         def call() -> None:
             """Run the launcher call on its own thread, keeping what it returned or raised."""
             try:
-                box["result"] = self._client.call(request, sink.feed)
+                box["result"] = self._client.call(request, sink.feed, timeout=deadline)
             except Exception as exc:  # handed back to the supervising thread below
                 box["error"] = exc
 
         thread = threading.Thread(target=call, name="lakana-docker-task", daemon=True)
         thread.start()
         stopped_by_us = False
+        gap = 0.0
+        next_stop = 0.0
         while thread.is_alive():
             thread.join(self._poll_seconds)
-            if stop.is_set() and not stopped_by_us and thread.is_alive():
-                # Asked again on every poll: the launcher answers False until it registered the run.
+            now = time.monotonic()
+            if stop.is_set() and not stopped_by_us and thread.is_alive() and now >= next_stop:
+                # The launcher answers False until it registered the run, and when Docker did
+                # not stop the container: asked again, less often each time.
                 stopped_by_us = self._stop(ident)
+                next_stop = now + gap
+                gap = stop_retry_gap(gap, self._poll_seconds)
         sink_failed = False
         try:
             sink.close()
@@ -1331,6 +1394,26 @@ class DockerRunner:
                 killed=True,
                 retryable=False,
                 failure_code=FailureCode.INTERNAL,
+            )
+        if isinstance(error, LauncherTimedOut):
+            self._stop(ident)
+            outcome = _outcome_from(
+                _read_record(work / RESULT_FILE, task.output),
+                code=-1,
+                stopped=True,
+                timed_out=stop.reason is None,
+                timeout_seconds=task.timeout_seconds,
+                stop=stop,
+                secrets_to_hide=secrets_to_hide,
+            )
+            if outcome.succeeded or stop.reason is not None:
+                return outcome
+            return RunOutcome(
+                succeeded=False,
+                error_message=_deadline_message(deadline, self._deadline_margin),
+                killed=True,
+                timed_out=True,
+                failure_code=FailureCode.TIMEOUT,
             )
         if isinstance(error, LauncherUnavailable):
             return RunOutcome(

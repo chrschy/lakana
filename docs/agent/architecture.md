@@ -678,7 +678,7 @@ poll loop, classification) are under "The run engine (M5c1)", "Python tasks (M5c
 | `lakana_core.runs.lockdown` | core | The claim-form run context. |
 | `lakana_worker.python_support` | worker | Whether this worker can run Python assets; the cache directory. |
 | `lakana_worker.runners` | worker | `Runner`, `LocalProcessRunner`, `DockerRunner`, `unpack_code`. |
-| `lakana_worker.launcher_client` | worker | The worker's side of the launcher's socket: one request per connection with the launcher's token; `LauncherUnavailable`, `LauncherRefused`, `LogSinkFailed`. |
+| `lakana_worker.launcher_client` | worker | The worker's side of the launcher's socket: one request per connection with the launcher's token; `LauncherUnavailable`, `LauncherRefused`, `LauncherTimedOut`, `LogSinkFailed`; `claim_owner` names the worker for the launcher's labels. |
 | `lakana_worker.docker_environments` | worker | Environments built by the launcher, one volume per project, lock, `pyproject.toml`, Python and index set. |
 | `lakana_worker.launcher` | launcher (own service) | The only holder of the Docker socket: request schema, container specs, the Docker Engine client, the run/build/stop/status/cleanup operations, the Unix-socket server (`lakana-launcher`); standard library only (contract `launcher-stands-alone`). |
 | `lakana_worker.venvs` | worker | The venv cache. |

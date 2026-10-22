@@ -30,6 +30,8 @@ class FakeLauncher:
         Set by `stop`; a script may wait on it.
     socket_path
         The socket the real client would use.
+    timeouts
+        The `timeout` of every `call`, in order.
     """
 
     scripts: dict[str, Script] = field(default_factory=dict)
@@ -37,9 +39,14 @@ class FakeLauncher:
     stopped: list[str] = field(default_factory=list)
     released: threading.Event = field(default_factory=threading.Event)
     socket_path: Path = Path("/run/lakana-launcher/launcher.sock")
+    timeouts: list[float | None] = field(default_factory=list)
 
     def call(
-        self, request: dict[str, Any], on_log: Callable[[bytes], None] | None = None
+        self,
+        request: dict[str, Any],
+        on_log: Callable[[bytes], None] | None = None,
+        *,
+        timeout: float | None = None,
     ) -> dict[str, object]:
         """Run the operation's script.
 
@@ -49,6 +56,8 @@ class FakeLauncher:
             The request.
         on_log
             The log sink.
+        timeout
+            The caller's deadline, recorded; the script decides what happens.
 
         Returns
         -------
@@ -61,6 +70,7 @@ class FakeLauncher:
             When no script is set for the operation.
         """
         self.requests.append(request)
+        self.timeouts.append(timeout)
         script = self.scripts.get(str(request["op"]))
         if script is None:
             raise LauncherUnavailable(f"runner unavailable: no script for {request['op']}")
