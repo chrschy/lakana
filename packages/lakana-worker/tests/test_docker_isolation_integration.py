@@ -49,7 +49,12 @@ from docker_stack import (
 )
 
 from lakana_worker.launcher.engine import EngineError
-from lakana_worker.launcher.requests import StopRequest, container_name, environment_volume
+from lakana_worker.launcher.requests import (
+    LABEL_STACK,
+    StopRequest,
+    container_name,
+    environment_volume,
+)
 from lakana_worker.launcher.service import Launcher
 
 pytestmark = [pytest.mark.integration, pytest.mark.docker]
@@ -665,20 +670,37 @@ _CONCURRENT = (
 def test_forty_tasks_run_at_once_each_in_its_own_container_and_network(running: Stack) -> None:
     """Review focus: the /29 allocation, the server's 40 attachments and the cleanup under load."""
     attempts = [running.attempt(_CONCURRENT) for _ in range(40)]
+    attached: dict[str, frozenset[str]] = {}
+    sampling = threading.Event()
 
+    def sample() -> None:
+        """Note the networks each running task container is attached to, keyed by hostname."""
+        label = f"{LABEL_STACK}={running.name}"
+        while not sampling.is_set():
+            for container in running.client.api.containers(filters={"label": [label]}):
+                networks = container["NetworkSettings"]["Networks"]
+                attached[container["Id"][:12]] = frozenset(
+                    n["NetworkID"] for n in networks.values()
+                )
+            sampling.wait(0.1)
+
+    sampler = threading.Thread(target=sample, daemon=True)
+    sampler.start()
     with concurrent.futures.ThreadPoolExecutor(max_workers=40) as pool:
         runs = list(
             pool.map(lambda a: running.run(a, memory_mb=64, pids=32, timeout=180), attempts)
         )
 
+    sampling.set()
+    sampler.join(10)
     failed = [(result, output) for result, output in runs if result["exit"] != 0]
     assert failed == [], failed[:3]
-    hosts = {output.split()[1] for _, output in runs}
+    hosts = {output.split()[1].decode() for _, output in runs}
     assert len(hosts) == 40, "two tasks shared a container"
-    networks = {
-        ipaddress.ip_network(output.split()[2].decode() + "/29", strict=False) for _, output in runs
-    }
-    assert len(networks) == 40, f"two tasks shared a network: {len(networks)} subnets for 40"
+    assert hosts <= attached.keys(), f"{len(hosts - attached.keys())} containers never sampled"
+    networks = {attached[host] for host in hosts}
+    assert all(len(ids) == 1 for ids in networks), networks
+    assert len(networks) == 40, f"two tasks shared a network: {len(networks)} networks for 40"
     assert running.labelled() == []
 
 
