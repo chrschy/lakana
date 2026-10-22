@@ -1952,3 +1952,4 @@ Generate compose.yaml and .env for a team deployment, and save a profile.
 | `--port` | whole number | `8000` | Host port for the server. |
 | `--workers` | whole number | `2` | Worker replicas. |
 | `--image` | text | none | Override the Lakana image reference. |
+| `--task-image` | text | none | Override the task images' reference (without -py3.X). |

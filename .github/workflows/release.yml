@@ -364,7 +364,7 @@ jobs:
         run: echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
         env: {TAG: "${{ needs.release-please.outputs.tag }}"}
       - run: |
-          uv run --locked bash scripts/compose_smoke_test.sh "ghcr.io/lakana-labs/lakana:${{ steps.version.outputs.version }}"
+          uv run --locked bash scripts/compose_smoke_test.sh "ghcr.io/lakana-labs/lakana:${{ steps.version.outputs.version }}" "ghcr.io/lakana-labs/lakana-task:${{ steps.version.outputs.version }}"
 
   sbom:
     needs: release-please

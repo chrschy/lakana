@@ -132,7 +132,16 @@ Each cell is a summary. The page named in the last column has the detail. The ch
 
 ## Notes for the next release
 
-Nothing yet.
+### Python tasks run in containers in the Compose bundle
+
+The bundle gains two services, `launcher` and `egress`, and runs every Python task in a container
+of its own (`LAKANA_RUNNER=docker` in `.env`). An existing bundle needs the new `compose.yaml`
+and four `.env` lines (see [Upgrading](../how-to/deploy-with-compose.md#upgrading) on the Compose
+page); Docker Engine 28 or later is required. Task containers sit outside the worker's memory
+limit: budget `LAKANA_RUN__TASK_MEMORY` (2 GB) per worker on top of the workers' own. Builds reach
+package indexes only through `egress`: a corporate proxy goes in `LAKANA_EGRESS_UPSTREAM_PROXY`,
+and `LAKANA_RUN__HTTPS_PROXY` and `LAKANA_RUN__CA_BUNDLE` are refused with the docker runner.
+`LAKANA_RUNNER=local` keeps the earlier behaviour. Local mode is unchanged.
 
 ## Notes for 0.19.0
 

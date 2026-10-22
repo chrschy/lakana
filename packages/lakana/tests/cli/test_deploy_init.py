@@ -6,6 +6,7 @@ import os
 import re
 import stat
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
 
 import pytest
@@ -14,10 +15,11 @@ from conftest import FakeApi, invoke, make_state
 
 import lakana
 from lakana.cli import _profiles
+from lakana.cli._state import CliError
 from lakana.cli.deploy import _init
 from lakana.errors import ConfigError
 
-_SAFE = re.compile(r"[A-Za-z0-9_\-+/=.:]+")
+_SAFE = re.compile(r"[A-Za-z0-9_\-+/=.:]*")
 
 
 def _env(path: Path) -> dict[str, str]:
@@ -61,6 +63,8 @@ def test_init_writes_compose_and_env_and_a_team_profile(tmp_path: Path, released
         "bucket",
         "migrate",
         "server",
+        "launcher",
+        "egress",
         "worker",
         "worker-interactive",
         "worker-pipeline",
@@ -312,8 +316,11 @@ def test_seaweedfs_internal_apis_are_unreachable_from_the_worker(
     assert "-filer=seaweedfs-core:8888" in gateway
     assert "-port.iceberg=0" in gateway and "-port.lance=0" in gateway
     assert "-ip=seaweedfs" in gateway
-    # `network_mode` would put a service on another's network without `networks:` showing it.
-    assert all("network_mode" not in svc for svc in services.values())
+    # `network_mode` would put a service on another's network without `networks:` showing it;
+    # the launcher's `none` is no network at all.
+    assert {
+        name: svc["network_mode"] for name, svc in services.items() if "network_mode" in svc
+    } == {"launcher": "none"}
     assert "expose" not in services["seaweedfs-core"]
     assert "server" not in gateway
     assert "-s3" not in services["seaweedfs-core"]["command"].split()
@@ -615,7 +622,7 @@ def test_next_steps_do_not_ask_for_a_registry_login(tmp_path: Path, released: No
     assert "private" not in steps
 
 
-_VAR_RE = re.compile(r"\$\{(\w+)(?::-[^}]*)?\}")
+_VAR_RE = re.compile(r"\$\{(\w+)(?::[-?][^}]*)?\}")
 _COMPOSE_BUILTINS = frozenset({"COMPOSE_PROJECT_NAME"})
 
 
@@ -623,7 +630,9 @@ def test_every_compose_variable_has_a_matching_env_key(released: None) -> None:
     """A template typo in `${VAR}` would otherwise only be caught by the path-gated smoke test."""
     template = (Path(_init.__file__).parent / _init.TEMPLATE_NAME).read_text()
     referenced = set(_VAR_RE.findall(template)) - _COMPOSE_BUILTINS
-    generated = set(_init.generate_env(image="x", bind="127.0.0.1", port=8000, workers=2).keys())
+    generated = set(
+        _init.generate_env(image="x", task_image="y", bind="127.0.0.1", port=8000, workers=2).keys()
+    )
     assert referenced == generated
 
 
@@ -636,6 +645,8 @@ def test_bundle_mounts_repos_read_only_and_sets_repo_roots(tmp_path: Path, relea
     assert compose["services"]["worker"]["volumes"] == [
         "./repos:/repos:ro",
         "worker-cache:/home/lakana/.cache/lakana-worker",
+        "launcher-socket:/run/lakana-launcher",
+        "task-work:/home/lakana/.cache/lakana-worker/attempts",
     ]
     for svc in ("server", "worker"):
         assert compose["services"][svc]["environment"]["LAKANA_REPO_ROOTS"] == '["/repos"]'
@@ -869,3 +880,249 @@ def test_the_three_worker_services_share_one_cache_volume_and_nothing_else_does(
         if str(entry).startswith("worker-cache:")
     }
     assert mounts == {"worker-cache:/home/lakana/.cache/lakana-worker"}
+
+
+def _services(tmp_path: Path) -> dict[str, Any]:
+    """Generate a bundle and read its services.
+
+    Parameters
+    ----------
+    tmp_path
+        The test's directory.
+
+    Returns
+    -------
+    dict
+        Service name to definition.
+    """
+    invoke(make_state(tmp_path, FakeApi()), "bundle", "init", str(tmp_path / "b"))
+    return yaml.safe_load((tmp_path / "b" / "compose.yaml").read_text())["services"]
+
+
+_BASE_PYTHON = ["/usr/local/bin/python", "-I", "-S"]
+"""The image's base interpreter with no environment, no user site and no site at all: no `.pth`
+file of the venv runs in a service that holds the Docker socket or the egress key."""
+
+
+def test_only_the_launcher_holds_the_docker_socket_and_it_has_no_network(
+    tmp_path: Path, released: None
+) -> None:
+    """The socket is root on the host: one service, no network, no capabilities, read-only."""
+    s = _services(tmp_path)
+
+    holders = [
+        name
+        for name, svc in s.items()
+        if any("docker.sock" in str(v) for v in svc.get("volumes", []))
+    ]
+    assert holders == ["launcher"]
+    launcher = s["launcher"]
+    assert (launcher["network_mode"], launcher["read_only"], launcher["cap_drop"]) == (
+        "none",
+        True,
+        ["ALL"],
+    )
+    assert "cap_add" not in launcher and "privileged" not in launcher
+    assert launcher["command"][:3] == _BASE_PYTHON
+    assert launcher["healthcheck"]["test"][1:4] == _BASE_PYTHON
+    assert launcher["environment"]["LAKANA_LAUNCHER__STACK"] == "${COMPOSE_PROJECT_NAME}"
+    assert "launcher-socket:/run/lakana-launcher" in launcher["volumes"]
+    assert (
+        "${LAKANA_DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock" in launcher["volumes"]
+    )
+
+
+def test_the_worker_reaches_the_launcher_by_its_socket_and_runs_docker_by_default(
+    tmp_path: Path, released: None
+) -> None:
+    """The worker mounts the launcher's socket volume and the task work volume, never the socket."""
+    s = _services(tmp_path)
+    worker = s["worker"]
+
+    assert worker["environment"]["LAKANA_RUN__RUNNER"] == "${LAKANA_RUNNER:-docker}"
+    assert "launcher-socket:/run/lakana-launcher" in worker["volumes"]
+    assert "task-work:/home/lakana/.cache/lakana-worker/attempts" in worker["volumes"]
+    assert worker["depends_on"]["launcher"]["condition"] == "service_healthy"
+    for kind in ("worker-interactive", "worker-pipeline"):
+        assert s[kind]["environment"]["LAKANA_RUN__RUNNER"] == "${LAKANA_RUNNER:-docker}"
+        assert s[kind]["volumes"] == worker["volumes"]
+
+
+def test_the_task_work_volume_is_named_after_the_project_and_gets_its_owner_first(
+    tmp_path: Path, released: None
+) -> None:
+    """The launcher mounts the volume by name; its root must be the worker's, mode 0700.
+
+    The image has no directory at the worker's mount point (nothing may be created inside the
+    shared `worker-cache` volume), so the first mount, the launcher's, gives the fresh volume the
+    owner and mode of the image's `/var/lib/lakana-task-work` (uid 10001, 0700). The workers
+    start after the launcher, and the launcher, root without capabilities, cannot enter it.
+    """
+    invoke(make_state(tmp_path, FakeApi()), "bundle", "init", str(tmp_path / "b"))
+    compose = yaml.safe_load((tmp_path / "b" / "compose.yaml").read_text())
+
+    assert compose["volumes"]["task-work"] == {"name": "${COMPOSE_PROJECT_NAME}-task-work"}
+    assert "task-work:/var/lib/lakana-task-work" in compose["services"]["launcher"]["volumes"]
+    mounting = {
+        name
+        for name, service in compose["services"].items()
+        for entry in service.get("volumes", [])
+        if str(entry).startswith("task-work:")
+    }
+    assert mounting == {"launcher", "worker", "worker-interactive", "worker-pipeline"}
+    for name in mounting - {"launcher"}:
+        assert compose["services"][name]["depends_on"]["launcher"] == {
+            "condition": "service_healthy"
+        }
+
+
+def test_the_egress_proxy_reads_the_key_and_holds_no_socket(tmp_path: Path, released: None) -> None:
+    """The proxy is on the default network; it reads the launcher's key read-only."""
+    egress = _services(tmp_path)["egress"]
+
+    assert egress["command"][:3] == _BASE_PYTHON
+    assert egress["healthcheck"]["test"][1:4] == _BASE_PYTHON
+    assert egress["volumes"] == ["egress-key:/run/lakana-egress:ro"]
+    assert (egress["read_only"], egress["cap_drop"]) == (True, ["ALL"])
+    # In group 10001: the key is 0640 root:10001 in a set-group-id directory (the Dockerfile).
+    assert egress["user"] == "10001:10001"
+    assert egress["environment"] == {
+        "LAKANA_EGRESS__UPSTREAM_PROXY": "${LAKANA_EGRESS_UPSTREAM_PROXY:-}"
+    }
+
+
+def test_only_the_launcher_and_the_proxy_mount_the_egress_key(
+    tmp_path: Path, released: None
+) -> None:
+    """The key signs every build's egress: no other service, the workers included, sees it.
+
+    The workers run in group 10001 too, so mounting the volume would let them read the key.
+    """
+    s = _services(tmp_path)
+
+    mounts = {
+        name: [str(v) for v in svc.get("volumes", []) if str(v).startswith("egress-key:")]
+        for name, svc in s.items()
+    }
+    assert {name: m for name, m in mounts.items() if m} == {
+        "launcher": ["egress-key:/run/lakana-egress"],
+        "egress": ["egress-key:/run/lakana-egress:ro"],
+    }
+
+
+def test_the_task_image_follows_the_lakana_image(tmp_path: Path, released: None) -> None:
+    """`ghcr.io/lakana-labs/lakana:V` gives `ghcr.io/lakana-labs/lakana-task:V`."""
+    assert (
+        _init.task_image_for("ghcr.io/lakana-labs/lakana:0.14.0")
+        == "ghcr.io/lakana-labs/lakana-task:0.14.0"
+    )
+    assert _init.task_image_for("lakana:ci") == "lakana-task:ci"
+    assert _init.task_image_for("localhost:5000/lakana:1.0") == "localhost:5000/lakana-task:1.0"
+    for untagged in (
+        "ghcr.io/lakana-labs/lakana@sha256:" + "a" * 64,
+        "ghcr.io/lakana-labs/lakana:0.14.0@sha256:" + "a" * 64,
+        "localhost:5000/lakana",
+        "lakana",
+    ):
+        with pytest.raises(CliError, match="Cannot tell the task image") as caught:
+            _init.task_image_for(untagged)
+        assert "--task-image" in str(caught.value.hint)
+    invoke(make_state(tmp_path, FakeApi()), "bundle", "init", str(tmp_path / "b"))
+    env = _env(tmp_path / "b" / ".env")
+    assert env["LAKANA_TASK_IMAGE"] == "ghcr.io/lakana-labs/lakana-task:0.4.0"
+    assert (env["LAKANA_RUNNER"], env["LAKANA_DOCKER_SOCKET"]) == ("docker", "/var/run/docker.sock")
+    assert env["LAKANA_EGRESS_UPSTREAM_PROXY"] == ""
+
+
+def test_the_env_file_explains_the_four_task_container_keys(tmp_path: Path, released: None) -> None:
+    """Each key follows `LAKANA_IMAGE` with a comment that says what it is."""
+    invoke(make_state(tmp_path, FakeApi()), "bundle", "init", str(tmp_path / "b"))
+    lines = (tmp_path / "b" / ".env").read_text().splitlines()
+    keys = [line.partition("=")[0] for line in lines if line and line[0] != "#"]
+    at = keys.index("LAKANA_IMAGE")
+    new = ["LAKANA_TASK_IMAGE", "LAKANA_RUNNER", "LAKANA_DOCKER_SOCKET"]
+    assert keys[at + 1 : at + 5] == [*new, "LAKANA_EGRESS_UPSTREAM_PROXY"]
+    for key in [*new, "LAKANA_EGRESS_UPSTREAM_PROXY"]:
+        above = lines[next(i for i, line in enumerate(lines) if line.startswith(f"{key}=")) - 1]
+        assert above.startswith("# ") and len(above) > 20, key
+    assert "LAKANA_EGRESS_UPSTREAM_PROXY=''" in lines
+
+
+def test_a_task_image_option_overrides_the_derived_one(tmp_path: Path, released: None) -> None:
+    """`--task-image` is written as given; a digest image then needs no derivation."""
+    digest = "ghcr.io/lakana-labs/lakana@sha256:" + "a" * 64
+    result = invoke(
+        make_state(tmp_path, FakeApi()),
+        "bundle",
+        "init",
+        str(tmp_path / "b"),
+        "--image",
+        digest,
+        "--task-image",
+        "registry.example/lakana-task:0.20.0",
+    )
+
+    assert result.exit_code == 0, result.stderr
+    env = _env(tmp_path / "b" / ".env")
+    assert (env["LAKANA_IMAGE"], env["LAKANA_TASK_IMAGE"]) == (
+        digest,
+        "registry.example/lakana-task:0.20.0",
+    )
+
+
+def test_a_digest_image_without_a_task_image_is_refused_with_the_option_named(
+    tmp_path: Path, released: None
+) -> None:
+    """Nothing is written; the hint names `--task-image`."""
+    result = invoke(
+        make_state(tmp_path, FakeApi()),
+        "bundle",
+        "init",
+        str(tmp_path / "b"),
+        "--image",
+        "ghcr.io/lakana-labs/lakana@sha256:" + "a" * 64,
+    )
+
+    assert result.exit_code == 2
+    assert "--task-image" in result.stderr
+    assert not (tmp_path / "b" / ".env").exists()
+
+
+@pytest.mark.parametrize(
+    ("task_image", "expected"),
+    [
+        ("lakana-task:1.0-py3.14", "without -py3.14"),
+        ("lakana-task@sha256:" + "a" * 64, "a tag, not a digest"),
+        ("lakana-task", "a tag, not a digest"),
+        ("Lakana-Task:1.0", "lower-case"),
+        ("lakana-task:1.0;rm", "unsafe characters"),
+    ],
+)
+def test_a_task_image_the_launcher_cannot_extend_is_refused(
+    tmp_path: Path, released: None, task_image: str, expected: str
+) -> None:
+    """The launcher appends `-py3.X` to the tag, so only `<lower-case repository>:<tag>` works.
+
+    Parameters
+    ----------
+    tmp_path
+        The test's directory.
+    released
+        A release build.
+    task_image
+        The value given.
+    expected
+        Part of the refusal.
+    """
+    result = invoke(
+        make_state(tmp_path, FakeApi()),
+        "bundle",
+        "init",
+        str(tmp_path / "b"),
+        "--task-image",
+        task_image,
+    )
+
+    assert result.exit_code == 2
+    assert expected in result.stderr
+    assert not (tmp_path / "b" / ".env").exists()

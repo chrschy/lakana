@@ -17,7 +17,7 @@ EXEMPT = (
     "scripts/tests/test_docs_site.py",
     "scripts/tests/test_docs_only.py",
 )
-NOT_TESTED_CEILING = 52
+NOT_TESTED_CEILING = 54
 UNCHECKED_OUTPUT_CEILING = 113
 """Blocks marked as not tested; it only goes down, apart from the rises below.
 
@@ -116,6 +116,10 @@ no Docker. The health route, the queue listings and the version run in `getting-
 
 The backup block of `deploy-with-compose.md` is synced from `docs/examples/compose-restore.sh`
 since #200, which `compose-smoke` runs, so the count fell by one, to 52.
+
+The task-container release rose it by two, to 54: the four `.env` lines of the upgrade (input,
+checked by `test_deploy_init.py`) and the launcher's volume removal under "Starting over" (run by
+`scripts/compose_smoke_test.sh`).
 """
 SECTIONS = ("tutorials", "how-to", "reference", "explanation")
 

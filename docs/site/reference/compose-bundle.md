@@ -11,6 +11,10 @@ the workers, with its type and default, is in the [settings reference](settings.
 | Key | Purpose |
 |---|---|
 | `LAKANA_IMAGE` | The Lakana image reference (`ghcr.io/lakana-labs/lakana:<version>` by default — see [Upgrading](../how-to/deploy-with-compose.md#upgrading) and [`--image`](../how-to/deploy-with-compose.md#what-init-generates)). |
+| `LAKANA_TASK_IMAGE` | The task images' reference without `-py3.X` (`ghcr.io/lakana-labs/lakana-task:<version>` by default, see [`--task-image`](../how-to/deploy-with-compose.md#what-init-generates)); the launcher runs a project's Python tasks on `<reference>-py3.11` to `-py3.14`. `docker compose up` stops without it. |
+| `LAKANA_RUNNER` | `docker` (each Python task in a container of its own, isolated) or `local` (as the worker's own processes, not isolated); sets `LAKANA_RUN__RUNNER` on every worker. A bundle whose `.env` predates the key runs `docker`. |
+| `LAKANA_DOCKER_SOCKET` | The Docker socket the `launcher` service mounts (`/var/run/docker.sock`). |
+| `LAKANA_EGRESS_UPSTREAM_PROXY` | `http://[user:password@]host:port` of the proxy your network sends https through, for environment builds; empty for none. |
 | `LAKANA_BIND` | The host address the server's port is published on (see [Exposing it](../how-to/deploy-with-compose.md#exposing-it)). |
 | `LAKANA_PORT` | The host port the server is published on. |
 | `LAKANA_WORKERS` | Worker replica count, used by `deploy: {replicas: ${LAKANA_WORKERS}}`. |
@@ -32,9 +36,11 @@ the workers, with its type and default, is in the [settings reference](settings.
 | `bucket` | `chrislusf/seaweedfs:4.47` | One-shot: creates the `lakana` bucket if it doesn't already exist. | `seaweedfs` healthy |
 | `migrate` | `${LAKANA_IMAGE}` | One-shot: applies Alembic migrations (`lakana-server migrate`) and exits. | `postgres` healthy |
 | `server` | `${LAKANA_IMAGE}` | The FastAPI control plane and Iceberg REST catalog; publishes `${LAKANA_BIND}:${LAKANA_PORT}:8000`. | `migrate` completed |
-| `worker` | `${LAKANA_IMAGE}` | The DuckDB query executor and dequeue loop; scaled to `LAKANA_WORKERS` replicas; takes every kind of work. | `migrate` completed |
-| `worker-interactive` | `${LAKANA_IMAGE}` | The same worker with `LAKANA_WORKER__TAKES=interactive`, scaled to `LAKANA_WORKERS_INTERACTIVE` replicas (`0` by default, so no container starts). | `migrate` completed |
-| `worker-pipeline` | `${LAKANA_IMAGE}` | The same worker with `LAKANA_WORKER__TAKES=pipeline`, scaled to `LAKANA_WORKERS_PIPELINE` replicas (`0` by default). | `migrate` completed |
+| `launcher` | `${LAKANA_IMAGE}` | The only holder of the Docker socket: starts each Python task and each environment build in a container of its own, on the worker's request over a Unix socket. No network, no capabilities, a read-only filesystem (see [`launcher` and `egress`](../how-to/deploy-with-compose.md#launcher-and-egress)). | — |
+| `egress` | `${LAKANA_IMAGE}` | The environment builds' only way out: a proxy that tunnels to the package index hosts the launcher signed for each build. | `launcher` healthy |
+| `worker` | `${LAKANA_IMAGE}` | The DuckDB query executor and dequeue loop; scaled to `LAKANA_WORKERS` replicas; takes every kind of work. | `migrate` completed, `launcher` healthy |
+| `worker-interactive` | `${LAKANA_IMAGE}` | The same worker with `LAKANA_WORKER__TAKES=interactive`, scaled to `LAKANA_WORKERS_INTERACTIVE` replicas (`0` by default, so no container starts). | `migrate` completed, `launcher` healthy |
+| `worker-pipeline` | `${LAKANA_IMAGE}` | The same worker with `LAKANA_WORKER__TAKES=pipeline`, scaled to `LAKANA_WORKERS_PIPELINE` replicas (`0` by default). | `migrate` completed, `launcher` healthy |
 | `setup` | `${LAKANA_IMAGE}` | One-shot: creates the `dev` environment, its storage secret, and the binding between them, entirely over the REST API (see [`setup`](../how-to/deploy-with-compose.md#setup)). | `server` healthy and `bucket` completed |
 
 ## Healthchecks
@@ -48,6 +54,8 @@ What `healthy` in `docker compose ps` means for each long-running service. The o
 | `seaweedfs-core` | The master answers and the filer accepts connections, every 5 s. | The storage's internal services run. |
 | `seaweedfs` | The S3 gateway answers HTTP, every 5 s. | The gateway listens; not that the credentials work. |
 | `server` | `GET /healthz` from inside the container, every 10 s. | The server process answers HTTP. |
+| `launcher` | Its Unix socket exists, every 5 s. | The launcher started: it checked the Docker Engine and listens for the workers. |
+| `egress` | A TCP connection to port 3128, every 10 s. | The proxy listens; not that a build reaches an index. |
 | `worker`, `worker-interactive`, `worker-pipeline` | `lakana-worker healthcheck`, every 10 s, after a start period of 30 s; unhealthy after 3 failures in a row. | The worker of the container wrote its heartbeat to the database within `LAKANA_RUN__LEASE_SECONDS` (60 s), so it reaches the database. |
 
 The server's healthcheck asks `/healthz`, not `/readyz`, on purpose: `setup` waits for a healthy
@@ -62,7 +70,12 @@ environment and a live worker), ask `/readyz`:
 |---|---|---|---|
 | `pgdata` | `postgres` | The catalog database. | Nothing; it grows with tables, runs and audit events. |
 | `seaweed` | `seaweedfs-core` | The object storage: every table, artifact and code archive. | Table maintenance and the sweep of dropped tables; `lakana env usage` shows its size per environment. |
-| `worker-cache` | `worker`, `worker-interactive`, `worker-pipeline`, at `/home/lakana/.cache/lakana-worker` | `venvs/` (Python environments), `uv/` (uv's package download cache) and `attempts/` (task directories), shared by every worker. | `LAKANA_RUN__VENV_KEEP` environments; the sweep trims `uv/` above `LAKANA_WORKER__PACKAGE_CACHE_MAX_BYTES` (10 GiB) and removes leftover task directories. `lakana worker list` shows its size. |
+| `worker-cache` | `worker`, `worker-interactive`, `worker-pipeline`, at `/home/lakana/.cache/lakana-worker` | With `LAKANA_RUNNER=local`: `venvs/` (Python environments) and `uv/` (uv's package download cache), shared by every worker. | `LAKANA_RUN__VENV_KEEP` environments; the sweep trims `uv/` above `LAKANA_WORKER__PACKAGE_CACHE_MAX_BYTES` (10 GiB). `lakana worker list` shows its size. |
+| `task-work` (named `<project>-task-work`) | the workers, at `/home/lakana/.cache/lakana-worker/attempts`; the launcher, only so that it gets its owner | Task directories; the launcher mounts each task's code and scratch directory from here. | The sweep removes leftover task directories. |
+| `launcher-socket` | `launcher`, the workers, at `/run/lakana-launcher` | The launcher's Unix socket and the token the workers send. | Nothing to keep small. |
+| `launcher-state` | `launcher` | One marker per built environment. | Kept with the environments. |
+| `egress-key` | `launcher` (writes), `egress` (reads), at `/run/lakana-egress` | The key that signs each build's egress; a new one at every launcher start. | Nothing to keep small. |
+| `<project>-env-…`, launcher's caches | task and build containers, made by the launcher and labelled `lakana.launcher.stack=<project>` | One built environment each, and the build caches. `docker compose down -v` does not remove them: see [Starting over](../how-to/deploy-with-compose.md#starting-over). | The launcher keeps the 10 most recently used environments. |
 
 See [Disk use](../how-to/instance-health.md#disk-use).
 

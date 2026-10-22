@@ -1037,10 +1037,16 @@ access-controlled on the server; `read_only=True` seals it (0400/0500) for a tas
   rest lives in the launcher's memory, so every launcher start writes a new `egress.key`
   (`egress_token.rotate_key`, replaced in one step): no token from before the restart is valid.
   The proxy needs no restart: it compares the key file's inode, modification time and size at
-  each connection and reads it again when they change. `mint` refuses a token longer than `verify` accepts (the launcher answers the
-  build with a refusal). With the docker runner an `http://` `LAKANA_RUN__INDEX_URL` is refused
-  at worker start (`RunConfig`): the proxy tunnels https only. `LAKANA_EGRESS__UPSTREAM_PROXY` chains a company proxy, which then resolves and
+  each connection and reads it again when they change; a failed read is not remembered, so the
+  next connection tries again. `mint` refuses a token longer than `verify` accepts (the launcher
+  answers the build with a refusal). With the docker runner an `http://`
+  `LAKANA_RUN__INDEX_URL` is refused at worker start (`RunConfig`): the proxy tunnels https
+  only. `LAKANA_EGRESS__UPSTREAM_PROXY` chains a company proxy, which then resolves and
   decides. M6 is meant to give ingestion tasks tokens of another purpose through the same proxy.
+  In the Compose bundle the proxy runs as uid and gid 10001 with the base interpreter
+  (`python -I -S`, standard library only) and reads `/run/lakana-egress/egress.key` (0640,
+  root:10001, in a set-group-id directory 2750 root:10001) from the `egress-key` volume, which
+  only `launcher` (writes) and `egress` (read-only) mount.
 - **Incident response.** When an environment may be poisoned (a malicious dependency or vendored
   package was deployed) or a worker may be compromised:
   1. Stop the workers (`docker compose stop worker`), so nothing builds or runs meanwhile.
@@ -4702,8 +4708,13 @@ matter for an operator deciding where to run it:
   plaintext. Anyone who can read it can decrypt every stored secret, reach the catalog
   database directly, and authenticate as the instance's original admin. See "Revoking the
   bootstrap credential" in `docs/site/how-to/deploy-with-compose.md`.
-- **The image runs non-root**, uid 10001 (`Dockerfile`), for the server, every worker, and
-  `setup` alike.
+- **The image runs non-root**, uid 10001 (`Dockerfile`), for the server, every worker,
+  `setup` and `egress` alike. The one exception is `launcher`, the only service that mounts the
+  Docker socket (root on the host): `user: "0:0"` only to open the socket, whose group varies by
+  host, with `network_mode: none`, `cap_drop: [ALL]`, a read-only filesystem, and the base
+  interpreter (`python -I -S`, standard library only) for its command and its healthcheck, so no
+  `.pth` file of a dependency runs next to the socket. The workers reach it through the
+  `launcher-socket` volume and never mount the Docker socket; `test_deploy_init.py` pins both.
 - **The server binds to `127.0.0.1` by default.** `lakana bundle init`'s `--bind` defaults to
   loopback; exposing it on the network (a specific address, or the `0.0.0.0`/`::` wildcard)
   triggers a plain-HTTP warning, since Lakana itself does not terminate TLS.
