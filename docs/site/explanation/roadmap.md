@@ -93,7 +93,7 @@ output blocks in the documentation are checked (#54). The next element was the m
 until at least October 2027 (#96 is closed). A few SQL forms behave differently; see the
 [notes for 0.19.0](upgrades.md). The query sandbox was hardened for DuckDB 2. A store
 certificate that cannot be verified now fails at once with a message that says why (#277). The
-next elements are the rest of M7b (pull requests 3 to 5, #38), then M6 and the public beta (M7c,
+next elements are M7b, task isolation (#38), then M6 and the public beta (M7c,
 #33).
 
 ## To v1.0.0
@@ -115,8 +115,7 @@ ingestion helpers and named connections.
 2. **The move to DuckDB 2 (built, 0.19.0).** Lakana runs on DuckDB 2.0, a long-term-support
    release supported until at least October 2027. It was a migration, not a milestone, tracked in
    #96. The worker requires `duckdb>=2.0,<3`; what changed for SQL is in
-   [Upgrade policy](upgrades.md). Reading Parquet over HTTP is faster in the way Lakana queries
-   it, and about equal on local files.
+   [Upgrade policy](upgrades.md).
 3. **M7b, task isolation.** A Docker runner executes each Python task in its own container. A
    short design trial comes first: how the worker reaches a container runtime without gaining
    root on the host. Done when a task cannot read the worker's credentials or another project's
