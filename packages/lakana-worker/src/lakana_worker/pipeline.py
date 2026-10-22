@@ -1817,6 +1817,14 @@ def _create_view(
     run.rows_written = 0
 
 
+VIEW_REFUSED_BY_GUARD = (
+    "View {view!r} is refused by Lakana's query checks, which may have become stricter since it "
+    "was created. Ask its owner to recreate it; the error then says what to change."
+)
+"""What the view diagnosis says of a stored view that `check_blacklist` now refuses. It quotes
+none of the view's text."""
+
+
 def _diagnose_views(
     session: Session,
     environment_name: str,
@@ -1869,6 +1877,13 @@ def _diagnose_views(
             view = catalog.find_view(principal, TableRef.from_dotted(environment_name, dotted))
             if view is None:
                 continue
+            # A view was checked when it was created; the guard may refuse more since, and
+            # nothing reaches DuckDB without passing it. The message quotes none of the view's
+            # text: the reader may lack READ on what it references.
+            try:
+                check_blacklist(view.sql)
+            except (ValidationError, *SQL_SYNTAX_ERRORS):
+                return ValidationError(VIEW_REFUSED_BY_GUARD.format(view=dotted))
             planned = _resolve_and_rewrite(
                 session, environment_name, principal, view.sql, authz, key_provider, locations
             )

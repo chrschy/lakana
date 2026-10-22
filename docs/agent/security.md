@@ -61,6 +61,10 @@ parse sites under `packages/*/src` are:
   owner to recreate it.` — the view the reader named, none of its text, since the reader may
   lack READ on what it references; the two re-parses of the expanded statement
   (`pipeline._resolve_and_rewrite`) say the same when the statement contains a view;
+- a stored view's SQL in the view diagnosis (`check_blacklist` in `pipeline._diagnose_views`,
+  so that no view's text reaches DuckDB unchecked, also when the guard has become stricter since
+  the view was created): `VIEW_REFUSED_BY_GUARD`, which names the view and asks its owner to
+  recreate it, none of its text, for a refusal and a syntax error alike;
 - stored row filters and column masks (`PolicyResolver`, `_substitute_context_functions`): a
   `ValidationError` that names no text; on the ordinary read path it is inside the opaque
   resolution wrapper, so the reader sees `Resolving the tables this query reads failed

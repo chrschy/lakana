@@ -39,6 +39,7 @@ from lakana_core.models import (
 )
 from lakana_core.policy.column_masks import ColumnMaskService
 from lakana_core.policy.row_filters import RowFilterService
+from lakana_core.query_rewrite import ViewDefinition
 from lakana_core.storage.resolver import StorageResolver
 from lakana_worker.executor import (
     CANCELLED_MESSAGE,
@@ -50,7 +51,12 @@ from lakana_worker.executor import (
     QueryTimeout,
     WorkerStaleQuery,
 )
-from lakana_worker.pipeline import _diagnose_views, _resolve_sources, run_one
+from lakana_worker.pipeline import (
+    VIEW_REFUSED_BY_GUARD,
+    _diagnose_views,
+    _resolve_sources,
+    run_one,
+)
 
 
 @pytest.fixture
@@ -778,3 +784,45 @@ def test_a_write_over_a_view_that_the_fence_refuses_is_not_diagnosed_as_a_broken
     failure = run_one(session, run.id, AllowAllAuthorization(), worker_id="w1")
     assert failure is not None and str(failure) == WRITE_FENCE_MESSAGE
     assert pipeline_module.failure_cause(failure).value == "worker_lost"
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        pytest.param("SELECT 1 AS one FROM read_text('/etc/hostname')", id="a file read"),
+        pytest.param(
+            "SELECT current_setting('s3_secret_access_key') AS k", id="a refused function"
+        ),
+        pytest.param("SELECT secret_col FROM WHERE (", id="text the guard cannot parse"),
+    ],
+)
+def test_diagnose_views_refuses_a_view_the_guard_refuses_without_running_it(
+    session: Session, admin: PrincipalRef, catalog: CatalogService, sql: str
+) -> None:
+    """Red before the guard call: the view's stored SQL went to DuckDB unchecked.
+
+    A stored view was checked when it was created; the guard may refuse more since. The
+    diagnosis must not be the one path that sends a view's text to DuckDB without it, and its
+    message quotes none of that text.
+    """
+    stored = ViewDefinition("gold.v", sql, ("bronze.orders",))
+    with (
+        mock.patch.object(CatalogService, "find_view", return_value=stored),
+        mock.patch(
+            "lakana_worker.pipeline.describe_query", side_effect=AssertionError("ran in DuckDB")
+        ),
+    ):
+        result = _diagnose_views(
+            session,
+            "dev",
+            admin,
+            ("gold.v",),
+            AllowAllAuthorization(),
+            None,
+            QueryLimitsConfig(),
+            [],
+            spill=False,
+        )
+    assert str(result) == VIEW_REFUSED_BY_GUARD.format(view="gold.v")
+    assert "read_text" not in str(result)
+    assert "current_setting" not in str(result)
