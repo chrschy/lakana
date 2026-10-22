@@ -9,6 +9,7 @@ under ``packages/<package>/tests`` and fails on an import of anything in that pa
 from __future__ import annotations
 
 import ast
+import configparser
 from pathlib import Path
 
 import pytest
@@ -146,3 +147,33 @@ def test_a_package_s_tests_do_not_import_what_the_package_must_not_depend_on(
         f"{package}'s tests import what the package must not depend on; move the test into "
         "the package that may (for DuckDB: packages/lakana-worker/tests):\n" + "\n".join(violations)
     )
+
+
+def test_only_the_query_child_imports_duckdb_in_the_packages_source() -> None:
+    """The query process is the one place DuckDB runs; every other module goes through it."""
+    allowed = ROOT / "packages" / "lakana-worker" / "src" / "lakana_worker" / "query_child.py"
+    files = sorted((ROOT / "packages").glob("*/src/**/*.py"))
+    assert allowed in files
+    violations = [
+        f"{path.relative_to(ROOT)}:{line} imports {module}"
+        for path in files
+        if path != allowed
+        for line, module in forbidden_imports(path.read_text(), ("duckdb",))
+    ]
+    assert violations == []
+
+
+def test_import_linter_holds_the_duckdb_rule_as_a_contract() -> None:
+    """`lint-imports` enforces the rule, so a new import fails CI and not only this test."""
+    config = configparser.ConfigParser()
+    config.read(ROOT / ".importlinter")
+    contract = config["importlinter:contract:only-the-query-child-imports-duckdb"]
+    assert contract["type"] == "forbidden"
+    assert contract["source_modules"].split() == [
+        "lakana",
+        "lakana_core",
+        "lakana_server",
+        "lakana_worker",
+    ]
+    assert contract["forbidden_modules"].split() == ["duckdb"]
+    assert contract["ignore_imports"].strip() == "lakana_worker.query_child -> duckdb"

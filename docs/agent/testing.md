@@ -612,7 +612,10 @@ Python 3.13 and 3.11 (4.8 GB at `-n 4`) and 1.9 GB on 3.14 (4.2 GB at `-n 2`, th
 fits comfortably; see "Running the unit suite in parallel"). Measured 2026-10-17 on
 `packages/lakana-core/tests` alone, serial, no coverage, Linux x86_64: 797 MB on 3.14 against
 592 MB on 3.13; the 3 GB against 1 GB of issue #72 does not show without coverage (with it, see
-the `sysmon` bullet above). The integration files that start a server peak at 0.2 and 0.7 GB. If a
+the `sysmon` bullet above). Measured 2026-10-22 on DuckDB 2.0.0, Python 3.14, `-n 3 --dist loadfile`,
+no coverage, one package per run: `lakana-worker` 3.8 GB, `lakana-core` 2.3 GB, `lakana-server`
+1.9 GB (DuckDB 2.0 starts I/O threads per query process; `async_threads` is capped at four per
+processor thread). The integration files that start a server peak at 0.2 and 0.7 GB. If a
 peak approaches the limit, raise the limit before the suite starts to fail. A warning line
 follows if the watchdog's thread stopped.
 

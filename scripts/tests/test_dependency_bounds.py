@@ -50,3 +50,13 @@ def test_a_deeply_used_dependency_has_an_upper_bound(package: str, dependency: s
         "ignores the lock and would take a release Lakana was not tested on. Raise the bound in "
         "its own pull request, after reading the upstream changelog and running the suite."
     )
+
+
+def test_the_worker_requires_the_duckdb_release_its_query_process_is_written_for() -> None:
+    """The query process uses DuckDB 2's settings, which 1.x does not have (issue #96).
+
+    `extension_directories`, `allow_extension_repositories` and `async_threads` fail on 1.x, so
+    a lower bound below 2.0 would let a fresh install pick a DuckDB the worker cannot configure.
+    """
+    (requirement,) = (r for r in _requirements("lakana-worker") if re.match(r"duckdb\b", r))
+    assert requirement == "duckdb>=2.0,<3"

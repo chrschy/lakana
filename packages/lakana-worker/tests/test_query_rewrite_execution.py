@@ -1107,7 +1107,10 @@ def test_a_query_that_is_only_a_values_list_returns_its_rows(
     )
 
     assert result.to_pylist() == rows
-    assert duckdb.connect().execute(sql).to_arrow_table().to_pylist() == rows
+    relation = duckdb.connect().sql(sql)
+    assert relation is not None
+    direct = relation.to_arrow_table()
+    assert direct.to_pylist() == rows
 
 
 def test_a_column_mask_holds_for_a_read_inside_a_bare_values_list(tmp_path: Path) -> None:

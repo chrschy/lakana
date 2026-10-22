@@ -435,12 +435,13 @@ def test_a_late_execution_error_raises_validation_error() -> None:
     small batch that hits `error()` surfaces through DuckDB's own Python
     exception translation instead (already covered by
     `test_a_syntax_error_raises_validation_error`'s kind of case), so this
-    needs enough rows to force more than one fetch from the reader. DuckDB 1.5.5
-    streams a result of more than about 120,000 rows (at 100,000 the error is raised
-    from `execute`): with the error after row 150,000 of 200,000 it delivers some
-    22,000 rows first, measured at one and at four threads. The test runs at one thread:
-    with several, DuckDB sometimes reports a cancelled sibling task's `INTERRUPT Error` instead of
-    the error (about 1 in 2,000 runs at four threads; `query_child.failure` words that case).
+    needs enough rows to force more than one fetch from the reader. DuckDB streams
+    a result of more than about 120,000 rows (at 100,000 the error is raised from
+    `execute`): with the error after row 150,000 of 200,000 it delivers some 22,000
+    rows first, measured on 1.5.5 at one and at four threads; the test holds on 2.0.0.
+    The test runs at one thread: with several, DuckDB sometimes reports a cancelled sibling
+    task's `INTERRUPT Error` instead of the error (about 1 in 2,000 runs at four threads on
+    1.5.5; `query_child.failure` words that case).
     """
     with pytest.raises(ValidationError, match="Query failed") as info:
         execute_query(
@@ -1235,7 +1236,7 @@ def test_a_statement_that_ignores_the_ask_is_killed_and_the_next_query_runs(
 
 @pytest.mark.parametrize("sql", [_SLOW_SQL, _STRING_AGG], ids=["cross_join", "string_agg"])
 def test_the_shapes_of_292_end_within_the_time_limit_and_the_grace(sql: str) -> None:
-    """On DuckDB 1.5.5 both stop when asked; whichever way, they end, and the worker goes on."""
+    """On DuckDB 1.5.5 and 2.0.0 both stop when asked; either way they end, the worker goes on."""
     limits = QueryLimitsConfig(timeout_seconds=0.5, kill_grace_seconds=1.0, threads=2)
     started = time.monotonic()
     with pytest.raises(QueryTimeout, match="LAKANA_QUERY_LIMITS__TIMEOUT_SECONDS"):

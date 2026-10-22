@@ -38,11 +38,13 @@ cloud credential lookup under "What we could not verify", are not.
 
 | From | To | Set by |
 |---|---|---|
-| Worker (DuckDB) | DuckDB's extension repository, to download the `httpfs` extension the first time a worker opens a connection on a machine that does not have it yet. One download of one file; no query data is sent. | Not configurable in Lakana (see below) |
+| Worker (DuckDB) | DuckDB's extension repository, `extensions.duckdb.org`, to download the `httpfs` extension the first time a worker opens a connection on a machine that does not have it yet; if that server answers with a server error (HTTP 5xx), DuckDB asks its backup, `extensions.duckdb-backup.org`, for the same file. One download of one file; no query data is sent. | Not configurable in Lakana (see below) |
 
 The container image already contains the extension, because the image installs it when it is
 built, so a worker that runs from the image makes no such download. A worker installed with
-`pip` makes it once, on its first query.
+`pip` makes it once, on its first query. Each DuckDB release has its own build of the
+extension, so after an upgrade to a new DuckDB release (Lakana runs DuckDB 2.0) a `pip`
+worker downloads it once more.
 
 A few more things you may see:
 
@@ -75,8 +77,8 @@ A few more things you may see:
 ## How we checked
 
 We read and searched the source of the four Lakana packages (`packages/*/src`) and the
-libraries in the lock file, and ran two small tests against DuckDB 1.5.5, the version in
-the lock file.
+libraries in the lock file, and ran two small tests against DuckDB 1.5.5 and again against
+DuckDB 2.0.0, the version in the lock file.
 
 - **Our code.** We searched for HTTP clients, sockets, `urllib`, subprocesses, update checks,
   usage reporting and the host names of analytics services. The only HTTP client is `httpx`: in
@@ -95,8 +97,12 @@ the lock file.
   `INSTALL` contacts the extension repository when the extension is missing, and does not when
   it is already installed.
 - **Where the extension download goes.** The repository setting is empty by default, so
-  the host is DuckDB's own default. We did not look up which host that is or watch the request
-  on the wire.
+  the host is DuckDB's own default. We read it in DuckDB 2.0.0's source
+  (`extension_install_info.hpp`): `http://extensions.duckdb.org`, with
+  `http://extensions.duckdb-backup.org` tried only when the first answers with a server error.
+  On a machine without network access, `INSTALL httpfs` failed naming
+  `http://extensions.duckdb.org/v2.0.0/linux_amd64/httpfs.duckdb_extension.gz`. We did not
+  watch the request on the wire.
 
 ## What we could not verify
 

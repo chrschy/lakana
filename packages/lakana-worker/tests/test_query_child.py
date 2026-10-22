@@ -301,8 +301,7 @@ def test_a_variable_name_that_is_not_an_identifier_is_never_written_into_sql() -
 
 def test_a_write_and_a_describe_run_in_utc_and_a_read_in_the_session_zone() -> None:
     sql = "SELECT TIMESTAMPTZ '2026-10-08 12:00:00+02' AS t"
-    session_zone = duckdb.sql("SELECT current_setting('TimeZone')").fetchone()
-    assert session_zone is not None
+    session_zone = duckdb.connect().execute("SELECT current_setting('TimeZone')").fetchall()[0]
     read = _table(_main(_request(sql))[1])
     write = _table(_main(_request(sql, mode=WRITE))[1])
     describe = _table(_main(_request(f"SELECT * FROM ({sql}) LIMIT 0", mode=DESCRIBE))[1])
@@ -320,8 +319,10 @@ _SETTINGS = (
     "autoinstall_known_extensions",
     "autoload_known_extensions",
     "allow_community_extensions",
-    "extension_directory",
+    "allow_extension_repositories",
+    "extension_directories",
     "threads",
+    "async_threads",
     "temp_directory",
     "max_temp_directory_size",
     "memory_limit",
@@ -339,8 +340,9 @@ def _configured(
 ) -> tuple[duckdb.DuckDBPyConnection, dict[str, object]]:
     """Configure a real connection as the child does and read every setting back.
 
-    Settings are read with `current_setting`, which works on DuckDB 1.5 and 2.0 alike
-    (`duckdb_settings()` no longer lists the ``s3_*`` keys on 2.0).
+    The connection is opened with `query_child.connection_config`, as `Session.open` does.
+    Settings are read with `current_setting`: DuckDB 2 no longer lists the ``s3_*`` keys in
+    `duckdb_settings()`.
 
     Parameters
     ----------
@@ -354,7 +356,7 @@ def _configured(
     tuple of (duckdb.DuckDBPyConnection, dict)
         The configured connection (the caller closes it) and each setting's value.
     """
-    connection = duckdb.connect(":memory:")
+    connection = duckdb.connect(":memory:", config=query_child.connection_config(request))
     spy = _Spy(connection)
     query_child.configure(spy, request)  # ty: ignore[invalid-argument-type]
     if statements is not None:
@@ -405,8 +407,11 @@ def test_the_connection_holds_no_credential_and_loads_nothing_by_itself(
         "autoinstall_known_extensions": False,
         "autoload_known_extensions": False,
         "allow_community_extensions": False,
-        "extension_directory": EXTENSIONS,
+        "allow_extension_repositories": "forbidden",
+        "extension_directories": [EXTENSIONS],
         "threads": 2,
+        # Four I/O threads per processor thread, not DuckDB 2's default of one per core.
+        "async_threads": 8,
         "temp_directory": str(spill),
         "max_temp_directory_size": "0 bytes",
         "memory_limit": "190.7 MiB",
@@ -418,7 +423,7 @@ def test_the_connection_holds_no_credential_and_loads_nothing_by_itself(
         "enable_server_cert_verification": True,
         "lock_configuration": True,
     }
-    assert statements.index("INSTALL httpfs") > statements.index("SET extension_directory = ?")
+    assert statements.index("INSTALL httpfs") > statements.index("SET extension_directories = ?")
     assert (
         statements.index("LOAD httpfs")
         < statements.index("SET enable_server_cert_verification = true")
@@ -474,6 +479,30 @@ def test_a_variable_can_still_be_set_once_configured(tmp_path: Path) -> None:
         assert connection.execute("SELECT getvariable('n')").fetchall() == [(3,)]
     finally:
         connection.close()
+
+
+def test_the_session_opens_its_connection_with_the_thread_counts_of_the_request() -> None:
+    """`async_threads` exists only as a connection option: `SET` is refused once configured."""
+    session = query_child.Session()
+    connection = session.open(query_child.connection_config(_request(threads=3)))
+    try:
+        assert connection.execute(
+            "SELECT current_setting('threads'), current_setting('async_threads')"
+        ).fetchall() == [(3, 12)]
+    finally:
+        session.close()
+
+
+def test_a_child_reads_back_the_settings_duckdb_2_names_differently() -> None:
+    """The child's own connection, not a copy of its set-up, carries the DuckDB 2 settings."""
+    sql = (
+        "SELECT CAST(current_setting('async_threads') AS BIGINT) AS a, "
+        "current_setting('extension_directories') AS e, "
+        "current_setting('allow_extension_repositories') AS r"
+    )
+    code, stream, stderr = _main(_request(sql))
+    assert (code, stderr) == (EXIT_OK, "")
+    assert _table(stream).to_pylist() == [{"a": 8, "e": [EXTENSIONS], "r": "forbidden"}]
 
 
 def test_a_check_accepts_good_sizes_with_an_empty_stream() -> None:
@@ -1047,7 +1076,7 @@ def test_a_request_over_the_limit_is_refused_and_never_read_beyond_it() -> None:
 def test_interrupting_a_closed_session_does_nothing() -> None:
     session = query_child.Session()
     session.interrupt()
-    session.open()
+    session.open(query_child.connection_config(_request()))
     session.interrupt()
     session.close()
     session.close()
@@ -1307,7 +1336,7 @@ def test_the_real_child_answers_with_a_complete_stream(tmp_path: Path) -> None:
 def test_a_child_with_an_empty_home_loads_httpfs_from_the_workers_directory(
     tmp_path: Path,
 ) -> None:
-    """Without `extension_directory` DuckDB looks under the empty HOME and tries to download.
+    """Without `extension_directories` DuckDB looks under the empty HOME and tries to download.
 
     ``duckdb_extensions()`` lists the extension directory, which allow-list mode refuses; httpfs
     shows by the settings it adds.
@@ -1498,7 +1527,9 @@ def test_a_statement_that_runs_out_of_memory_is_never_sent_again(tmp_path: Path)
         query_child.configure(spy, request)  # ty: ignore[invalid-argument-type]
         sent = len(spy.executed)
         with pytest.raises(duckdb.OutOfMemoryException) as caught:
-            for _batch in spy.execute(sql, None).to_arrow_reader(request.batch_rows):
+            reader = spy.execute(sql, None).to_arrow_reader(request.batch_rows)
+            assert reader is not None
+            for _batch in reader:
                 pass
         document = query_child.failure(caught.value, threading.Event())
     finally:

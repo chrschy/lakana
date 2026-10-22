@@ -2584,10 +2584,20 @@ own process opens no DuckDB connection and imports no `duckdb`.
 - **No descriptor** but the three pipes (standard input, output, error) is inherited, and
   descriptor 1 is pointed at standard error before anything runs, so DuckDB's progress bar or an
   extension's print cannot get into the result stream.
-- **`SET extension_directory`** is the first statement. A child with an empty `HOME` would look
-  for `$HOME/.duckdb/extensions`, find nothing and try to download `httpfs`; it is told the
-  worker's `~/.duckdb/extensions` instead (the image fills it at build time, local mode on the
-  first query), so it loads the extension without network access.
+- **The connection is opened with `threads` and `async_threads`** (`connection_config`):
+  DuckDB 2.0 starts a pool of I/O threads per connection, one per core by default (80 on a
+  20-core machine, 84 OS threads per query process against 23 on 1.5.5); the child asks for
+  `ASYNC_THREADS_PER_THREAD` (4) per processor thread. `async_threads` exists only as a
+  connection option: `SET async_threads` is refused once external access is off.
+- **`SET extension_directories`** (DuckDB 2.0's list-valued name; a string fails the cast) is
+  the first statement. A child with an empty `HOME` would look for `$HOME/.duckdb/extensions`,
+  find nothing and try to download `httpfs`; it is told the worker's `~/.duckdb/extensions`
+  instead (the image fills it at build time, local mode on the first query), so it loads the
+  extension without network access. Then `allow_community_extensions = false` and
+  `allow_extension_repositories = 'forbidden'`: the default `undecided` may still change to
+  `allowed` at run time, `forbidden` may not and refuses `CREATE EXTENSION REPOSITORY`. All
+  three read back in `test_the_connection_holds_no_credential_and_loads_nothing_by_itself`, and
+  in a real child in `test_a_child_reads_back_the_settings_duckdb_2_names_differently`.
 - **The child dies with the worker:** `PR_SET_PDEATHSIG` (Linux), and a `parent_pid` check at
   start that refuses to run for another parent.
 - **Allow-list mode.** The connection runs with `enable_external_access = false`,
@@ -2609,8 +2619,8 @@ own process opens no DuckDB connection and imports no `duckdb`.
   (probed on 1.5.5 and 2.0.0). The lock holds **settings only**: behind the guard (which
   refuses `SET` itself) it stops `SET`/`RESET`/`PRAGMA`/`SET GLOBAL` of `http_proxy` (a proxy
   would receive the query's presigned URLs; it defaults from `HTTP_PROXY`, which the child's
-  environment does not have), `extra_http_headers`, `ca_cert_file`, `lambda_syntax` and
-  `allow_extension_repositories`. It does **not** stop a secret: after the lock
+  environment does not have), `extra_http_headers`, `ca_cert_file`, `lambda_syntax`,
+  `error_on_division_by_zero` and `allow_extension_repositories`. It does **not** stop a secret: after the lock
   `CREATE SECRET (TYPE http, HTTP_PROXY …)` and `CREATE SECRET (TYPE http, EXTRA_HTTP_HEADERS …)`
   still succeed, and a proxy secret then received `HEAD http://<store>/…?X-Amz-Signature=…`
   over plain HTTP (the Compose default) or a `CONNECT` over HTTPS, on 1.5.5 and 2.0.0 (review
@@ -2799,7 +2809,12 @@ so a function DuckDB adds later is refused by default.
 (`x -> x + 1`), so `query_rewrite._render` marks every `exp.Lambda` for sqlglot's keyword form
 and the rewrite (and view expansion) hands DuckDB `LAMBDA x : x + 1`. Only the node's spelling
 changes: its parameters and body are subtrees the guard checked, rendered by sqlglot like any
-other expression, and a lambda only occurs as a function argument, delimited by `,` or `)`.
+other expression. A lambda's body extends as far right as DuckDB can read it, so a lambda
+anywhere but in the arguments of a function that takes one (delimited by `,` or `)`) is wrapped
+in parentheses: sqlglot turns `mod(x -> x + 10, 4)` into the operator `% 4`, which a bare
+`LAMBDA x : x + 10 % 4` would take into the body, a grouping the guard never checked
+(`test_a_lambda_that_is_an_operand_keeps_its_grouping`; DuckDB refuses a lambda as an operand
+either way, wrapped it refuses the checked tree; review of #284).
 DuckDB parses the keyword form as sqlglot does where the arrow form diverged (`x -> x -> '$.a'`,
 a lambda whose body is a JSON extract, failed to bind on 1.5.5). Probed on 1.5.5 and 2.0.0 for
 casts, `::`, slices, struct literals, nested and two-parameter lambdas, `AND`/`OR`, `CASE`,

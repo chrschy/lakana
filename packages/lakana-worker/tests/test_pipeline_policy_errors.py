@@ -291,7 +291,7 @@ def test_a_failing_row_filter_shows_the_fixed_message(
     _assert_fixed(run, "gold.people", captured.out + captured.err + caplog.text)
 
 
-@pytest.mark.parametrize("expression", ["code = 5", "code = num", "code", "NOT code", "-low > 0"])
+@pytest.mark.parametrize("expression", ["code = 5", "code = num", "code", "NOT code"])
 def test_a_row_filter_stored_before_the_type_check_can_fail_on_a_stored_value(
     session: Session, principal: PrincipalRef, catalog: CatalogService, expression: str
 ) -> None:
@@ -305,6 +305,26 @@ def test_a_row_filter_stored_before_the_type_check_can_fail_on_a_stored_value(
     run = _query(session, principal, "SELECT id FROM gold.people")
 
     _assert_fixed(run, "gold.people", "")
+
+
+def test_a_negation_that_overflowed_on_duckdb_1_5_now_keeps_the_row(
+    session: Session, principal: PrincipalRef, catalog: CatalogService, tmp_path: Path
+) -> None:
+    """Characterisation: `-low > 0` on the smallest 32-bit integer.
+
+    DuckDB 1.5 failed on the negation (``Overflow in negation``), which the run reported with
+    the fixed message. DuckDB 2.0 rewrites the comparison so that nothing overflows and keeps
+    the row, which is arithmetically right: the negation of -2147483648 is positive. No value
+    reaches the reader that the filter would hide.
+    """
+    _filter(session, principal, catalog, "people", "-low > 0")
+
+    run = _query(session, principal, "SELECT id FROM gold.people")
+
+    assert run.status == QueryRunStatus.SUCCEEDED, run.error_message
+    assert run.result_location is not None
+    with pyarrow.ipc.open_file(tmp_path / run.result_location) as reader:
+        assert reader.read_all().column("id").to_pylist() == [1]
 
 
 def test_a_column_mask_stored_before_the_type_check_can_fail_on_a_stored_value(
@@ -398,6 +418,72 @@ def test_a_catalog_error_under_a_policy_shows_the_fixed_message(
     run = _query(session, principal, "SELECT no_such_function(id) FROM gold.people")
 
     _assert_fixed(run, "gold.people", "")
+
+
+def test_a_parser_failure_on_the_text_of_a_row_filter_shows_the_fixed_message(
+    session: Session,
+    principal: PrincipalRef,
+    catalog: CatalogService,
+    capfd: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Regression for DuckDB 2.0: its parser quotes the token it fails on (`at or near "x"`).
+
+    A row filter's text is spliced into the statement, so the token can come from the policy;
+    the run shows the fixed message and the token appears nowhere.
+    """
+    caplog.set_level(logging.DEBUG)
+    _filter(session, principal, catalog, "people", "id IS HIDDENTOKEN")
+
+    run = _query(session, principal, "SELECT id FROM gold.people")
+
+    captured = capfd.readouterr()
+    output = captured.out + captured.err + caplog.text
+    _assert_fixed(run, "gold.people", output)
+    for text in (run.error_message or "", output):
+        assert "HIDDENTOKEN" not in text
+
+
+def test_a_conversion_failure_on_a_row_filters_literal_over_a_csv_shows_the_fixed_message(
+    session: Session,
+    principal: PrincipalRef,
+    catalog: CatalogService,
+    tmp_path: Path,
+    capfd: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Regression for DuckDB 2.0: a conversion error quotes the literal it could not convert.
+
+    A raw CSV table is read without a field-id map, so nothing in the query process replaces
+    the text; the pipeline does, because the read is under a row filter.
+    """
+    caplog.set_level(logging.DEBUG)
+    catalog.create_namespace(principal, "dev", NamespacePath.from_parts(["raw"]))
+    (tmp_path / "raw" / "events").mkdir(parents=True)
+    (tmp_path / "raw" / "events" / "part-0.csv").write_text("id\n1\n2\n")
+    catalog.create_external_table(
+        principal,
+        TableRef(environment="dev", namespace=NamespacePath.from_parts(["raw"]), name="events"),
+        location_pattern="raw/events/*.csv",
+        format="csv",
+    )
+    RowFilterService(session, AllowAllAuthorization(), catalog).create(
+        principal,
+        principal="admin",
+        environment="dev",
+        namespace="raw",
+        table="events",
+        expression="id > 0",
+    )
+    session.execute(
+        update(RowFilter).where(RowFilter.table == "events").values(expression=f"id = '{_SECRET}'")
+    )
+    session.commit()
+
+    run = _query(session, principal, "SELECT id FROM raw.events")
+
+    captured = capfd.readouterr()
+    _assert_fixed(run, "raw.events", captured.out + captured.err + caplog.text)
 
 
 _ENGINE_TEXTS = [
