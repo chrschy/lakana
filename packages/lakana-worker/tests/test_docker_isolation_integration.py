@@ -149,7 +149,9 @@ def _in_background(work: Callable[[], object]) -> tuple[threading.Thread, list[o
 
 _ISOLATION = r"""
 import errno, json, os
-mounts = sorted({line.split()[4] for line in open("/proc/self/mountinfo")})
+table = [line.split() for line in open("/proc/self/mountinfo")]
+mounts = sorted({fields[4] for fields in table})
+options = {fields[4]: fields[5] for fields in table}
 writes = {}
 for path in ("/env/x", "/code/x", "/x"):
     try:
@@ -168,6 +170,7 @@ print(json.dumps({
     "groups": sorted(os.getgroups()),
     "mounts": [m for m in mounts if not m.startswith(("/proc", "/sys", "/dev"))],
     "writes": writes,
+    "options": {path: options.get(path, "") for path in ("/", "/code", "/env")},
 }))
 """
 _MOUNTS = {"/", "/code", "/env", "/etc/hostname", "/etc/hosts", "/etc/resolv.conf", "/tmp", "/work"}
@@ -195,9 +198,45 @@ def test_a_task_cannot_read_the_workers_credentials_or_another_projects_environm
     mounts = set(seen["mounts"])
     assert mounts >= _MOUNTS, f"missing mounts: {sorted(_MOUNTS - mounts)}"
     assert len(mounts - _MOUNTS) <= 1 and mounts - _MOUNTS <= _INIT, f"extra: {sorted(mounts)}"
-    assert all(outcome in ("EROFS", "EACCES") for outcome in seen["writes"].values()), seen[
-        "writes"
-    ]
+    not_read_only = [p for p, o in seen["options"].items() if "ro" not in o.split(",")]
+    assert not_read_only == [], f"mounted writable: {not_read_only} ({seen['options']})"
+    assert seen["writes"] == dict.fromkeys(seen["writes"], "EROFS"), seen["writes"]
+
+
+_SIBLINGS = r"""
+import json, os
+table = {fields[4]: fields[3] for fields in (line.split() for line in open("/proc/self/mountinfo"))}
+found = [
+    os.path.join(directory, name)
+    for top in ("/work", "/code")
+    for directory, _, names in os.walk(top)
+    for name in names
+    if "CANARY" in name
+]
+print(json.dumps({"found": found, "work": table.get("/work"), "code": table.get("/code")}))
+"""
+
+
+def test_a_task_sees_no_other_attempt_in_the_shared_work_volume(running: Stack) -> None:
+    """Every attempt of every project lives in one volume, owned by the task's own uid.
+
+    Only the `/code` and `/work` subpaths keep a task to its own attempt: a sibling attempt's
+    canary files must be out of reach, and the mounts' roots must be the attempt's own.
+    """
+    canary = f"CANARY-{uuid.uuid4().hex}"
+    sibling = running.attempt("", files={canary: b"another project's code"})
+    running.put(
+        running.work_volume, [(f"{sibling}/task/{canary}", "file", "its data", 0o600, 10001)]
+    )
+    attempt = running.attempt(_SIBLINGS)
+
+    result, output = running.run(attempt)
+
+    seen = _json(output)
+    assert result["exit"] == 0, output
+    assert seen["found"] == [], f"the task sees another attempt: {seen['found']}"
+    assert str(seen["work"]).endswith(f"/{attempt}/task"), f"/work is not the subpath: {seen}"
+    assert str(seen["code"]).endswith(f"/{attempt}/code"), f"/code is not the subpath: {seen}"
 
 
 _MEMORY = "blocks = []\nwhile True:\n    blocks.append(bytearray(16 * 1024 * 1024))\n"
@@ -414,7 +453,10 @@ def test_the_task_resolves_no_outside_name(running: Stack) -> None:
     """Review focus: a forwarded query is an exfiltration channel (a name it makes up leaks).
 
     Docker's resolver answers the stack's own names on an internal network and forwards
-    nothing else; port 53 outside is unreachable like every other port.
+    nothing else; port 53 outside is unreachable like every other port. The proof that nothing
+    is forwarded is `example.com` failing to resolve: it exists, so only a resolver that never
+    asks outside fails it. A made-up name fails either way (a forwarded query for it comes back
+    as "no such name"); its check only shows that it, too, gets no answer.
     """
     unique = f"lakana-exfil-{uuid.uuid4().hex}.example.com"
 
@@ -554,6 +596,43 @@ def test_a_task_container_mounts_only_its_volumes_and_makes_no_anonymous_one(
     assert not thread.is_alive() and not isinstance(outcome[0], Exception), outcome
 
 
+_STUBBORN = r"""
+import os, signal, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+if os.fork() == 0:
+    os.execvp("python", ["python", "-c", "import time; time.sleep(600)", "MARKER"])
+print("started", flush=True)
+time.sleep(600)
+"""
+"""Ignores SIGTERM, and so does its child (an ignored signal stays ignored across exec)."""
+
+
+def test_a_stopped_task_leaves_no_process_and_nothing_labelled(running: Stack) -> None:
+    """The exit criterion's "a stopped task leaves no process behind", through `stop`.
+
+    `stop` is what DockerRunner sends on a cancel, a lost lease or a drain. The task ignores
+    SIGTERM, so it ends only by the SIGKILL after its grace.
+    """
+    assert running.launcher is not None
+    task = uuid.uuid4().hex[:20]
+    marker = f"lakana-test-{uuid.uuid4().hex}"
+    attempt = running.attempt(_STUBBORN.replace("MARKER", marker))
+    thread, outcome = _in_background(lambda: running.run(attempt, task=task, timeout=120))
+    _until(lambda: host_processes(marker), 30, "the task never started")
+
+    assert running.launcher.stop(StopRequest(task)) == {"stopped": True}
+
+    _until(
+        lambda: not host_processes(marker) and not running.labelled(),
+        20,
+        lambda: f"after stop: processes {host_processes(marker)}, objects {running.labelled()}",
+    )
+    thread.join(30)
+    assert not thread.is_alive(), "the run did not end after its container was stopped"
+    result = outcome[0]
+    assert isinstance(result, tuple) and result[0]["stopped"] is True, outcome
+
+
 def test_a_launcher_that_stops_removes_its_running_tasks(running: Stack, tmp_path: Path) -> None:
     """Review focus: SIGTERM to the launcher must not leave a task running, untimed."""
     with stack(running.client, running.image, tmp_path) as own:
@@ -577,7 +656,10 @@ def test_a_launcher_that_stops_removes_its_running_tasks(running: Stack, tmp_pat
         assert not thread.is_alive(), "the run did not end when its container was removed"
 
 
-_CONCURRENT = 'import socket, time\ntime.sleep(3)\nprint("ok", socket.gethostname(), flush=True)\n'
+_CONCURRENT = (
+    "import socket, time\ntime.sleep(3)\n"
+    'print("ok", socket.gethostname(), socket.gethostbyname(socket.gethostname()), flush=True)\n'
+)
 
 
 def test_forty_tasks_run_at_once_each_in_its_own_container_and_network(running: Stack) -> None:
@@ -591,8 +673,12 @@ def test_forty_tasks_run_at_once_each_in_its_own_container_and_network(running: 
 
     failed = [(result, output) for result, output in runs if result["exit"] != 0]
     assert failed == [], failed[:3]
-    hosts = {output.split()[-1] for _, output in runs}
+    hosts = {output.split()[1] for _, output in runs}
     assert len(hosts) == 40, "two tasks shared a container"
+    networks = {
+        ipaddress.ip_network(output.split()[2].decode() + "/29", strict=False) for _, output in runs
+    }
+    assert len(networks) == 40, f"two tasks shared a network: {len(networks)} subnets for 40"
     assert running.labelled() == []
 
 

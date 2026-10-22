@@ -52,8 +52,34 @@ Entry = tuple[str, str, bytes | str, int, int]
 """``(path, kind, content, mode, uid)``; kind ``dir``, ``file`` or ``link`` (content: target)."""
 
 
+def docker_socket() -> Path:
+    """Find the engine's socket, the one the test's client and the launcher both use.
+
+    The launcher speaks to Docker only over a Unix socket (`DockerEngine`), as in its Compose
+    service, so `DOCKER_HOST` is honoured only as ``unix://``; anything else would let the test
+    look at one engine while the launcher drives another.
+
+    Returns
+    -------
+    Path
+        `DOCKER_HOST`'s path, or ``/var/run/docker.sock`` without it.
+    """
+    host = os.environ.get("DOCKER_HOST", "")
+    if not host:
+        return Path("/var/run/docker.sock")
+    if host.startswith("unix://"):
+        return Path(host.removeprefix("unix://"))
+    message = (
+        f"DOCKER_HOST is {host!r}; the launcher reaches Docker only through a Unix socket, so "
+        "these tests need DOCKER_HOST unset or unix://<path>"
+    )
+    if os.environ.get("LAKANA_TEST_DOCKER") == "1":
+        pytest.fail(message)
+    pytest.skip(message)
+
+
 def docker_client() -> Any:
-    """Connect to Docker, or skip (fail when `LAKANA_TEST_DOCKER=1`).
+    """Connect to Docker on `docker_socket`, or skip (fail when `LAKANA_TEST_DOCKER=1`).
 
     Returns
     -------
@@ -62,8 +88,9 @@ def docker_client() -> Any:
     """
     docker = pytest.importorskip("docker")
     required = os.environ.get("LAKANA_TEST_DOCKER") == "1"
+    socket_path = docker_socket()
     try:
-        client = docker.from_env()
+        client = docker.DockerClient(base_url=f"unix://{socket_path}")
         version = str(client.version()["Version"])
     except Exception as exc:
         if required:
@@ -444,8 +471,10 @@ def stack(client: Any, image: str, root: Path) -> Generator[Stack]:
     """
     name = f"lt{uuid.uuid4().hex[:10]}"
     current = Stack(client=client, image=image, name=name, root=root)
+    socket_path = docker_socket()
     settings = LauncherSettings(
         stack=name,
+        docker_socket=socket_path,
         images={PYTHON: image},
         work_volume=current.work_volume,
         socket=Path("l.sock"),
@@ -486,7 +515,7 @@ def stack(client: Any, image: str, root: Path) -> Generator[Stack]:
                 (f"{site}/runner.py", "file", STUB_HARNESS, 0o644, 10002),
             ],
         )
-        current.launcher = Launcher(settings, DockerEngine(Path("/var/run/docker.sock")))
+        current.launcher = Launcher(settings, DockerEngine(socket_path))
         current.launcher.start()
         (root / "state" / "environments" / f"{env}.complete").write_text(env)
         yield current

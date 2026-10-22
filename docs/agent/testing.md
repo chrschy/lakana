@@ -1049,7 +1049,7 @@ server (uvicorn on a loopback port, `python_asset_helpers.serving`) on Postgres 
   (`--require-hashes`). That is the only step that needs the network, and only for wheels the
   directory does not hold yet. CI runs the tests that install no packages first, then restores
   the directory from a cache keyed on `uv.lock` and `.python-version`, runs the script as its own step, and runs this
-  module with `LAKANA_TEST_WHEELHOUSE` set; the job has `timeout-minutes: 30`. Each test project commits
+  module with `LAKANA_TEST_WHEELHOUSE` set; the job has `timeout-minutes: 45` (22 to 24 minutes before the Docker isolation step). Each test project commits
   a copy as `wheelhouse/` and sets `[tool.uv] no-index = true`, `find-links = ["wheelhouse"]`;
   the worker under test has its proxy pointed at the discard port, so a build that reached for
   an index would fail. The directory is never committed to this repository.
@@ -1134,7 +1134,10 @@ service and one environment with a stub harness that runs the attempt's `probe.p
 object carries `lakana-test=1` and its stack's `lakana-test-stack=<name>`, and is removed, also
 after a failure; a test that needs a launcher of its own (the one that stops it) brings up a
 second stack without touching the first. One test per property of the exit criterion; each
-probe is the task. `test_docker_isolation_integration.py` also holds the real-engine cases the
+probe is the task, among them that a task sees no other attempt in the shared work volume (a
+sibling attempt's canary files stay out of reach and the mounts' roots are the attempt's own
+subpaths) and that a task stopped through `stop`, ignoring SIGTERM, leaves no process and no
+labelled object. `test_docker_isolation_integration.py` also holds the real-engine cases the
 launcher's reviews asked for: no IPv6 address and no reach to the host's link-local addresses,
 no resolution of outside names (a forwarded query would be an exfiltration channel), the
 gateway address of the task's own /29 answering nothing (the isolated gateway mode), a subpath
@@ -1146,6 +1149,9 @@ package code gets a private cache that is gone when it ends, two wheels-only bui
 cache yet each gets its own repository's wheel at the same path, and no installed code runs
 while uv builds.
 
+The test's Docker client and the launcher use one socket: `DOCKER_HOST` when it is
+`unix://<path>`, else `/var/run/docker.sock`; another `DOCKER_HOST` skips them (fails with
+`LAKANA_TEST_DOCKER=1`), since the launcher speaks to Docker only over a Unix socket.
 They need Docker Engine 28 or later and skip without Docker, unless `LAKANA_TEST_DOCKER=1`
 (CI's "Docker isolation tests" step) makes that a failure; the build test also needs `uv` on
 the `PATH`. GitHub's `ubuntu-latest` has Docker 28 or later; a self-hosted `CI_RUNNER` needs it

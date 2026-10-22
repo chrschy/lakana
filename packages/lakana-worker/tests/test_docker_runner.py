@@ -5,7 +5,6 @@ from __future__ import annotations
 import itertools
 import json
 import threading
-import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
@@ -993,12 +992,30 @@ def test_a_success_recorded_before_the_launcher_hung_still_succeeds(tmp_path: Pa
 
 
 def test_a_stop_the_launcher_keeps_refusing_is_asked_again_less_and_less_often(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The first retry is immediate, then the gap doubles: a stuck launcher is not flooded."""
+    """The first retry is immediate, then the gap doubles: a stuck launcher is not flooded.
+
+    The runner's clock is a fake that moves one poll per reading, so the gaps are counted in
+    polls whatever the machine's load.
+    """
+    tick = 1 / 64  # exact in binary: the gaps add up without rounding
+    now = [0.0]
     launcher = FakeLauncher()
     asked: list[float] = []
+    enough = threading.Event()
     stop = StopSignal()
+
+    def clock() -> float:
+        """Move the fake clock on by one poll.
+
+        Returns
+        -------
+        float
+            The new time.
+        """
+        now[0] += tick
+        return now[0]
 
     def refuses(ident: str) -> bool:
         """Answer that Docker did not stop the container.
@@ -1013,13 +1030,15 @@ def test_a_stop_the_launcher_keeps_refusing_is_asked_again_less_and_less_often(
         bool
             `False`.
         """
-        asked.append(time.monotonic())
+        asked.append(now[0])
+        if len(asked) >= 7:
+            enough.set()
         return False
 
-    def runs_a_second(
+    def runs_until_asked_enough(
         request: dict[str, Any], on_log: Callable[[bytes], None]
     ) -> dict[str, object]:
-        """Ask for a stop, then end by itself a second later.
+        """Ask for a stop, then end by itself once the runner asked seven times.
 
         Parameters
         ----------
@@ -1034,18 +1053,17 @@ def test_a_stop_the_launcher_keeps_refusing_is_asked_again_less_and_less_often(
             A stopped container.
         """
         stop.set(StopReason.CANCELLED)
-        threading.Event().wait(1.0)
+        enough.wait(30)
         return {"exit": 137, "stopped": True}
 
+    monkeypatch.setattr("lakana_worker.runners._clock", clock)
     launcher.stop = refuses  # ty: ignore[invalid-assignment]
-    launcher.scripts["run"] = runs_a_second
+    launcher.scripts["run"] = runs_until_asked_enough
 
-    _runner(launcher, poll_seconds=0.01).run(_task(tmp_path), lambda chunk: None, stop)
+    _runner(launcher, poll_seconds=tick).run(_task(tmp_path), lambda chunk: None, stop)
 
-    gaps = [later - earlier for earlier, later in itertools.pairwise(asked)]
-    assert 4 <= len(asked) <= 14, f"asked {len(asked)} times in a second"
-    assert gaps[0] < 0.1
-    assert gaps[-1] > gaps[1]
+    polls = [round((later - earlier) / tick) for earlier, later in itertools.pairwise(asked[:7])]
+    assert polls == [1, 1, 2, 4, 8, 16]
 
 
 def test_the_stop_retry_gap_doubles_from_the_poll_and_stops_growing_at_five_seconds() -> None:

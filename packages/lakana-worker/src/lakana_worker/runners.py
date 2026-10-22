@@ -1067,6 +1067,8 @@ DEADLINE_MARGIN_SECONDS = 900.0
 """Seconds past a task's timeout and kill grace after which the worker stops waiting for the
 launcher: its image pull before the timer starts (up to 600 s), its wait margin (60 s), slack."""
 STOP_RETRY_CAP_SECONDS = 5.0
+_clock = time.monotonic
+"""The clock the stop retries are timed by; a test replaces it with one it moves itself."""
 """The longest gap between two requests to stop a container the launcher has not stopped."""
 
 
@@ -1373,7 +1375,7 @@ class DockerRunner:
         next_stop = 0.0
         while thread.is_alive():
             thread.join(self._poll_seconds)
-            now = time.monotonic()
+            now = _clock()
             if stop.is_set() and not stopped_by_us and thread.is_alive() and now >= next_stop:
                 # The launcher answers False until it registered the run, and when Docker did
                 # not stop the container: asked again, less often each time.
