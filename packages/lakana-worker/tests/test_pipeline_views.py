@@ -267,6 +267,41 @@ def test_a_view_is_created_without_executing_and_read_through(
     assert rows == [{"id": 2}, {"id": 3}]
 
 
+def test_a_view_stored_with_an_arrow_lambda_runs_and_is_read_through(
+    session: Session, admin: PrincipalRef, catalog: CatalogService, tmp_path: Path
+) -> None:
+    """A view written with `x -> …` (DuckDB 1.5 syntax) plans and reads on DuckDB 1.5 and 2.0."""
+    run = _view(
+        session,
+        admin,
+        "gold.v",
+        "SELECT id, list_transform([id, id], x -> x * 10) AS tens FROM bronze.orders",
+    )
+
+    assert run.status == QueryRunStatus.SUCCEEDED, run.error_message
+    read, rows = _query(
+        session, admin, tmp_path, "SELECT tens FROM gold.v ORDER BY id", granted=False
+    )
+    assert read.status == QueryRunStatus.SUCCEEDED, read.error_message
+    assert rows == [{"tens": [10, 10]}, {"tens": [20, 20]}, {"tens": [30, 30]}]
+
+
+def test_a_view_over_an_untyped_null_is_created_and_read_through(
+    session: Session, admin: PrincipalRef, catalog: CatalogService, tmp_path: Path
+) -> None:
+    """A view stores no data, so `SELECT NULL AS x` is a valid view column on either DuckDB.
+
+    DuckDB 1.5 types the `NULL` as an integer, DuckDB 2 as Arrow `null`; either way the view
+    is created and reads back `None`.
+    """
+    run = _view(session, admin, "gold.v", "SELECT id, NULL AS x FROM bronze.orders")
+
+    assert run.status == QueryRunStatus.SUCCEEDED, run.error_message
+    read, rows = _query(session, admin, tmp_path, "SELECT x FROM gold.v ORDER BY id", granted=False)
+    assert read.status == QueryRunStatus.SUCCEEDED, read.error_message
+    assert rows == [{"x": None}] * 3
+
+
 def test_creating_a_view_never_runs_its_query(
     session: Session, admin: PrincipalRef, catalog: CatalogService
 ) -> None:

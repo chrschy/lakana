@@ -290,6 +290,51 @@ def test_rewrite_never_puts_a_resolved_url_in_the_sql() -> None:
     assert list(rewritten.parameters.values()) == [[evil]]
 
 
+@pytest.mark.parametrize(
+    ("sql", "rendered"),
+    [
+        (
+            "SELECT list_transform([1, 2], x -> x + 1)",
+            "SELECT LIST_TRANSFORM([1, 2], LAMBDA x : x + 1)",
+        ),
+        (
+            "SELECT list_reduce([1, 2, 3], (x, y) -> x + y)",
+            "SELECT LIST_REDUCE([1, 2, 3], LAMBDA x, y : x + y)",
+        ),
+        (
+            "SELECT list_transform([[1]], x -> list_transform(x, y -> y * 2))",
+            "SELECT LIST_TRANSFORM([[1]], LAMBDA x : LIST_TRANSFORM(x, LAMBDA y : y * 2))",
+        ),
+        (
+            "SELECT list_transform([1, 2], lambda x: x + 1)",
+            "SELECT LIST_TRANSFORM([1, 2], LAMBDA x : x + 1)",
+        ),
+    ],
+)
+def test_rewrite_renders_every_lambda_in_the_keyword_form(sql: str, rendered: str) -> None:
+    """DuckDB 2 refuses `x -> …`; the rewrite renders `LAMBDA x : …`, which 1.5 runs too.
+
+    Parameters
+    ----------
+    sql
+        The query as the caller wrote it.
+    rendered
+        The SQL the rewrite hands to DuckDB.
+    """
+    assert rewrite_query(sql, {}).sql == rendered
+
+
+def test_rewrite_renders_a_lambda_in_the_keyword_form_beside_a_table_read() -> None:
+    """The query that reads a table goes through the same rendering as one that reads none."""
+    rewritten = rewrite_query(
+        "SELECT list_filter(e.tags, t -> t <> 'x') FROM raw.events AS e",
+        sources={"raw.events": _parquet("a.parquet")},
+    )
+
+    assert "LIST_FILTER(e.tags, LAMBDA t : t <> 'x')" in rewritten.sql
+    assert "->" not in rewritten.sql
+
+
 def test_rewrite_keeps_the_original_table_alias() -> None:
     """Dropping the alias left the rest of the query unable to resolve `e.id`."""
     rewritten = rewrite_query(
@@ -716,6 +761,9 @@ _FUNCTION_CALL_FORMS = {
     "method_call": "SELECT 's'.{f}(1)",
     "method_call_on_column": "SELECT x.{f}(1) FROM range(1) AS t(x)",
     "lambda": "SELECT list_transform([1], x -> {f}(x, 2))",
+    "lambda_keyword": "SELECT list_transform([1], lambda x: {f}(x, 2))",
+    "lambda_duckdb_keyword": "SELECT list_transform([1], LAMBDA x : {f}(x, 2))",
+    "lambda_two_parameters": "SELECT list_reduce([1], (x, y) -> {f}(x, y))",
     "cte": "WITH c AS (SELECT {f}(1, 2) AS v) SELECT v FROM c",
     "subquery": "SELECT (SELECT {f}(1, 2))",
     "derived_table": "SELECT v FROM (SELECT {f}(1, 2) AS v) AS d",
@@ -756,6 +804,40 @@ def test_blacklist_refuses_duckdb_internal_and_state_changing_functions_in_every
 
     with pytest.raises(ValidationError, match=re.escape(function_name)):
         check_blacklist(sql)
+
+
+@pytest.mark.parametrize(
+    ("function_name", "cause"),
+    [
+        ("setval", "changes or reads a sequence"),
+        ("nextval", "changes or reads a sequence"),
+        ("currval", "changes or reads a sequence"),
+        ("to_aggregate_state", "picks an aggregate function by a name given as data"),
+    ],
+)
+def test_blacklist_names_the_cause_and_the_next_step_for_a_state_or_dispatch_function(
+    function_name: str, cause: str
+) -> None:
+    """A sequence function or `to_aggregate_state` is refused with its own reason.
+
+    "Query the catalog instead" is no next step for these: the message names what the call
+    does and says to remove it.
+
+    Parameters
+    ----------
+    function_name
+        The refused function.
+    cause
+        The part of the message that names what the function does.
+    """
+    with pytest.raises(ValidationError) as caught:
+        check_blacklist(f"SELECT {function_name}('s')")
+
+    message = str(caught.value)
+    assert message.startswith(f"{function_name} ")
+    assert cause in message
+    assert "Remove the call; a query reads tables only." in message
+    assert "catalog" not in message
 
 
 def test_blacklist_tells_the_user_what_to_write_instead_of_an_internal_function() -> None:

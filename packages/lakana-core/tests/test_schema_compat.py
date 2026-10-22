@@ -113,6 +113,30 @@ def test_arrow_types_a_table_cannot_store_fail_naming_the_column(arrow_type: pa.
         arrow_to_iceberg_type(arrow_type, "amount")
 
 
+def test_an_untyped_null_column_fails_naming_the_cast_to_write() -> None:
+    """`SELECT NULL AS x` (Arrow `null` on DuckDB 2) names the CAST that gives it a type."""
+    with pytest.raises(ValidationError) as caught:
+        arrow_to_iceberg_type(pa.null(), "x")
+
+    assert str(caught.value) == (
+        "Column 'x' is NULL without a type, which a Lakana table can't store; "
+        "write `CAST(NULL AS <type>) AS x`, for example `CAST(NULL AS VARCHAR)`."
+    )
+
+
+def test_an_untyped_null_column_hint_quotes_a_name_that_needs_it() -> None:
+    """The suggested SQL stays valid when the column's name needs quoting."""
+    with pytest.raises(ValidationError, match=r'AS "unit price"`'):
+        arrow_to_iceberg_type(pa.null(), "unit price")
+
+
+def test_view_columns_reports_an_untyped_null_column_as_null() -> None:
+    """A view over `SELECT NULL AS x` is described, not refused: its column type reads `null`."""
+    schema = pa.schema([pa.field("x", pa.null(), nullable=True)])
+
+    assert view_columns(schema) == [ColumnSpec(name="x", type="null", nullable=True)]
+
+
 def test_view_columns_describes_a_storable_type_by_its_iceberg_name() -> None:
     """A view column a table could also store reports its Iceberg type name."""
     schema = pa.schema([pa.field("id", pa.int64(), nullable=False)])

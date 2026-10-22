@@ -32,6 +32,7 @@ from pyiceberg.types import (
     TimeType,
     UUIDType,
 )
+from sqlglot import exp
 
 from lakana_core.catalog.json_schema import ColumnSpec, type_name
 from lakana_core.errors import ValidationError
@@ -79,8 +80,16 @@ def arrow_to_iceberg_type(arrow_type: pa.DataType, column: str) -> IcebergType:
         If a Lakana table can't store `arrow_type` — an unsigned 64-bit
         integer, a timestamp in any unit but microseconds or with a
         non-UTC time zone, or a nested, interval or other type. The message
-        names the column and suggests a CAST.
+        names the column and suggests a CAST; for an untyped `NULL`
+        (`SELECT NULL AS x`, Arrow `null` on DuckDB 2) it spells out the
+        CAST to write.
     """
+    if pa.types.is_null(arrow_type):
+        alias = exp.to_identifier(column).sql(dialect="duckdb")
+        raise ValidationError(
+            f"Column {column!r} is NULL without a type, which a Lakana table can't store; "
+            f"write `CAST(NULL AS <type>) AS {alias}`, for example `CAST(NULL AS VARCHAR)`."
+        )
     for predicate, iceberg_type in _SIMPLE_TYPES:
         if predicate(arrow_type):
             return iceberg_type

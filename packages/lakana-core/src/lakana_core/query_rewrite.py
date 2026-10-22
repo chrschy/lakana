@@ -259,6 +259,20 @@ Beside this list, `check_blacklist` refuses every function whose name starts wit
 `_INTERNAL_FUNCTION_PREFIX` — see there.
 """
 
+_SEQUENCE_REASON = "changes or reads a sequence, which is connection state, not data"
+
+_NO_QUERY_USE_REASONS: dict[str, str] = {
+    "setval": _SEQUENCE_REASON,
+    "nextval": _SEQUENCE_REASON,
+    "currval": _SEQUENCE_REASON,
+    "to_aggregate_state": "picks an aggregate function by a name given as data",
+}
+"""Blacklisted functions refused with their own cause instead of "query the catalog instead".
+
+Each is in `_BLACKLISTED_FUNCTIONS`; this only words the refusal. The catalog holds nothing
+these calls were after, so the message names what the call does and says to remove it.
+"""
+
 _INTERNAL_FUNCTION_PREFIX = "__"
 """The prefix of DuckDB's internal function namespace, refused as a whole.
 
@@ -769,6 +783,34 @@ def _parse_sql(sql: str, dialect: str) -> exp.Expr:
         return sqlglot.parse_one(sql, dialect=dialect)
     except _PARSER_FAULTS as exc:
         raise sqlglot.errors.ParseError("the text could not be read") from exc
+
+
+def _render(parsed: exp.Expr, dialect: str) -> str:
+    """Render a checked tree as the SQL the query process runs, every lambda in keyword form.
+
+    DuckDB 2.0 refuses the arrow lambda (`x -> x + 1` is a Binder Error) and DuckDB 1.5
+    accepts both forms, so every `exp.Lambda` is rendered `LAMBDA x : x + 1` (`LAMBDA x, y :
+    …` for two parameters) whichever form the caller wrote. Only the spelling of the node
+    changes: its parameters and body are the subtrees the guard already checked, rendered by
+    sqlglot as any other expression, so no text reaches DuckDB that the guard did not see.
+    The keyword form is also the one DuckDB parses as sqlglot does: `x -> x -> '$.a'` (a
+    lambda whose body is a JSON extract) did not bind in the arrow form on DuckDB 1.5.
+
+    Parameters
+    ----------
+    parsed
+        The tree to render; its lambdas are marked for the keyword form in place.
+    dialect
+        The SQL dialect to render in.
+
+    Returns
+    -------
+    str
+        The SQL text.
+    """
+    for node in parsed.find_all(exp.Lambda):
+        node.set("colon", True)
+    return parsed.sql(dialect=dialect)
 
 
 def _fail_closed(func: Callable[_P, _R]) -> Callable[_P, _R]:
@@ -1644,7 +1686,7 @@ def expand_views(
         list(traverse_scope(parsed)),
         [(key, node) for key, node in named_views if counts[key[2]] == 1],
     )
-    return ExpandedQuery(sql=parsed.sql(dialect=dialect), views=tuple(expanded))
+    return ExpandedQuery(sql=_render(parsed, dialect), views=tuple(expanded))
 
 
 _SAFE_TABLE_ARGS = frozenset({"this", "db", "catalog", "alias"})
@@ -1975,7 +2017,7 @@ def rewrite_query(
         table.replace(replacement)
     _drop_schema_from_qualified_columns(scopes, named)
     if not ctes:
-        return RewrittenQuery(sql=parsed.sql(dialect=dialect), parameters=parameters)
+        return RewrittenQuery(sql=_render(parsed, dialect), parameters=parameters)
     if not isinstance(parsed, exp.Query):
         raise ValidationError(f"{parsed.key.upper()} may not reference a catalog table.")
     new_ctes = [
@@ -1989,7 +2031,7 @@ def rewrite_query(
         # The query's own CTEs may read the tables being rewritten, so the
         # generated ones have to be defined first, not appended after.
         existing.set("expressions", [*new_ctes, *existing.expressions])
-    return RewrittenQuery(sql=parsed.sql(dialect=dialect), parameters=parameters)
+    return RewrittenQuery(sql=_render(parsed, dialect), parameters=parameters)
 
 
 @_fail_closed
@@ -2062,6 +2104,11 @@ def check_blacklist(sql: str, dialect: str = "duckdb") -> None:
             )
     for func in parsed.find_all(exp.Func):
         name = func.name.lower() if isinstance(func, exp.Anonymous) else func.sql_name().lower()
+        if name in _NO_QUERY_USE_REASONS:
+            raise ValidationError(
+                f"{name} {_NO_QUERY_USE_REASONS[name]}, which no query needs, so it may not be "
+                "called. Remove the call; a query reads tables only."
+            )
         if name in _BLACKLISTED_FUNCTIONS:
             raise ValidationError(f"{name} may not be called directly; query the catalog instead.")
         if name.startswith(_INTERNAL_FUNCTION_PREFIX):

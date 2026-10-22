@@ -2770,6 +2770,9 @@ sequence (and `nextval`/`currval`, older, are refused with it: sequence state is
 governed read needs), `index_key` reads a catalog index by name, and `to_aggregate_state` picks an
 aggregate by a name given as data (nothing harmful found behind it, but dispatch by a name in
 a string is the class that made `json_execute_serialized_sql` a bypass); all five are listed.
+The four sequence and dispatch functions are refused with a message of their own
+(`_NO_QUERY_USE_REASONS`): it names what the call does and says to remove it, since "query the
+catalog instead" is no next step for them.
 **DuckDB's internal namespace is refused as a prefix:** any function whose name starts with
 `__` (`__cast`, `__between`, `__internal_barrier`, `__internal_tablefilter_*`, and the
 `__internal_compress_*`/`__internal_decompress_*` 1.5.5 already had) is refused by
@@ -2787,6 +2790,17 @@ any table function except the generators in `_ALLOWED_TABLE_FUNCTIONS` (`range`,
 `generate_series`, `unnest`) in any FROM-item position (`FROM fn()`, `LATERAL fn()`, `TABLE(fn())`),
 so a function DuckDB adds later is refused by default.
 `extract_table_refs` never reports a function call as a table.
+
+**Lambdas are re-spelled, not passed through.** DuckDB 2.0 refuses the arrow lambda
+(`x -> x + 1`), so `query_rewrite._render` marks every `exp.Lambda` for sqlglot's keyword form
+and the rewrite (and view expansion) hands DuckDB `LAMBDA x : x + 1`. Only the node's spelling
+changes: its parameters and body are subtrees the guard checked, rendered by sqlglot like any
+other expression, and a lambda only occurs as a function argument, delimited by `,` or `)`.
+DuckDB parses the keyword form as sqlglot does where the arrow form diverged (`x -> x -> '$.a'`,
+a lambda whose body is a JSON extract, failed to bind on 1.5.5). Probed on 1.5.5 and 2.0.0 for
+casts, `::`, slices, struct literals, nested and two-parameter lambdas, `AND`/`OR`, `CASE`,
+`BETWEEN`, `IN`, quoted parameters (`test_a_lambda_runs_as_the_guard_parsed_it`); a refused
+function inside a lambda is refused in all three input spellings (`_FUNCTION_CALL_FORMS`).
 
 **User SQL cannot reach the values the platform sets, and may not contain a placeholder
 (`?`, `$1`, `$name`).** The rewriter reads each table's resolved file list — on S3, presigned

@@ -327,3 +327,14 @@ def test_a_stored_view_calling_a_refused_duckdb_2_function_is_refused_at_expansi
         expand_views("SELECT v FROM gold.v", _lookup({"gold.v": stored}))
 
     assert "bronze.orders" not in str(caught.value)
+
+
+def test_an_expanded_view_renders_its_lambdas_in_the_keyword_form() -> None:
+    """A view stored with `x -> …` (valid on DuckDB 1.5) expands to the form DuckDB 2 runs."""
+    expanded = expand_views(
+        "SELECT doubled FROM gold.v",
+        _lookup({"gold.v": "SELECT list_transform(tags, x -> x * 2) AS doubled FROM bronze.t"}),
+    )
+
+    assert "LIST_TRANSFORM(tags, LAMBDA x : x * 2)" in expanded.sql
+    assert "->" not in expanded.sql

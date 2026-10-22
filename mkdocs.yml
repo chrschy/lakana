@@ -71,6 +71,7 @@ nav:
       - reference/lists.md
       - reference/access.md
       - reference/jobs.md
+      - reference/sql-in-queries.md
       - reference/project-layout.md
       - reference/asset-front-matter.md
       - reference/lakana-yaml.md
