@@ -8,7 +8,8 @@ exits 0, in a file no build container can reach.
 
 Exit status: uv's own when it fails (3, 4 and 5 become 1); `NO_SDK` when the environment has no
 `lakana` harness to run an asset with; `NO_INTERPRETER` when uv made no `bin/python`;
-`TOO_LARGE` when the environment is larger than `LAKANA_BUILD_MAX_BYTES`.
+`TOO_LARGE` when the environment is larger than `LAKANA_BUILD_MAX_BYTES` or has a directory the
+check cannot read (a build could hide files that way); 1 when the limit is not a number.
 """
 
 from __future__ import annotations
@@ -23,6 +24,16 @@ NO_SDK = 3
 NO_INTERPRETER = 4
 TOO_LARGE = 5
 UV = "/usr/local/bin/uv"
+UV_SYNC_FLAGS = (
+    "sync",
+    "--frozen",
+    "--no-config",
+    "--no-dev",
+    "--no-default-groups",
+    "--no-install-project",
+    "--no-install-workspace",
+)
+"""The flags of every `uv sync` Lakana runs; the worker's venv cache uses this tuple too."""
 
 
 def uv_argv(no_build: bool, python: str, project: Path) -> list[str]:
@@ -45,19 +56,29 @@ def uv_argv(no_build: bool, python: str, project: Path) -> list[str]:
     """
     return [
         UV,
-        "sync",
-        "--frozen",
-        "--no-config",
-        "--no-dev",
-        "--no-default-groups",
-        "--no-install-project",
-        "--no-install-workspace",
+        *UV_SYNC_FLAGS,
         *(["--no-build"] if no_build else []),
         "--python",
         python,
         "--project",
         str(project),
     ]
+
+
+def _unreadable(error: OSError) -> None:
+    """Refuse a directory that cannot be read, which would hide files from the size limit.
+
+    Parameters
+    ----------
+    error
+        What `os.walk` met.
+
+    Raises
+    ------
+    OSError
+        Always.
+    """
+    raise error
 
 
 def tree_size(root: Path) -> int:
@@ -72,9 +93,14 @@ def tree_size(root: Path) -> int:
     -------
     int
         Bytes.
+
+    Raises
+    ------
+    OSError
+        A directory could not be read: its files would not be counted.
     """
     total = 0
-    for directory, _dirs, files in os.walk(root):
+    for directory, _dirs, files in os.walk(root, onerror=_unreadable):
         for name in files:
             total += os.lstat(os.path.join(directory, name)).st_size
     return total
@@ -114,9 +140,23 @@ def main(
     if not any(environment.glob("lib/python*/site-packages/lakana/runner.py")):
         return NO_SDK
     limit = environ.get("LAKANA_BUILD_MAX_BYTES", "0")
-    if limit.isdigit() and int(limit) > 0 and tree_size(environment) > int(limit):
+    if not limit.isdigit():
+        print(
+            f"LAKANA_BUILD_MAX_BYTES is {limit!r}, not a number of bytes; set it to a whole "
+            "number, or 0 for no limit",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        too_large = int(limit) > 0 and tree_size(environment) > int(limit)
+    except OSError as error:
+        print(
+            f"cannot measure the environment ({error}); a directory in it is unreadable, so "
+            "the size limit cannot be checked",
+            file=sys.stderr,
+        )
         return TOO_LARGE
-    return 0
+    return TOO_LARGE if too_large else 0
 
 
 if __name__ == "__main__":

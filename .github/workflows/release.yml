@@ -223,7 +223,7 @@ jobs:
   # One task image per supported Python, with the release's version: the launcher's allow-list in
   # the Compose bundle names them. Built from the tag, like the main image.
   publish-task-images:
-    needs: [release-please, build, publish-sdk]
+    needs: [release-please, build, approve, publish-sdk]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -268,6 +268,37 @@ jobs:
         with:
           subject-name: ghcr.io/lakana-labs/lakana
           subject-digest: ${{ needs.publish-image.outputs.digest }}
+          push-to-registry: false
+
+  # Signs each task image by digest, like `attest-image`. The digest is read back from the
+  # registry: a matrix job has no single output to hand over.
+  attest-task-images:
+    needs: [release-please, publish-task-images]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read           # reads the pushed digest
+      id-token: write          # the Sigstore signing certificate
+      attestations: write      # stores the attestation
+    strategy:
+      matrix:
+        python: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - id: digest
+        # Plain docker commands, no third-party action: this job holds `id-token: write`.
+        run: |
+          echo "${GITHUB_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+          digest=$(docker buildx imagetools inspect "ghcr.io/lakana-labs/lakana-task:${TAG#v}-py${PYTHON}" --format '{{.Manifest.Digest}}')
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.release-please.outputs.tag }}
+          PYTHON: ${{ matrix.python }}
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-name: ghcr.io/lakana-labs/lakana-task
+          subject-digest: ${{ steps.digest.outputs.digest }}
           push-to-registry: false
 
   five-minute-release:

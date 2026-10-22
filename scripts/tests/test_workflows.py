@@ -1472,7 +1472,7 @@ def test_every_published_artefact_gets_a_build_provenance_attestation() -> None:
         return [s for s in job["steps"] if "attest-build-provenance" in str(s.get("uses"))]
 
     attesting = {name for name, job in jobs.items() if attest(job)}
-    assert attesting == {"attest-dist", "attest-image"}
+    assert attesting == {"attest-dist", "attest-image", "attest-task-images"}
     for name in attesting:
         perms = jobs[name]["permissions"]
         assert perms["id-token"] == "write", name
@@ -1744,3 +1744,23 @@ def test_a_release_publishes_one_task_image_per_supported_python() -> None:
     )
     assert "PYTHON=${{ matrix.python }}" in build["with"]["build-args"]
     assert "publish-task-images" in _jobs("release.yml")["compose-smoke-release"]["needs"]
+
+
+def test_the_task_images_wait_for_the_approval_and_are_attested() -> None:
+    """The gate is explicit, and each image is signed by digest like the main image."""
+    jobs = _jobs("release.yml")
+    publish = jobs["publish-task-images"]
+
+    assert "approve" in publish["needs"]
+    attest = jobs["attest-task-images"]
+    assert "publish-task-images" in attest["needs"]
+    assert attest["permissions"] == {
+        "contents": "read",
+        "packages": "read",
+        "id-token": "write",
+        "attestations": "write",
+    }
+    step = next(s for s in attest["steps"] if "attest-build-provenance" in s.get("uses", ""))
+    assert step["with"]["subject-name"] == "ghcr.io/lakana-labs/lakana-task"
+    assert step["with"]["subject-digest"] == "${{ steps.digest.outputs.digest }}"
+    assert attest["strategy"]["matrix"]["python"] == ["3.11", "3.12", "3.13", "3.14"]

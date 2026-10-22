@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
 
+from lakana_worker import venvs
+from lakana_worker.launcher import settings as launcher_settings
 from lakana_worker.launcher import task_build
+
+_TASK_DOCKERFILE = Path(__file__).resolve().parents[3] / "Dockerfile.task"
 
 
 def _environment(root: Path, *, python: bool = True, sdk: bool = True, size: int = 0) -> Path:
@@ -134,3 +139,57 @@ def test_the_project_defaults_to_the_launchers_mount_then_the_working_directory(
 
     assert ran[0][-1] == "/src/abc123"
     assert ran[1][-1] == str(tmp_path)
+
+
+def test_a_limit_that_is_not_a_number_fails_the_build(tmp_path: Path) -> None:
+    """A mistyped limit must not switch the limit off.
+
+    Parameters
+    ----------
+    tmp_path
+        The test's directory.
+    """
+    env = _environment(tmp_path)
+
+    status = task_build.main(
+        {"LAKANA_BUILD_MAX_BYTES": "lots"}, environment=env, project=tmp_path, run=lambda _: 0
+    )
+
+    assert status == 1
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads every directory")
+def test_a_directory_the_size_check_cannot_read_counts_as_too_large(tmp_path: Path) -> None:
+    """A build's own code could hide files from the limit with `chmod 000`.
+
+    Parameters
+    ----------
+    tmp_path
+        The test's directory.
+    """
+    env = _environment(tmp_path)
+    hidden = env / "lib" / "hidden"
+    hidden.mkdir()
+    (hidden / "big").write_bytes(b"x" * 4096)
+    hidden.chmod(0)
+    try:
+        status = task_build.main(
+            {"LAKANA_BUILD_MAX_BYTES": "1024"}, environment=env, project=tmp_path, run=lambda _: 0
+        )
+    finally:
+        hidden.chmod(0o755)
+
+    assert status == task_build.TOO_LARGE
+
+
+def test_the_build_entry_and_the_workers_venv_cache_share_their_uv_flags() -> None:
+    """One list of flags, so the task image builds what the local cache would."""
+    assert venvs.UV_SYNC_FLAGS is task_build.UV_SYNC_FLAGS
+
+
+def test_the_task_images_group_is_the_launchers_task_group() -> None:
+    """The launcher's `User` overrides the image's `USER`; the two must name the same ids."""
+    text = _TASK_DOCKERFILE.read_text(encoding="utf-8")
+
+    assert f"USER {launcher_settings.TASK_USER}\n" in text
+    assert launcher_settings.TASK_USER == "10001:10003"

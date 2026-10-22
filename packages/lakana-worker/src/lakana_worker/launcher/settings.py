@@ -30,8 +30,9 @@ STATE_DIR = Path("/var/lib/lakana-launcher")
 """The launcher's own volume: one completion marker per built environment."""
 EGRESS_KEY = Path("/run/lakana-egress/egress.key")
 """The key that signs the egress proxy's tokens."""
-TASK_USER = "10001:10001"
-"""``uid:gid`` of every task container: the worker's own, so the harness owns its work directory."""
+TASK_USER = "10001:10003"
+"""``uid:gid`` of every task container: the worker's uid, so the harness owns its work directory,
+in a group of its own (the worker's group is 10001)."""
 BUILD_USER = "10002:10002"
 """``uid:gid`` of every build container: another one, so a task cannot change its environment."""
 SERVER_SERVICE = "server"

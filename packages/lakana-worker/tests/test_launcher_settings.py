@@ -66,7 +66,7 @@ def test_only_what_a_person_needs_is_a_setting(name: str) -> None:
     settings = load_settings(
         {"LAKANA_LAUNCHER__STACK": "lakana", "LAKANA_LAUNCHER__IMAGES": _IMAGES}
     )
-    assert settings.task_user == "10001:10001" and settings.build_user == "10002:10002"
+    assert settings.task_user == "10001:10003" and settings.build_user == "10002:10002"
     assert settings.docker_socket == Path("/var/run/docker.sock")
 
 

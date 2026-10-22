@@ -59,6 +59,7 @@ from lakana_worker.index_credentials import (
     uv_index_value,
     wheels_only,
 )
+from lakana_worker.launcher.task_build import UV_SYNC_FLAGS
 from lakana_worker.processes import OutputRedactor, is_private_directory, signal_group, tree_size
 
 MARKER = ".lakana-complete"
@@ -617,13 +618,7 @@ def _build(
         )
     argv = [
         uv,
-        "sync",
-        "--frozen",
-        "--no-config",
-        "--no-dev",
-        "--no-default-groups",
-        "--no-install-project",
-        "--no-install-workspace",
+        *UV_SYNC_FLAGS,
         # A source distribution's build runs that package's code where the credential is.
         *(["--no-build"] if wheels_only(accesses) else []),
         "--python",

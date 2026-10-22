@@ -256,7 +256,11 @@ def test_the_task_image_carries_python_uv_and_the_build_entry_and_no_entrypoint(
     text = _TASK_DOCKERFILE.read_text(encoding="utf-8")
 
     assert "ENTRYPOINT" not in text
-    assert "FROM python:${PYTHON}-slim" in text
+    assert "FROM py${PYTHON}" in text
+    for version in ("3.11", "3.12", "3.13", "3.14"):
+        assert re.search(
+            rf"^FROM python:{version}-slim@sha256:[0-9a-f]{{64}} AS py{version}$", text, re.M
+        )
     assert (
         "COPY packages/lakana-worker/src/lakana_worker/launcher/task_build.py"
         " /opt/lakana-task/build.py" in text

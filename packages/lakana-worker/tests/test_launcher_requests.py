@@ -505,7 +505,7 @@ def test_the_run_spec_fixes_every_field_that_matters() -> None:
     host = spec["HostConfig"]
     assert spec["Image"] == "ghcr.io/lakana-labs/lakana-task:0.14.0-py3.13"
     assert spec["Entrypoint"] == ["/env/bin/python", "-P", "-m", "lakana.runner"]
-    assert spec["User"] == "10001:10001"
+    assert spec["User"] == "10001:10003"
     assert spec["WorkingDir"] == "/code"
     assert (host["CapDrop"], host["CapAdd"], host["Privileged"]) == (["ALL"], [], False)
     assert (host["ReadonlyRootfs"], host["Init"], host["IpcMode"], host["PidMode"]) == (
