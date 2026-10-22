@@ -49,7 +49,7 @@ STUB_HARNESS = (
 """Stands in for `lakana.runner`: runs the attempt's script, so a test's probe is the task."""
 
 Entry = tuple[str, str, bytes | str, int, int]
-"""``(path, kind, content, mode, uid)``; kind ``dir``, ``file`` or ``link`` (content: target)."""
+"""``(path, kind, content, mode, uid)``; kind ``dir`` or ``file`` (links: `Stack.link`)."""
 
 
 def docker_socket() -> Path:
@@ -163,9 +163,6 @@ def _tar(entries: list[Entry]) -> bytes:
             data = None
             if kind == "dir":
                 info.type = tarfile.DIRTYPE
-            elif kind == "link":
-                info.type = tarfile.SYMTYPE
-                info.linkname = str(content)
             else:
                 payload = content if isinstance(content, bytes) else content.encode()
                 info.size = len(payload)
@@ -282,9 +279,8 @@ class Stack:
         """
         name = f"attempt-{uuid.uuid4().hex[:12]}"
         entries: list[Entry] = [(name, "dir", b"", 0o700, 10001)]
-        if code_link is not None:
-            entries.append((f"{name}/code", "link", code_link, 0o777, 10001))
-        else:
+        links = {"code": code_link, "task": task_link}
+        if code_link is None:
             entries += [
                 (f"{name}/code", "dir", b"", 0o555, 10001),
                 (f"{name}/code/probe.py", "file", script, 0o444, 10001),
@@ -295,16 +291,39 @@ class Stack:
                 (f"{name}/code/{path}", "file", data, 0o444, 10001)
                 for path, data in (files or {}).items()
             ]
-        if task_link is not None:
-            entries.append((f"{name}/task", "link", task_link, 0o777, 10001))
-        else:
+        if task_link is None:
             entries += [
                 (f"{name}/task", "dir", b"", 0o700, 10001),
                 (f"{name}/task/home", "dir", b"", 0o700, 10001),
                 (f"{name}/task/tmp", "dir", b"", 0o700, 10001),
             ]
         self.put(self.work_volume, entries)
+        for part, target in links.items():
+            if target is not None:
+                self.link(f"{name}/{part}", target)
         return name
+
+    def link(self, path: str, target: str) -> None:
+        """Make a symbolic link in the work volume with `ln -s` in a short-lived container.
+
+        Not through `put_archive`: newer engines (API 1.48) refuse an archive whose link points
+        out of the extraction directory ("invalid symlink"), which is the very link a test needs.
+
+        Parameters
+        ----------
+        path
+            The link, relative to the volume's root; its directory is the task user's.
+        target
+            What it points to, as written.
+        """
+        self.client.containers.run(
+            self.image,
+            ["ln", "-s", target, f"/v/{path}"],
+            user="10001:10001",
+            labels=self.labels,
+            volumes={self.work_volume: {"bind": "/v", "mode": "rw"}},
+            remove=True,
+        )
 
     def run(
         self,

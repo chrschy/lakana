@@ -551,7 +551,8 @@ def test_a_subpath_that_is_a_link_out_of_the_volume_is_refused_by_docker(
     """
     attempt = running.attempt("print('ran')", code_link=code_link, task_link=task_link)
 
-    with pytest.raises(EngineError):
+    # Docker's own subpath check, not a missing directory: the link was followed and refused.
+    with pytest.raises(EngineError, match="escapes the base directory"):
         running.run(attempt)
 
     assert running.labelled() == []
