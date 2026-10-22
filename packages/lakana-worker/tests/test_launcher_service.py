@@ -15,6 +15,7 @@ import subprocess
 import sys
 import threading
 import time
+import types
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -2432,3 +2433,54 @@ def test_a_build_network_needs_a_started_launcher(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="start"):
         launcher.open_build_network("b1", "w1", [("pypi.org", 443)], 60)
+
+
+def test_a_build_subnet_rests_until_its_token_has_expired(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A token stays valid after its build ends: its /29 goes to no other network meanwhile.
+
+    Parameters
+    ----------
+    tmp_path
+        The state directory.
+    monkeypatch
+        Moves the launcher's clock past the token's expiry.
+    """
+    from lakana_worker.launcher import service
+
+    engine = FakeEngine()
+    launcher = _started(engine, tmp_path)
+    first, proxy = launcher.open_build_network("b1", "w1", [("pypi.org", 443)], 60)
+    key = read_key(tmp_path / "egress.key")
+    assert proxy is not None and key is not None
+    grant = verify(key, proxy.split(":", 2)[2].split("@")[0], time.time())
+    assert grant is not None
+    launcher.close_network(first)
+
+    second, _ = launcher.open_build_network("b2", "w1", [("pypi.org", 443)], 60)
+    assert launcher._subnets[second] != str(grant.network)
+    launcher.close_network(second)
+    task = launcher._open_network("task", "t1", "w1", None, 0)
+    assert launcher._subnets[task] != str(grant.network)
+    launcher.close_network(task)
+
+    later = grant.expires + 61
+    monkeypatch.setattr(
+        service, "time", types.SimpleNamespace(time=lambda: later, monotonic=time.monotonic)
+    )
+    third, _ = launcher.open_build_network("b3", "w1", [("pypi.org", 443)], 60)
+    assert launcher._subnets[third] == str(grant.network)
+
+
+def test_a_build_whose_token_would_be_too_long_is_refused_and_leaves_no_network(
+    tmp_path: Path,
+) -> None:
+    """32 long host names fit the request but not a token: a refusal, nothing left behind."""
+    engine = FakeEngine()
+    launcher = _started(engine, tmp_path)
+    hosts = [(f"{'a' * 60}.{'b' * 60}.{'c' * 60}.h{n}.example.org", 443) for n in range(32)]
+
+    with pytest.raises(Refused, match="too long"):
+        launcher.open_build_network("b1", "w1", hosts, 60)
+    assert not [n for n in engine.networks if n.startswith("lakana-build")]

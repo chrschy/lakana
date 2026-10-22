@@ -31,7 +31,10 @@ from pathlib import Path
 _VERSION = "v1"
 MAX_TARGETS = 64
 """The most host:port pairs one token grants."""
-_TOKEN = re.compile(r"\Av1\.[A-Za-z0-9_-]{1,8192}\.[0-9a-f]{64}\Z")
+MAX_PAYLOAD = 8192
+"""The longest payload `verify` accepts; `mint` refuses a longer one. The proxy's 16 KiB head
+limit holds a token of this size in base64 with room to spare."""
+_TOKEN = re.compile(rf"\Av1\.[A-Za-z0-9_-]{{1,{MAX_PAYLOAD}}}\.[0-9a-f]{{64}}\Z")
 _PURPOSE = re.compile(r"\A[a-z][a-z0-9-]{0,31}\Z")
 _HOST = re.compile(
     r"\A(?=.{1,253}\Z)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*\Z"
@@ -144,6 +147,11 @@ def mint(
     }
     text = json.dumps(data, separators=(",", ":"), sort_keys=True)
     payload = base64.urlsafe_b64encode(text.encode("ascii")).decode("ascii").rstrip("=")
+    if len(payload) > MAX_PAYLOAD:
+        raise ValueError(
+            f"the token would be too long for the proxy ({len(payload)} characters of payload, "
+            f"at most {MAX_PAYLOAD}); grant fewer or shorter host names"
+        )
     body = f"{_VERSION}.{payload}"
     return f"{body}.{_sign(key, body)}"
 
@@ -255,13 +263,30 @@ def read_key(path: Path) -> bytes | None:
     return key if len(key) == _KEY_BYTES else None
 
 
+def _restrict(path: Path) -> None:
+    """Set a key file's mode back to 0640, without following a link.
+
+    Parameters
+    ----------
+    path
+        The key file `read_key` just accepted.
+    """
+    with contextlib.suppress(OSError):
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        try:
+            if stat.S_IMODE(os.fstat(descriptor).st_mode) != 0o640:
+                os.fchmod(descriptor, 0o640)
+        finally:
+            os.close(descriptor)
+
+
 def ensure_key(path: Path) -> bytes:
     """Make the shared key once, readable by the owner and the group only.
 
-    A valid key is kept. A missing one is written to a temporary file and linked into place, so
-    the file never exists half written; a broken one (truncated, or something planted at the
-    path) is replaced. Replacing invalidates the tokens of running builds, which fail with a
-    proxy authentication error and run again.
+    A valid key is kept, its mode set back to 0640 if it changed. A missing one is written to a
+    temporary file and linked into place, so the file never exists half written; a broken one
+    (truncated, or something planted at the path) is replaced. Replacing invalidates the tokens
+    of running builds, which fail with a proxy authentication error and run again.
 
     Parameters
     ----------
@@ -275,6 +300,7 @@ def ensure_key(path: Path) -> bytes:
     """
     existing = read_key(path)
     if existing is not None:
+        _restrict(path)
         return existing
     present = os.path.lexists(path)
     key = secrets.token_bytes(_KEY_BYTES)

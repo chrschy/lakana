@@ -93,6 +93,8 @@ _PROBE_SECONDS = 300.0
 _WAIT_MARGIN = 60.0
 """Seconds past a run's timeout and grace that the wait for its container may last."""
 _SUBNET_TRIES = 8
+_REST_MARGIN = 60
+"""Seconds past its last token's expiry that a build's subnet stays out of use."""
 """How many subnets are tried when Docker says one overlaps an address pool of its own."""
 _CACHE_MAX_AGE = 14 * 86400
 """Seconds after which an idle shared cache is removed; the next build fills a new one."""
@@ -362,6 +364,8 @@ class Launcher:
         self._max_networks = self._pool.num_addresses // 8 * 3 // 4
         self._subnets: dict[str, str] = {}
         self._used_subnets: set[str] = set()
+        self._resting: dict[str, float] = {}
+        self._token_expiry: dict[str, int] = {}
         self._reserved_mb = 0
         self._key: bytes | None = None
         self._egress_key: bytes | None = None
@@ -1720,6 +1724,8 @@ class Launcher:
         ------
         EngineError
             If Docker refuses the network or cannot attach the proxy; nothing is left behind.
+        Refused
+            If the pairs do not fit in a token; nothing is left behind.
         RuntimeError
             If the launcher has not started, so it has no egress key.
         """
@@ -1730,15 +1736,21 @@ class Launcher:
         network = self._open_network("build", build, owner, service, _deadline(seconds))
         if not egress:
             return network, None
+        expires = int(time.time()) + seconds + 60
         with self._lock:
             subnet = self._subnets[network]
-        token = mint(
-            self._egress_key,
-            targets,
-            int(time.time()) + seconds + 60,
-            purpose="build",
-            network=ipaddress.ip_network(subnet),
-        )
+            self._token_expiry[network] = expires
+        try:
+            token = mint(
+                self._egress_key,
+                targets,
+                expires,
+                purpose="build",
+                network=ipaddress.ip_network(subnet),
+            )
+        except ValueError as exc:
+            self.close_network(network)
+            raise Refused(f"hosts: {exc}") from None
         return network, f"http://lakana:{token}@egress:{EGRESS_PORT}"
 
     def _create_network(self, name: str, kind: str, ident: str, owner: str, deadline: int) -> None:
@@ -1804,9 +1816,11 @@ class Launcher:
                     f"{self._max_networks}); wait for runs to end, or enlarge "
                     "LAKANA_LAUNCHER__NETWORK_RANGE"
                 )
+            now = time.time()
+            self._resting = {k: v for k, v in self._resting.items() if v > now}
             for candidate in self._pool.subnets(new_prefix=29):
                 text = str(candidate)
-                if text not in self._used_subnets:
+                if text not in self._used_subnets and text not in self._resting:
                     self._used_subnets.add(text)
                     self._subnets[name] = text
                     return text
@@ -1825,8 +1839,13 @@ class Launcher:
         """
         with self._lock:
             subnet = self._subnets.pop(name, None)
+            expiry = self._token_expiry.pop(name, None)
             if subnet is not None:
                 self._used_subnets.discard(subnet)
+                if expiry is not None:
+                    # A token bound to this subnet is valid until `expiry`: no other network gets
+                    # the subnet before then, so a leaked token finds no client there.
+                    self._resting[subnet] = expiry + _REST_MARGIN
 
     def _recover_subnets(self) -> None:
         """Mark the subnets of networks that survived the start-up removal as in use."""

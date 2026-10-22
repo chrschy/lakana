@@ -278,3 +278,22 @@ def test_a_directory_at_the_key_path_is_no_key(tmp_path: Path) -> None:
     (tmp_path / "egress.key").mkdir()
 
     assert read_key(tmp_path / "egress.key") is None
+
+
+def test_a_token_too_long_for_the_proxy_is_never_minted() -> None:
+    """`mint` refuses what `verify` would always refuse, instead of a token that never works."""
+    hosts = [("a" * 60 + "." + "b" * 60 + "." + f"h{n}.example.org", 443) for n in range(49)]
+
+    with pytest.raises(ValueError, match="too long"):
+        _token(targets=hosts)
+    assert verify(KEY, _token(targets=hosts[:20]), now=1000) is not None
+
+
+def test_an_existing_key_gets_its_mode_back(tmp_path: Path) -> None:
+    """A key someone opened up to everyone is closed again, and kept."""
+    path = tmp_path / "egress.key"
+    first = ensure_key(path)
+    path.chmod(0o644)
+
+    assert ensure_key(path) == first
+    assert stat.S_IMODE(path.stat().st_mode) == 0o640

@@ -550,7 +550,56 @@ def test_a_connected_network_is_read_from_the_routing_table(tmp_path: Path) -> N
             ipaddress.ip_network("fd00::/64"),
         }
     )
-    assert connected_networks(tmp_path / "missing", tmp_path / "missing6") == frozenset()
+    assert connected_networks(tmp_path / "missing", route6) is None
+    assert connected_networks(route, tmp_path / "missing6") == frozenset(
+        {ipaddress.ip_network("172.18.0.0/16"), ipaddress.ip_network("10.207.0.8/29")}
+    )
+
+
+def test_a_bad_route_line_is_skipped_alone(tmp_path: Path) -> None:
+    """One line the parser does not understand costs that line, not the table."""
+    route = tmp_path / "route"
+    route.write_text(
+        "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\n"
+        "eth0\tZZZZ\t00000000\t0001\t0\t0\t0\t0000FFFF\n"
+        "short\n"
+        "eth1\t0800CF0A\t00000000\t0001\t0\t0\t0\tF8FFFFFF\n",
+        encoding="ascii",
+    )
+    route6 = tmp_path / "ipv6_route"
+    route6.write_text("zz 40 x x 00 x x x x eth0\n", encoding="ascii")
+
+    assert connected_networks(route, route6) == frozenset({ipaddress.ip_network("10.207.0.8/29")})
+
+
+def test_without_a_routing_table_no_direct_connection_is_made(
+    proxy: Running, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Fail closed: without its attached networks the proxy cannot tell internal from outside.
+
+    Parameters
+    ----------
+    proxy
+        The running proxy (its index would otherwise be reachable).
+    tmp_path
+        Where no table is.
+    caplog
+        The log.
+    """
+    server = _proxy(tmp_path, route=tmp_path / "missing")
+    try:
+        answer, connection = _connect(
+            server.server_address[1], f"localhost:{proxy.index}", proxy.token()
+        )
+        body = connection.recv(4096)
+        connection.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert answer.split()[1] == b"503"
+    assert b"routing table" in body
+    assert "missing" in caplog.text
 
 
 def test_an_upstream_proxy_is_asked_to_connect(tmp_path: Path) -> None:

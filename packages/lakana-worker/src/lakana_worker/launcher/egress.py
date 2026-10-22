@@ -15,7 +15,8 @@ database and the object store, and every build network). A host is resolved once
 connection goes to an address that passed the check, so a name that resolves elsewhere a moment
 later (DNS rebinding) gains nothing. Private addresses outside those networks stay reachable: a
 company's package index is often one. With `LAKANA_EGRESS__UPSTREAM_PROXY` the proxy tunnels
-through a company proxy instead, which resolves and decides.
+through a company proxy instead, which resolves and decides. When the IPv4 routing table cannot be
+read, the proxy cannot tell internal addresses from others and makes no direct connection.
 
 Limits: a request head must arrive whole within 10 seconds and 16 KiB; at most
 `LAKANA_EGRESS__MAX_CONNECTIONS` connections at once (256); a tunnel ends after five idle minutes
@@ -106,6 +107,8 @@ class EgressSettings:
     reachable
         Networks a direct connection may reach although the built-in refusals cover them. Not
         a setting: tests reach an index on loopback with it.
+    route, route6
+        The kernel's routing tables, read for the attached networks. Not settings either.
     """
 
     key: Path = Path("/run/lakana-egress/egress.key")
@@ -114,6 +117,8 @@ class EgressSettings:
     max_connections: int = 256
     head_seconds: float = _HEAD_SECONDS
     reachable: frozenset[Network] = frozenset()
+    route: Path = _ROUTE
+    route6: Path = _ROUTE6
 
 
 def _port(text: str) -> int | None:
@@ -215,8 +220,64 @@ def load_settings(environ: Mapping[str, str]) -> EgressSettings:
     )
 
 
-def connected_networks(route: Path = _ROUTE, route6: Path = _ROUTE6) -> frozenset[Network]:
+def _ipv4_route(line: str) -> Network | None:
+    """Read one line of ``/proc/net/route``.
+
+    Parameters
+    ----------
+    line
+        The line.
+
+    Returns
+    -------
+    IPv4Network or None
+        The network of a route without a gateway; `None` for any other line or one not
+        understood.
+    """
+    fields = line.split()
+    try:
+        if len(fields) < 8 or int(fields[2], 16) != 0:
+            return None
+        destination = ipaddress.IPv4Address(bytes.fromhex(fields[1])[::-1])
+        mask = ipaddress.IPv4Address(bytes.fromhex(fields[7])[::-1])
+        if not int(mask):
+            return None
+        return ipaddress.IPv4Network(f"{destination}/{mask}", strict=False)
+    except ValueError:
+        return None
+
+
+def _ipv6_route(line: str) -> Network | None:
+    """Read one line of ``/proc/net/ipv6_route``.
+
+    Parameters
+    ----------
+    line
+        The line.
+
+    Returns
+    -------
+    IPv6Network or None
+        The network of a route without a next hop; `None` for any other line or one not
+        understood.
+    """
+    fields = line.split()
+    try:
+        if len(fields) < 10 or int(fields[4], 16) != 0:
+            return None
+        prefix = int(fields[1], 16)
+        if not prefix:
+            return None
+        address = ipaddress.IPv6Address(bytes.fromhex(fields[0]))
+        return ipaddress.IPv6Network(f"{address}/{prefix}", strict=False)
+    except ValueError:
+        return None
+
+
+def connected_networks(route: Path = _ROUTE, route6: Path = _ROUTE6) -> frozenset[Network] | None:
     """Read the networks this container is attached to from the kernel's routing tables.
+
+    A line not understood is skipped on its own. The IPv6 table may be missing (IPv6 off).
 
     Parameters
     ----------
@@ -227,28 +288,20 @@ def connected_networks(route: Path = _ROUTE, route6: Path = _ROUTE6) -> frozense
 
     Returns
     -------
-    frozenset
-        Every network reached without a gateway; empty where the tables cannot be read.
+    frozenset or None
+        Every network reached without a gateway; `None` when the IPv4 table cannot be read or
+        names no attached network, so the caller cannot tell internal addresses from others.
     """
-    found: set[Network] = set()
+    try:
+        lines = route.read_text(encoding="ascii").splitlines()[1:]
+    except (OSError, ValueError):
+        return None
+    found: set[Network] = {n for n in map(_ipv4_route, lines) if n is not None}
+    if not found:
+        return None
     with contextlib.suppress(OSError, ValueError):
-        for line in route.read_text(encoding="ascii").splitlines()[1:]:
-            fields = line.split()
-            if len(fields) < 8 or int(fields[2], 16) != 0:
-                continue
-            destination = ipaddress.IPv4Address(bytes.fromhex(fields[1])[::-1])
-            mask = ipaddress.IPv4Address(bytes.fromhex(fields[7])[::-1])
-            if int(mask):
-                found.add(ipaddress.IPv4Network(f"{destination}/{mask}", strict=False))
-    with contextlib.suppress(OSError, ValueError):
-        for line in route6.read_text(encoding="ascii").splitlines():
-            fields = line.split()
-            if len(fields) < 10 or int(fields[4], 16) != 0:
-                continue
-            prefix = int(fields[1], 16)
-            if prefix:
-                address = ipaddress.IPv6Address(bytes.fromhex(fields[0]))
-                found.add(ipaddress.IPv6Network(f"{address}/{prefix}", strict=False))
+        lines6 = route6.read_text(encoding="ascii").splitlines()
+        found |= {n for n in map(_ipv6_route, lines6) if n is not None}
     return frozenset(found)
 
 
@@ -686,7 +739,20 @@ class EgressServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
             found = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
         except OSError as exc:
             raise _Refused(502, f"cannot resolve {host} ({exc.strerror or exc})") from None
-        connected = connected_networks()
+        connected = connected_networks(self.settings.route, self.settings.route6)
+        if connected is None:
+            logger.error(
+                "Refused %s:%d: cannot read the attached networks from %s, so internal addresses "
+                "cannot be told apart; no direct connection is made.",
+                host,
+                port,
+                self.settings.route,
+            )
+            raise _Refused(
+                503,
+                "the egress proxy cannot read its routing table, so it makes no direct "
+                "connection; see `docker compose logs egress`",
+            )
         allowed = [
             entry
             for entry in found
