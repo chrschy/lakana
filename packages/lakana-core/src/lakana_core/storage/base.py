@@ -258,6 +258,31 @@ class Storage(Protocol):
         """
         ...
 
+    def read_url_prefix(self, path: str) -> str:
+        """Return the prefix of every URL `resolve_read_url` returns for a path under `path`.
+
+        The query process is allowed to open URLs under these prefixes and nothing else.
+
+        Parameters
+        ----------
+        path
+            Root-relative path of a directory: a table's location, an external table's claim.
+
+        Returns
+        -------
+        str
+            A string ending in ``/``: the absolute directory for a local filesystem; for a
+            cloud backend, ``scheme://host[:port]/<path>/`` exactly as the backend writes the
+            URLs of the files below it.
+
+        Raises
+        ------
+        ValidationError
+            If the path contains a NUL byte, escapes the configured storage root or names the
+            root itself, or if the backend's URLs have a shape the prefix cannot be cut from.
+        """
+        ...
+
     def open_write(self, path: str) -> StreamWriter:
         """Open a stream to an object, written piece by piece.
 

@@ -18,6 +18,7 @@ import pyarrow.parquet as pq
 import pytest
 import sqlglot.expressions as exp
 from pyiceberg.types import DecimalType, DoubleType, IcebergType, IntegerType, LongType, StringType
+from worker_test_helpers import local_prefixes
 
 from lakana_core.errors import ValidationError
 from lakana_core.policy.cast_types import arrow_cast_type, iceberg_cast_type
@@ -658,7 +659,9 @@ def test_a_read_of_two_thousand_files_and_a_thousand_columns_by_field_id(tmp_pat
         {"gold.wide": source},
     )
 
-    result = execute_query(rewritten.sql, rewritten.parameters, restrict_local_filesystem=False)
+    result = execute_query(
+        rewritten.sql, rewritten.parameters, read_prefixes=local_prefixes(rewritten.parameters)
+    )
 
     assert result.to_pylist() == [{"n": 4000, "s": 6000, "k": 4000}]
 
@@ -1016,7 +1019,9 @@ def test_a_query_that_is_only_a_values_list_returns_its_rows(
     check_blacklist(sql)
     rewritten = rewrite_query(sql, {})
 
-    result = execute_query(rewritten.sql, rewritten.parameters, restrict_local_filesystem=False)
+    result = execute_query(
+        rewritten.sql, rewritten.parameters, read_prefixes=local_prefixes(rewritten.parameters)
+    )
 
     assert result.to_pylist() == rows
     assert duckdb.connect().execute(sql).to_arrow_table().to_pylist() == rows

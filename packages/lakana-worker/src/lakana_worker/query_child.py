@@ -8,24 +8,53 @@ request from standard input (`lakana_worker.query_protocol.Request`), opens one 
 connection, configures it, runs the one statement and writes the result to standard output as an
 Arrow IPC stream. It holds no credential: the statement reads presigned URLs.
 
+**Allow-list mode.** DuckDB opens only what the request names: the locations of the tables the
+query reads (`read_prefixes`: a directory in local mode, a URL prefix otherwise), the query's
+private temp directory (DuckDB allows its own ``temp_directory``) and the CA bundle. Anything
+else, another host, another scheme, a sibling directory, a local file, a symlink out of a table
+directory, is refused while the statement is planned. DuckDB compares URLs as strings and sends a
+``..`` segment to the server unchanged, so before anything runs the child checks every file the
+variables name against the prefixes (`file_outside_prefixes`) and refuses the request when one
+lies outside.
+
+**One SELECT, checked by DuckDB's parser.** The lock holds settings, not secrets: ``CREATE SECRET
+(TYPE http, HTTP_PROXY ...)`` or ``EXTRA_HTTP_HEADERS`` would still route the reads, presigned URLs
+included, through a proxy of the statement's choosing. So before anything is configured the child
+splits the text with `duckdb.DuckDBPyConnection.extract_statements` and runs it only if that is
+exactly one ``SELECT`` (`NOT_ONE_SELECT` otherwise, an ``internal`` failure). The guard refuses
+all of these first; this is the second layer.
+
 Why each configuration statement is there, and why their order matters:
 
-* ``extension_directory`` comes first. The child's ``HOME`` is empty, and DuckDB looks for
-  installed extensions under ``HOME``; without the worker's directory ``INSTALL httpfs`` would
-  download the extension for every query, and fail without network access.
-* ``s3_access_key_id``, ``s3_secret_access_key`` and ``s3_session_token`` are cleared.
-  `duckdb.connect()` fills them from ``AWS_*`` environment variables. The child's environment
-  has none, and the statements stay as a second layer.
-* ``allow_persistent_secrets = false`` keeps DuckDB's disk-backed secret store out, and must be
-  set before the local file system is disabled: the secret manager reads local disk on the first
-  httpfs read.
-* ``autoinstall_known_extensions`` and ``autoload_known_extensions`` are off, so that no
-  function loads an extension the module did not load on purpose.
-* ``disabled_filesystems = 'LocalFileSystem'`` comes after ``INSTALL``/``LOAD httpfs``, which
-  need the local disk. It also blocks DuckDB's own spill file, so a query over ``memory_limit``
-  fails instead of spilling; that refusal has the same text as a refused local read, and
-  `_is_refused_spill` tells them apart by planning the statement again.
-* The resource limits come last; none touches the file system when set.
+1. ``extension_directory`` comes first. The child's ``HOME`` is empty, and DuckDB looks for
+   installed extensions under ``HOME``; without the worker's directory ``INSTALL httpfs`` would
+   download the extension for every query, and fail without network access.
+2. ``allow_community_extensions = false``; then ``INSTALL``/``LOAD httpfs``, which need the
+   extension directory, before external access is switched off.
+3. ``s3_access_key_id``, ``s3_secret_access_key`` and ``s3_session_token`` are cleared.
+   `duckdb.connect()` fills them from ``AWS_*`` environment variables. The child's environment
+   has none, and the statements stay as a second layer.
+4. ``allow_persistent_secrets = false`` keeps DuckDB's disk-backed secret store out (the secret
+   manager would read local disk on the first httpfs read);
+   ``autoinstall_known_extensions`` and ``autoload_known_extensions`` are off, so that no
+   function loads an extension the module did not load on purpose.
+5. ``ca_cert_file`` is the request's bundle. DuckDB 2 reads the bundle lazily, through the local
+   file system, on the first HTTPS request; it must be named and allowed, or every HTTPS read
+   fails with ``Cannot read a CA certificate bundle``.
+6. ``temp_directory`` before external access is switched off: afterwards DuckDB refuses to
+   change it (``Modifying the temp_directory has been disabled``).
+7. ``allowed_paths`` (the bundle) and ``allowed_directories`` (the prefixes), before external
+   access is switched off: afterwards DuckDB refuses to change them.
+8. ``enable_external_access = false``: from here on DuckDB opens only the allowed paths and
+   directories, and the temp directory.
+9. The limits: ``memory_limit``, ``threads``, ``max_temp_directory_size`` (``0KB`` unless the
+   request allows spilling, which only local mode does: a query over ``memory_limit`` then fails
+   with DuckDB's ``Out of Memory Error``) and, for a mode other than ``read``, ``TimeZone``. All
+   are still settable after step 8.
+10. ``lock_configuration = true`` last: no ``SET``, ``RESET`` or ``PRAGMA`` of any setting
+    succeeds after it (``SET VARIABLE`` still does). A second layer behind the guard, which
+    refuses ``SET`` itself, against ``http_proxy`` (a proxy would receive the presigned URLs),
+    ``extra_http_headers`` and ``ca_cert_file`` as settings (not as a secret: see above).
 
 **Values are variables, not parameters.** Every value the statement reads (a file list, a
 field-id map, a watermark) is set with ``SET VARIABLE "<name>" = ?`` before the statement, and
@@ -58,12 +87,14 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
+import functools
 import os
 import re
 import signal
 import sys
 import threading
 import traceback
+import urllib.parse
 from collections.abc import Callable, Mapping, Sequence
 from typing import BinaryIO, NoReturn, TextIO
 
@@ -72,7 +103,6 @@ import pyarrow as pa
 
 from lakana_worker.query_protocol import (
     CHECK,
-    DESCRIBE,
     EXIT_FAILED,
     EXIT_OK,
     EXIT_REFUSED,
@@ -105,9 +135,50 @@ _DUCKDB_ERROR_TYPE = re.compile(r"^([A-Z][A-Za-z]*(?: [A-Za-z]+)*) Error:")
 _TRANSIENT_ERROR_TYPES = frozenset({"IO", "HTTP"})
 _OUT_OF_MEMORY_ERROR_TYPES = frozenset({"Out of Memory"})
 _INTERNAL_ERROR_TYPES = frozenset({"INTERNAL", "FATAL"})
-_SPILL_REFUSAL = "LocalFileSystem has been disabled by configuration"
-"""DuckDB's refusal to open a file while the local file system is disabled. A refused local read
-and a refused spill file produce the same text, so it never decides alone."""
+_CA_REFUSAL = "Cannot read a CA certificate bundle"
+"""DuckDB 2's refusal to load the CA bundle under the restriction. It should not occur once
+``ca_cert_file`` and ``allowed_paths`` name the bundle; pinned so that a DuckDB change shows."""
+
+REFUSED_LOCATION = (
+    "Query failed: the query tried to open a file or an address that is not one of the tables "
+    "it reads."
+)
+"""What a child says of DuckDB's refusal to open a path or URL outside the allowed ones. DuckDB's
+own text quotes the path, so it is never passed on."""
+
+OUTSIDE_PREFIXES = (
+    "Query failed: a file of the query lies outside the locations it was given. This is a "
+    "defect of Lakana; please report it."
+)
+"""What a child says, without running anything, when a file of a variable lies outside the
+request's prefixes, or a prefix has a shape the child does not accept."""
+
+NOT_ONE_SELECT = (
+    "Query failed: the query process was given something other than one SELECT statement. "
+    "This is a defect of Lakana; please report it."
+)
+"""What a child says, without running anything, of SQL that DuckDB's parser does not read as
+exactly one ``SELECT``. Every mode sends one (a describe wraps it in ``SELECT * FROM (...)
+LIMIT 0``); anything else (a second statement, ``CREATE SECRET``, ``SET``, ``PRAGMA``,
+``ATTACH``, ``COPY``, ``LOAD``, ``CALL``) is refused here as the layer behind the guard."""
+
+NO_SPILL = (
+    f"Query failed: the query ran out of memory and cannot spill to disk. {MEMORY_LIMIT_ADVICE}"
+)
+"""What a child says of running out of memory when the request does not allow spilling."""
+
+NETWORK_SETTINGS = "https://lakana-labs.github.io/lakana/reference/network-settings/"
+"""The page that says how to trust a private certificate authority."""
+
+_REMOTE_PREFIX = re.compile(
+    r"https?://(?:[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?|\[[0-9A-Fa-f:.]+\])(?::[0-9]{1,5})?"
+    r"/[^?#\s\\]+/"
+)
+"""A remote prefix: ``http(s)://host[:port]/`` and a non-empty path ending in ``/``. No user
+information, query, fragment, white space or backslash."""
+
+_DOT_ESCAPE = re.compile(r"%2e", re.IGNORECASE)
+"""A percent-escaped dot, which a server may decode into a ``..`` segment."""
 
 _INTERRUPT_SECONDS = 0.1
 """How often the main thread interrupts the connection once it was asked to stop."""
@@ -125,9 +196,6 @@ _PR_SET_PDEATHSIG = 1
 _VARIABLE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
 """A name the child sets a variable under. DuckDB binds no name in `SET VARIABLE`, so the name
 is written into the statement, double-quoted, and must be an identifier."""
-
-_Statement = str
-
 
 _READ_CAST = re.compile(
     r'failed to cast column "(?P<column>[^"]*)" from type (?P<stored>.+?) to (?P<wanted>.+?): :'
@@ -249,8 +317,8 @@ def _is_out_of_memory(exc: BaseException) -> bool:
     )
 
 
-def _is_permission_refusal(exc: BaseException) -> bool:
-    """Tell DuckDB's refusal to use the disabled local file system from any other error.
+def _is_permission(exc: BaseException) -> bool:
+    """Tell DuckDB's refusal to open a path or URL from any other error.
 
     Parameters
     ----------
@@ -260,13 +328,9 @@ def _is_permission_refusal(exc: BaseException) -> bool:
     Returns
     -------
     bool
-        Whether DuckDB refused to touch the local file system. A refused local read and
-        a refused spill file both qualify.
+        Whether DuckDB reports a ``Permission Error``, by the class or by the message's prefix.
     """
-    is_permission = isinstance(exc, duckdb.PermissionException) or (
-        _error_type(exc) == "Permission"
-    )
-    return is_permission and _SPILL_REFUSAL in str(exc)
+    return isinstance(exc, duckdb.PermissionException) or _error_type(exc) == "Permission"
 
 
 def _is_internal(exc: BaseException) -> bool:
@@ -287,8 +351,121 @@ def _is_internal(exc: BaseException) -> bool:
     )
 
 
+def _has_dot_segment(path: str, separators: str) -> bool:
+    """Tell whether a path holds a ``.`` or ``..`` segment.
+
+    Parameters
+    ----------
+    path
+        The path, or the part of a URL after its prefix.
+    separators
+        The characters that separate segments.
+
+    Returns
+    -------
+    bool
+        Whether a segment is ``.`` or ``..``.
+    """
+    return any(segment in (".", "..") for segment in re.split(f"[{re.escape(separators)}]", path))
+
+
+def valid_prefix(prefix: str) -> bool:
+    """Tell whether a prefix has a shape the child gives DuckDB as an allowed location.
+
+    Parameters
+    ----------
+    prefix
+        One of the request's `read_prefixes`.
+
+    Returns
+    -------
+    bool
+        For a remote prefix: ``http(s)://host[:port]/`` and a non-empty path ending in ``/``
+        whose segments are neither empty nor ``.``/``..`` and that holds no ``%2e``. For a local
+        one: absolute, ending in ``/``, `os.path.normpath`-canonical before that slash, and not
+        ``/`` itself. Nothing else (no NUL byte either).
+    """
+    if "\x00" in prefix:
+        return False
+    if prefix.startswith(("http://", "https://")):
+        if _REMOTE_PREFIX.fullmatch(prefix) is None:
+            return False
+        path = prefix.split("/", 3)[3][:-1]
+        return not _DOT_ESCAPE.search(path) and all(
+            segment not in ("", ".", "..") for segment in path.split("/")
+        )
+    directory = prefix[:-1]
+    return (
+        prefix.startswith("/")
+        and not prefix.startswith("//")
+        and prefix.endswith("/")
+        and directory != ""
+        and os.path.normpath(directory) == directory
+    )
+
+
+def _inside(url: str, prefix: str) -> bool:
+    """Tell whether a file lies under one prefix, without a way out of it.
+
+    Parameters
+    ----------
+    url
+        A file the statement reads: a presigned URL, or a local path.
+    prefix
+        A prefix `valid_prefix` accepted.
+
+    Returns
+    -------
+    bool
+        Whether `url` starts with `prefix` and the rest (up to ``?`` for a URL) holds no
+        ``.``/``..`` segment and no ``%2e``. A URL's rest is also checked once percent-decoded,
+        split at ``/`` and at a backslash, as a server might read it.
+    """
+    if "\x00" in url or not url.startswith(prefix):
+        return False
+    rest = url[len(prefix) :]
+    if not prefix.startswith(("http://", "https://")):
+        return not _DOT_ESCAPE.search(rest) and not _has_dot_segment(rest, "/")
+    rest = rest.split("?", 1)[0]
+    return not (
+        _DOT_ESCAPE.search(rest)
+        or _has_dot_segment(rest, "/")
+        or _has_dot_segment(urllib.parse.unquote(rest), "/\\")
+    )
+
+
+def file_outside_prefixes(request: Request) -> bool:
+    """Tell whether the request must be refused before anything runs (fail closed).
+
+    DuckDB checks only what it opens, and sends a URL's ``..`` to the server unchanged
+    (``.../t1/../t2/a.parquet`` passes an allowed ``.../t1/``), so the child checks the files
+    itself.
+
+    Parameters
+    ----------
+    request
+        The request: its prefixes and the file lists among its variables.
+
+    Returns
+    -------
+    bool
+        Whether a prefix has a shape `valid_prefix` refuses, the CA bundle is not an absolute
+        path, or a string of a list-valued variable does not lie inside one of the prefixes.
+    """
+    if not all(valid_prefix(prefix) for prefix in request.read_prefixes):
+        return True
+    if not os.path.isabs(request.ca_bundle):
+        return True
+    return any(
+        not any(_inside(url, prefix) for prefix in request.read_prefixes)
+        for value in request.parameters.values()
+        if isinstance(value, list)
+        for url in value
+    )
+
+
 def configure(connection: duckdb.DuckDBPyConnection, request: Request) -> None:
-    """Apply the isolation settings and the limits, in their required order.
+    """Apply the isolation settings and the limits, in their required order, then lock them.
 
     See the module's docstring for why each statement is there.
 
@@ -297,9 +474,9 @@ def configure(connection: duckdb.DuckDBPyConnection, request: Request) -> None:
     connection
         A fresh in-memory connection.
     request
-        Supplies the extension directory, the limits and the mode: a mode other than ``read``
-        pins the session time zone to UTC, so a ``TIMESTAMPTZ`` exports as a type a table can
-        store.
+        Supplies the extension directory, the CA bundle, the prefixes, the temp directory, the
+        limits and the mode: a mode other than ``read`` pins the session time zone to UTC, so a
+        ``TIMESTAMPTZ`` exports as a type a table can store.
     """
     connection.execute("SET extension_directory = ?", [request.extension_directory])
     connection.execute("SET allow_community_extensions = false")
@@ -310,70 +487,37 @@ def configure(connection: duckdb.DuckDBPyConnection, request: Request) -> None:
     connection.execute("SET allow_persistent_secrets = false")
     connection.execute("SET autoinstall_known_extensions = false")
     connection.execute("SET autoload_known_extensions = false")
-    if request.restrict_local_filesystem:
-        connection.execute("SET disabled_filesystems = 'LocalFileSystem'")
+    connection.execute("SET ca_cert_file = ?", [request.ca_bundle])
+    connection.execute("SET temp_directory = ?", [request.temp_directory])
+    connection.execute("SET allowed_paths = ?", [[request.ca_bundle]])
+    connection.execute("SET allowed_directories = ?", [list(request.read_prefixes)])
+    connection.execute("SET enable_external_access = false")
     connection.execute("SET memory_limit = ?", [request.memory_limit])
     connection.execute("SET threads = ?", [request.threads])
-    connection.execute("SET temp_directory = ?", [request.temp_directory])
-    connection.execute("SET max_temp_directory_size = ?", [request.max_temp_directory_size])
+    connection.execute(
+        "SET max_temp_directory_size = ?",
+        [request.max_temp_directory_size if request.spill else "0KB"],
+    )
     if request.mode != READ:
         connection.execute("SET TimeZone = 'UTC'")
-
-
-def _is_refused_spill(
-    connection: duckdb.DuckDBPyConnection, exc: BaseException, statement: _Statement | None
-) -> bool:
-    """Tell a refused spill file from a refused local read.
-
-    A local read is refused while the statement is planned; a spill is refused while it runs.
-    So the statement is planned again on the same connection (``EXPLAIN`` executes nothing): if
-    it plans, the refusal came from a spill. Only a text of exactly one ``SELECT`` is planned
-    again, as the statement DuckDB extracted from it: ``EXPLAIN a; b`` would execute ``b``.
-
-    Parameters
-    ----------
-    connection
-        The connection the statement failed on.
-    exc
-        The `duckdb.Error` or `OSError` that ended the statement.
-    statement
-        The SQL; `None` when nothing may be planned again (a describe).
-
-    Returns
-    -------
-    bool
-        Whether the refusal came from a spill file.
-    """
-    if statement is None or not _is_permission_refusal(exc):
-        return False
-    try:
-        statements = connection.extract_statements(statement)
-        if len(statements) != 1 or statements[0].type != duckdb.StatementType.SELECT:
-            return False
-        connection.execute(f"EXPLAIN {statements[0].query}")
-    except (duckdb.Error, OSError):
-        return False
-    return True
+    connection.execute("SET lock_configuration = true")
 
 
 def failure(
-    connection: duckdb.DuckDBPyConnection,
     exc: BaseException,
-    statement: _Statement | None,
     asked: threading.Event,
     files: Sequence[str] = (),
     mapped: bool = False,
+    *,
+    spill: bool = False,
+    ca_bundle: str = "",
 ) -> ErrorDocument:
     """Classify a DuckDB failure and word it for the user.
 
     Parameters
     ----------
-    connection
-        The connection the statement failed on, for the second planning.
     exc
         The `duckdb.Error` or `OSError` that ended the statement.
-    statement
-        The SQL, or `None` when nothing may be planned again.
     asked
         Set once the child was asked to stop; the failure is then `interrupted`, whatever DuckDB
         said. An interrupt DuckDB reports without that ask is a lost cause (`invalid`, as before,
@@ -387,6 +531,11 @@ def failure(
         the mapped type while it reads, and a conversion error quotes the cell: under a row
         filter the text names no column, so any conversion error is replaced by a fixed one
         that also covers a cast of the query's own.
+    spill
+        Whether the request allowed spilling. Without it, running out of memory is worded as
+        "cannot spill to disk": decided by the request, never by DuckDB's text.
+    ca_bundle
+        The request's CA bundle, named in the message of a refused bundle.
 
     Returns
     -------
@@ -416,17 +565,20 @@ def failure(
     if _is_transient(exc):
         return ErrorDocument(TRANSIENT, message)
     if _is_out_of_memory(exc):
+        if not spill:
+            return ErrorDocument(OUT_OF_MEMORY, NO_SPILL)
         reason = text.split("\n", 1)[0].strip()
         return ErrorDocument(OUT_OF_MEMORY, f"Query failed: {reason} {MEMORY_LIMIT_ADVICE}")
-    refused_spill = _is_refused_spill(connection, exc, statement)
-    if asked.is_set():
-        return ErrorDocument(INTERRUPTED, _ASKED)
-    if refused_spill:
-        return ErrorDocument(
-            OUT_OF_MEMORY,
-            "Query failed: the query ran out of memory and cannot spill to disk. "
-            f"{MEMORY_LIMIT_ADVICE}",
-        )
+    if _is_permission(exc):
+        if _CA_REFUSAL in text:
+            return ErrorDocument(
+                INTERNAL,
+                f"Query failed: the query process could not read its certificate authorities "
+                f"from {ca_bundle}. Set AWS_CA_BUNDLE or SSL_CERT_FILE on the worker to a "
+                f"readable PEM file of your object store's certificate authority; see "
+                f"{NETWORK_SETTINGS}.",
+            )
+        return ErrorDocument(INVALID, REFUSED_LOCATION)
     if _is_internal(exc):
         return ErrorDocument(INTERNAL, message)
     return ErrorDocument(INVALID, message)
@@ -470,13 +622,10 @@ class Session:
 
 
 def _stream(
-    connection: duckdb.DuckDBPyConnection,
     reader: pa.RecordBatchReader,
     sink: BinaryIO,
-    statement: _Statement | None,
     asked: threading.Event,
-    files: Sequence[str] = (),
-    mapped: bool = False,
+    classify: Callable[[BaseException], ErrorDocument],
 ) -> ErrorDocument | None:
     """Write a result to the sink as an Arrow IPC stream, end marker included.
 
@@ -486,20 +635,14 @@ def _stream(
 
     Parameters
     ----------
-    connection
-        The connection the result comes from.
     reader
         The result as an Arrow reader.
     sink
         Where the stream goes (standard output).
-    statement
-        The SQL, for the classification of an error.
     asked
         Set once the child was asked to stop; checked before each batch.
-    files
-        The file URLs of the reads, for `failure` to keep out of a message.
-    mapped
-        Whether a read goes through a field-id map, as for `failure`.
+    classify
+        Turns an error of DuckDB into the document (`failure`, with the request's details).
 
     Returns
     -------
@@ -517,7 +660,7 @@ def _stream(
             except StopIteration:
                 break
             except (duckdb.Error, OSError) as exc:
-                return failure(connection, exc, statement, asked, files, mapped)
+                return classify(exc)
             writer.write_batch(batch)
         writer.close()
         sink.flush()
@@ -641,12 +784,20 @@ def serve(
         exception becomes an `internal` document that names its class and nothing else.
     """
     try:
+        if request.mode != CHECK and file_outside_prefixes(request):
+            return ErrorDocument(INTERNAL, OUTSIDE_PREFIXES)
         connection = session.open()
-        mapped = any(isinstance(value, tuple) for value in request.parameters.values())
-        statement: _Statement | None = None
         files = [
             url for value in request.parameters.values() if isinstance(value, list) for url in value
         ]
+        classify = functools.partial(
+            failure,
+            asked=asked,
+            files=files,
+            mapped=any(isinstance(value, tuple) for value in request.parameters.values()),
+            spill=request.spill,
+            ca_bundle=request.ca_bundle,
+        )
         try:
             if request.mode == CHECK:
                 refused = _check(connection, request)
@@ -654,22 +805,24 @@ def serve(
                     return refused
                 reader = pa.RecordBatchReader.from_batches(pa.schema([]), [])
             else:
+                statements = connection.extract_statements(request.sql)
+                if not statements:
+                    return ErrorDocument(INVALID, NO_RESULT_MESSAGE)
+                if len(statements) != 1 or statements[0].type != duckdb.StatementType.SELECT:
+                    return ErrorDocument(INTERNAL, NOT_ONE_SELECT)
                 configure(connection, request)
                 if asked.is_set():
                     return ErrorDocument(INTERRUPTED, _ASKED)
                 set_variables(connection, request.parameters)
-                if request.mode != DESCRIBE:
-                    statement = request.sql
                 # `sql` and not `execute`: its relation streams through `to_arrow_reader`, and it
                 # is the call whose result keeps an Arrow export in DuckDB 2. Nothing is bound to
-                # the statement; what it reads was set as variables above.
-                result = connection.sql(request.sql)
-                if result is None:
-                    return ErrorDocument(INVALID, NO_RESULT_MESSAGE)
-                reader = result.to_arrow_reader(request.batch_rows)
+                # the statement; what it reads was set as variables above. One SELECT always
+                # gives a relation, so there is no `None` to handle here (an empty text was
+                # answered above).
+                reader = connection.sql(request.sql).to_arrow_reader(request.batch_rows)
         except (duckdb.Error, OSError) as exc:
-            return failure(connection, exc, statement, asked, files, mapped)
-        return _stream(connection, reader, sink, statement, asked, files, mapped)
+            return classify(exc)
+        return _stream(reader, sink, asked, classify)
     except BaseException as exc:  # the statement's thread must hand back a document
         _report_unexpected(exc)
         return ErrorDocument(

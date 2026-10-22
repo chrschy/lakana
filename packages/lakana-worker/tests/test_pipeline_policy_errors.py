@@ -476,8 +476,7 @@ def _through_the_child(exc: BaseException) -> ValidationError:
     ValidationError
         The error the parent receives, of the type the document's kind maps to.
     """
-    connection = duckdb.connect(":memory:")
-    document = query_child.failure(connection, exc, None, threading.Event())
+    document = query_child.failure(exc, threading.Event(), spill=True)
     return _KINDS[document.kind](document.message)
 
 

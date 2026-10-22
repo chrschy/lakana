@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager
 from pathlib import Path
 from unittest import mock
@@ -499,7 +499,7 @@ def test_diagnose_views_skips_a_view_that_vanished_before_diagnosis(
             None,
             QueryLimitsConfig(),
             [],
-            restrict_local_filesystem=True,
+            spill=False,
         )
 
     assert result is None
@@ -600,7 +600,7 @@ def test_a_diagnosis_that_is_stopped_itself_leaves_the_failure_of_the_query(
         None,
         QueryLimitsConfig(),
         [],
-        restrict_local_filesystem=True,
+        spill=False,
     )
 
     assert result is None
@@ -703,7 +703,8 @@ def test_a_write_over_a_view_that_the_fence_refuses_is_not_diagnosed_as_a_broken
         sql: str,
         parameters: Mapping[str, object] | None = None,
         *,
-        restrict_local_filesystem: bool = True,
+        read_prefixes: Sequence[str] = (),
+        spill: bool = False,
         limits: QueryLimitsConfig | None = None,
     ) -> AbstractContextManager[tuple[pa.Schema, Iterator[pa.RecordBatch]]]:
         with Session(engine) as other:
@@ -713,9 +714,7 @@ def test_a_write_over_a_view_that_the_fence_refuses_is_not_diagnosed_as_a_broken
                 .values(status=QueryRunStatus.FAILED, error_message="ended")
             )
             other.commit()
-        return real(
-            sql, parameters, restrict_local_filesystem=restrict_local_filesystem, limits=limits
-        )
+        return real(sql, parameters, read_prefixes=read_prefixes, spill=spill, limits=limits)
 
     monkeypatch.setattr(pipeline_module, "stream_query", ended_meanwhile)
     monkeypatch.setattr(

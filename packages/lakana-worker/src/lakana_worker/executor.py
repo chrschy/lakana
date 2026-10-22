@@ -9,8 +9,8 @@ Isolation is what remains once the query has been rewritten
 (`lakana_core.query_rewrite.rewrite_query`) to read only the URLs the catalog resolved: the
 child holds no credential (its request carries presigned URLs and nothing else, its environment
 is built from scratch), and its connection is configured as `lakana_worker.query_child.configure`
-documents. A process boundary, not a sandbox: the child runs as the worker's user and sees its
-file system.
+documents: in allow-list mode, opening only the locations of the tables the query reads. A
+process boundary, not a sandbox: the child runs as the worker's user.
 
 A query is stopped for four reasons, always by "ask, wait `kill_grace_seconds`, kill": its
 time limit, the cancel event of the task run it executes for (`cancellation`), a cancel request
@@ -48,6 +48,7 @@ import pyarrow as pa
 from lakana_core.config import QueryLimitsConfig
 from lakana_core.errors import ValidationError
 from lakana_worker import query_process
+from lakana_worker.ca_bundle import query_ca_bundle
 from lakana_worker.query_process import ChildFailed, StopReason, Stops
 from lakana_worker.query_protocol import (
     CHECK,
@@ -504,7 +505,8 @@ def _child(
     sql: str,
     named: dict[str, object] | None,
     *,
-    restrict_local_filesystem: bool,
+    read_prefixes: Sequence[str],
+    spill: bool,
     limits: QueryLimitsConfig,
     batch_rows: int,
     writing: bool = False,
@@ -520,8 +522,10 @@ def _child(
         The rewritten SQL.
     named
         The values bound by name, or `None`.
-    restrict_local_filesystem
-        Whether the child disables DuckDB's local file system.
+    read_prefixes
+        The locations the statement may open (see `execute_query`).
+    spill
+        Whether DuckDB may spill to the child's private temp directory.
     limits
         Supplies the limits the child is given and the time limit and grace the worker applies.
     batch_rows
@@ -564,7 +568,9 @@ def _child(
             sql=sql,
             # `encode_request` refuses a value of any other type, by the parameter's name.
             parameters=cast("Mapping[str, ParameterValue]", named or {}),
-            restrict_local_filesystem=restrict_local_filesystem,
+            read_prefixes=tuple(read_prefixes),
+            ca_bundle=query_ca_bundle(),
+            spill=spill,
             memory_limit=limits.memory_limit,
             threads=limits.threads,
             temp_directory=temp_directory,
@@ -643,7 +649,8 @@ def execute_query(
     sql: str,
     parameters: Mapping[str, object] | None = None,
     *,
-    restrict_local_filesystem: bool = True,
+    read_prefixes: Sequence[str] = (),
+    spill: bool = False,
     limits: QueryLimitsConfig | None = None,
 ) -> pa.Table:
     """Run one rewritten query in a query child and return its result.
@@ -665,15 +672,19 @@ def execute_query(
         instead of executing as SQL. Only the types the platform binds can be
         sent to the child (lists of strings, integers, decimals, dates and
         timestamps).
-    restrict_local_filesystem
-        `True` (the default) blocks the worker's own disk — the correct
-        setting whenever the resolved URLs are presigned HTTPS, i.e.
-        team/cloud mode (S3/ADLS). Local (`file://`) mode's resolved "URLs"
-        are bare local paths (nothing to presign there), which
-        this same restriction would also block, so the pipeline must
-        pass `False` when the environment's storage root is `file://`.
-        Clearing the ambient S3 credentials is *not* conditional on this:
-        the child never has any, whatever the mode.
+    read_prefixes
+        The locations the statement may open, each ending in ``/``: the location of every
+        table the query reads, in the form its files' URLs take (the URL prefix of a
+        presigned URL, ``http(s)://host[:port]/<path>/``; the absolute directory in local
+        ``file://`` mode), as `lakana_core.storage.base.Storage.read_url_prefix` makes it.
+        DuckDB runs in allow-list mode: nothing else is opened, besides the child's private
+        temp directory and the CA bundle (`lakana_worker.ca_bundle`). Every file a variable
+        names must lie under one of them, or the child refuses to run (an `internal` failure).
+        The default, none, lets a statement read nothing but what it computes itself.
+    spill
+        Whether DuckDB may spill to the child's private temp directory, up to
+        `limits.max_temp_directory_size`. Only local ``file://`` mode passes `True`;
+        otherwise a query over `limits.memory_limit` fails as out of memory.
     limits
         Result and execution bounds, including the wall-clock
         `timeout_seconds` and the `kill_grace_seconds` after which a query that
@@ -687,8 +698,8 @@ def execute_query(
     Raises
     ------
     ValidationError
-        If the query fails for any reason: it fails to parse; it names a local
-        file DuckDB refuses to open; a configuration statement of the child
+        If the query fails for any reason: it fails to parse; it opens a file
+        or an address outside `read_prefixes`; a configuration statement of the child
         fails; the SQL produces no result at all (empty or comment-only text);
         `limits.memory_limit` is not a value DuckDB accepts; an execution error
         surfaces while a later batch is fetched; a value cannot be sent to the
@@ -716,7 +727,8 @@ def execute_query(
         READ,
         sql,
         named,
-        restrict_local_filesystem=restrict_local_filesystem,
+        read_prefixes=read_prefixes,
+        spill=spill,
         limits=limits,
         batch_rows=_FETCH_BATCH_ROWS,
     ) as (schema, batches):
@@ -745,7 +757,8 @@ def stream_query(
     sql: str,
     parameters: Mapping[str, object] | None = None,
     *,
-    restrict_local_filesystem: bool = True,
+    read_prefixes: Sequence[str] = (),
+    spill: bool = False,
     limits: QueryLimitsConfig | None = None,
 ) -> Generator[tuple[pa.Schema, Iterator[pa.RecordBatch]], None, None]:
     """Run one rewritten query for a write and stream its batches.
@@ -768,7 +781,9 @@ def stream_query(
     parameters
         Values set as variables for `sql`, as for `execute_query`: the
         rewriter's URL lists plus, for an incremental append, the watermark.
-    restrict_local_filesystem
+    read_prefixes
+        As for `execute_query`.
+    spill
         As for `execute_query`.
     limits
         Supplies `memory_limit`, `threads`, the spill bounds, `timeout_seconds` and
@@ -794,7 +809,8 @@ def stream_query(
         WRITE,
         sql,
         named,
-        restrict_local_filesystem=restrict_local_filesystem,
+        read_prefixes=read_prefixes,
+        spill=spill,
         limits=limits,
         batch_rows=_WRITE_FETCH_BATCH_ROWS,
         writing=True,
@@ -806,7 +822,8 @@ def describe_query(
     sql: str,
     parameters: Mapping[str, object] | None = None,
     *,
-    restrict_local_filesystem: bool = True,
+    read_prefixes: Sequence[str] = (),
+    spill: bool = False,
     limits: QueryLimitsConfig | None = None,
 ) -> pa.Schema:
     """Plan one rewritten query in a query child and return its result schema without rows.
@@ -823,7 +840,9 @@ def describe_query(
         Rewritten SQL.
     parameters
         Values set as variables for it, as for `execute_query`.
-    restrict_local_filesystem
+    read_prefixes
+        As for `execute_query`.
+    spill
         As for `execute_query`.
     limits
         Supplies `memory_limit`, `threads`, the spill bounds, `timeout_seconds` and
@@ -848,7 +867,8 @@ def describe_query(
         DESCRIBE,
         described,
         named,
-        restrict_local_filesystem=restrict_local_filesystem,
+        read_prefixes=read_prefixes,
+        spill=spill,
         limits=limits,
         batch_rows=_FETCH_BATCH_ROWS,
     ) as (schema, batches):
@@ -882,7 +902,8 @@ def check_limits(limits: QueryLimitsConfig) -> None:
             CHECK,
             "",
             None,
-            restrict_local_filesystem=True,
+            read_prefixes=(),
+            spill=False,
             limits=limits,
             batch_rows=_FETCH_BATCH_ROWS,
             timeout_seconds=_CHECK_TIMEOUT_SECONDS,

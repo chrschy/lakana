@@ -7,22 +7,27 @@ import datetime as dt
 import io
 import json
 import os
+import posixpath
 import selectors
 import signal
 import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable
+import urllib.parse
 from decimal import Decimal
 from pathlib import Path
+from typing import cast
 
 import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from lakana_worker import query_child
+from lakana_worker.ca_bundle import query_ca_bundle
 from lakana_worker.query_protocol import (
     CHECK,
     DESCRIBE,
@@ -76,7 +81,9 @@ def _request(sql: str = "SELECT 42 AS answer", **overrides: object) -> Request:
         "mode": READ,
         "sql": sql,
         "parameters": {},
-        "restrict_local_filesystem": True,
+        "read_prefixes": (),
+        "ca_bundle": query_ca_bundle(),
+        "spill": False,
         "memory_limit": "200MB",
         "threads": 2,
         "temp_directory": "/nonexistent/lakana-test-spill",
@@ -172,7 +179,7 @@ def test_the_statement_reads_every_value_as_a_variable() -> None:
     """Each value the platform sends arrives as a DuckDB variable of its own type."""
     moment = dt.datetime(2026, 10, 8, 12, 30, tzinfo=dt.UTC)
     parameters = {
-        "urls": ["a", "b"],
+        "urls": ["/data/t/a", "/data/t/b"],
         "n": 7,
         "d": Decimal("1.50"),
         "day": dt.date(2026, 10, 8),
@@ -185,7 +192,9 @@ def test_the_statement_reads_every_value_as_a_variable() -> None:
         "getvariable('naive') < getvariable('naive') + INTERVAL 1 HOUR AS naive, "
         "epoch(getvariable('aware')) AS aware"
     )
-    code, stream, _stderr = _main(_request(sql, parameters=parameters, mode=WRITE))
+    code, stream, _stderr = _main(
+        _request(sql, parameters=parameters, mode=WRITE, read_prefixes=("/data/t/",))
+    )
     assert code == EXIT_OK
     assert _table(stream).to_pylist() == [
         {
@@ -211,7 +220,8 @@ def test_a_variable_read_streams_in_more_than_one_batch(
     request = _request(
         "SELECT * FROM read_parquet(getvariable('v_0_files'))",
         parameters={"v_0_files": [str(path)]},
-        restrict_local_filesystem=False,
+        read_prefixes=(f"{tmp_path}/",),
+        spill=True,
         memory_limit="32MB",
         threads=1,
     )
@@ -248,7 +258,9 @@ def test_the_statement_runs_without_parameters(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr(query_child.duckdb, "connect", lambda *_a, **_k: Spy())
     request = _request(
-        "SELECT len(getvariable('v_0_files')) AS n", parameters={"v_0_files": ["a", "b"]}
+        "SELECT len(getvariable('v_0_files')) AS n",
+        parameters={"v_0_files": ["/data/t/a", "/data/t/b"]},
+        read_prefixes=("/data/t/",),
     )
 
     code, stream, stderr = _main(request)
@@ -265,7 +277,8 @@ def test_a_failing_statement_never_echoes_a_value_it_was_given(tmp_path: Path) -
     request = _request(
         "SELECT nope FROM read_parquet(getvariable('v_0_files'))",
         parameters={"v_0_files": [str(path)]},
-        restrict_local_filesystem=False,
+        read_prefixes=(f"{tmp_path}/",),
+        spill=True,
     )
 
     code, _stream, stderr = _main(request)
@@ -298,47 +311,160 @@ def test_a_write_and_a_describe_run_in_utc_and_a_read_in_the_session_zone() -> N
     assert describe.num_rows == 0
 
 
+_SETTINGS = (
+    "s3_access_key_id",
+    "s3_secret_access_key",
+    "s3_session_token",
+    "allow_persistent_secrets",
+    "autoinstall_known_extensions",
+    "autoload_known_extensions",
+    "allow_community_extensions",
+    "extension_directory",
+    "threads",
+    "temp_directory",
+    "max_temp_directory_size",
+    "memory_limit",
+    "enable_external_access",
+    "allowed_directories",
+    "allowed_paths",
+    "ca_cert_file",
+    "lock_configuration",
+)
+
+
+def _configured(
+    request: Request, statements: list[str] | None = None
+) -> tuple[duckdb.DuckDBPyConnection, dict[str, object]]:
+    """Configure a real connection as the child does and read every setting back.
+
+    Settings are read with `current_setting`, which works on DuckDB 1.5 and 2.0 alike
+    (`duckdb_settings()` no longer lists the ``s3_*`` keys on 2.0).
+
+    Parameters
+    ----------
+    request
+        The request.
+    statements
+        When given, filled with every statement `configure` sent, in order.
+
+    Returns
+    -------
+    tuple of (duckdb.DuckDBPyConnection, dict)
+        The configured connection (the caller closes it) and each setting's value.
+    """
+    connection = duckdb.connect(":memory:")
+    spy = _Spy(connection)
+    query_child.configure(spy, request)  # ty: ignore[invalid-argument-type]
+    if statements is not None:
+        statements.extend(spy.executed)
+    return connection, _settings_of(connection)
+
+
+def _settings_of(connection: duckdb.DuckDBPyConnection) -> dict[str, object]:
+    """Read every setting of `_SETTINGS` with `current_setting`.
+
+    Parameters
+    ----------
+    connection
+        The connection.
+
+    Returns
+    -------
+    dict
+        Each setting's value.
+    """
+    values = connection.execute(
+        "SELECT " + ", ".join(f"current_setting('{name}')" for name in _SETTINGS)
+    ).fetchall()[0]
+    return dict(zip(_SETTINGS, values, strict=True))
+
+
 def test_the_connection_holds_no_credential_and_loads_nothing_by_itself(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIAAMBIENT")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "ambient-secret")
     monkeypatch.setenv("AWS_SESSION_TOKEN", "ambient-token")
-    connection = duckdb.connect(":memory:")
-    try:
-        query_child.configure(connection, _request(restrict_local_filesystem=False))
-        settings = dict(
-            connection.execute(
-                "SELECT name, value FROM duckdb_settings() WHERE name IN ('s3_access_key_id', "
-                "'s3_secret_access_key', 's3_session_token', 'allow_persistent_secrets', "
-                "'autoinstall_known_extensions', 'autoload_known_extensions', "
-                "'allow_community_extensions', 'extension_directory', 'threads', "
-                "'disabled_filesystems', 'temp_directory', 'max_temp_directory_size', "
-                "'memory_limit')"
-            ).fetchall()
-        )
-        loaded = connection.execute(
-            "SELECT install_path FROM duckdb_extensions() WHERE extension_name = 'httpfs' "
-            "AND loaded"
-        ).fetchone()
-    finally:
-        connection.close()
+    spill = tmp_path / "spill"
+    statements: list[str] = []
+    connection, settings = _configured(
+        _request(
+            read_prefixes=("/data/t1/", "http://127.0.0.1:9/b/t2/"), temp_directory=str(spill)
+        ),
+        statements,
+    )
+    connection.close()
+    settings["allowed_directories"] = sorted(cast("list[str]", settings["allowed_directories"]))
     assert settings == {
         "s3_access_key_id": "",
         "s3_secret_access_key": "",
         "s3_session_token": "",
-        "allow_persistent_secrets": "false",
-        "autoinstall_known_extensions": "false",
-        "autoload_known_extensions": "false",
-        "allow_community_extensions": "false",
+        "allow_persistent_secrets": False,
+        "autoinstall_known_extensions": False,
+        "autoload_known_extensions": False,
+        "allow_community_extensions": False,
         "extension_directory": EXTENSIONS,
-        "threads": "2",
-        "disabled_filesystems": "",
-        "temp_directory": "/nonexistent/lakana-test-spill",
-        "max_temp_directory_size": "953.6 MiB",
+        "threads": 2,
+        "temp_directory": str(spill),
+        "max_temp_directory_size": "0 bytes",
         "memory_limit": "190.7 MiB",
+        "enable_external_access": False,
+        # DuckDB adds the temp directory itself when external access is switched off.
+        "allowed_directories": sorted([f"{spill}/", "/data/t1/", "http://127.0.0.1:9/b/t2/"]),
+        "allowed_paths": [query_ca_bundle()],
+        "ca_cert_file": query_ca_bundle(),
+        "lock_configuration": True,
     }
-    assert loaded is not None and loaded[0].startswith(EXTENSIONS)
+    assert statements.index("INSTALL httpfs") > statements.index("SET extension_directory = ?")
+    assert statements[-1] == "SET lock_configuration = true"
+
+
+def test_local_mode_may_spill_up_to_the_configured_size(tmp_path: Path) -> None:
+    connection, settings = _configured(_request(spill=True, temp_directory=str(tmp_path)))
+    connection.close()
+    assert settings["max_temp_directory_size"] == "953.6 MiB"
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "SET http_proxy = 'http://127.0.0.1:9'",
+        "SET extra_http_headers = MAP {'a': 'b'}",
+        "SET ca_cert_file = '/etc/passwd'",
+        "SET enable_external_access = true",
+        "SET allowed_directories = ['/']",
+        "SET allowed_paths = ['/etc/passwd']",
+        "SET temp_directory = '/'",
+        "SET memory_limit = '64GB'",
+        "SET threads = 64",
+        "SET max_temp_directory_size = '1TB'",
+        "SET lock_configuration = false",
+        "RESET threads",
+        "RESET memory_limit",
+        "PRAGMA threads = 8",
+        "PRAGMA memory_limit = '64GB'",
+        "SET GLOBAL threads = 8",
+        "SET SESSION memory_limit = '64GB'",
+    ],
+)
+def test_no_setting_can_be_changed_once_configured(tmp_path: Path, statement: str) -> None:
+    """The lock is the second layer behind the guard, which refuses `SET` itself."""
+    connection, before = _configured(_request(temp_directory=str(tmp_path)))
+    try:
+        with pytest.raises(duckdb.Error):
+            connection.execute(statement)
+        assert _settings_of(connection) == before
+    finally:
+        connection.close()
+
+
+def test_a_variable_can_still_be_set_once_configured(tmp_path: Path) -> None:
+    connection, _settings = _configured(_request(temp_directory=str(tmp_path)))
+    try:
+        query_child.set_variables(connection, {"v_0_files": ["/x/a"], "n": 3})
+        assert connection.execute("SELECT getvariable('n')").fetchall() == [(3,)]
+    finally:
+        connection.close()
 
 
 def test_a_check_accepts_good_sizes_with_an_empty_stream() -> None:
@@ -383,31 +509,84 @@ def test_sql_without_a_result_is_about_the_query(sql: str) -> None:
     assert _failed(_request(sql)) == ErrorDocument("invalid", NO_RESULT_MESSAGE)
 
 
-def test_a_local_read_is_refused_as_an_error_about_the_query() -> None:
+def test_a_local_read_is_refused_without_naming_the_file() -> None:
     error = _failed(_request("SELECT * FROM read_csv('/etc/hostname')"))
-    assert error.kind == "invalid"
-    assert "LocalFileSystem has been disabled" in error.message
+    assert error == ErrorDocument("invalid", query_child.REFUSED_LOCATION)
+    assert "hostname" not in error.message
 
 
-def test_a_refused_spill_is_out_of_memory_with_the_setting_to_raise() -> None:
-    error = _failed(_request(OVER_THE_LIMIT, memory_limit="32MB", threads=1))
+@pytest.mark.parametrize("mode", [READ, DESCRIBE])
+def test_a_query_over_the_limit_without_spill_is_out_of_memory_with_the_setting_to_raise(
+    tmp_path: Path, mode: str
+) -> None:
+    error = _failed(
+        _request(
+            OVER_THE_LIMIT, mode=mode, memory_limit="32MB", threads=1, temp_directory=str(tmp_path)
+        )
+    )
     assert error == ErrorDocument(
         "out_of_memory",
         "Query failed: the query ran out of memory and cannot spill to disk. "
         f"{MEMORY_LIMIT_ADVICE}",
     )
+    assert list(tmp_path.iterdir()) == []
 
 
-def test_a_describe_never_plans_a_second_time() -> None:
-    error = _failed(_request(OVER_THE_LIMIT, mode=DESCRIBE, memory_limit="32MB", threads=1))
-    assert error.kind == "invalid"
-    assert "LocalFileSystem has been disabled" in error.message
+def test_a_query_over_the_limit_with_spill_returns_its_result(tmp_path: Path) -> None:
+    code, stream, stderr = _main(
+        _request(
+            OVER_THE_LIMIT,
+            memory_limit="32MB",
+            threads=1,
+            temp_directory=str(tmp_path),
+            spill=True,
+        )
+    )
+    assert (code, stderr) == (EXIT_OK, "")
+    assert _table(stream).to_pylist() == [{"n": 200000}]
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT * FROM sniff_csv('/etc/hostname')",
+        "SELECT count(*) FROM duckdb_extensions()",
+        "SELECT * FROM read_csv('/etc/hostname')",
+    ],
+)
+def test_a_refusal_at_execution_is_about_the_query_not_out_of_memory(sql: str) -> None:
+    """Refused by the guard as well; here DuckDB's refusal comes while the statement runs."""
+    assert _failed(_request(sql)) == ErrorDocument("invalid", query_child.REFUSED_LOCATION)
+
+
+def test_temporary_files_are_listed_without_error() -> None:
+    """``duckdb_temporary_files`` reads no file: refused by the guard, harmless here."""
+    code, stream, _stderr = _main(_request("SELECT count(*) AS n FROM duckdb_temporary_files()"))
+    assert code == EXIT_OK
+    assert _table(stream).to_pylist() == [{"n": 0}]
 
 
 def test_a_storage_failure_is_transient() -> None:
-    error = _failed(_request("SELECT * FROM read_parquet('http://127.0.0.1:9/none.parquet')"))
+    error = _failed(
+        _request(
+            "SELECT * FROM read_parquet('http://127.0.0.1:9/bucket/t/none.parquet')",
+            read_prefixes=("http://127.0.0.1:9/bucket/t/",),
+        )
+    )
     assert error.kind == "transient"
     assert error.message.startswith("Query failed: ")
+
+
+def test_a_closed_https_port_is_a_transient_connection_error_not_the_ca_refusal() -> None:
+    """Once the bundle is allowed, an HTTPS failure is the connection's, as for plain HTTP."""
+    error = _failed(
+        _request(
+            "SELECT * FROM read_parquet('https://127.0.0.1:9/bucket/t/none.parquet')",
+            read_prefixes=("https://127.0.0.1:9/bucket/t/",),
+        )
+    )
+    assert error.kind == "transient"
+    assert "certificate" not in error.message.lower()
 
 
 def test_an_ask_that_arrives_before_the_statement_stops_it_from_starting() -> None:
@@ -581,72 +760,13 @@ def test_an_error_while_a_later_batch_is_fetched_is_classified_like_any_other() 
     assert not stream.endswith(END_OF_STREAM)
 
 
-_REFUSAL = "Permission Error: File system LocalFileSystem has been disabled by configuration"
-
-
-class _Planner:
-    """A connection stand-in whose `EXPLAIN` plans, or fails as a local read does."""
-
-    def __init__(self, *, plans: bool, during: Callable[[], None] | None = None) -> None:
-        self._plans = plans
-        self._during = during
-        self._real = duckdb.connect(":memory:")
-        self.planned: list[str] = []
-
-    def extract_statements(self, sql: str) -> list[duckdb.Statement]:
-        """Split `sql` as DuckDB does.
-
-        Parameters
-        ----------
-        sql
-            The text.
-
-        Returns
-        -------
-        list
-            The statements.
-        """
-        return self._real.extract_statements(sql)
-
-    def execute(self, sql: str, parameters: object = None) -> None:
-        """Plan `sql`, or refuse it as DuckDB refuses a local read.
-
-        Parameters
-        ----------
-        sql
-            The `EXPLAIN` statement.
-        parameters
-            Ignored.
-
-        Raises
-        ------
-        duckdb.PermissionException
-            If the stand-in does not plan.
-        """
-        assert sql.startswith("EXPLAIN ")
-        self.planned.append(sql)
-        if self._during is not None:
-            self._during()
-        if not self._plans:
-            raise duckdb.PermissionException(_REFUSAL)
-
-
-def _kind(
-    exc: BaseException,
-    statement: str | None = None,
-    planner: _Planner | None = None,
-    asked: threading.Event | None = None,
-) -> str:
+def _kind(exc: BaseException, asked: threading.Event | None = None) -> str:
     """Classify `exc` as the child does and return the kind.
 
     Parameters
     ----------
     exc
         The failure.
-    statement
-        The statement that failed.
-    planner
-        The connection stand-in.
     asked
         The ask flag.
 
@@ -655,13 +775,17 @@ def _kind(
     str
         The kind.
     """
-    connection = planner or _Planner(plans=True)
-    return query_child.failure(
-        connection,  # ty: ignore[invalid-argument-type]
-        exc,
-        statement,
-        asked or threading.Event(),
-    ).kind
+    return query_child.failure(exc, asked or threading.Event()).kind
+
+
+_DUCKDB_REFUSAL = (
+    'Permission Error: Cannot access file "/srv/secret/s.csv" - file system operations are '
+    "disabled by configuration"
+)
+_CA_REFUSAL = (
+    "Permission Error: Cannot read a CA certificate bundle: file system access is restricted by "
+    "configuration. Add one of /etc/ssl/certs/ca-certificates.crt to allowed_paths"
+)
 
 
 @pytest.mark.parametrize(
@@ -686,10 +810,31 @@ def _kind(
         (duckdb.ConversionException("Conversion Error: bad"), "invalid"),
         (duckdb.ConstraintException("Constraint Error: dup"), "invalid"),
         (duckdb.InvalidInputException("Invalid Input Error: x"), "invalid"),
+        (duckdb.PermissionException(_DUCKDB_REFUSAL), "invalid"),
+        (OSError(_DUCKDB_REFUSAL), "invalid"),
+        (duckdb.PermissionException(_CA_REFUSAL), "internal"),
+        (OSError(_CA_REFUSAL), "internal"),
+        (OSError("IO Error: " + _DUCKDB_REFUSAL), "transient"),
     ],
 )
 def test_the_kind_follows_the_duckdb_error_type(exc: BaseException, kind: str) -> None:
     assert _kind(exc) == kind
+
+
+@pytest.mark.parametrize("exc", [duckdb.PermissionException, OSError])
+def test_a_refused_path_or_url_is_never_named(exc: type[BaseException]) -> None:
+    error = query_child.failure(exc(_DUCKDB_REFUSAL), threading.Event())
+    assert error == ErrorDocument("invalid", query_child.REFUSED_LOCATION)
+    assert "/srv/secret" not in error.message
+
+
+def test_a_refused_ca_bundle_names_the_bundle_the_variables_and_the_page() -> None:
+    error = query_child.failure(
+        duckdb.PermissionException(_CA_REFUSAL), threading.Event(), ca_bundle="/etc/ca.pem"
+    )
+    assert error.kind == "internal"
+    for part in ("/etc/ca.pem", "AWS_CA_BUNDLE", "SSL_CERT_FILE", query_child.NETWORK_SETTINGS):
+        assert part in error.message
 
 
 def test_an_out_of_memory_message_names_the_setting_and_drops_duckdbs_own_advice() -> None:
@@ -697,12 +842,7 @@ def test_an_out_of_memory_message_names_the_setting_and_drops_duckdbs_own_advice
         "Out of Memory Error: failed to allocate data of size 256.0 MiB (1/2 used)\n\n"
         "Possible solutions:\n* Reducing the number of threads (SET threads=X)"
     )
-    error = query_child.failure(
-        _Planner(plans=True),  # ty: ignore[invalid-argument-type]
-        exc,
-        None,
-        threading.Event(),
-    )
+    error = query_child.failure(exc, threading.Event(), spill=True)
     assert error.message == (
         "Query failed: Out of Memory Error: failed to allocate data of size 256.0 MiB "
         f"(1/2 used) {MEMORY_LIMIT_ADVICE}"
@@ -710,61 +850,17 @@ def test_an_out_of_memory_message_names_the_setting_and_drops_duckdbs_own_advice
 
 
 @pytest.mark.parametrize(
-    ("exc", "plans", "statement", "kind"),
+    "text",
     [
-        (duckdb.PermissionException(_REFUSAL), True, "SELECT 1", "out_of_memory"),
-        (OSError(_REFUSAL), True, "SELECT 1", "out_of_memory"),
-        (duckdb.PermissionException(_REFUSAL), False, "SELECT 1", "invalid"),
-        (OSError(_REFUSAL), False, "SELECT 1", "invalid"),
-        (duckdb.PermissionException(_REFUSAL), True, None, "invalid"),
-        (duckdb.PermissionException("Permission Error: no"), True, "SELECT 1", "invalid"),
-        (OSError("IO Error: " + _REFUSAL), True, "SELECT 1", "transient"),
+        "Out of Memory Error: failed to offload data block of size 192.0 KiB (0 bytes/0 used)",
+        "Out of Memory Error: failed to allocate data of size 256.0 MiB (1/2 used)",
     ],
 )
-def test_a_refusal_is_a_spill_only_if_the_statement_plans(
-    exc: BaseException, plans: bool, statement: str | None, kind: str
+def test_without_spill_running_out_of_memory_is_decided_by_the_request_not_the_text(
+    text: str,
 ) -> None:
-    assert _kind(exc, statement, _Planner(plans=plans)) == kind
-
-
-@pytest.mark.parametrize("raises", [True, False])
-def test_an_ask_during_the_second_planning_stays_visible(raises: bool) -> None:
-    asked = threading.Event()
-
-    def during() -> None:
-        asked.set()
-        if raises:
-            raise duckdb.InterruptException("Interrupt Error: Interrupted!")
-
-    planner = _Planner(plans=True, during=during)
-    kind = _kind(duckdb.PermissionException(_REFUSAL), "SELECT 1", planner, asked)
-    assert kind == "interrupted"
-
-
-@pytest.mark.parametrize(
-    "sql",
-    [
-        "SELECT 1; SELECT 2",
-        "SELECT 1; INSERT INTO c VALUES (2)",
-        "SET threads = 1",
-        "LOAD 'somewhere/extension'",
-        "INSERT INTO c VALUES (2)",
-        "SELEC 1",
-        "-- nothing",
-    ],
-)
-def test_only_one_select_is_planned_again(sql: str) -> None:
-    """`EXPLAIN a; b` runs `b`: user SQL must never execute a second time."""
-    planner = _Planner(plans=True)
-    assert _kind(duckdb.PermissionException(_REFUSAL), sql, planner) == "invalid"
-    assert planner.planned == []
-
-
-def test_one_select_is_planned_again_as_the_statement_duckdb_extracted() -> None:
-    planner = _Planner(plans=True)
-    statement = "SELECT 1; -- trailing"
-    assert _kind(duckdb.PermissionException(_REFUSAL), statement, planner) == "out_of_memory"
-    assert planner.planned == ["EXPLAIN SELECT 1; -- trailing"]
+    error = query_child.failure(duckdb.OutOfMemoryException(text), threading.Event())
+    assert error == ErrorDocument("out_of_memory", query_child.NO_SPILL)
 
 
 def test_an_unexpected_exception_becomes_a_document_without_its_text(
@@ -1089,12 +1185,16 @@ def test_the_real_child_answers_with_a_complete_stream(tmp_path: Path) -> None:
 def test_a_child_with_an_empty_home_loads_httpfs_from_the_workers_directory(
     tmp_path: Path,
 ) -> None:
-    """Without `extension_directory` DuckDB looks under the empty HOME and tries to download."""
-    sql = "SELECT count(*) AS n FROM duckdb_extensions() WHERE extension_name = 'httpfs' AND loaded"
-    with _Real({"sql": sql, "restrict_local_filesystem": False}, tmp_path) as child:
+    """Without `extension_directory` DuckDB looks under the empty HOME and tries to download.
+
+    ``duckdb_extensions()`` lists the extension directory, which allow-list mode refuses; httpfs
+    shows by the settings it adds.
+    """
+    sql = "SELECT count(*) > 0 AS n FROM duckdb_settings() WHERE name LIKE 's3_%'"
+    with _Real({"sql": sql, "read_prefixes": (f"{tmp_path}/",)}, tmp_path) as child:
         code, out, err = child.end()
         assert (code, err) == (EXIT_OK, b"")
-        assert _table(out).to_pydict() == {"n": [1]}
+        assert _table(out).to_pydict() == {"n": [True]}
         assert list(child.home.iterdir()) == []
 
 
@@ -1110,37 +1210,18 @@ def test_a_read_is_exported_in_the_zone_of_the_childs_tz_variable(tmp_path: Path
 LINUX = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc")
 
 
-def _wait_for_file(path: Path, timeout: float = 30.0) -> None:
-    """Wait, with a bound, until a file exists and holds something.
-
-    Parameters
-    ----------
-    path
-        The file.
-    timeout
-        Seconds to wait at most.
-    """
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if path.exists() and path.stat().st_size > 0:
-            return
-        time.sleep(0.01)
-    pytest.fail(f"{path} was not written in {timeout} s")
-
-
 def test_the_real_child_stops_within_seconds_of_sigterm_while_it_waits_for_a_batch(
     tmp_path: Path,
 ) -> None:
     """The probe's finding: with the statement on the main thread this never returns.
 
-    A first statement writes a marker file, so the test knows the child is past its set-up and
-    inside DuckDB; the slow statement follows it in the same text and is still running when the
-    signal arrives, whether it has started or is about to (the repeated interrupt reaches it).
+    The child runs one statement only, so the test cannot have it write a marker first. It
+    waits until the child has used half a second of processor time (`/proc`), which it spends
+    inside DuckDB on the slow statement (start-up costs about 0.1 s); the statement runs about
+    9 s, so the signal arrives while the child waits for its first batch.
     """
-    marker = tmp_path / "started.csv"
-    sql = f"COPY (SELECT 1 AS started) TO '{marker}'; {SLOW_STREAM}"
-    with _Real({"sql": sql, "restrict_local_filesystem": False}, tmp_path) as child:
-        _wait_for_file(marker)
+    with _Real({"sql": SLOW_STREAM}, tmp_path) as child:
+        _wait_for_cpu(child.process.pid, seconds=0.5)
         asked = time.monotonic()
         os.killpg(child.process.pid, signal.SIGTERM)
         code, _out, err = child.end(timeout=20)
@@ -1150,6 +1231,33 @@ def test_the_real_child_stops_within_seconds_of_sigterm_while_it_waits_for_a_bat
         "interrupted", "The query stopped because it was asked to."
     )
     assert seconds < 5
+
+
+def _wait_for_cpu(pid: int, seconds: float, timeout: float = 30.0) -> None:
+    """Wait until a process has used `seconds` of processor time, or fail the test.
+
+    Parameters
+    ----------
+    pid
+        The process.
+    seconds
+        User plus system time to wait for.
+    timeout
+        Seconds to wait at most.
+
+    Where there is no ``/proc`` (macOS) it waits 1.5 s instead, well inside the statement's 9 s.
+    """
+    if not Path(f"/proc/{pid}/stat").exists():
+        time.sleep(1.5)
+        return
+    ticks = os.sysconf("SC_CLK_TCK")
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        if (int(fields[11]) + int(fields[12])) / ticks >= seconds:
+            return
+        time.sleep(0.02)
+    pytest.fail(f"the child did not use {seconds} s of processor time within {timeout} s")
 
 
 def test_killing_the_group_mid_stream_leaves_no_process_no_end_marker_and_no_file(
@@ -1250,76 +1358,31 @@ class _Spy:
         return getattr(self._real, name)
 
 
-def _refused_spill_through_a_spy(sql: str) -> tuple[ErrorDocument, _Spy]:
-    """Run `sql` on a real, configured connection as the child does, and classify its failure.
+def test_a_statement_that_runs_out_of_memory_is_never_sent_again(tmp_path: Path) -> None:
+    """Against real DuckDB: after the failure nothing more is sent, no ``EXPLAIN`` either.
 
-    The local file system is disabled and the memory limit is 32MB at one thread, so the sort
-    inside `sql` must spill and DuckDB refuses its spill file.
-
-    Parameters
-    ----------
-    sql
-        The statement, which must fail.
-
-    Returns
-    -------
-    tuple of (ErrorDocument, _Spy)
-        What `query_child.failure` made of the failure, and the spy with every string sent.
-
-    Raises
-    ------
-    AssertionError
-        If the statement did not fail.
-    """
-    request = _request(sql, memory_limit="32MB", threads=1)
-    real = duckdb.connect(":memory:")
-    spy = _Spy(real)
-    try:
-        query_child.configure(spy, request)  # ty: ignore[invalid-argument-type]
-        try:
-            for _batch in spy.execute(sql, None).to_arrow_reader(request.batch_rows):
-                pass
-        except (duckdb.Error, OSError) as exc:
-            document = query_child.failure(
-                spy,  # ty: ignore[invalid-argument-type]
-                exc,
-                sql,
-                threading.Event(),
-            )
-            return document, spy
-        raise AssertionError("the statement was expected to fail")
-    finally:
-        real.close()
-
-
-def test_a_multi_statement_string_is_never_executed_again_after_a_refused_spill() -> None:
-    """Against real DuckDB: a refused spill after a CREATE and INSERT re-runs neither.
-
-    The spy sees every string the child sends. The whole text goes to DuckDB once; after the
-    spill is refused nothing more is sent, in particular no `EXPLAIN` of a text that holds the
-    INSERT (which would run it again).
+    Planning a text again would run each statement of it a second time (``EXPLAIN a; b`` runs
+    ``b``); the failure is classified from the request alone.
     """
     sql = (
         "CREATE TABLE c(i INT); INSERT INTO c VALUES (1); "
         "SELECT * FROM (SELECT i, repeat('x', 100) || i::VARCHAR AS b "
         "FROM range(200000) AS r(i)) ORDER BY b DESC"
     )
-    document, spy = _refused_spill_through_a_spy(sql)
-    assert document.kind == "invalid"
-    assert "LocalFileSystem has been disabled" in document.message
-    assert [text for text in spy.executed if text == sql] == [sql]
-    assert not [text for text in spy.executed if "EXPLAIN" in text]
-
-
-def test_a_single_select_is_planned_again_with_its_parameters_on_the_real_connection() -> None:
-    """Against real DuckDB: the single re-plan is an `EXPLAIN` of the same text."""
-    sql = (
-        "SELECT * FROM (SELECT i, repeat('x', 100) || i::VARCHAR AS b "
-        "FROM range(200000) AS r(i)) ORDER BY b DESC"
-    )
-    document, spy = _refused_spill_through_a_spy(sql)
-    assert document.kind == "out_of_memory"
-    assert spy.executed[-1] == f"EXPLAIN {sql}"
+    request = _request(sql, memory_limit="32MB", threads=1, temp_directory=str(tmp_path))
+    real = duckdb.connect(":memory:")
+    spy = _Spy(real)
+    try:
+        query_child.configure(spy, request)  # ty: ignore[invalid-argument-type]
+        sent = len(spy.executed)
+        with pytest.raises(duckdb.OutOfMemoryException) as caught:
+            for _batch in spy.execute(sql, None).to_arrow_reader(request.batch_rows):
+                pass
+        document = query_child.failure(caught.value, threading.Event())
+    finally:
+        real.close()
+    assert document == ErrorDocument("out_of_memory", query_child.NO_SPILL)
+    assert spy.executed[sent:] == [sql]
 
 
 @pytest.mark.parametrize(
@@ -1507,34 +1570,19 @@ _LOST_CAUSE = (
 )
 def test_an_interrupt_nobody_asked_for_says_that_the_cause_was_lost(exc: BaseException) -> None:
     """DuckDB can report a sibling thread's interrupt instead of the error."""
-    error = query_child.failure(
-        _Planner(plans=True),  # ty: ignore[invalid-argument-type]
-        exc,
-        None,
-        threading.Event(),
-    )
+    error = query_child.failure(exc, threading.Event())
     assert (error.kind, error.message) == ("invalid", _LOST_CAUSE)
 
 
 def test_an_interrupt_that_was_asked_for_keeps_its_wording() -> None:
     asked = threading.Event()
     asked.set()
-    error = query_child.failure(
-        _Planner(plans=True),  # ty: ignore[invalid-argument-type]
-        OSError("INTERRUPT Error: Interrupted!"),
-        None,
-        asked,
-    )
+    error = query_child.failure(OSError("INTERRUPT Error: Interrupted!"), asked)
     assert error == ErrorDocument("interrupted", "The query stopped because it was asked to.")
 
 
 def test_other_errors_are_not_taken_for_a_lost_cause() -> None:
-    error = query_child.failure(
-        _Planner(plans=True),  # ty: ignore[invalid-argument-type]
-        OSError("Conversion Error: boom"),
-        None,
-        threading.Event(),
-    )
+    error = query_child.failure(OSError("Conversion Error: boom"), threading.Event())
     assert error.message == "Query failed: Conversion Error: boom"
 
 
@@ -1568,7 +1616,8 @@ def test_a_schema_map_duckdb_cannot_parse_fails_closed(
     request = _request(
         "SELECT * FROM read_parquet(getvariable('v_0_files'), schema = getvariable('v_0_schema'))",
         parameters={"v_0_files": [str(path)], "v_0_schema": fields},
-        restrict_local_filesystem=False,
+        read_prefixes=(f"{tmp_path}/",),
+        spill=True,
     )
 
     code, stream, stderr = _main(request)
@@ -1628,8 +1677,9 @@ def test_a_cast_the_map_asks_for_names_no_cell_value(tmp_path: Path, select: str
     reader = "read_parquet(getvariable('v_0_files'), schema = getvariable('v_0_schema'))"
     request = _request(
         select.format(reader=reader),
-        parameters={"v_0_files": [str(path), ""], "v_0_schema": ((1, "ssn", "INTEGER"),)},
-        restrict_local_filesystem=False,
+        parameters={"v_0_files": [str(path)], "v_0_schema": ((1, "ssn", "INTEGER"),)},
+        read_prefixes=(f"{tmp_path}/",),
+        spill=True,
     )
 
     code, stream, stderr = _main(request)
@@ -1657,7 +1707,8 @@ def test_a_cast_of_the_querys_own_on_a_mapped_read_names_the_next_step(tmp_path:
         "SELECT CAST('abc' AS INT) AS n FROM read_parquet(getvariable('v_0_files'), "
         "schema = getvariable('v_0_schema'))",
         parameters={"v_0_files": [str(path)], "v_0_schema": ((1, "ssn", "VARCHAR"),)},
-        restrict_local_filesystem=False,
+        read_prefixes=(f"{tmp_path}/",),
+        spill=True,
     )
 
     code, stream, stderr = _main(request)
@@ -1666,3 +1717,185 @@ def test_a_cast_of_the_querys_own_on_a_mapped_read_names_the_next_step(tmp_path:
     assert decode_error(stderr.encode()) == ErrorDocument("invalid", _HIDDEN_CONVERSION)
     assert "abc" not in stderr
     assert stream == b"" or not list(pa.ipc.open_stream(stream))
+
+
+# --- the files against the prefixes ------------------------------------------------------------
+
+_REMOTE = "http://store:8333/bucket/root/managed/ns/t1-ab/"
+_LOCAL = "/srv/lakana/managed/ns/t1-ab/"
+
+
+def _files(*urls: str, prefixes: tuple[str, ...] = (_REMOTE, _LOCAL)) -> Request:
+    """Build a request whose one file list holds `urls`.
+
+    Parameters
+    ----------
+    *urls
+        The files.
+    prefixes
+        The request's prefixes.
+
+    Returns
+    -------
+    Request
+        The request.
+    """
+    return _request(
+        "SELECT * FROM read_parquet(getvariable('v_0_files'))",
+        parameters={"v_0_files": list(urls)},
+        read_prefixes=prefixes,
+    )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        f"{_REMOTE}data/a.parquet?X-Amz-Signature=abc&X-Amz-Credential=k%2F2026",
+        f"{_REMOTE}data/x%20y.parquet",
+        f"{_REMOTE}a..b.parquet",
+        f"{_LOCAL}data/a.parquet",
+        f"{_LOCAL}data/a..b.parquet",
+        f"{_LOCAL}data/.hidden.parquet",
+    ],
+)
+def test_a_file_under_a_prefix_passes(url: str) -> None:
+    assert not query_child.file_outside_prefixes(_files(url))
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        pytest.param("http://store:8333/bucket/root/managed/ns/t10-ab/a.parquet", id="sibling"),
+        pytest.param("http://other:8333/bucket/root/managed/ns/t1-ab/a.parquet", id="other host"),
+        pytest.param("https://store:8333/bucket/root/managed/ns/t1-ab/a.parquet", id="https"),
+        pytest.param("s3://bucket/root/managed/ns/t1-ab/a.parquet", id="s3 scheme"),
+        pytest.param("http://169.254.169.254/latest/meta-data/", id="metadata"),
+        pytest.param(f"{_REMOTE}../t2/a.parquet", id="dotdot"),
+        pytest.param(f"{_REMOTE}data/./../../t2/a.parquet", id="dot then dotdot"),
+        pytest.param(f"{_REMOTE}%2e%2e/t2/a.parquet", id="escaped dotdot"),
+        pytest.param(f"{_REMOTE}%2E./t2/a.parquet", id="escaped dot upper"),
+        pytest.param(f"{_REMOTE}..%2ft2/a.parquet", id="escaped slash"),
+        pytest.param(f"{_REMOTE}..%5ct2/a.parquet", id="escaped backslash"),
+        pytest.param(f"{_REMOTE}..\\t2/a.parquet", id="backslash"),
+        pytest.param(f"{_REMOTE}..?x=1", id="dotdot before query"),
+        pytest.param(f"{_LOCAL}../t2/a.parquet", id="local dotdot"),
+        pytest.param(f"{_LOCAL}data/../../t2/a.parquet", id="local deep dotdot"),
+        pytest.param(f"{_LOCAL}%2e%2e/t2/a.parquet", id="local escaped"),
+        pytest.param("/srv/lakana/managed/ns/t1-ab", id="the directory without slash"),
+        pytest.param("/etc/passwd", id="local elsewhere"),
+        pytest.param("", id="empty"),
+        pytest.param(f"{_LOCAL}a\x00.parquet", id="NUL"),
+        pytest.param("relative/a.parquet", id="relative"),
+    ],
+)
+def test_a_file_outside_the_prefixes_is_refused_before_anything_runs(
+    url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert query_child.file_outside_prefixes(_files(f"{_LOCAL}ok.parquet", url))
+    monkeypatch.setattr(query_child.duckdb, "connect", lambda *_a, **_k: pytest.fail("ran"))
+    assert _failed(_files(url)) == ErrorDocument("internal", query_child.OUTSIDE_PREFIXES)
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        pytest.param("/", id="the disk"),
+        pytest.param("/srv/lakana", id="no trailing slash"),
+        pytest.param("srv/lakana/", id="relative"),
+        pytest.param("/srv/./lakana/", id="dot"),
+        pytest.param("/srv/../etc/", id="dotdot"),
+        pytest.param("/srv//lakana/", id="double slash"),
+        pytest.param("//srv/lakana/", id="leading double slash"),
+        pytest.param("/srv/lakana\x00/", id="NUL"),
+        pytest.param("http://store:8333/", id="host only"),
+        pytest.param("http://store:8333", id="host without slash"),
+        pytest.param("http://store:8333/bucket", id="remote without slash"),
+        pytest.param("http://user@store:8333/bucket/", id="user information"),
+        pytest.param("http://store:8333@evil/bucket/", id="userinfo trick"),
+        pytest.param("http://store:8333/bucket/?x=/", id="query"),
+        pytest.param("http://store:8333/bucket/#/", id="fragment"),
+        pytest.param("http://store:8333/bucket//t/", id="empty segment"),
+        pytest.param("http://store:8333/bucket/../t/", id="remote dotdot"),
+        pytest.param("http://store:8333/bucket/%2e%2e/t/", id="remote escaped dotdot"),
+        pytest.param("http://store:8333/b\\x/", id="backslash"),
+        pytest.param("http://-store/b/", id="bad host"),
+        pytest.param("s3://bucket/root/", id="s3"),
+        pytest.param("file:///srv/lakana/", id="file URL"),
+        pytest.param("", id="empty"),
+    ],
+)
+def test_a_prefix_of_another_shape_refuses_the_request(prefix: str) -> None:
+    assert not query_child.valid_prefix(prefix)
+    request = _request(read_prefixes=(prefix,))
+    assert query_child.file_outside_prefixes(request)
+    assert _failed(request) == ErrorDocument("internal", query_child.OUTSIDE_PREFIXES)
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "/srv/lakana/managed/ns/t1-ab/",
+        "http://127.0.0.1:8333/bucket/root/t/",
+        "https://bucket.s3.eu-central-1.amazonaws.com/root/t/",
+        "https://acct.blob.core.windows.net/container/root/t/",
+        "http://[::1]:8333/bucket/t/",
+    ],
+)
+def test_a_prefix_of_a_known_shape_is_accepted(prefix: str) -> None:
+    assert query_child.valid_prefix(prefix)
+
+
+def test_a_relative_ca_bundle_refuses_the_request() -> None:
+    assert _failed(_request(ca_bundle="ca.pem")) == ErrorDocument(
+        "internal", query_child.OUTSIDE_PREFIXES
+    )
+
+
+def test_a_check_is_not_refused_for_its_prefixes() -> None:
+    """The start-up check runs no statement and reads no file."""
+    code, _stream, stderr = _main(_request("", mode=CHECK, read_prefixes=("/",)))
+    assert (code, stderr) == (EXIT_OK, "")
+
+
+_SEGMENT = st.text(alphabet="ab.%2eE/\\?", min_size=0, max_size=12)
+
+
+@settings(max_examples=400, deadline=None)
+@given(rest=_SEGMENT, remote=st.booleans())
+def test_no_generated_file_that_passes_reaches_outside_its_prefix(rest: str, remote: bool) -> None:
+    """Property: whatever passes, normalised as a server or the kernel would, stays inside.
+
+    The rest after the prefix is percent-decoded (as a server might), backslashes are read as
+    slashes, and the path is normalised; it must still lie under the prefix's directory.
+    """
+    prefix = _REMOTE if remote else _LOCAL
+    url = prefix + rest
+    if query_child.file_outside_prefixes(_files(url, prefixes=(prefix,))):
+        return
+    path = url.split("://", 1)[-1].split("/", 1)[-1] if remote else url
+    path = "/" + path.lstrip("/")
+    if remote:
+        path = path.split("?", 1)[0]
+        path = urllib.parse.unquote(path).replace("\\", "/")
+    base = prefix.split("://", 1)[-1].split("/", 1)[-1] if remote else prefix
+    base = "/" + base.lstrip("/")
+    assert (posixpath.normpath(path) + "/").startswith(base) or posixpath.normpath(
+        path
+    ) + "/" == base
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "CREATE SECRET p (TYPE http, HTTP_PROXY '127.0.0.1:9'); SELECT 1",
+        "SELECT 1; SELECT 2",
+        "SET threads = 1",
+        "ATTACH ':memory:' AS m",
+    ],
+)
+def test_anything_but_one_select_is_refused_before_the_connection_is_configured(
+    sql: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """In this process, for coverage; `test_query_allow_list.py` runs the real child."""
+    monkeypatch.setattr(query_child, "configure", lambda *_a: pytest.fail("configured"))
+    assert _failed(_request(sql)) == ErrorDocument("internal", query_child.NOT_ONE_SELECT)

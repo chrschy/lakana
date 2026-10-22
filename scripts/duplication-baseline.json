@@ -1,6 +1,6 @@
 {
-  "duplicated_lines": 1330,
-  "clones": 69,
+  "duplicated_lines": 1317,
+  "clones": 68,
   "pairs": {
     "lakana/_artifact_manifest.py ↔ lakana_core/artifacts/manifest.py": {
       "clones": 1,
@@ -155,8 +155,8 @@
       "lines": 17
     },
     "lakana_worker/pipeline.py ↔ lakana_worker/pipeline.py": {
-      "clones": 2,
-      "lines": 26
+      "clones": 1,
+      "lines": 13
     },
     "lakana_worker/poller.py ↔ lakana_worker/poller.py": {
       "clones": 1,

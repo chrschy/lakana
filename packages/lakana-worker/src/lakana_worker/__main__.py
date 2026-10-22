@@ -44,6 +44,7 @@ from lakana_core.secrets.crypto import ACCEPT_FORMAT_1_WARNING
 from lakana_core.secrets.keys import EnvKeyProvider
 from lakana_core.storage.resolver import StorageResolver
 from lakana_worker.attempt_sweep import AttemptSweeper
+from lakana_worker.ca_bundle import CaBundleError, find_ca_bundle, query_ca_bundle
 from lakana_worker.caches import CacheKeeper, CachePaths, PackageCacheTrim, TrimSettings
 from lakana_worker.deploy import DeploySettings, platform_version
 from lakana_worker.deploy_sweep import DeploySweeper, sweep_deploy_checkouts
@@ -145,6 +146,23 @@ def _check_process_supervision() -> None:
             "supervise query processes (macOS has it from Python 3.13). Run the worker with "
             "Python 3.13 or newer."
         )
+
+
+def _check_query_ca_bundle() -> None:
+    """Refuse to start with a CA bundle the query process cannot use, and log the one it uses.
+
+    Raises
+    ------
+    SystemExit
+        If ``AWS_CA_BUNDLE`` or ``SSL_CERT_FILE`` names a missing, unreadable or non-PEM file;
+        the message names the variable and the path.
+    """
+    try:
+        bundle, source = find_ca_bundle()
+        query_ca_bundle()
+    except CaBundleError as exc:
+        raise SystemExit(str(exc)) from exc
+    logger.info("Query processes trust the certificate authorities in %s (%s).", bundle, source)
 
 
 def _check_query_limits(limits: QueryLimitsConfig) -> None:
@@ -375,7 +393,9 @@ def main() -> None:
     Logging is set up once the settings are read (`configure_logging`, level
     `LAKANA_LOG__LEVEL`, INFO by default), so those lines reach stderr
     (`docker compose logs worker`). At
-    start-up the worker refuses to run on a Python without `os.waitid` (macOS before 3.13) and
+    start-up the worker refuses to run on a Python without `os.waitid` (macOS before 3.13),
+    resolves and logs the CA bundle of its query processes (`lakana_worker.ca_bundle`; a bad
+    ``AWS_CA_BUNDLE`` or ``SSL_CERT_FILE`` stops it with a message), and
     runs one query child that only sets the two sizes: a memory limit or
     temp-directory size DuckDB cannot read, or a child that cannot start at all, stops the worker
     with a message that names the cause.
@@ -383,6 +403,7 @@ def main() -> None:
     settings = Settings()
     configure_logging(settings.log.level)
     _check_process_supervision()
+    _check_query_ca_bundle()
     _check_query_limits(settings.query_limits)
     engine = create_engine(settings.database, lease_seconds=settings.run.lease_seconds)
     session_factory = functools.partial(Session, engine)

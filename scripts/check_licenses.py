@@ -54,10 +54,12 @@ comment justifying it, and adding one is a deliberate decision.
 * ``hypothesis`` — MPL-2.0, a `dev` dependency-group only (property-based testing,
   see `docs/agent/testing.md`). It is never a runtime dependency of any of the
   four packages and is never shipped.
-* ``certifi`` — MPL-2.0, but *not* dev-only: it is a transitive dependency of
-  `requests`, which `pyiceberg` (a `lakana-core` default dependency) requires for
-  its REST catalog client, so it is present in the default, shipped dependency
-  set (confirmed via ``uv export --no-dev``). MPL-2.0 is file-level copyleft —
+* ``certifi`` — MPL-2.0, but *not* dev-only: `lakana-worker` depends on it directly
+  (the last place its query process looks for a CA bundle, `lakana_worker.ca_bundle`),
+  and it is a transitive dependency of `requests`, which `pyiceberg` (a `lakana-core`
+  default dependency) requires for its REST catalog client, and of `httpx`, so it is
+  present in the default, shipped dependency set (confirmed via ``uv export --no-dev``).
+  The worker only calls `certifi.where()`. MPL-2.0 is file-level copyleft —
   its share-alike obligation attaches only to modifications of certifi's own
   files (a CA bundle plus a loader), never to code that merely imports it — so
   bundling it alongside Apache-2.0 code imposes no obligation on Lakana's own

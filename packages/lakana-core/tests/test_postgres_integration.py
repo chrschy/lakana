@@ -202,6 +202,34 @@ def test_resolve_read_url_against_real_seaweedfs() -> None:
         assert httpx.get(url.split("?")[0]).status_code == 403
 
 
+def test_a_read_prefix_against_real_seaweedfs_is_the_start_of_every_file_url() -> None:
+    """Path style against a real store: the prefix is what the query process may open.
+
+    The prefix is cut from a signed URL of a sentinel name; every presigned URL of a file
+    below the directory starts with it, and nothing of a signature is in it.
+    """
+    with SeaweedFsContainer() as seaweedfs:
+        client = seaweedfs.get_client()
+        client.make_bucket("lakana")
+        client.put_object("lakana", "dev/raw/in/x.parquet", io.BytesIO(b"hello"), length=5)
+        endpoint = f"http://{seaweedfs.get_config()['endpoint']}"
+        storage = FsspecStorage(
+            "s3://lakana/dev",
+            {
+                "s3.endpoint": endpoint,
+                "s3.access-key-id": seaweedfs.access_key,
+                "s3.secret-access-key": seaweedfs.secret_key,
+            },
+        )
+
+        prefix = storage.read_url_prefix("raw/in")
+        url = storage.resolve_read_url("raw/in/x.parquet", ttl_seconds=60)
+
+        assert prefix == f"{endpoint}/lakana/dev/raw/in/"
+        assert url.startswith(prefix)
+        assert httpx.get(url).content == b"hello"
+
+
 @pytest.mark.parametrize("status", ["QUEUED", "RUNNING"])
 def test_a_cancel_behind_a_locked_run_row_is_a_conflict_within_the_timeout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: str

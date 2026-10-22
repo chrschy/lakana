@@ -10,7 +10,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import cast
 
@@ -722,7 +722,8 @@ def test_a_cancel_request_through_the_service_stops_the_running_query(
         sql: str,
         parameters: Mapping[str, object] | None = None,
         *,
-        restrict_local_filesystem: bool = True,
+        read_prefixes: Sequence[str] = (),
+        spill: bool = False,
         limits: QueryLimitsConfig | None = None,
     ) -> pa.Table:
         with Session(session.get_bind()) as other:
@@ -732,9 +733,7 @@ def test_a_cancel_request_through_the_service_stops_the_running_query(
         assert answered.status is QueryRunStatus.RUNNING
         assert len(_pollers()) == 1
         asked.append(time.monotonic())
-        return real(
-            sql, parameters, restrict_local_filesystem=restrict_local_filesystem, limits=limits
-        )
+        return real(sql, parameters, read_prefixes=read_prefixes, spill=spill, limits=limits)
 
     monkeypatch.setattr("lakana_worker.pipeline.execute_query", cancel_then_run)
     failure = run_one(session, run_id, AllowAllAuthorization())

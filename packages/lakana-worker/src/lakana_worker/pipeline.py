@@ -459,6 +459,7 @@ def _resolve_sources(
     *,
     check_result_id: uuid.UUID | None = None,
     withheld: dict[str, str] | None = None,
+    prefixes: list[str] | None = None,
 ) -> dict[str, TableSource]:
     """Authorize and resolve every table a query references to readable URLs.
 
@@ -503,6 +504,10 @@ def _resolve_sources(
         column whose name another table of the query also has is not among them: the text
         is chosen by the bare name the database could not find, which then may mean either
         table.
+    prefixes
+        When given, filled with the read prefix of every table (`Storage.read_url_prefix`
+        of an Iceberg table's location, or of an external table's ``raw/`` claim): the only
+        locations the query process may open.
 
     Returns
     -------
@@ -557,7 +562,9 @@ def _resolve_sources(
         DuckDB expands a glob in a local path itself) — a foreign snapshot or manifest
         committed under the table's own metadata can otherwise name another table's files, and a
         namespace coincidentally named after another (suffixed) table's own
-        directory can nest one table's location inside another's.
+        directory can nest one table's location inside another's; if an `ICEBERG` table's
+        location does not lie under the environment's storage root, or a table's read prefix
+        cannot be derived (`Storage.read_url_prefix`).
     NotPublishedError
         If a table's first build did not finish, or failed a blocking check, and no later
         run has published it (raised by `CatalogService.load_table`, after the read grant
@@ -721,6 +728,7 @@ def _resolve_sources(
                 for relative in resolved_storage.storage.list(loc.claim)
                 if loc.matches(relative)
             ]
+            readable = loc.claim
         else:
             # By the row's id, never by a name: the result's `table_name` goes stale on a
             # rename, and a table built again under the name is another table.
@@ -760,6 +768,15 @@ def _resolve_sources(
                     f"Table {dotted!r} was created by an older Lakana, with a location that "
                     "does not end in its id; re-create it."
                 )
+            # The query process may open this location and nothing else of the store, so it must
+            # lie under the environment's root; a location committed outside it is refused, never
+            # turned into a prefix on another host.
+            if not table_location.startswith(root_prefix):
+                raise ValidationError(
+                    f"Table {dotted!r} has a location outside its environment's storage; "
+                    "refusing to read it."
+                )
+            readable = table_location.removeprefix(root_prefix)
             # Precomputed once per table, not once per file: the set of other tables' locations
             # nested inside
             # this one does not depend on which file is being checked.
@@ -864,6 +881,8 @@ def _resolve_sources(
             )
             for path in paths
         ]
+        if prefixes is not None:
+            prefixes.append(resolved_storage.storage.read_url_prefix(readable))
         resolved_policy = policy_resolver.resolve(principal, ref, table_id=row.id)
         column_masks = resolved_policy.column_masks
         if iceberg_metadata is not None:
@@ -949,6 +968,8 @@ def _resolve_sources(
     return sources
 
 
+# `_resolve_sources_opaquely` wraps `_resolve_sources` and takes the same parameters.
+# jscpd:ignore-start
 def _resolve_sources_opaquely(
     session: Session,
     environment_name: str,
@@ -960,7 +981,9 @@ def _resolve_sources_opaquely(
     *,
     check_result_id: uuid.UUID | None = None,
     withheld: dict[str, str] | None = None,
+    prefixes: list[str] | None = None,
 ) -> dict[str, TableSource]:
+    # jscpd:ignore-end
     """Call `_resolve_sources`, replacing any failure's message with a safe one.
 
     Everything this stage touches knows a resolved storage location — a
@@ -1013,6 +1036,8 @@ def _resolve_sources_opaquely(
         Passed through to `_resolve_sources`.
     withheld
         Passed through to `_resolve_sources`.
+    prefixes
+        Passed through to `_resolve_sources`.
 
     Returns
     -------
@@ -1056,6 +1081,7 @@ def _resolve_sources_opaquely(
             pins,
             check_result_id=check_result_id,
             withheld=withheld,
+            prefixes=prefixes,
         )
     except (
         UnsupportedTableError,
@@ -1222,6 +1248,9 @@ class _Prepared:
         filter, a column mask or a read at a checked snapshot applies to them.
     named
         The lower-cased names of the columns the reader's SQL names, with its views expanded.
+    read_prefixes
+        The read prefix of every table the query reads, sorted and without duplicates: the
+        locations the query process may open (`execute_query`'s `read_prefixes`).
     """
 
     rewritten: RewrittenQuery
@@ -1232,6 +1261,7 @@ class _Prepared:
     tables: Mapping[str, frozenset[str]] = field(default_factory=dict)
     projected: frozenset[str] = frozenset()
     named: frozenset[str] = frozenset()
+    read_prefixes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1424,6 +1454,7 @@ def _resolve_and_rewrite(
         _raise_expanded_text_failure(expanded, exc)
     pins: dict[TableRef, SnapshotPin] = {}
     withheld: dict[str, str] = {}
+    prefixes: list[str] = []
     sources = _resolve_sources_opaquely(
         session,
         environment_name,
@@ -1434,8 +1465,10 @@ def _resolve_and_rewrite(
         pins,
         check_result_id=check_result_id,
         withheld=withheld,
+        prefixes=prefixes,
     )
     locations.extend(url for source in sources.values() for url in source.urls)
+    locations.extend(prefixes)
     try:
         rewritten = rewrite_query(expanded.sql, sources)
     except SQL_SYNTAX_ERRORS as exc:
@@ -1461,6 +1494,7 @@ def _resolve_and_rewrite(
             and (source.row_filters or source.column_masks or source.declared_columns_only)
         ),
         named=named_columns(expanded.sql),
+        read_prefixes=tuple(sorted(set(prefixes))),
     )
 
 
@@ -1720,7 +1754,7 @@ def _create_view(
     key_provider: KeyProvider | None,
     limits: QueryLimitsConfig,
     *,
-    restrict_local_filesystem: bool,
+    spill: bool,
 ) -> None:
     """Plan a `mode: view` run's SELECT and store it as a view, without executing it.
 
@@ -1748,8 +1782,8 @@ def _create_view(
         Decrypts a secret-backed environment's storage credentials.
     limits
         Supplies `memory_limit`.
-    restrict_local_filesystem
-        As for `execute_query`.
+    spill
+        Whether the query process may spill (local ``file://`` mode), as for `execute_query`.
 
     Raises
     ------
@@ -1763,7 +1797,8 @@ def _create_view(
     schema = describe_query(
         prepared.rewritten.sql,
         prepared.rewritten.parameters,
-        restrict_local_filesystem=restrict_local_filesystem,
+        read_prefixes=prepared.read_prefixes,
+        spill=spill,
         limits=limits,
     )
     references = catalog.resolve_lineage_sources(principal, environment_name, dotted_refs)
@@ -1789,7 +1824,7 @@ def _diagnose_views(
     limits: QueryLimitsConfig,
     locations: list[str],
     *,
-    restrict_local_filesystem: bool,
+    spill: bool,
 ) -> ValidationError | None:
     """Find the first expanded view that no longer plans on its own.
 
@@ -1814,8 +1849,8 @@ def _diagnose_views(
         Supplies `memory_limit`.
     locations
         The run's redaction list, extended with anything this resolves.
-    restrict_local_filesystem
-        As for `execute_query`.
+    spill
+        Whether the query process may spill (local ``file://`` mode), as for `execute_query`.
 
     Returns
     -------
@@ -1837,7 +1872,8 @@ def _diagnose_views(
             describe_query(
                 planned.rewritten.sql,
                 planned.rewritten.parameters,
-                restrict_local_filesystem=restrict_local_filesystem,
+                read_prefixes=planned.read_prefixes,
+                spill=spill,
                 limits=limits,
             )
         # The describe was stopped itself (a cancel or the drain arrived meanwhile, or a limit
@@ -1947,7 +1983,7 @@ def _run_write(
     key_provider: KeyProvider | None,
     limits: QueryLimitsConfig,
     *,
-    restrict_local_filesystem: bool,
+    spill: bool,
 ) -> int:
     """Execute a write run: stream the result into its target and record the outcome.
 
@@ -1976,8 +2012,8 @@ def _run_write(
         Decrypts a secret-backed environment's storage credentials.
     limits
         Supplies `max_write_rows` and `memory_limit`.
-    restrict_local_filesystem
-        As for `execute_query`.
+    spill
+        Whether the query process may spill (local ``file://`` mode), as for `execute_query`.
 
     Returns
     -------
@@ -2026,7 +2062,7 @@ def _run_write(
             parameters[incremental.parameter] = watermark.value
     encoded = None if watermark is None else watermark.encode()
     with stream_query(
-        sql, parameters, restrict_local_filesystem=restrict_local_filesystem, limits=limits
+        sql, parameters, read_prefixes=prepared.read_prefixes, spill=spill, limits=limits
     ) as (schema, batches):
         if run.incremental_key is not None and run.incremental_key not in schema.names:
             raise ValidationError(
@@ -2394,7 +2430,9 @@ def _run_one(
     dotted_refs: list[str] = []
     row_count: int | None = None
     limits = limits or QueryLimitsConfig()
-    restrict = not environment.storage_root.startswith("file://")
+    # Only local `file://` mode lets a query spill to disk; elsewhere the worker's temp directory
+    # may be a container's writable layer.
+    spill = environment.storage_root.startswith("file://")
     prepared: _Prepared | None = None
     failure_exc: BaseException | None = None
     outcome = QueryRunStatus.SUCCEEDED
@@ -2429,7 +2467,8 @@ def _run_one(
                 result = execute_query(
                     prepared.rewritten.sql,
                     prepared.rewritten.parameters,
-                    restrict_local_filesystem=restrict,
+                    read_prefixes=prepared.read_prefixes,
+                    spill=spill,
                     limits=limits,
                 )
                 if on_result is not None:
@@ -2460,7 +2499,7 @@ def _run_one(
                     authz,
                     key_provider,
                     limits,
-                    restrict_local_filesystem=restrict,
+                    spill=spill,
                 )
                 row_count = 0
             else:
@@ -2474,7 +2513,7 @@ def _run_one(
                     authz,
                     key_provider,
                     limits,
-                    restrict_local_filesystem=restrict,
+                    spill=spill,
                 )
             run.lineage_json = lineage
     except _ResolutionFailed as exc:
@@ -2537,7 +2576,7 @@ def _run_one(
                     key_provider,
                     limits,
                     locations,
-                    restrict_local_filesystem=restrict,
+                    spill=spill,
                 )
                 or exc
             )

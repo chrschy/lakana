@@ -423,7 +423,7 @@ it started. On Linux, a worker over it first ends the largest running query or P
 query fails with the cause `out_of_memory`, a task's attempt fails and is retried (see [Failure, retry and cancel](../reference/python-assets.md#failure-retry-and-cancel)); the worker and everything else go on. Only if the worker is still
 over the limit after that, or nothing it can end was running, does it stop. It is then restarted, and the
 query or task it was running is marked failed with the cause `out_of_memory` (see [Failure, retry and cancel](../reference/python-assets.md#failure-retry-and-cancel) for what happens to a task). On macOS the worker always stops, without ending a query first.
-A sort or aggregation over DuckDB's limit fails as out of memory too (`the query ran out of memory and cannot spill to disk`, cause `out_of_memory`): DuckDB cannot spill to disk where the local file system is restricted, which is every deployment but local `file://` storage. Keep the first well below the second. Sizes in the second are binary (`GB` is 1024 MB); in
+A sort or aggregation over DuckDB's limit fails as out of memory too (`the query ran out of memory and cannot spill to disk`, cause `out_of_memory`): DuckDB may spill to disk only with local `file://` storage; every other deployment gives it no spill space. Keep the first well below the second. Sizes in the second are binary (`GB` is 1024 MB); in
 the first, `GB` is decimal. Linux measures the worker and its tasks, macOS only the worker process,
 and Windows nothing. In the Compose bundle, set `LAKANA_WORKER_MEMORY` in `.env` instead
 ([`deploy-with-compose.md`](deploy-with-compose.md#memory-limits), "Memory limits"); local mode

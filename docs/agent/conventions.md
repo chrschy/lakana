@@ -210,9 +210,9 @@ E.g. Shepherd.js and Intro.js (AGPL) are refused; Driver.js and react-joyride (M
 
 `ALLOWLIST` holds three entries today, each with its own justifying comment: `hypothesis`
 (MPL-2.0, `dev` dependency-group only, never shipped), `pathspec` (MPL-2.0, transitive dep of
-`hatchling`, `dev` only) and `certifi` (MPL-2.0, a transitive
-dependency of `requests` that `pyiceberg` requires — present in the default, shipped
-dependency set, allowlisted because MPL-2.0's share-alike obligation attaches only to
+`hatchling`, `dev` only) and `certifi` (MPL-2.0, a direct dependency of `lakana-worker`,
+whose query process falls back to its CA bundle, and a transitive dependency of `requests`
+that `pyiceberg` requires — present in the default, shipped dependency set, allowlisted because MPL-2.0's share-alike obligation attaches only to
 modifications of certifi's own files, never to code that merely imports it, and certifi is
 used unmodified).
 

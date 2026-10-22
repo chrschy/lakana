@@ -9,7 +9,7 @@ import logging
 import sys
 import time
 import uuid
-from collections.abc import Callable, Generator, Iterator, Mapping
+from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from pathlib import Path
 
 import pyarrow as pa
@@ -1467,11 +1467,12 @@ def test_a_write_whose_run_was_ended_while_it_streamed_commits_nothing_and_keeps
         sql: str,
         parameters: Mapping[str, object] | None = None,
         *,
-        restrict_local_filesystem: bool = True,
+        read_prefixes: Sequence[str] = (),
+        spill: bool = False,
         limits: QueryLimitsConfig | None = None,
     ) -> Generator[tuple[pa.Schema, Iterator[pa.RecordBatch]]]:
         with real(
-            sql, parameters, restrict_local_filesystem=restrict_local_filesystem, limits=limits
+            sql, parameters, read_prefixes=read_prefixes, spill=spill, limits=limits
         ) as streamed:
             with Session(engine) as other:
                 other.execute(

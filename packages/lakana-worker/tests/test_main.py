@@ -416,6 +416,87 @@ def test_main_refuses_a_ca_bundle_the_worker_cannot_read(
     poll.assert_not_called()
 
 
+@pytest.mark.parametrize("variable", ["AWS_CA_BUNDLE", "SSL_CERT_FILE"])
+def test_main_refuses_a_query_ca_bundle_that_is_not_a_pem_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, variable: str
+) -> None:
+    """A bad bundle stops the worker at start, before any query child, naming the variable."""
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{tmp_path}/lakana.db")
+    monkeypatch.delenv("AWS_CA_BUNDLE", raising=False)
+    monkeypatch.setenv(variable, str(tmp_path / "missing.pem"))
+
+    def no_child(*_: object, **__: object) -> None:
+        raise AssertionError("no query process may be started with a bad CA bundle")
+
+    monkeypatch.setattr("lakana_worker.__main__.check_limits", no_child)
+    with (
+        mock.patch("lakana_worker.__main__.poll_forever") as poll,
+        mock.patch("lakana_worker.__main__.SchedulerLoop"),
+        mock.patch("lakana_worker.__main__.signal.signal"),
+        pytest.raises(SystemExit) as caught,
+    ):
+        main()
+    assert str(caught.value) == (
+        f"{variable} names {tmp_path / 'missing.pem'}, which is not a readable file of PEM "
+        "certificates. Point it at your object store's certificate authority, or unset it."
+    )
+    poll.assert_not_called()
+
+
+def test_main_refuses_a_query_ca_bundle_that_holds_a_private_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A combined certificate-and-key file stops the worker before any query child."""
+    bundle = tmp_path / "combined.pem"
+    bundle.write_bytes(
+        b"-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"
+        + "".join(
+            f"{'-' * 5}{edge} EC PRIVATE KEY{'-' * 5}\n{body}"
+            for edge, body in (("BEGIN", "KEYDATA\n"), ("END", ""))
+        ).encode()
+    )
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{tmp_path}/lakana.db")
+    monkeypatch.setenv("AWS_CA_BUNDLE", str(bundle))
+    monkeypatch.setattr(
+        "lakana_worker.__main__.check_limits",
+        lambda *_a, **_k: pytest.fail("no query process may start with a key in the bundle"),
+    )
+    with (
+        mock.patch("lakana_worker.__main__.poll_forever") as poll,
+        mock.patch("lakana_worker.__main__.SchedulerLoop"),
+        mock.patch("lakana_worker.__main__.signal.signal"),
+        pytest.raises(SystemExit) as caught,
+    ):
+        main()
+    assert "AWS_CA_BUNDLE" in str(caught.value) and str(bundle) in str(caught.value)
+    assert "private key" in str(caught.value) and "KEYDATA" not in str(caught.value)
+    poll.assert_not_called()
+
+
+def test_main_logs_the_query_ca_bundle_it_resolved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The start-up log names the bundle's path, never its content."""
+    bundle = tmp_path / "store-ca.pem"
+    bundle.write_bytes(b"-----BEGIN CERTIFICATE-----\nSECRETISH\n-----END CERTIFICATE-----\n")
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{tmp_path}/lakana.db")
+    monkeypatch.setenv("AWS_CA_BUNDLE", str(bundle))
+    monkeypatch.setattr("lakana_worker.__main__.check_limits", lambda *_a, **_k: None)
+    with (
+        caplog.at_level("INFO", logger="lakana_worker.__main__"),
+        mock.patch("lakana_worker.__main__.poll_forever", side_effect=SystemExit(0)),
+        mock.patch("lakana_worker.__main__.SchedulerLoop"),
+        mock.patch("lakana_worker.__main__.signal.signal"),
+        pytest.raises(SystemExit),
+    ):
+        main()
+    assert (
+        f"Query processes trust the certificate authorities in {bundle} (AWS_CA_BUNDLE)."
+        in caplog.text
+    )
+    assert "SECRETISH" not in caplog.text
+
+
 def test_main_refuses_a_run_ca_bundle_that_is_a_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

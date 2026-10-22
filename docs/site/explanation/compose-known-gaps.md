@@ -21,6 +21,10 @@ What the bundle does not do, or does not protect, today, and why. The steps to r
   S3 that needs the keys. The filer also runs with `-disableHttp`. **Not protected:** the gateway's gRPC port; see [The gRPC port of the SeaweedFS gateway](#the-grpc-port-of-the-seaweedfs-gateway). The isolation relies on Docker's own network isolation (the default); `iptables: false`, Podman or rootless setups may not provide it. A person
   with Docker access to the host can still reach SeaweedFS (`docker exec`), and the S3 keys in
   `.env` give full access to the `lakana` bucket, as always. The pinned SeaweedFS version is updated with Lakana releases.
+  A query process opens only the S3 locations of the tables its query reads. Two things go further, and
+  only for SQL that got past Lakana's own checks: a literal address with `..` in it reaches other paths
+  of the same gateway (which answers them without the keys only for what it serves anonymously), and
+  DuckDB follows a redirect that the gateway sends.
 
 ## The gRPC port of the SeaweedFS gateway
 

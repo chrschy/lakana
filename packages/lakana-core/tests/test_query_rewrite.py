@@ -496,7 +496,7 @@ def test_rewrite_rejects_a_statement_that_is_not_a_query() -> None:
 @pytest.mark.parametrize(
     ("sql", "key"),
     [
-        ("PIVOT gold.sales ON a USING sum(b)", "PIVOT"),
+        ("PIVOT gold.sales ON a IN ('x') USING sum(b)", "PIVOT"),
         ("SELECT 1 AS a; SELECT b FROM gold.sales", "BLOCK"),
     ],
 )
@@ -1448,7 +1448,7 @@ def test_the_rewrite_refuses_dml_inside_a_cte_on_its_own() -> None:
     "sql",
     [
         "WITH m AS (VALUES (1)) SELECT * FROM m",
-        "WITH m AS (PIVOT bronze.t ON a USING sum(b)) SELECT * FROM m",
+        "WITH m AS (PIVOT bronze.t ON a IN ('x') USING sum(b)) SELECT * FROM m",
         "WITH m AS (FROM bronze.t) SELECT * FROM m",
         "SELECT * FROM (FROM bronze.t SELECT a) AS s",
         "SELECT * FROM (bronze.v JOIN bronze.x ON v.a = x.a)",
@@ -2092,3 +2092,44 @@ def test_a_stored_view_that_trips_a_parser_fault_is_named(witness: str) -> None:
             "SELECT * FROM gold.v",
             lambda dotted: ViewDefinition(name=dotted, sql=witness) if dotted == "gold.v" else None,
         )
+
+
+_PIVOT_WITHOUT_VALUES = [
+    "SELECT * FROM (PIVOT gold.sales ON a USING sum(b))",
+    "SELECT * FROM (PIVOT gold.sales ON a USING sum(b) GROUP BY c)",
+    "SELECT * FROM (PIVOT gold.sales ON a IN ('x'), c USING sum(b))",
+    "SELECT * FROM (PIVOT gold.sales ON a || c USING sum(b))",
+    "SELECT * FROM (PIVOT gold.sales ON a IN (SELECT a FROM gold.sales) USING sum(b))",
+    "WITH p AS (PIVOT gold.sales ON a USING sum(b)) SELECT * FROM p",
+    "SELECT * FROM gold.sales WHERE b IN (SELECT 1 FROM (PIVOT gold.sales ON a USING sum(b)))",
+    "SELECT * FROM gold.sales PIVOT (sum(b) FOR a IN (SELECT a FROM gold.sales))",
+]
+
+
+@pytest.mark.parametrize("sql", _PIVOT_WITHOUT_VALUES)
+def test_a_pivot_without_the_values_of_its_on_column_is_refused(sql: str) -> None:
+    """DuckDB runs such a PIVOT as two statements (it creates a type first).
+
+    The query process runs exactly one SELECT, so the guard says what to write instead of
+    letting it fail there as a defect.
+    """
+    with pytest.raises(ValidationError) as caught:
+        check_blacklist(sql)
+    assert str(caught.value) == query_rewrite.PIVOT_VALUES_MESSAGE
+    with pytest.raises(ValidationError):
+        extract_table_refs(sql)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT * FROM (PIVOT gold.sales ON a IN ('x', 'y') USING sum(b))",
+        "SELECT * FROM (PIVOT gold.sales ON a IN ('x'), c IN (1, 2) USING sum(b) GROUP BY d)",
+        "SELECT * FROM gold.sales PIVOT (sum(b) FOR a IN ('x', 'y'))",
+        "SELECT * FROM gold.sales UNPIVOT (v FOR k IN (a, b))",
+        "SELECT * FROM (UNPIVOT gold.sales ON a, b INTO NAME k VALUE v)",
+    ],
+)
+def test_a_pivot_with_its_values_listed_and_an_unpivot_pass(sql: str) -> None:
+    check_blacklist(sql)
+    assert extract_table_refs(sql) == ["gold.sales"]
