@@ -141,8 +141,11 @@ def find_ca_bundle(
     Returns
     -------
     tuple of (str, str)
-        The absolute path of the bundle (a relative variable is made absolute against the
-        worker's working directory, because the query process allows the path as written), and
+        The real path of the bundle: absolute (a relative variable is resolved against the
+        worker's working directory) with symlinks resolved, because DuckDB stores
+        ``ca_cert_file`` and ``allowed_paths`` by real path (on macOS ``/etc/ssl/cert.pem`` reads
+        back as ``/private/etc/ssl/cert.pem``), so the path the worker logs, passes and allows is
+        the one DuckDB uses. And
         its source for the start-up log: the variable's name, ``the system's bundle`` or
         ``certifi``.
 
@@ -163,13 +166,13 @@ def find_ca_bundle(
                 raise CaBundleError(_message(variable, value))
             if key:
                 raise CaBundleError(_key_message(variable, value))
-            return os.path.abspath(value), variable
+            return os.path.realpath(value), variable
     for candidate in system_bundles:
         if os.path.isfile(candidate) and os.access(candidate, os.R_OK):
             if _scan(candidate)[1]:
                 raise CaBundleError(_key_message("the system's bundle", candidate))
-            return candidate, "the system's bundle"
-    return os.path.abspath(fallback()), "certifi"
+            return os.path.realpath(candidate), "the system's bundle"
+    return os.path.realpath(fallback()), "certifi"
 
 
 def resolve_ca_bundle(
@@ -191,7 +194,7 @@ def resolve_ca_bundle(
     Returns
     -------
     str
-        The absolute path of the bundle.
+        The real path of the bundle.
 
     Raises
     ------

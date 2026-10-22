@@ -61,7 +61,9 @@ def test_the_first_of_several_readable_system_bundles_wins(tmp_path: Path) -> No
 
 
 def test_certifi_comes_last(tmp_path: Path) -> None:
-    assert resolve_ca_bundle({}, (str(tmp_path / "missing.pem"),)) == certifi.where()
+    assert resolve_ca_bundle({}, (str(tmp_path / "missing.pem"),)) == os.path.realpath(
+        certifi.where()
+    )
 
 
 def test_a_relative_variable_is_made_absolute(
@@ -193,3 +195,14 @@ def test_a_key_split_across_the_read_window_is_still_found(tmp_path: Path) -> No
     path.write_bytes(_PEM * 300_000 + _key_block(end=False))
     with pytest.raises(CaBundleError):
         resolve_ca_bundle({"AWS_CA_BUNDLE": str(path)}, ())
+
+
+def test_a_bundle_reached_through_a_symlink_is_named_by_its_real_path(tmp_path: Path) -> None:
+    """DuckDB stores `ca_cert_file` and `allowed_paths` by real path (macOS: /etc → /private/etc).
+
+    The worker names the same path, so what it logs, passes and allows is what DuckDB uses.
+    """
+    real = _pem(tmp_path / "real.pem")
+    (tmp_path / "linked.pem").symlink_to(real)
+    assert resolve_ca_bundle({"AWS_CA_BUNDLE": str(tmp_path / "linked.pem")}, ()) == str(real)
+    assert resolve_ca_bundle({}, (str(tmp_path / "linked.pem"),)) == str(real)
