@@ -61,21 +61,16 @@ If a query fails with `the query process could not read its certificate authorit
 the file is gone or unreadable since the worker started: fix the variable and restart the worker.
 
 A query process always verifies the store's certificate. If the file does not hold the authority
-that signed it, the query fails at once, and is not tried again, with:
-
-<!-- not tested: an error message, pinned by test_query_allow_list.py against a TLS server -->
-```text
-Query failed: the query process could not verify the TLS certificate of the object store at
+that signed it, the query fails at once, and is not tried again, with
+`Query failed: the query process could not verify the TLS certificate of the object store at
 minio.internal:9000 against the certificate authorities in /etc/ssl/certs/ca-certificates.crt.
 Set AWS_CA_BUNDLE or SSL_CERT_FILE on the worker to a PEM file of your object store's certificate
-authority, then restart the worker; see https://lakana-labs.github.io/lakana/reference/network-settings/#object-store-certificates-for-queries.
-```
+authority, then restart the worker; see` this section.
 
 The message names the store by host and port only, never a presigned URL. To fix it:
 
-1. Get the certificate of the authority that signed the store's certificate (your operations team
-   has it; `openssl s_client -connect minio.internal:9000 -showcerts` shows the chain the store
-   sends).
+1. Get the certificate of the authority that signed the store's certificate; whoever runs the
+   store has it.
 2. Put it, with every other authority your stores need, in one PEM file on the worker.
 3. Point `AWS_CA_BUNDLE` (or `SSL_CERT_FILE`) at that file and restart the worker. Its log then
    names the file.

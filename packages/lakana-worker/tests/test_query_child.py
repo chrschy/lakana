@@ -893,6 +893,40 @@ def test_an_unverifiable_certificate_of_a_host_the_request_does_not_name_is_not_
     assert "the object store" in error.message
 
 
+@pytest.mark.parametrize(
+    ("text", "prefix"),
+    [
+        pytest.param(
+            "IO Error: SSL peer certificate or SSH remote key was not OK",
+            "https://store.example:8333/bucket/t1/",
+            id="no URL quoted",
+        ),
+        pytest.param(
+            _UNVERIFIED.replace("https://", "https://user@"),
+            "https://user@store.example:8333/bucket/t1/",
+            id="user information",
+        ),
+        pytest.param(
+            "IO Error: SSL peer certificate or SSH remote key was not OK error for HTTP HEAD to "
+            "'https://[::1/bucket/t1/a.parquet'",
+            "https://[::1/bucket/t1/",
+            id="a URL that does not parse",
+        ),
+    ],
+)
+def test_an_unverifiable_certificate_without_a_safe_host_says_only_the_object_store(
+    text: str, prefix: str
+) -> None:
+    """A host is said only from a quoted URL that parses, without user information."""
+    error = query_child.failure(
+        duckdb.IOException(text), threading.Event(), ca_bundle="/etc/ca.pem", prefixes=(prefix,)
+    )
+    assert error.kind == "internal"
+    assert error.message.startswith(f"{STORE_CERTIFICATE_UNVERIFIED} against ")
+    assert "user" not in error.message
+    assert "::1" not in error.message
+
+
 def test_a_certificate_text_quoted_by_another_error_type_is_not_taken_for_one() -> None:
     """Only DuckDB's own ``IO Error`` counts: SQL can make an error of another type say it."""
     text = "Invalid Input Error: " + _UNVERIFIED
