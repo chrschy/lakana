@@ -2676,7 +2676,8 @@ own process opens no DuckDB connection and imports no `duckdb`.
   presigned URL, so the child takes the netloc of the quoted URL and says it only when it is the
   netloc of one of the request's own prefixes (no user information), otherwise "the object
   store". Only an `IO Error` with that text counts (an error of another type quoting it, which
-  SQL can produce, keeps its own class). Lakana words the message itself, so the executor adds
+  SQL can produce, keeps its own class; and the class is checked beside the text, pinned by
+`test_a_certificate_text_on_an_error_that_is_not_an_io_error_is_not_taken_for_one`). Lakana words the message itself, so the executor adds
   no "run it again" advice and `pipeline._without_the_value` keeps it under a policy. Pinned by
   `test_a_store_certificate_of_a_foreign_authority_fails_once_and_is_not_retried` (and its
   right-authority twin) and the `failure` unit tests. DuckDB's own HTTP retries
@@ -2694,7 +2695,10 @@ own process opens no DuckDB connection and imports no `duckdb`.
   - **Redirects are followed.** httpfs follows a 3xx from an allowed URL to another host
     without consulting the allow-list (1.5.5 and 2.0.0;
     `test_known_residual_a_redirect_from_the_store_is_followed_to_another_host`). The reach is
-    what the store itself redirects to; a query cannot choose the target.
+    what the store itself redirects to; a query cannot choose the target. When the host
+    redirected to presents a certificate that fails, DuckDB quotes the original URL, so the
+    certificate message names the trusted store's host:port, not the failing host: misleading
+    for the operator, but nothing leaks.
   - **Method and payload:** GET and HEAD only; httpfs refuses writes to http(s). No credential
     is sent (none is held); `http_proxy`/`extra_http_headers` are locked as settings, and a
     secret that sets them cannot be created, because the child runs nothing but one `SELECT`.

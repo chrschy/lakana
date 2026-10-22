@@ -933,6 +933,32 @@ def test_a_certificate_text_quoted_by_another_error_type_is_not_taken_for_one() 
     assert query_child.failure(OSError(text), threading.Event()).kind == "invalid"
 
 
+@pytest.mark.parametrize("exc", [duckdb.InvalidInputException, duckdb.BinderException])
+def test_a_certificate_text_on_an_error_that_is_not_an_io_error_is_not_taken_for_one(
+    exc: type[BaseException],
+) -> None:
+    """Only an `IOException` or an `OSError` counts, even when the text starts with ``IO Error``.
+
+    Pins the class check beside the text match: SQL can make an error of another class carry
+    any text, and without the check this text would be reported as the store's certificate.
+
+    Parameters
+    ----------
+    exc
+        The DuckDB error class that carries the text.
+    """
+    error = query_child.failure(
+        exc(_UNVERIFIED),
+        threading.Event(),
+        files=[_SIGNED],
+        ca_bundle="/etc/ca.pem",
+        prefixes=("https://store.example:8333/bucket/t1/",),
+    )
+
+    assert error.kind == "invalid"
+    assert not error.message.startswith(STORE_CERTIFICATE_UNVERIFIED)
+
+
 def test_an_out_of_memory_message_names_the_setting_and_drops_duckdbs_own_advice() -> None:
     exc = duckdb.OutOfMemoryException(
         "Out of Memory Error: failed to allocate data of size 256.0 MiB (1/2 used)\n\n"
