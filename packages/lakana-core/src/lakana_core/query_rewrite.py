@@ -856,10 +856,19 @@ def _render(parsed: exp.Expr, dialect: str) -> str:
     The keyword form is also the one DuckDB parses as sqlglot does: `x -> x -> '$.a'` (a
     lambda whose body is a JSON extract) did not bind in the arrow form on DuckDB 1.5.
 
+    A lambda's body extends as far to the right as DuckDB can read it, so a lambda anywhere but
+    in the arguments of a function that takes one (or already in parentheses) is wrapped in
+    parentheses: sqlglot turns `mod(x -> x + 10, 4)` into the operator `% 4`, and a bare
+    `LAMBDA x : x + 10 % 4` would take the `% 4` into the body, a grouping the guard never
+    checked. DuckDB refuses such a lambda either way; wrapped, it refuses the tree that was
+    checked. Turning the lambda into a JSON extract instead, as in a function's argument, would
+    also turn a lambda the caller parenthesised inside a function that takes one.
+
     Parameters
     ----------
     parsed
-        The tree to render; its lambdas are marked for the keyword form in place.
+        The tree to render; its lambdas are marked for the keyword form, and an operand lambda
+        wrapped in parentheses, in place.
     dialect
         The SQL dialect to render in.
 
@@ -868,8 +877,12 @@ def _render(parsed: exp.Expr, dialect: str) -> str:
     str
         The SQL text.
     """
-    for node in parsed.find_all(exp.Lambda):
+    for node in list(parsed.find_all(exp.Lambda)):
         node.set("colon", True)
+        if not isinstance(node.parent, exp.Paren) and not _takes_a_lambda(node.parent):
+            wrapper = exp.Paren()
+            node.replace(wrapper)
+            wrapper.set("this", node)
     return parsed.sql(dialect=dialect)
 
 
