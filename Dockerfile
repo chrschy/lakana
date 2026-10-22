@@ -6,7 +6,7 @@
 #   uv export --frozen --no-dev --all-packages --no-emit-workspace -o dist/requirements.txt
 
 # Base image: pinned by tag and digest; Dependabot bumps the two together.
-FROM python:3.14-slim@sha256:a2b82f3c48559aa0a8446d9af49826b6e2b2016f4cd2afabfe6013ec53729170 AS builder
+FROM python:3.14-slim@sha256:0514bc76712d64f8bb48adcb95b1ab0d88c69fee95d62fe4c18ee948bee9b1e1 AS builder
 ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 RUN apt-get update \
  && apt-get install -y --no-install-recommends tini \
@@ -24,7 +24,7 @@ RUN python -m venv /opt/lakana \
 # Dependabot bumps the tag and the digest together; by hand, use `docker buildx imagetools inspect`.
 FROM ghcr.io/astral-sh/uv:0.13.1@sha256:4a1f3666816dafadd20ceb71eac9a7d56d7ef30279f7d64048519ab901ada336 AS uv
 
-FROM python:3.14-slim@sha256:a2b82f3c48559aa0a8446d9af49826b6e2b2016f4cd2afabfe6013ec53729170
+FROM python:3.14-slim@sha256:0514bc76712d64f8bb48adcb95b1ab0d88c69fee95d62fe4c18ee948bee9b1e1
 ENV TMPDIR=/var/tmp/lakana \
     HOME=/home/lakana \
     PATH=/opt/lakana/bin:$PATH \

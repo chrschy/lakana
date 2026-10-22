@@ -1790,3 +1790,12 @@ def test_the_integration_job_has_room_for_the_docker_isolation_tests() -> None:
     Python bases and uv: the legacy builder builds every stage) and two minutes of tests.
     """
     assert _jobs("ci.yml")["integration"]["timeout-minutes"] == 45
+
+
+def test_the_two_dockerfiles_pin_the_same_python_314_base_image() -> None:
+    """The release image and the 3.14 task image must not drift to different digests."""
+    pin = re.compile(r"^FROM (python:3\.14-slim@sha256:[0-9a-f]{64})", re.MULTILINE)
+    main = set(pin.findall((ROOT / "Dockerfile").read_text()))
+    task = set(pin.findall((ROOT / "Dockerfile.task").read_text()))
+    assert len(main) == 1
+    assert main == task
