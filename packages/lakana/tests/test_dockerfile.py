@@ -246,3 +246,40 @@ def _created_directories() -> list[str]:
             if words[:1] == ["mkdir"] or words[:2] == ["install", "-d"]:
                 found += [w.rstrip("/") for w in words if w.startswith("/")]
     return found
+
+
+_TASK_DOCKERFILE = _DOCKERFILE.with_name("Dockerfile.task")
+
+
+def test_the_task_image_carries_python_uv_and_the_build_entry_and_no_entrypoint() -> None:
+    """The launcher sets the command; an entrypoint in the image would run first."""
+    text = _TASK_DOCKERFILE.read_text(encoding="utf-8")
+
+    assert "ENTRYPOINT" not in text
+    assert "FROM python:${PYTHON}-slim" in text
+    assert (
+        "COPY packages/lakana-worker/src/lakana_worker/launcher/task_build.py"
+        " /opt/lakana-task/build.py" in text
+    )
+    assert "--uid 10001" in text and "--uid 10002" in text
+    assert "--gid 10003" in text
+    assert "install -d -o 10002 -g 10002 -m 0755 /env" in text
+    assert "USER 10001:10003" in text
+    ignore = _TASK_DOCKERFILE.with_name("Dockerfile.task.dockerignore").read_text(encoding="utf-8")
+    assert ignore.splitlines() == [
+        "*",
+        "!packages/lakana-worker/src/lakana_worker/launcher/task_build.py",
+    ]
+
+
+def test_the_task_image_pins_the_same_uv_as_the_main_image() -> None:
+    """A venv is built and run with the image's uv; both images move together."""
+
+    def uv_line(path: Path) -> str:
+        return next(
+            line
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.startswith("FROM ghcr.io/astral-sh/uv:")
+        )
+
+    assert uv_line(_TASK_DOCKERFILE) == uv_line(_DOCKERFILE)

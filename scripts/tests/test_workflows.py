@@ -1729,3 +1729,18 @@ def test_the_site_is_built_for_the_address_it_is_served_from() -> None:
     """GitHub Pages serves the project under `/lakana/`, so the build needs that `site_url`."""
     config = (ROOT / "mkdocs.yml").read_text()
     assert re.search(r"^site_url: https://lakana-labs\.github\.io/lakana/$", config, re.MULTILINE)
+
+
+def test_a_release_publishes_one_task_image_per_supported_python() -> None:
+    """One image per supported Python, `lakana-task:<version>-py3.X`, built with the release."""
+    job = _jobs("release.yml")["publish-task-images"]
+
+    assert job["strategy"]["matrix"]["python"] == ["3.11", "3.12", "3.13", "3.14"]
+    build = next(step for step in job["steps"] if "build-push-action" in step.get("uses", ""))
+    assert build["with"]["file"] == "Dockerfile.task"
+    assert build["with"]["tags"] == (
+        "ghcr.io/lakana-labs/lakana-task:"
+        "${{ steps.version.outputs.version }}-py${{ matrix.python }}"
+    )
+    assert "PYTHON=${{ matrix.python }}" in build["with"]["build-args"]
+    assert "publish-task-images" in _jobs("release.yml")["compose-smoke-release"]["needs"]

@@ -1,0 +1,25 @@
+# syntax=docker/dockerfile:1
+# A Lakana task image: the Python a project's Python tasks run on, uv, and the build entry the
+# launcher runs. One image per supported Python, built by the release workflow with
+#   docker build -f Dockerfile.task --build-arg PYTHON=3.14 -t ghcr.io/lakana-labs/lakana-task:<version>-py3.14 .
+# from the repository root. The image has no entry point: the launcher sets every container's command.
+ARG PYTHON=3.14
+
+# uv, pinned by tag and digest as in Dockerfile; test_dockerfile.py keeps both pins equal.
+FROM ghcr.io/astral-sh/uv:0.13.1@sha256:4a1f3666816dafadd20ceb71eac9a7d56d7ef30279f7d64048519ab901ada336 AS uv
+
+FROM python:${PYTHON}-slim
+# uid 10001 runs tasks (the worker's uid: the harness must own its work directory) in group
+# 10003, which is not the worker's group 10001; uid 10002 builds environments, so a task cannot
+# change the files of the environment it runs in. /env and /uv-cache give a new volume the
+# build user as owner on first use.
+RUN groupadd --system --gid 10003 lakana-task \
+ && useradd --system --uid 10001 --gid lakana-task --no-create-home --home-dir /work/home --shell /usr/sbin/nologin lakana \
+ && groupadd --system --gid 10002 lakana-build \
+ && useradd --system --uid 10002 --gid lakana-build --no-create-home --home-dir /tmp --shell /usr/sbin/nologin lakana-build \
+ && install -d -o 10002 -g 10002 -m 0755 /env \
+ && install -d -o 10002 -g 10002 -m 0700 /uv-cache \
+ && install -d -m 0755 /code /work /src /opt/lakana-task /ingest
+COPY --from=uv /uv /usr/local/bin/uv
+COPY packages/lakana-worker/src/lakana_worker/launcher/task_build.py /opt/lakana-task/build.py
+USER 10001:10003
