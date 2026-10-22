@@ -271,6 +271,52 @@ def test_stop_stops_a_running_task(tmp_path: Path) -> None:
     assert launcher.stop(StopRequest("t1")) == {"stopped": False}
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [(500, {"message": "cannot stop container: permission denied"}), EngineError("timed out")],
+    ids=["docker-refuses", "docker-unreachable"],
+)
+def test_a_stop_docker_did_not_carry_out_answers_false_and_a_retry_stops_the_task(
+    tmp_path: Path, failure: Any
+) -> None:
+    """The caller asks again on False; a True it cannot trust would end its retries early."""
+    engine = FakeEngine(hold=True)
+    launcher = _started(engine, tmp_path)
+    results: list[dict[str, object]] = []
+    worker = threading.Thread(
+        target=lambda: results.append(launcher.run(_run(), lambda line: None))
+    )
+    worker.start()
+    _until(lambda: _task_started(engine))
+    real = engine.request
+    _intercept(engine, lambda method, path, body: path.endswith("/stop"), failure)
+
+    assert launcher.stop(StopRequest("t1")) == {"stopped": False}
+    assert worker.is_alive()
+
+    engine.request = real  # ty: ignore[invalid-assignment]
+    assert launcher.stop(StopRequest("t1")) == {"stopped": True}
+    worker.join(10)
+    assert results[0]["stopped"] is True
+
+
+def test_a_stop_of_a_container_that_already_ended_or_is_gone_answers_true(tmp_path: Path) -> None:
+    """Docker's 304 (not running) and 404 (removed) mean nothing of the task runs any more."""
+    engine = FakeEngine(hold=True)
+    launcher = _started(engine, tmp_path)
+    worker = threading.Thread(target=lambda: launcher.run(_run(), lambda line: None))
+    worker.start()
+    _until(lambda: _task_started(engine))
+    real = engine.request
+
+    for status in (304, 404):
+        _intercept(engine, lambda method, path, body: path.endswith("/stop"), (status, b""))
+        assert launcher.stop(StopRequest("t1")) == {"stopped": True}
+        engine.request = real  # ty: ignore[invalid-assignment]
+    launcher.stop(StopRequest("t1"))
+    worker.join(10)
+
+
 def test_a_closed_connection_removes_the_container_and_its_network(tmp_path: Path) -> None:
     """Review focus: a worker that dies sends nothing; the launcher still cleans up."""
     engine = FakeEngine()

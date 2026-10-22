@@ -1037,24 +1037,39 @@ class Launcher:
         Returns
         -------
         dict
-            ``stopped``: whether something was registered under that id. A run that has not
-            started its container yet never will.
+            ``stopped``: `True` when a run is registered under that id and Docker stopped its
+            container, found it not running or gone, or it has none yet (a run that has not
+            started its container never will). `False` when nothing is registered under the id,
+            or Docker did not carry out the stop: the caller asks again.
         """
         for kind in ("task", "build"):
+            name = container_name(self.settings, kind, request.id)
             with self._lock:
-                live = self._live.get(container_name(self.settings, kind, request.id))
+                live = self._live.get(name)
             if live is not None:
                 live.stopped.set()
                 cid = live.container_id
-                if cid is not None:
-                    with contextlib.suppress(EngineError):
-                        self.engine.request(
-                            "POST",
-                            f"/containers/{cid}/stop",
-                            query={"t": str(live.grace)},
-                            timeout=live.grace + 30.0,
-                        )
-                return {"stopped": True}
+                if cid is None:
+                    return {"stopped": True}
+                try:
+                    status, body = self.engine.request(
+                        "POST",
+                        f"/containers/{cid}/stop",
+                        query={"t": str(live.grace)},
+                        timeout=live.grace + 30.0,
+                    )
+                except EngineError as exc:
+                    status, body = None, {"message": str(exc)}
+                # 304: not running any more; 404: removed meanwhile. Either way nothing runs.
+                if status in (204, 304, 404):
+                    return {"stopped": True}
+                logger.error(
+                    "Docker did not stop container %s (status %s: %s); the worker asks again.",
+                    name,
+                    status if status is not None else "none",
+                    self.redact(_message(body)),
+                )
+                return {"stopped": False}
         return {"stopped": False}
 
     def abandon(self, name: str) -> None:
