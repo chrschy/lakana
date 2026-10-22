@@ -242,7 +242,8 @@ jobs:
       - id: version
         run: echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
         env: {TAG: "${{ needs.release-please.outputs.tag }}"}
-      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7
+      - id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7
         with:
           context: .
           file: Dockerfile.task
@@ -251,6 +252,14 @@ jobs:
           build-args: |
             PYTHON=${{ matrix.python }}
           tags: ghcr.io/lakana-labs/lakana-task:${{ steps.version.outputs.version }}-py${{ matrix.python }}
+      - name: Hand the pushed digest to the attestation job
+        # A matrix job has no single output, so each leg uploads the digest its own push reported.
+        run: echo "${DIGEST}" > digest.txt
+        env: {DIGEST: "${{ steps.build.outputs.digest }}"}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7
+        with:
+          name: task-digest-${{ matrix.python }}
+          path: digest.txt
 
   # Signs the pushed image by digest. Its own job: `publish-image` runs several third-party
   # actions, and any step of a job with `id-token: write` could ask for a signing certificate.
@@ -270,31 +279,25 @@ jobs:
           subject-digest: ${{ needs.publish-image.outputs.digest }}
           push-to-registry: false
 
-  # Signs each task image by digest, like `attest-image`. The digest is read back from the
-  # registry: a matrix job has no single output to hand over.
+  # Signs each task image by digest, like `attest-image`. The digest is the one the push step of
+  # the same matrix leg reported (an artifact), not a read-back from a mutable tag.
   attest-task-images:
-    needs: [release-please, publish-task-images]
+    needs: publish-task-images
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
-      packages: read           # reads the pushed digest
       id-token: write          # the Sigstore signing certificate
       attestations: write      # stores the attestation
     strategy:
       matrix:
         python: ["3.11", "3.12", "3.13", "3.14"]
     steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
+        with:
+          name: task-digest-${{ matrix.python }}
       - id: digest
-        # Plain docker commands, no third-party action: this job holds `id-token: write`.
-        run: |
-          echo "${GITHUB_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
-          digest=$(docker buildx imagetools inspect "ghcr.io/lakana-labs/lakana-task:${TAG#v}-py${PYTHON}" --format '{{.Manifest.Digest}}')
-          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ needs.release-please.outputs.tag }}
-          PYTHON: ${{ matrix.python }}
+        run: echo "digest=$(tr -d '[:space:]' < digest.txt)" >> "$GITHUB_OUTPUT"
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
         with:
           subject-name: ghcr.io/lakana-labs/lakana-task

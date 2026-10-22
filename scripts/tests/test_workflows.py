@@ -1756,7 +1756,6 @@ def test_the_task_images_wait_for_the_approval_and_are_attested() -> None:
     assert "publish-task-images" in attest["needs"]
     assert attest["permissions"] == {
         "contents": "read",
-        "packages": "read",
         "id-token": "write",
         "attestations": "write",
     }
@@ -1764,6 +1763,26 @@ def test_the_task_images_wait_for_the_approval_and_are_attested() -> None:
     assert step["with"]["subject-name"] == "ghcr.io/lakana-labs/lakana-task"
     assert step["with"]["subject-digest"] == "${{ steps.digest.outputs.digest }}"
     assert attest["strategy"]["matrix"]["python"] == ["3.11", "3.12", "3.13", "3.14"]
+
+
+def test_the_attested_digest_is_the_one_the_push_step_reported() -> None:
+    """No read-back from a mutable tag: the push step's digest travels in an artifact."""
+    jobs = _jobs("release.yml")
+    publish, attest = jobs["publish-task-images"], jobs["attest-task-images"]
+    build = next(s for s in publish["steps"] if "build-push-action" in s.get("uses", ""))
+    assert build["id"]
+    upload = next(s for s in publish["steps"] if "upload-artifact" in s.get("uses", ""))
+    assert upload["with"]["name"] == "task-digest-${{ matrix.python }}"
+    writer = next(
+        s for s in publish["steps"] if f"steps.{build['id']}.outputs.digest" in json.dumps(s)
+    )
+    assert "digest" in writer["run"] or "digest" in json.dumps(writer.get("env", {}))
+    download = next(s for s in attest["steps"] if "download-artifact" in s.get("uses", ""))
+    assert download["with"]["name"] == "task-digest-${{ matrix.python }}"
+    text = json.dumps(attest)
+    assert "imagetools" not in text
+    assert "docker login" not in text
+    assert attest["permissions"].get("packages") is None
 
 
 def test_the_docker_isolation_tests_have_a_step_of_their_own_that_needs_docker() -> None:
