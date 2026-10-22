@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import os
 import re
+import socket
 import stat
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -1126,3 +1129,38 @@ def test_a_task_image_the_launcher_cannot_extend_is_refused(
     assert result.exit_code == 2
     assert expected in result.stderr
     assert not (tmp_path / "b" / ".env").exists()
+
+
+def test_the_launcher_is_healthy_only_while_it_listens(tmp_path: Path, released: None) -> None:
+    """The healthcheck connects: a socket left in the volume by an earlier launcher is refused.
+
+    The socket volume outlives `docker compose down`, so a check that the file exists would call
+    a launcher that is still starting, or failing, healthy.
+    """
+    test = _services(tmp_path)["launcher"]["healthcheck"]["test"]
+    assert test[:5] == ["CMD", *_BASE_PYTHON, "-c"]
+    code = test[5].replace("/run/lakana-launcher/launcher.sock", "h.sock")
+    assert code != test[5]
+
+    def healthy() -> bool:
+        """Run the healthcheck's code next to `h.sock`.
+
+        Returns
+        -------
+        bool
+            Whether it exits 0.
+        """
+        done = subprocess.run(
+            [sys.executable, "-I", "-S", "-c", code], cwd=tmp_path, check=False, timeout=30
+        )
+        return done.returncode == 0
+
+    assert not healthy()  # no socket yet
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as stale:
+        stale.bind(str(tmp_path / "h.sock"))
+    assert not healthy()  # a stale socket: nobody listens
+    (tmp_path / "h.sock").unlink()
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as live:
+        live.bind(str(tmp_path / "h.sock"))
+        live.listen(1)
+        assert healthy()

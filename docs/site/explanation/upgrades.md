@@ -141,7 +141,11 @@ page); Docker Engine 28 or later is required. Task containers sit outside the wo
 limit: budget `LAKANA_RUN__TASK_MEMORY` (2 GB) per worker on top of the workers' own. Builds reach
 package indexes only through `egress`: a corporate proxy goes in `LAKANA_EGRESS_UPSTREAM_PROXY`,
 and `LAKANA_RUN__HTTPS_PROXY` and `LAKANA_RUN__CA_BUNDLE` are refused with the docker runner.
-`LAKANA_RUNNER=local` keeps the earlier behaviour. Local mode is unchanged.
+`LAKANA_RUNNER=local` runs tasks as the worker's own processes again, as before, but the new
+`compose.yaml` still starts `launcher` and `egress`: Docker Engine 28, the Docker socket and
+`LAKANA_TASK_IMAGE` stay required, and the workers wait for the launcher (to drop both services,
+edit `compose.yaml` by hand, see [Python assets](../how-to/deploy-with-compose.md#python-assets)).
+Local mode is unchanged.
 
 ## Notes for 0.19.0
 

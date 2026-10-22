@@ -176,10 +176,14 @@ Each Python task runs in a container of its own (`LAKANA_RUN__RUNNER=docker`, se
 `LAKANA_RUNNER` in `.env`): its code and environment read-only, a private scratch directory, the
 server as the only thing it can reach, and its own memory (`LAKANA_RUN__TASK_MEMORY`, 2 GB), CPU
 (1) and process (256) limits. Environments are built once per `uv.lock`, `pyproject.toml`, Python
-and set of package indexes, in volumes the launcher names `<project>-env-…`. Set
-`LAKANA_RUNNER=local` to run tasks as the worker's own processes, without isolation. What a
-project's Python code can and cannot do in either case is in
-[Python assets](projects.md#python-assets).
+and set of package indexes, in volumes the launcher names `<project>-env-…`. What a project's
+Python code can and cannot do in either case is in [Python assets](projects.md#python-assets).
+
+`LAKANA_RUNNER=local` changes only where tasks run: as the worker's own processes, without
+isolation. `launcher` and `egress` still start, so Docker Engine 28, the Docker socket and
+`LAKANA_TASK_IMAGE` are still needed (the launcher's start-up checks pull the 3.11 task image), and
+the workers still wait for a healthy launcher. To run without them, remove both services and the
+workers' `launcher` entry under `depends_on` from your `compose.yaml` by hand.
 
 A task talks to the server over REST, so the worker needs the server's address: the bundle sets
 `LAKANA_RUN__SERVER_URL=http://server:8000` on the `worker` service (not on the server). The
@@ -907,7 +911,9 @@ Two things to check before editing `.env`:
    ```
 
    Without `LAKANA_TASK_IMAGE`, `docker compose up` stops with "set LAKANA_TASK_IMAGE in .env,
-   see the upgrade notes". `LAKANA_RUNNER=local` keeps tasks in the worker's own processes.
+   see the upgrade notes". `LAKANA_RUNNER=local` keeps tasks in the worker's own processes, but
+   the launcher still starts and needs all four lines and Docker Engine 28
+   ([Python assets](#python-assets)).
 
 ### Limits that start to apply after you upgrade
 

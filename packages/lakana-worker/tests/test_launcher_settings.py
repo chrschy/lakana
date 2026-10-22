@@ -394,15 +394,22 @@ def test_a_blank_former_variable_is_ignored_and_a_set_one_says_to_remove_it() ->
         load_settings({**_BASE, "LAKANA_LAUNCHER__TASK_USER": "0:0"})
 
 
-_COMPOSE = (
-    Path(__file__).resolve().parents[2]
-    / "lakana"
-    / "src"
-    / "lakana"
-    / "cli"
-    / "deploy"
-    / "compose.yaml"
-)
+_REPO = Path(__file__).resolve().parents[3]
+"""The repository root: ``packages/lakana-worker/tests`` is three levels below it."""
+_COMPOSE = _REPO / "packages" / "lakana" / "src" / "lakana" / "cli" / "deploy" / "compose.yaml"
+
+
+def test_the_repository_root_holds_the_bundle_template() -> None:
+    """A moved test or template fails here, by name, not as a confusing read error."""
+    assert (_REPO / "pyproject.toml").is_file() and (_REPO / "Dockerfile").is_file(), (
+        f"{_REPO} is not the repository root; fix _REPO in {Path(__file__).name}"
+    )
+    assert _COMPOSE.is_file(), (
+        f"the Compose bundle's template is not at {_COMPOSE.relative_to(_REPO)}; point "
+        f"_COMPOSE in {Path(__file__).name} at lakana's compose.yaml"
+    )
+
+
 _VARIABLE = re.compile(r"\$\{(\w+)(?::([-?])([^}]*))?\}")
 
 
@@ -422,6 +429,8 @@ def _bundle_environment(service: str, values: dict[str, str]) -> dict[str, str]:
         Variable to value.
     """
     yaml = pytest.importorskip("yaml")
+    if not _COMPOSE.is_file():
+        pytest.fail(f"no Compose template at {_COMPOSE}: see the test of the repository root")
     environment = yaml.safe_load(_COMPOSE.read_text(encoding="utf-8"))["services"][service][
         "environment"
     ]

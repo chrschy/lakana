@@ -1080,6 +1080,26 @@ def test_the_compose_smoke_test_has_the_task_images_the_launcher_needs() -> None
     assert '--task-image "$TASK_IMAGE"' in script
 
 
+def test_the_compose_smoke_test_builds_only_a_local_task_image_and_pulls_a_published_one() -> None:
+    """The release smoke must run on the published task images: a failed pull fails it.
+
+    A reference with a registry or namespace (a ``/``) is pulled, and a pull error stops the
+    script (``set -e``); only a local tag (CI's ``lakana-task:ci``) is built from the checkout.
+    """
+    script = (ROOT / "scripts" / "compose_smoke_test.sh").read_text()
+    loop = script.split('for version in 3.11 "$python"; do', 1)[1].split("\ndone\n", 1)[0]
+
+    assert '*/*) docker pull "$reference" ;;' in loop
+    assert '*) docker build -f "$here/../Dockerfile.task"' in loop
+    assert "|| docker" not in loop and "&& ! docker pull" not in loop
+    assert "2>&1" not in loop.split('docker pull "$reference"', 1)[1].split(";;", 1)[0]
+
+
+def test_the_release_compose_smoke_job_has_time_for_the_task_images() -> None:
+    """It pulls two task images and builds an environment as well: 30 minutes, as in CI."""
+    assert _jobs("release.yml")["compose-smoke-release"]["timeout-minutes"] == 30
+
+
 def test_the_compose_smoke_test_proves_the_task_ran_in_a_container_and_cleans_up() -> None:
     """The worker holds no Docker socket, an environment volume was built, and it is removed.
 

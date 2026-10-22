@@ -9,8 +9,9 @@
 # run again, now on `worker-pipeline`) → down -v.
 #
 # TASK_IMAGE names the task images without -py3.X (default: IMAGE's repository with -task, same
-# tag). Those of 3.11 (the launcher's start-up probes) and of the image's Python are pulled, or
-# built from this checkout when the tag is local (CI's lakana-task:ci).
+# tag). Those of 3.11 (the launcher's start-up probes) and of the image's Python are pulled
+# (a failed pull fails the run), or built from this checkout when the tag is local (CI's
+# lakana-task:ci).
 #
 # Two sequences are the documentation's own commands, sourced from docs/examples (the page shows
 # their regions): a second environment with the bundle's storage secret
@@ -56,12 +57,16 @@ cleanup() {
 trap cleanup EXIT
 # The wheels must be for the image's interpreter, so ask the image which one it has.
 python=$(docker run --rm "$IMAGE" python -c 'import sys; print("%d.%d" % sys.version_info[:2])')
-# The task images: pulled, or built from this checkout when the tag is local.
+# The task images. A published one (a reference with a registry or namespace) is pulled, and a
+# failed pull ends the run: the release smoke must run on the images it published. Only a local
+# tag (CI's lakana-task:ci) is built from this checkout when it is missing.
 for version in 3.11 "$python"; do
-  if ! docker image inspect "$TASK_IMAGE-py$version" >/dev/null 2>&1 \
-    && ! docker pull "$TASK_IMAGE-py$version" >/dev/null 2>&1; then
-    docker build -f "$here/../Dockerfile.task" --build-arg "PYTHON=$version" -t "$TASK_IMAGE-py$version" "$here/.."
-  fi
+  reference="$TASK_IMAGE-py$version"
+  if docker image inspect "$reference" >/dev/null 2>&1; then continue; fi
+  case "$TASK_IMAGE" in
+    */*) docker pull "$reference" ;;
+    *) docker build -f "$here/../Dockerfile.task" --build-arg "PYTHON=$version" -t "$reference" "$here/.." ;;
+  esac
 done
 wheelhouse=${LAKANA_WHEELHOUSE:-}
 if [ -z "$wheelhouse" ]; then

@@ -142,8 +142,10 @@ services:
       # the image's directory (uid 10001, 0700), which the workers need; root without
       # capabilities cannot enter it. The launcher mounts it into task containers by name.
       - task-work:/var/lib/lakana-task-work
+    # Healthy while the launcher listens: a connection, not the file, which an earlier launcher
+    # leaves in the volume. The launcher closes a connection that sends nothing without a log line.
     healthcheck:
-      test: ["CMD", "/usr/local/bin/python", "-I", "-S", "-c", "import os, sys; sys.exit(0 if os.path.exists('/run/lakana-launcher/launcher.sock') else 1)"]
+      test: ["CMD", "/usr/local/bin/python", "-I", "-S", "-c", "import socket; s = socket.socket(socket.AF_UNIX); s.settimeout(2); s.connect('/run/lakana-launcher/launcher.sock'); s.close()"]
       interval: 5s
       timeout: 3s
       retries: 30
@@ -194,7 +196,7 @@ services:
       # Python assets: a task's subprocess talks to the server over REST.
       LAKANA_RUN__SERVER_URL: http://server:8000
       # docker: each Python task in a container of its own, started by `launcher`; local: as
-      # this container's own processes, without isolation.
+      # this container's own processes, without isolation (launcher and egress still start).
       LAKANA_RUN__RUNNER: ${LAKANA_RUNNER:-docker}
     volumes:
       - ./repos:/repos:ro

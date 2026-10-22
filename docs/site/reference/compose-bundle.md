@@ -12,7 +12,7 @@ the workers, with its type and default, is in the [settings reference](settings.
 |---|---|
 | `LAKANA_IMAGE` | The Lakana image reference (`ghcr.io/lakana-labs/lakana:<version>` by default — see [Upgrading](../how-to/deploy-with-compose.md#upgrading) and [`--image`](../how-to/deploy-with-compose.md#what-init-generates)). |
 | `LAKANA_TASK_IMAGE` | The task images' reference without `-py3.X` (`ghcr.io/lakana-labs/lakana-task:<version>` by default, see [`--task-image`](../how-to/deploy-with-compose.md#what-init-generates)); the launcher runs a project's Python tasks on `<reference>-py3.11` to `-py3.14`. `docker compose up` stops without it. |
-| `LAKANA_RUNNER` | `docker` (each Python task in a container of its own, isolated) or `local` (as the worker's own processes, not isolated); sets `LAKANA_RUN__RUNNER` on every worker. A bundle whose `.env` predates the key runs `docker`. |
+| `LAKANA_RUNNER` | `docker` (each Python task in a container of its own, isolated) or `local` (as the worker's own processes, not isolated); sets `LAKANA_RUN__RUNNER` on every worker. A bundle whose `.env` predates the key runs `docker`. With `local`, `launcher` and `egress` still start and need what they need (see [Python assets](../how-to/deploy-with-compose.md#python-assets)). |
 | `LAKANA_DOCKER_SOCKET` | The Docker socket the `launcher` service mounts (`/var/run/docker.sock`). |
 | `LAKANA_EGRESS_UPSTREAM_PROXY` | `http://[user:password@]host:port` of the proxy your network sends https through, for environment builds; empty for none. |
 | `LAKANA_BIND` | The host address the server's port is published on (see [Exposing it](../how-to/deploy-with-compose.md#exposing-it)). |
@@ -54,7 +54,7 @@ What `healthy` in `docker compose ps` means for each long-running service. The o
 | `seaweedfs-core` | The master answers and the filer accepts connections, every 5 s. | The storage's internal services run. |
 | `seaweedfs` | The S3 gateway answers HTTP, every 5 s. | The gateway listens; not that the credentials work. |
 | `server` | `GET /healthz` from inside the container, every 10 s. | The server process answers HTTP. |
-| `launcher` | Its Unix socket exists, every 5 s. | The launcher started: it checked the Docker Engine and listens for the workers. |
+| `launcher` | A connection to its Unix socket, every 5 s; the launcher removes an earlier launcher's socket before it starts. | The launcher started: it checked the Docker Engine and listens for the workers. |
 | `egress` | A TCP connection to port 3128, every 10 s. | The proxy listens; not that a build reaches an index. |
 | `worker`, `worker-interactive`, `worker-pipeline` | `lakana-worker healthcheck`, every 10 s, after a start period of 30 s; unhealthy after 3 failures in a row. | The worker of the container wrote its heartbeat to the database within `LAKANA_RUN__LEASE_SECONDS` (60 s), so it reaches the database. |
 
