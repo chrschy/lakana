@@ -807,6 +807,33 @@ def test_without_a_key_every_client_is_asked_for_a_token(proxy: Running, tmp_pat
     assert _status(proxy.port, f"localhost:{proxy.index}", token) == b"407"
 
 
+def test_a_failed_key_read_is_tried_again_at_the_next_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A transient read error must not deny every client until the next launcher start.
+
+    Parameters
+    ----------
+    tmp_path
+        For the key.
+    monkeypatch
+        Makes the first read fail.
+    """
+    key_file = tmp_path / "egress.key"
+    key = ensure_key(key_file)
+    settings = EgressSettings(key=key_file, listen=("127.0.0.1", 0))
+    server = EgressServer(settings)
+    try:
+        real = egress.read_key
+        monkeypatch.setattr(egress, "read_key", lambda path: None)
+        assert server.key() is None
+        monkeypatch.setattr(egress, "read_key", real)
+
+        assert server.key() == key  # the file did not change, but nothing was cached
+    finally:
+        server.server_close()
+
+
 def test_an_ipv4_mapped_address_is_judged_as_its_ipv4_address() -> None:
     """``::ffff:127.0.0.1`` is loopback."""
     mapped = ipaddress.ip_address("::ffff:127.0.0.1")

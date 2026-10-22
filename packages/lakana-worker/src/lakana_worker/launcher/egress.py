@@ -735,7 +735,8 @@ class EgressServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         Returns
         -------
         bytes or None
-            The key; `None` until the launcher has written it.
+            The key; `None` until the launcher has written it, and for a read that fails. A
+            failed read is not remembered: the next connection reads the file again.
         """
         try:
             info = os.stat(self.settings.key)
@@ -744,7 +745,10 @@ class EgressServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         stamp = (info.st_ino, info.st_mtime_ns, info.st_size)
         with self._key_lock:
             if self._key[0] != stamp:
-                self._key = (stamp, read_key(self.settings.key))
+                key = read_key(self.settings.key)
+                if key is None:
+                    return None
+                self._key = (stamp, key)
             return self._key[1]
 
     def open(self, host: str, port: int) -> socket.socket:
