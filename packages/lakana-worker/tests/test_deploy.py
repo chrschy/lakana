@@ -2754,3 +2754,31 @@ def test_a_deploy_refuses_an_override_that_leaves_a_schedule_without_cron(
     assert "cron" in run.error_message
     assert INTERNAL_ERROR_MESSAGE not in run.error_message
     assert session.query(JobVersion).count() == 0
+
+
+def test_a_deploy_checks_requires_python_against_the_python_the_project_names(
+    session: Session, principal: PrincipalRef, world: World
+) -> None:
+    """`python: "3.11"` with a lock needing 3.12 names 3.11; "3.12" deploys and is recorded."""
+    lock = _lock_text().replace('requires-python = ">=3.11"', 'requires-python = ">=3.12"')
+    files = {
+        "assets/gold/scores.py": _PY_ASSET,
+        "pyproject.toml": _PYPROJECT,
+        "uv.lock": lock,
+        "lakana.yaml": 'python: "3.11"\n',
+    }
+    commit(world.repo_path, files)
+    settings = _python_settings(world)
+
+    refused = _submit_and_run(session, principal, world, settings=settings)
+
+    assert refused.status is DeployStatus.FAILED
+    assert refused.error_message is not None
+    assert (
+        "requires-python '>=3.12' does not admit the worker's Python 3.11." in refused.error_message
+    )
+    commit(world.repo_path, {"lakana.yaml": 'python: "3.12"\n'})
+    run = _submit_and_run(session, principal, world, settings=settings)
+    assert run.status is DeployStatus.SUCCEEDED
+    version = session.get(JobVersion, run.job_version_id)
+    assert version is not None and version.manifest_json["python"] == "3.12"

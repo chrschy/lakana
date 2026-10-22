@@ -418,6 +418,43 @@ def _secret_name(value: str) -> str:
 
 
 WebhookSecret = Annotated[str, AfterValidator(_secret_name)]
+
+SUPPORTED_TASK_PYTHONS = ("3.11", "3.12", "3.13", "3.14")
+"""The Python versions Lakana ships a task image for (`lakana.yaml`'s `python:`)."""
+
+
+def _task_python(value: object) -> object:
+    """Refuse a `python:` that names no task image, before pydantic reads it as text.
+
+    Parameters
+    ----------
+    value
+        The raw YAML value.
+
+    Returns
+    -------
+    object
+        `value`, when it is one of `SUPPORTED_TASK_PYTHONS`.
+
+    Raises
+    ------
+    ValueError
+        For a number (YAML reads ``3.10`` as 3.1) or any other value.
+    """
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        raise ValueError(
+            f'write the version in quotes, such as python: "3.12": YAML reads {value} as a number'
+        )
+    if not isinstance(value, str) or value not in SUPPORTED_TASK_PYTHONS:
+        raise ValueError(
+            'must be one of "3.11", "3.12", "3.13", "3.14" (the Python versions Lakana ships a '
+            f"task image for), in quotes; got '{shown(str(value))}'"
+        )
+    return value
+
+
+TaskPython = Annotated[str, BeforeValidator(_task_python)]
+"""A Python version Lakana ships a task image for."""
 """The name of a secret of the environment; its value holds the webhook URL."""
 
 
@@ -610,9 +647,14 @@ class ProjectConfig(ResolvedProjectConfig):
     environments
         Per-environment overrides. An override for an environment that does
         not exist is allowed; only the target's is applied.
+    python
+        The Python version the project's Python tasks run on, one of
+        `SUPPORTED_TASK_PYTHONS`; `None` runs them on the worker's own. Top-level
+        only: it chooses the task image, so no environment may change it.
     """
 
     environments: dict[str, EnvironmentOverride] = {}
+    python: TaskPython | None = None
 
     @field_validator("repo")
     @classmethod
@@ -661,7 +703,7 @@ class ProjectConfig(ResolvedProjectConfig):
         ProjectValidationError
             If the merge does not validate, for example a schedule left without a `cron`.
         """
-        base = self.model_dump(exclude={"environments"})
+        base = self.model_dump(exclude={"environments", "python"})
         override = self.environments.get(environment)
         if override is not None:
             base = _deep_merge(base, override.model_dump(exclude_unset=True))

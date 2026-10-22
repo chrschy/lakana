@@ -14,7 +14,6 @@ import hashlib
 import logging
 import shlex
 import shutil
-import sys
 import tempfile
 import time
 import uuid
@@ -61,6 +60,7 @@ from lakana_core.projects.lockfile import (
     PYPROJECT_FILE,
     lock_digest,
     lockfile_issues,
+    task_interpreter,
     used_indexes,
 )
 from lakana_core.projects.manifest import build_manifest, manifest_tables
@@ -136,7 +136,11 @@ def platform_version() -> str:
 
 
 def _python_issues(
-    pyproject: str | None, lock: bytes | None, python: PythonSupport, sources: KnownSources
+    pyproject: str | None,
+    lock: bytes | None,
+    python: PythonSupport,
+    sources: KnownSources,
+    interpreter: tuple[int, int, int],
 ) -> list[ProjectIssue]:
     """Validate what a project with Python assets needs beyond its assets.
 
@@ -150,6 +154,8 @@ def _python_issues(
         Whether this worker can run Python assets.
     sources
         The package sources this instance knows.
+    interpreter
+        The `(major, minor, micro)` the project's tasks run on, `task_interpreter`'s answer.
 
     Returns
     -------
@@ -161,7 +167,7 @@ def _python_issues(
         pyproject,
         lock,
         platform_version=platform_version(),
-        python=(sys.version_info.major, sys.version_info.minor, sys.version_info.micro),
+        python=interpreter,
         sources=sources,
     )
     reason = python.reason()
@@ -680,9 +686,8 @@ def _deploy(
         if ci_scope is not None:
             service.check_ci_commit(principal, ci_scope, kind, fetched.sha)
         checkout = discover(fetched.tree, limits=limits)
-        config = parse_project_config(checkout.config_text or "", limits=limits).resolved_for(
-            environment_name
-        )
+        project = parse_project_config(checkout.config_text or "", limits=limits)
+        config = project.resolved_for(environment_name)
         assets = parse_assets(checkout.assets, defaults=config.defaults, limits=limits)
         checks = parse_checks(
             checkout.checks, limits=limits, default_on_failure=config.checks.on_failure
@@ -702,7 +707,13 @@ def _deploy(
             )
             + run_policy_issues(assets, settings.caps)
             + (
-                _python_issues(checkout.pyproject_text, checkout.lock, settings.python, sources)
+                _python_issues(
+                    checkout.pyproject_text,
+                    checkout.lock,
+                    settings.python,
+                    sources,
+                    task_interpreter(project.python),
+                )
                 if has_python
                 else []
             )
@@ -724,6 +735,7 @@ def _deploy(
             graph,
             config,
             caps=settings.caps,
+            python=project.python,
             lock_sha256=lock_digest(checkout.lock) if checkout.lock is not None else None,
             package_indexes=[index.name for index in used],
             checks=checks,

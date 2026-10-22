@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import shlex
+import sys
 
 import pytest
 
@@ -15,6 +16,7 @@ from lakana_core.projects.lockfile import (
     lockfile_issues,
     python_admitted,
     source_issues,
+    task_interpreter,
     used_indexes,
     versions_compatible,
 )
@@ -1011,3 +1013,11 @@ def test_a_declared_url_with_a_query_is_the_registered_index_and_shows_no_token(
     (message,) = _messages(_PYPROJECT + declared, _GOOD, sources=_SOURCES)
     assert "needs `explicit = true`" in message
     assert "hunter2" not in message and "token" not in message
+
+
+def test_a_named_python_is_checked_at_its_first_release() -> None:
+    """Without `python:` the worker's own interpreter counts; a named other one counts as x.y.0."""
+    assert task_interpreter(None) == tuple(sys.version_info[:3])
+    own = f"{sys.version_info.major}.{sys.version_info.minor}"
+    assert task_interpreter(own) == tuple(sys.version_info[:3])
+    assert task_interpreter("3.99") == (3, 99, 0)

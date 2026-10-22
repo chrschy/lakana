@@ -12,7 +12,11 @@ from lakana_core.identifiers import NOTIFY_FORMATS
 from lakana_core.projects.asset_model import DEFAULT_DECIMALS, MAX_KEEP_VERSIONS
 from lakana_core.projects.dag import ProjectGraph
 from lakana_core.projects.parse import ParsedAsset
-from lakana_core.projects.project_config import JobConfig, ResolvedProjectConfig
+from lakana_core.projects.project_config import (
+    SUPPORTED_TASK_PYTHONS,
+    JobConfig,
+    ResolvedProjectConfig,
+)
 from lakana_core.projects.run_policy import RunCaps, resolve_run_policy
 
 if TYPE_CHECKING:
@@ -33,7 +37,9 @@ for, so that a worker of an earlier release refuses a manifest whose notificatio
 never send; any other project keeps its version.
 The `decimals` key is optional and read with a default (`entry_decimals`), so it needed
 no bump: an entry without it means ``float``. The `package_indexes` key is optional in
-the same way: a manifest without it uses no registered package index."""
+the same way: a manifest without it uses no registered package index. The `python` key is
+optional too: a manifest without it runs on the worker's Python, and a worker of an earlier
+release ignores it and does the same."""
 
 VERSION_WITHOUT_CHECKS = 3
 """The version of a manifest that has no `checks` list: a project without `checks/` is unchanged."""
@@ -189,6 +195,7 @@ def build_manifest(
     artifacts: frozenset[str] = frozenset(),
     package_indexes: Sequence[str] = (),
     checks: Sequence[ParsedCheck] = (),
+    python: str | None = None,
 ) -> dict[str, Any]:
     """Build the manifest stored on a project version.
 
@@ -213,6 +220,9 @@ def build_manifest(
     checks
         The validated checks; the manifest has a `checks` list, sorted by name, and version
         `CHECKS_VERSION` (`JOBS_VERSION` with jobs), only when there are any.
+    python
+        `lakana.yaml`'s `python:`; recorded as `python` only when set, so a project without it
+        keeps its manifest.
 
     Returns
     -------
@@ -236,6 +246,8 @@ def build_manifest(
         }
     if lock_sha256 is not None:
         manifest["lock_sha256"] = lock_sha256
+    if python is not None:
+        manifest["python"] = python
     if package_indexes:
         manifest["package_indexes"] = sorted(package_indexes)
     if checks or config.jobs:
@@ -582,3 +594,21 @@ def manifest_lock_sha256(manifest: Mapping[str, object]) -> str | None:
     """
     value = manifest.get("lock_sha256")
     return value if isinstance(value, str) and _SHA256.match(value) else None
+
+
+def manifest_python(manifest: Mapping[str, object]) -> str | None:
+    """Read the Python a project's tasks run on from a stored manifest.
+
+    Parameters
+    ----------
+    manifest
+        A manifest.
+
+    Returns
+    -------
+    str or None
+        One of `SUPPORTED_TASK_PYTHONS`; `None` when absent or anything else (no release writes
+        another value), which means the worker's own Python.
+    """
+    value = manifest.get("python")
+    return value if isinstance(value, str) and value in SUPPORTED_TASK_PYTHONS else None

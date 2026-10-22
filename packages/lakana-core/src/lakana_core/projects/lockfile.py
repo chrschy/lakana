@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import re
 import shlex
+import sys
 import tomllib
 
 from lakana_core.errors import ValidationError
@@ -135,6 +136,28 @@ def _clause_holds(
     if operator == "<=":
         return have <= want
     return have < want
+
+
+def task_interpreter(python: str | None) -> tuple[int, int, int]:
+    """Name the interpreter a project's tasks run on, for the `requires-python` check.
+
+    Parameters
+    ----------
+    python
+        `lakana.yaml`'s `python:`, or `None`.
+
+    Returns
+    -------
+    tuple of int
+        This process's ``(major, minor, micro)`` when `python` is `None` or its own version;
+        otherwise ``(3, minor, 0)``: the task image's micro release is not known here, so a
+        project that names a version must admit its first release.
+    """
+    own = sys.version_info
+    if python is None or python == f"{own.major}.{own.minor}":
+        return (own.major, own.minor, own.micro)
+    major, minor = (int(part) for part in python.split("."))
+    return (major, minor, 0)
 
 
 def python_admitted(specifier: str, python: tuple[int, int, int]) -> bool | None:

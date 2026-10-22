@@ -6,6 +6,7 @@ per-environment overrides. The steps that use it are in [Projects and deploys](.
 
 ```yaml
 repo: analytics              # lets the CLI omit the repository name
+python: "3.12"               # the Python of your Python assets, see "The Python of your tasks"
 defaults:                    # applied to every asset unless its front-matter overrides
   owner: data-eng
   materialize: table
@@ -35,6 +36,21 @@ environments:                # per-environment overrides, deep-merged over the b
 ```
 
 Unknown keys are errors. An override for an environment that does not exist is allowed.
+
+## The Python of your tasks
+
+`python:` chooses the Python your Python assets run on, when the worker runs tasks in containers
+(`LAKANA_RUN__RUNNER=docker`, the default of the Compose bundle). Write it in quotes: YAML reads
+`3.10` as the number 3.1.
+
+```yaml
+python: "3.12"
+```
+
+Without it, tasks run on the worker's own Python. It applies to every environment: an
+`environments:` override cannot change it. `requires-python` in `pyproject.toml` must admit the
+version's first release (`>=3.12`, or `==3.12.*`). A worker that runs tasks without containers
+(`LAKANA_RUN__RUNNER=local`, local mode) refuses a project that names another Python than its own.
 
 ## Jobs
 

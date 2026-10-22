@@ -10,6 +10,7 @@ import pytest
 from lakana_core.projects.issues import ProjectIssue, ProjectValidationError
 from lakana_core.projects.limits import DeployLimits
 from lakana_core.projects.project_config import (
+    SUPPORTED_TASK_PYTHONS,
     ChecksDefaults,
     EnvironmentOverride,
     JobOverride,
@@ -795,3 +796,44 @@ def test_an_unknown_notify_key_is_refused() -> None:
     text = 'jobs:\n  a:\n    select: ["x.*"]\n    notify: { webhook: w, url: "https://x" }\n'
     with pytest.raises(ProjectValidationError, match=r"jobs\.a\.notify\.url"):
         parse_project_config(text)
+
+
+def test_python_names_one_of_the_task_images_and_is_not_per_environment() -> None:
+    """`python:` is top-level only; it chooses the image, so every environment runs the same."""
+    config = parse_project_config('python: "3.12"\n')
+
+    assert config.python == "3.12"
+    assert parse_project_config("").python is None
+    assert SUPPORTED_TASK_PYTHONS == ("3.11", "3.12", "3.13", "3.14")
+    resolved = config.resolved_for("dev")
+    assert "python" not in resolved.model_dump()
+    with pytest.raises(ProjectValidationError, match=r"environments\.prod\.python"):
+        parse_project_config('environments:\n  prod:\n    python: "3.12"\n')
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        (
+            'python: "3.10"\n',
+            'must be one of "3.11", "3.12", "3.13", "3.14" (the Python versions Lakana ships a '
+            "task image for), in quotes; got '3.10'",
+        ),
+        ("python: 3.12\n", 'write the version in quotes, such as python: "3.12"'),
+        ("python: 3.10\n", 'write the version in quotes, such as python: "3.12"'),
+        ("python: [3]\n", "must be one of"),
+    ],
+)
+def test_a_python_without_a_task_image_is_refused_at_deploy(text: str, message: str) -> None:
+    """YAML reads 3.10 as the number 3.1; the message says to quote it.
+
+    Parameters
+    ----------
+    text
+        The file.
+    message
+        Part of the issue.
+    """
+    with pytest.raises(ProjectValidationError) as caught:
+        parse_project_config(text)
+    assert message in str(caught.value)
