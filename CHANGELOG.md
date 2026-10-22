@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.19.0](https://github.com/lakana-labs/lakana/compare/v0.18.0...v0.19.0) (2026-10-22)
+
+
+### ⚠ BREAKING CHANGES
+
+* **worker:** the worker runs queries, views, checks and SQL assets on DuckDB 2.0 (duckdb>=2.0,<3) instead of 1.5. Integer division and remainder by zero (`//`, `%`) now fail the query: write `TRY(x // y)` or divide by `NULLIF(y, 0)`. A write of an untyped `NULL AS x` is refused: write `CAST(NULL AS <type>) AS x`. In `FROM generate_series(1, 3) i` the alias `i` is the number, not a struct. `price = 1.1` on a column widened from float to double matches only rows written after the widening (use a range or `round()`). Some Parquet files written by other programs may no longer read. The worker needs macOS 10.15 or newer and, on x86_64 Linux, glibc 2.27 or newer, and a pip-installed worker downloads `httpfs` once more. See "Notes for the next release" in docs/site/explanation/upgrades.md.
+
+### Features
+
+* **query:** let the query process open only the locations of the tables it reads ([#279](https://github.com/lakana-labs/lakana/issues/279)) ([e9a9012](https://github.com/lakana-labs/lakana/commit/e9a9012bfc696965144c50cd0cd63956b33eb2a9))
+* **worker:** run queries on DuckDB 2.0 ([baa4f1a](https://github.com/lakana-labs/lakana/commit/baa4f1a3f7725912f164e9de22afa0ad8e290339))
+
+
+### Bug Fixes
+
+* **query:** hand DuckDB lambdas as LAMBDA x : … and explain untyped NULL and sequence calls ([#284](https://github.com/lakana-labs/lakana/issues/284)) ([0ef3311](https://github.com/lakana-labs/lakana/commit/0ef3311ff7ad7fbbff6db0a4b487749f02c56bbd))
+* **security:** refuse a write nested inside a SELECT in the query process ([#286](https://github.com/lakana-labs/lakana/issues/286)) ([818f5dd](https://github.com/lakana-labs/lakana/commit/818f5dd324ce479a799a2e0ec706474c4aaa7650))
+* **security:** refuse DuckDB-internal and state-changing functions in queries ([#278](https://github.com/lakana-labs/lakana/issues/278)) ([7c4b911](https://github.com/lakana-labs/lakana/commit/7c4b911b7ccd8952fff702655d7ae250f1e00f29))
+* **security:** refuse the extension functions that run SQL on another database in the guard ([#287](https://github.com/lakana-labs/lakana/issues/287)) ([3baf208](https://github.com/lakana-labs/lakana/commit/3baf2086460a52dcd0c0e1f97046fac1581a34fe))
+* **worker:** say clearly when the store's certificate cannot be verified, and do not retry ([#283](https://github.com/lakana-labs/lakana/issues/283)) ([4257a93](https://github.com/lakana-labs/lakana/commit/4257a936189a633b64a2f4e5e4068b62f7fb86cd)), closes [#277](https://github.com/lakana-labs/lakana/issues/277)
+
+
+### Documentation
+
+* name the 0.19.0 upgrade notes and add their row ([#288](https://github.com/lakana-labs/lakana/issues/288)) ([bc8fdf5](https://github.com/lakana-labs/lakana/commit/bc8fdf51109e5fca421bb4a0120645e184d18adf))
+* record what 0.18.0 shipped and the data-modelling plan in the scope and roadmap pages ([#273](https://github.com/lakana-labs/lakana/issues/273)) ([62e7ccb](https://github.com/lakana-labs/lakana/commit/62e7ccb09b6d327a5aea068577a3c770aa3e21ee))
+
 ## [0.18.0](https://github.com/lakana-labs/lakana/compare/v0.17.0...v0.18.0) (2026-10-21)
 
 
