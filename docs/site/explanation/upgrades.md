@@ -131,7 +131,78 @@ Each cell is a summary. The page named in the last column has the detail. The ch
 
 ## Notes for the next release
 
-Nothing yet.
+### Queries run on DuckDB 2.0
+
+**Breaking.** The worker runs every query, view, check and SQL asset on DuckDB 2.0 (a release
+with long-term support, until at least October 2027) instead of DuckDB 1.5. The server, the CLI
+and the SDK do not use DuckDB. Most SQL runs unchanged; the items below say what does not, and
+what to write instead. Each refusal names its cause in the run's error message.
+
+**Installing the worker**
+
+- **Python 3.11 or newer, as before.** DuckDB 2.0 needs macOS 10.15 or newer (was 10.9) and, on
+  x86_64 Linux, glibc 2.27 or newer (was 2.26). As before, there are no wheels for musl (Alpine
+  Linux): run the worker from the container image or on a glibc distribution.
+- **One more download for a worker installed with `pip`.** Each DuckDB release has its own build
+  of the `httpfs` extension, so such a worker downloads it once more on its first query (from
+  `extensions.duckdb.org`; see [What leaves the machine](what-leaves-the-machine.md)). The
+  container image already contains it. On a machine without internet access, put the extension
+  for DuckDB 2.0.0 into the worker's extension directory before the first query.
+
+**SQL that behaves differently** (details in [SQL in queries](../reference/sql-in-queries.md))
+
+- **Integer division and remainder by zero fail.** `x // 0` and `x % 0` returned `NULL`; now the
+  query fails with "Division by zero in expression (...)". Write `TRY(x // y)`, or divide by
+  `NULLIF(y, 0)`, where a divisor can be zero.
+- **A column that is only `NULL` needs a type in a write.** `SELECT NULL AS x` into a table is
+  refused with "Column 'x' is NULL without a type, which a Lakana table can't store; write
+  `CAST(NULL AS <type>) AS x`, for example `CAST(NULL AS VARCHAR)`." (DuckDB 1.5 created an
+  integer column.) Write the `CAST`. A read and a view are not affected.
+- **A table function's alias is its value.** In `FROM generate_series(1, 3) i` (also `range`
+  and `unnest`), `i` is now the number, not a struct with one field. `i.generate_series` keeps
+  working; SQL that treated `i` as a struct, such as `i['generate_series']`, now fails: write `i`.
+- **Equality on a column widened from `float` to `double`.** `price = 1.1` now matches only the
+  rows written after the widening (before, it could also match older rows, depending on how the
+  condition was written). Write a range, `price > 1.09 AND price < 1.11`, or
+  `round(price, 2) = 1.1`, which match old and new rows alike; a row filter on such a column
+  needs the range ([Filter rows](../how-to/filter-rows.md)).
+- **Parquet files are checked more strictly.** DuckDB 2.0 refuses some Parquet files that 1.5
+  read: files with inconsistent decimal or time columns or value counts. Files Lakana wrote read
+  as before. A file another program wrote (an external table's raw files, or a commit through the
+  Iceberg REST catalog) can now fail the read with DuckDB's message: write that data again with
+  a current version of the program, or ask the table's owner to overwrite it.
+- **Lambdas need no change.** Write `x -> x + 1`, `lambda x: x + 1` or `LAMBDA x : x + 1`;
+  Lakana hands DuckDB `LAMBDA x : …`, the only form DuckDB 2.0 accepts, so queries, views and SQL
+  assets written with `->` keep running. A JSON arrow as a function argument
+  (`upper(j -> '$.a')`) stays a JSON extract. Write `list_apply` for `apply` and `list_reduce` for
+  `reduce`, which Lakana cannot read with a lambda.
+- **`~` still matches the whole text** in Lakana (DuckDB 2.0 alone made it a partial match); no
+  change.
+
+**What a query may do**
+
+- **A `PIVOT` lists its values.** A `PIVOT` without an `IN` list is refused with "A PIVOT needs
+  the values of its ON column listed". Write `PIVOT ... ON a IN ('x', 'y') USING ...`.
+- **Refused functions.** DuckDB's internal functions (any name starting with `__`), the sequence
+  functions `setval`, `nextval` and `currval`, `index_key` and `to_aggregate_state` are refused,
+  and `stats()` stays refused. The sequence functions and `to_aggregate_state` say what the call
+  does and "Remove the call; a query reads tables only." Remove the call; for a `__` function,
+  write the SQL it stands for, such as `CAST` or `BETWEEN`.
+- **A query opens only the tables it reads**, in local mode too: any other file or address is
+  refused with "the query tried to open a file or an address that is not one of the tables it
+  reads." A query that read a file by its path never worked through the guard; nothing to do.
+
+**Certificates of the object store**
+
+- **The worker checks its certificate authorities at start-up.** If `AWS_CA_BUNDLE`,
+  `SSL_CERT_FILE` or the system bundle names a missing or unreadable file, a file without PEM
+  certificates, or one that also holds a private key, the worker stops with a message naming the
+  variable and the file. Point the variable at your object store's certificate authority, or
+  unset it ([Network settings](../reference/network-settings.md#object-store-certificates-for-queries)).
+- **A store whose certificate cannot be verified fails at once.** Such a query failed as a
+  temporary storage error and was retried; now it fails at once, not retried, with a message that
+  names the store's host and port, the bundle, `AWS_CA_BUNDLE` / `SSL_CERT_FILE` and the network
+  settings. A store that worked before is not affected.
 
 ## Notes for 0.18.0
 

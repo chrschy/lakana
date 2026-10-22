@@ -113,14 +113,14 @@ and `lakana` also now contains the CLI built on top of it (details below).
   `executor.py` is the worker-facing API of query execution (what a query is given, which
   limits apply, which error each end of a child becomes) and holds no connection: every
   statement runs in a child process (M5c3a). `query_child.py` is that child and the only module
-  that imports `duckdb` (no ambient object-store credential, no persistent secrets, local
-  filesystem disabled outside `file://` mode); `query_process.py` starts it, reads its Arrow
+  that imports `duckdb` (DuckDB 2.0; no ambient object-store credential, no persistent secrets,
+  and only the locations of the tables a query reads open to it); `query_process.py` starts it, reads its Arrow
   stream, judges the result complete and stops it by "ask, wait, kill"; `query_protocol.py` is
   the request and the error document they exchange. `__main__.py` is the `python -m
   lakana_worker` entry point. `index_credentials.py` (M5c2c) turns a registered package
   index's secret into the `UV_INDEX` entry of an environment build and writes its messages.
-  **The only package allowed to import `duckdb`** — this
-  is a stated project rule (CLAUDE.md), not itself an `import-linter` contract.
+  **The only package allowed to import `duckdb`**, and within it only `query_child.py`: the
+  `only-the-query-child-imports-duckdb` contract in `.importlinter`.
   Never imports `lakana-server`.
 - **`lakana`** (`packages/lakana`, import `lakana`) — the SDK. As of M4a, it is complete:
   `_config.py` (three-source config resolution: explicit arguments,

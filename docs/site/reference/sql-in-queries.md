@@ -20,13 +20,38 @@ Lakana hands DuckDB every lambda as `LAMBDA x : x + 1`, the only form DuckDB 2.0
 SQL assets written with `->` keep running; there is nothing to change.
 
 An arrow is a lambda only in a function that takes one: `list_transform`, `list_apply`,
-`list_filter`, `list_reduce`, their `array_` names, `apply`, `filter`, `reduce` and `COLUMNS`.
-Anywhere else, as in `upper(j -> '$.a')` or `coalesce(j -> 'a', 'x')`, it is the JSON operator,
+`list_filter`, `list_reduce`, their `array_` names, `filter` and `COLUMNS`. Write `list_apply`
+for DuckDB's `apply` and `list_reduce` for its `reduce`: Lakana cannot read `apply` with a
+lambda, and reads `reduce` with its arguments in another order, so DuckDB refuses it. Anywhere else, as in `upper(j -> '$.a')` or `coalesce(j -> 'a', 'x')`, it is the JSON operator,
 as in DuckDB, and runs as one. A lambda written `lambda x:` or with two parameters is always
 a lambda.
 
 A lambda's body is checked like the rest of the query: a function a query may not call is
 refused inside a lambda too. A row filter or a column mask may not contain a lambda.
+
+## Integer division and remainder by zero
+
+`//` (integer division) and `%` (remainder) by zero stop the query with "Division by zero in
+expression (...)". Wrap the expression in `TRY(...)` to get `NULL` instead, or divide by
+`NULLIF(x, 0)`: `TRY(total // count)`, `total % NULLIF(count, 0)`. `/` by zero gives
+`Infinity` (or `NaN` for `0 / 0`), as before.
+
+Lakana ran on DuckDB 1.5 before, where both returned `NULL`; a query or asset that relied on
+that now fails with the message above until you add `TRY` or `NULLIF`.
+
+## `~` matches the whole text
+
+`'abc' ~ 'b'` is false in Lakana: `~` and `!~` match the whole text, as `regexp_full_match`
+does. DuckDB 2.0 alone treats `~` as a partial match. For a partial match write
+`regexp_matches(x, 'b')`, or `'.*b.*'` as the pattern. `SIMILAR TO` matches the whole text
+too.
+
+## A table function's alias is its value
+
+In `SELECT i FROM generate_series(1, 3) i`, `i` is the number (a `bigint`), so the query
+returns the numbers 1 to 3 and a write stores them as a `long` column. The same holds for
+`range` and `unnest`. `i.generate_series` still works. On DuckDB 1.5 `i` was a struct, which a
+write refused.
 
 ## A column that is only `NULL` needs a type
 

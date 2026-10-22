@@ -895,6 +895,62 @@ def test_a_timestamptz_result_becomes_a_timestamptz_column(
     assert loaded.metadata.schema().find_field("ts").field_type == TimestamptzType()
 
 
+def test_a_nanosecond_timestamptz_result_is_refused_with_the_cast_to_write(
+    session: Session, principal: PrincipalRef, catalog: CatalogService
+) -> None:
+    """DuckDB 2.0's `TIMESTAMPTZ_NS` exports nanoseconds, which a Lakana table cannot store."""
+    run = _run(
+        session,
+        principal,
+        "SELECT 1 AS id, CAST('2026-01-01 12:00:00+00' AS TIMESTAMPTZ_NS) AS ts",
+        WriteTarget(table="gold.ns", mode=WriteMode.CREATE),
+    )
+
+    assert run.status == QueryRunStatus.FAILED
+    assert run.error_message == (
+        "Column 'ts' has type timestamp[ns, tz=UTC], which a Lakana table can't store; CAST it "
+        "in the SELECT (for example to BIGINT, DOUBLE, VARCHAR or TIMESTAMP)."
+    )
+    assert not catalog.table_exists(principal, TableRef.from_dotted("dev", "gold.ns"))
+
+
+def test_an_untyped_null_column_is_refused_with_the_cast_to_write(
+    session: Session, principal: PrincipalRef, catalog: CatalogService
+) -> None:
+    """On DuckDB 2.0 `NULL AS x` exports as Arrow `null` (1.5 created an integer column)."""
+    run = _run(
+        session,
+        principal,
+        "SELECT 1 AS id, NULL AS x",
+        WriteTarget(table="gold.untyped", mode=WriteMode.CREATE),
+    )
+
+    assert run.status == QueryRunStatus.FAILED
+    assert run.error_message == (
+        "Column 'x' is NULL without a type, which a Lakana table can't store; write "
+        "`CAST(NULL AS <type>) AS x`, for example `CAST(NULL AS VARCHAR)`."
+    )
+    assert not catalog.table_exists(principal, TableRef.from_dotted("dev", "gold.untyped"))
+
+
+def test_a_generate_series_alias_is_written_as_a_number_column(
+    session: Session, principal: PrincipalRef, catalog: CatalogService
+) -> None:
+    """Characterisation: DuckDB 2.0 makes `i` the number, so the column is a `long`.
+
+    On DuckDB 1.5 `i` was a struct, which a Lakana table refuses.
+    """
+    run = _run(
+        session,
+        principal,
+        "SELECT i AS id FROM generate_series(1, 2) i",
+        WriteTarget(table="gold.series", mode=WriteMode.CREATE),
+    )
+
+    assert run.status == QueryRunStatus.SUCCEEDED, run.error_message
+    assert _rows(catalog, principal, "gold.series") == [{"id": 1}, {"id": 2}]
+
+
 def test_a_write_run_records_query_completed_with_its_row_count(
     session: Session, principal: PrincipalRef, catalog: CatalogService
 ) -> None:

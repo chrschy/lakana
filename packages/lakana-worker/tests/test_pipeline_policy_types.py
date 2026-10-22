@@ -416,10 +416,11 @@ def test_a_float_equality_on_a_column_promoted_to_double(
 
     The file written before the promotion holds 32-bit floats, the one written after holds
     64-bit doubles, and the read gives both as double through the field-id map, in either file
-    order. DuckDB 1.5 still pushes an equality down into the older file as a 32-bit comparison:
-    `price = 1.1` matches the rows of both files, `price = 1.1 OR id = 99` only the new one, and
-    `NOT (price = 1.1 AND id > 0)` shows a row the equality matches. Only the range and the
-    rounded value are guaranteed; the others describe DuckDB 1.5.
+    order. The float 1.1 read as a double is 1.100000023841858, so on DuckDB 2.0 `price = 1.1`
+    matches only the new file's row, and every form of the equality agrees with it. (DuckDB 1.5
+    pushed the equality down into the older file as a 32-bit comparison, so `price = 1.1`
+    matched both files and `price = 1.1 OR id = 99` only the new one.) The range and the
+    rounded value match both rows, which is what the documentation advises.
     """
     _promoted_prices(session, principal, catalog)
 
@@ -445,7 +446,7 @@ def test_a_float_equality_on_a_column_promoted_to_double(
     assert ranged == [1, 3]
     assert rounded == [1, 3]
     assert filtered == [1, 3]
-    assert equal == [1, 3]
+    assert equal == [3]
     assert equal_or == [3]
-    assert not_equal == [2, 4]
+    assert not_equal == [1, 2, 4]
     assert negated == [1, 2, 4]

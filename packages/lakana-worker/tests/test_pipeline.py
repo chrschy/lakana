@@ -302,6 +302,62 @@ def test_a_pivot_with_its_values_listed_returns_rows(
     assert _read_result(tmp_path, run).to_pylist() == [{"eu": 4, "us": 2}]
 
 
+@pytest.mark.parametrize("operator", ["//", "%"])
+def test_an_integer_division_by_zero_fails_and_says_how_to_get_null(
+    session: Session, principal: PrincipalRef, tmp_path: Path, operator: str
+) -> None:
+    """DuckDB 2.0 raises on `//` and `%` by zero (1.5 returned NULL).
+
+    DuckDB's text also suggests `SET error_on_division_by_zero`, which a query cannot run; the
+    message keeps only the advice that works in a query.
+    """
+    _sales(session, principal, tmp_path)
+    run = QueryService(session, AllowAllAuthorization()).submit_query(
+        principal, "dev", f"SELECT id {operator} (id - id) AS q FROM gold.sales"
+    )
+    run_one(session, run.id, AllowAllAuthorization())
+    session.refresh(run)
+    assert run.status == QueryRunStatus.FAILED
+    assert run.error_cause == "invalid_query"
+    assert run.error_message == (
+        f"Query failed: Invalid Input Error: Division by zero in expression "
+        f"(id {operator} (id - id)). Use TRY(...) to return NULL for this expression."
+    )
+
+
+def test_try_turns_an_integer_division_by_zero_into_null(
+    session: Session, principal: PrincipalRef, tmp_path: Path
+) -> None:
+    """The way out that the message names."""
+    _sales(session, principal, tmp_path)
+    run = QueryService(session, AllowAllAuthorization()).submit_query(
+        principal, "dev", "SELECT TRY(id // (id - id)) AS q, TRY(id % 0) AS r FROM gold.sales"
+    )
+    run_one(session, run.id, AllowAllAuthorization())
+    session.refresh(run)
+    assert run.status == QueryRunStatus.SUCCEEDED, run.error_message
+    assert _read_result(tmp_path, run).to_pylist() == [{"q": None, "r": None}] * 3
+
+
+def test_a_generate_series_alias_names_the_value_itself(
+    session: Session, principal: PrincipalRef, tmp_path: Path
+) -> None:
+    """Characterisation: on DuckDB 2.0 `i` in `generate_series(1, 2) i` is the number.
+
+    DuckDB 1.5 made `i` a struct with one field; `i.generate_series` still reads the number.
+    """
+    _local_catalog(session, principal, tmp_path)
+    run = QueryService(session, AllowAllAuthorization()).submit_query(
+        principal, "dev", "SELECT i, i.generate_series AS g FROM generate_series(1, 2) i"
+    )
+    run_one(session, run.id, AllowAllAuthorization())
+    session.refresh(run)
+    assert run.status == QueryRunStatus.SUCCEEDED, run.error_message
+    result = _read_result(tmp_path, run)
+    assert result.schema.field("i").type == pa.int64()
+    assert result.to_pylist() == [{"i": 1, "g": 1}, {"i": 2, "g": 2}]
+
+
 def test_a_table_location_outside_the_storage_root_is_never_turned_into_a_prefix(
     session: Session, principal: PrincipalRef, tmp_path: Path
 ) -> None:

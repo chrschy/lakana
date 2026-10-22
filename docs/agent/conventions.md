@@ -173,12 +173,16 @@ ratchet" in `docs/agent/testing.md`). The message lists the new blocks as
 ## Upper bounds on the deeply used dependencies
 
 `sqlglot` and `pyiceberg` (`lakana-core`) and `duckdb` (`lakana-worker`) carry an upper bound:
-`sqlglot>=30.21.0,<31`, `pyiceberg>=0.12,<0.13`, `duckdb>=1.1,<2`. Lakana uses their APIs deeply
+`sqlglot>=30.21.0,<31`, `pyiceberg>=0.12,<0.13`, `duckdb>=2.0,<3`. Lakana uses their APIs deeply
 (`sqlglot` drives lineage and the query rewriter for row filters and column masks), and
 they change signatures in minor releases. The lock does not protect a user: `pip install` ignores
 it, so an unbounded requirement takes the newest release on the day it is installed (a `sqlglot`
 release once made an argument of `sqlglot.lineage.lineage` required, and only an unpinned CI run
 noticed). `scripts/tests/test_dependency_bounds.py` fails when one of the three has no upper bound.
+`duckdb` also has a lower bound that matters: the query process configures DuckDB with settings
+only 2.0 has (`extension_directories`, `allow_extension_repositories`, `async_threads`), and the
+same test pins `duckdb>=2.0,<3`. Moving to DuckDB 3 means sweeping the guard's function lists
+(`query_rewrite.py`) and the query process's settings (`query_child.py`) again, as #96 did for 2.0.
 
 To raise a bound: its own pull request (the Dependabot updates keep the lock current inside the
 bounds), after reading the upstream changelog, with the suite green on the new version.

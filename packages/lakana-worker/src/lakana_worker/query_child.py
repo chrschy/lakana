@@ -26,11 +26,21 @@ all of these first; this is the second layer.
 
 Why each configuration statement is there, and why their order matters:
 
-1. ``extension_directory`` comes first. The child's ``HOME`` is empty, and DuckDB looks for
+0. The connection is opened with ``threads`` and ``async_threads`` as options
+   (`connection_config`). DuckDB 2 starts a pool of I/O threads with every connection, one per
+   core by default (80 on a 20-core machine); the child asks for `ASYNC_THREADS_PER_THREAD`
+   per processor thread instead. Measured on remote reads with 5 ms per request, 4 threads:
+   four per thread was within 10 % of the default on every query, two per thread was not.
+   ``async_threads`` can only be given here: ``SET async_threads`` is refused once external
+   access is off.
+1. ``extension_directories`` comes first. The child's ``HOME`` is empty, and DuckDB looks for
    installed extensions under ``HOME``; without the worker's directory ``INSTALL httpfs`` would
-   download the extension for every query, and fail without network access.
-2. ``allow_community_extensions = false``; then ``INSTALL``/``LOAD httpfs``, which need the
-   extension directory, before external access is switched off.
+   download the extension for every query, and fail without network access. DuckDB 2 takes a
+   list here (a string fails the cast to ``VARCHAR[]``).
+2. ``allow_community_extensions = false`` and ``allow_extension_repositories = 'forbidden'``
+   (``undecided``, the default, may still change to ``allowed`` at run time; ``forbidden`` may
+   not, and refuses ``CREATE EXTENSION REPOSITORY``); then ``INSTALL``/``LOAD httpfs``, which
+   need the extension directory, before external access is switched off.
 3. ``s3_access_key_id``, ``s3_secret_access_key`` and ``s3_session_token`` are cleared.
    `duckdb.connect()` fills them from ``AWS_*`` environment variables. The child's environment
    has none, and the statements stay as a second layer.
@@ -41,9 +51,9 @@ Why each configuration statement is there, and why their order matters:
 5. ``ca_cert_file`` is the request's bundle. DuckDB 2 reads the bundle lazily, through the local
    file system, on the first HTTPS request; it must be named and allowed, or every HTTPS read
    fails with ``Cannot read a CA certificate bundle``. Then
-   ``enable_server_cert_verification = true``: DuckDB 1.5.5 and 2.0.0 verify the store's
-   certificate whatever it says, but its default reads as off, and the behaviour must not rest
-   on that. A certificate the bundle cannot verify fails the query as ``internal``, not
+   ``enable_server_cert_verification = true``: DuckDB (1.5.5 and 2.0.0 alike) verifies the
+   store's certificate whatever it says, but its default reads as off, and the behaviour must
+   not rest on that. A certificate the bundle cannot verify fails the query as ``internal``, not
    retried, with a message naming the store's host and port, never the presigned URL.
 6. ``temp_directory`` before external access is switched off: afterwards DuckDB refuses to
    change it (``Modifying the temp_directory has been disabled``).
@@ -58,7 +68,9 @@ Why each configuration statement is there, and why their order matters:
 10. ``lock_configuration = true`` last: no ``SET``, ``RESET`` or ``PRAGMA`` of any setting
     succeeds after it (``SET VARIABLE`` still does). A second layer behind the guard, which
     refuses ``SET`` itself, against ``http_proxy`` (a proxy would receive the presigned URLs),
-    ``extra_http_headers`` and ``ca_cert_file`` as settings (not as a secret: see above).
+    ``extra_http_headers`` and ``ca_cert_file`` as settings (not as a secret: see above), and
+    against ``lambda_syntax`` and ``error_on_division_by_zero``. ``http_proxy`` defaults to the
+    ``HTTP_PROXY`` environment variable on DuckDB 2; the child's environment has none.
 
 **Values are variables, not parameters.** Every value the statement reads (a file list, a
 field-id map, a watermark) is set with ``SET VARIABLE "<name>" = ?`` before the statement, and
@@ -145,7 +157,7 @@ _UNVERIFIED_CERTIFICATE = re.compile(
     r"(?:.*?'(?P<url>https://[^'\s]+)')?"
 )
 """DuckDB's report of a server certificate it cannot verify against ``ca_cert_file``: the same
-text on 1.5.5 and 2.0.0, as a `duckdb.IOException` or, from a later batch, an `OSError`. It
+text on DuckDB 1.5.5 and 2.0.0, as a `duckdb.IOException` or, from a later batch, an `OSError`. It
 quotes the URL it asked for, a presigned one; only its host and port are ever used."""
 _CA_REFUSAL = "Cannot read a CA certificate bundle"
 """DuckDB 2's refusal to load the CA bundle under the restriction. It should not occur once
@@ -195,6 +207,16 @@ information, query, fragment, white space or backslash."""
 _DOT_ESCAPE = re.compile(r"%2e", re.IGNORECASE)
 """A percent-escaped dot, which a server may decode into a ``..`` segment."""
 
+ASYNC_THREADS_PER_THREAD = 4
+"""DuckDB I/O threads per processor thread of a query (``async_threads``); see the module's
+docstring, step 0, for the measurement."""
+
+_DIVISION_ADVICE = re.compile(
+    r", or SET error_on_division_by_zero=false to return NULL for all divisions by zero\."
+)
+"""The part of DuckDB 2's division-by-zero message that suggests a setting. A query cannot run
+``SET`` (the guard refuses it, and the lock after it), so the message keeps only ``TRY(...)``."""
+
 _INTERRUPT_SECONDS = 0.1
 """How often the main thread interrupts the connection once it was asked to stop."""
 
@@ -205,7 +227,8 @@ _LOST_CAUSE = (
 )
 """With several threads DuckDB can cancel a sibling task of a failing statement and report that
 interruption in place of the statement's own error (about 1 failure in 2,000 at 4 threads in
-DuckDB 1.5.5). Nothing here interrupted the connection, so the cause is lost."""
+DuckDB 1.5.5; not reproduced locally on 2.0.0, kept until a CI run shows it gone). Nothing here
+interrupted the connection, so the cause is lost."""
 _SINK_CLOSED = "The worker stopped reading the result."
 _PR_SET_PDEATHSIG = 1
 _VARIABLE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
@@ -479,6 +502,30 @@ def file_outside_prefixes(request: Request) -> bool:
     )
 
 
+ConnectionConfig = dict[str, str | bool | int | float | list[str]]
+"""The options `duckdb.connect` takes as ``config``."""
+
+
+def connection_config(request: Request) -> ConnectionConfig:
+    """Give the options the connection is opened with.
+
+    Parameters
+    ----------
+    request
+        Supplies ``threads``.
+
+    Returns
+    -------
+    dict
+        ``threads`` and ``async_threads`` (`ASYNC_THREADS_PER_THREAD` per thread), for
+        `duckdb.connect`'s ``config``.
+    """
+    return {
+        "threads": request.threads,
+        "async_threads": ASYNC_THREADS_PER_THREAD * request.threads,
+    }
+
+
 def configure(connection: duckdb.DuckDBPyConnection, request: Request) -> None:
     """Apply the isolation settings and the limits, in their required order, then lock them.
 
@@ -493,8 +540,9 @@ def configure(connection: duckdb.DuckDBPyConnection, request: Request) -> None:
         limits and the mode: a mode other than ``read`` pins the session time zone to UTC, so a
         ``TIMESTAMPTZ`` exports as a type a table can store.
     """
-    connection.execute("SET extension_directory = ?", [request.extension_directory])
+    connection.execute("SET extension_directories = ?", [[request.extension_directory]])
     connection.execute("SET allow_community_extensions = false")
+    connection.execute("SET allow_extension_repositories = 'forbidden'")
     connection.execute("INSTALL httpfs")
     connection.execute("LOAD httpfs")
     for credential in ("s3_access_key_id", "s3_secret_access_key", "s3_session_token"):
@@ -610,6 +658,7 @@ def failure(
         )
     elif mapped and text.startswith("Conversion Error"):
         text = UNCONVERTED_VALUE
+    text = _DIVISION_ADVICE.sub(".", text)
     message = f"Query failed: {text}"
     raw = str(exc)
     if isinstance(exc, (duckdb.IOException, OSError)) and _UNVERIFIED_CERTIFICATE.match(raw):
@@ -653,15 +702,20 @@ class Session:
         self._lock = threading.Lock()
         self._connection: duckdb.DuckDBPyConnection | None = None
 
-    def open(self) -> duckdb.DuckDBPyConnection:
+    def open(self, config: ConnectionConfig) -> duckdb.DuckDBPyConnection:
         """Open the in-memory connection.
+
+        Parameters
+        ----------
+        config
+            The options it is opened with (`connection_config`).
 
         Returns
         -------
         duckdb.DuckDBPyConnection
             The connection, which `interrupt` and `close` now act on.
         """
-        connection = duckdb.connect(":memory:")
+        connection = duckdb.connect(":memory:", config=config)
         with self._lock:
             self._connection = connection
         return connection
@@ -799,7 +853,7 @@ def set_variables(
         if isinstance(value, list):
             connection.execute(statement + "?::VARCHAR[]", [value])
         elif isinstance(value, tuple):
-            # DuckDB 1.5's `read_parquet(schema = ...)` needs all three children; a NULL
+            # `read_parquet(schema = ...)` needs all three children (DuckDB 1.5 and 2); a NULL
             # default makes a column a file lacks read as NULL, as Iceberg says.
             connection.execute(
                 statement + "MAP(?::INTEGER[], "
@@ -845,7 +899,7 @@ def serve(
     try:
         if request.mode != CHECK and file_outside_prefixes(request):
             return ErrorDocument(INTERNAL, OUTSIDE_PREFIXES)
-        connection = session.open()
+        connection = session.open(connection_config(request))
         files = [
             url for value in request.parameters.values() if isinstance(value, list) for url in value
         ]

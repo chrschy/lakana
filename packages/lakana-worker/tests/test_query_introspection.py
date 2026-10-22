@@ -191,7 +191,9 @@ def test_stats_would_report_values_the_row_filter_hides(
     """DuckDB reads Parquet statistics below the CTE's WHERE, so `stats()` shows hidden rows.
 
     This pins the raw DuckDB behaviour the guard exists for, and that the guard
-    refuses the call before it ever reaches the executor.
+    refuses the call before it ever reaches the executor. DuckDB 2 returns the statistics as a
+    `VARIANT`, read here as text; it shows the whole hidden string (1.5 showed eight
+    characters of it).
 
     Parameters
     ----------
@@ -201,12 +203,13 @@ def test_stats_would_report_values_the_row_filter_hides(
         The filtered source fixture.
     """
     sql = f"SELECT stats({column}) AS s FROM bronze.customers LIMIT 1"
-    rewritten = rewrite_query(sql, {"bronze.customers": hidden_rows})
+    as_text = f"SELECT CAST(stats({column}) AS VARCHAR) AS s FROM bronze.customers LIMIT 1"
+    rewritten = rewrite_query(as_text, {"bronze.customers": hidden_rows})
     raw = execute_query(
         rewritten.sql, rewritten.parameters, read_prefixes=local_prefixes(rewritten.parameters)
     )
-    leaked = str(raw.to_pylist())
-    assert "Min: 1," in leaked or "HIDDENVA" in leaked
+    leaked = raw.column("s")[0].as_py()
+    assert ("'min': 1}" if column == "id" else "'max': HIDDENVALUE,") in leaked
 
     with pytest.raises(ValidationError, match="stats may not be called") as caught:
         check_blacklist(sql)

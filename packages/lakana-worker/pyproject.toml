@@ -48,9 +48,11 @@ raw-options = { root = "../.." }
 # comments in this table (rather than hard-coding them into hatch_build.py)
 # keeps them visible and editable as ordinary TOML.
 dependencies = [
-    # MIT. Capped below 2: on a DuckDB 2.0 development build, the tests of the
-    # query guard and of DuckDB's error texts fail. Lifted by issue #96.
-    "duckdb>=1.1,<2",
+    # MIT. 2.0 is the long-term-support line (supported until at least October 2027); the
+    # query process uses its settings (`extension_directories`, `allow_extension_repositories`,
+    # `async_threads`), so 1.x no longer works. Capped below 3: a major release changes SQL
+    # and settings, and the guard's function lists are swept against each one (issue #96).
+    "duckdb>=2.0,<3",
     # BSD-3-Clause. Sends webhooks (`egress.py`); the lakana SDK already depends on it.
     "httpx>=0.28,<1",
     # MPL-2.0, used unmodified (allowlisted in scripts/check_licenses.py). The last place the

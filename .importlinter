@@ -58,6 +58,23 @@ layers =
     lakana_server | lakana_worker
     lakana_core
 
+# DuckDB runs only in the query process (`lakana_worker.query_child`): a process of its own per
+# query, configured to open only the tables it reads and holding no credential. A `duckdb` import
+# anywhere else would run SQL outside those guarantees. `scripts/tests/test_package_test_imports.py`
+# checks this contract is here and scans the source trees itself.
+[importlinter:contract:only-the-query-child-imports-duckdb]
+name = Only lakana_worker.query_child imports duckdb
+type = forbidden
+source_modules =
+    lakana
+    lakana_core
+    lakana_server
+    lakana_worker
+forbidden_modules =
+    duckdb
+ignore_imports =
+    lakana_worker.query_child -> duckdb
+
 # The launcher holds the Docker socket, so it is root on the host: it must stay small and
 # reviewable. It imports nothing of Lakana's other packages and no third-party package;
 # `packages/lakana-worker/tests/test_launcher_imports.py` also keeps it off the worker's

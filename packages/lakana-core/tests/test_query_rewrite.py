@@ -324,6 +324,40 @@ def test_rewrite_renders_every_lambda_in_the_keyword_form(sql: str, rendered: st
     assert rewrite_query(sql, {}).sql == rendered
 
 
+@pytest.mark.parametrize(
+    ("sql", "rendered"),
+    [
+        (
+            "SELECT list_transform([1, 2, 3], mod(x -> x + 10, 4))",
+            "SELECT LIST_TRANSFORM([1, 2, 3], (LAMBDA x : x + 10) % 4)",
+        ),
+        (
+            "SELECT list_transform([1, 2, 3], x -> mod(y -> y + 10, 4))",
+            "SELECT LIST_TRANSFORM([1, 2, 3], LAMBDA x : (LAMBDA y : y + 10) % 4)",
+        ),
+        (
+            "SELECT json_extract((x, y) -> x + 1, '$.a')",
+            "SELECT (LAMBDA x, y : x + 1) -> '$.a'",
+        ),
+    ],
+)
+def test_a_lambda_that_is_an_operand_keeps_its_grouping(sql: str, rendered: str) -> None:
+    """`LAMBDA x : …` extends as far right as it can, so an operand lambda is parenthesised.
+
+    sqlglot turns `mod(a, b)` into the operator `a % b`; rendered bare, the lambda's body would
+    take the `% 4` in (`LAMBDA x : x + 10 % 4`), a grouping the guard never checked. DuckDB
+    refuses a lambda as an operand either way; the parentheses make it refuse what was checked.
+
+    Parameters
+    ----------
+    sql
+        The query as the caller wrote it.
+    rendered
+        The SQL the rewrite hands to DuckDB.
+    """
+    assert rewrite_query(sql, {}).sql == rendered
+
+
 def test_rewrite_renders_a_lambda_in_the_keyword_form_beside_a_table_read() -> None:
     """The query that reads a table goes through the same rendering as one that reads none."""
     rewritten = rewrite_query(
