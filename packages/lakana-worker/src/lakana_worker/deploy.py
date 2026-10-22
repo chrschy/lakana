@@ -141,6 +141,7 @@ def _python_issues(
     python: PythonSupport,
     sources: KnownSources,
     interpreter: tuple[int, int, int],
+    named_python: str | None = None,
 ) -> list[ProjectIssue]:
     """Validate what a project with Python assets needs beyond its assets.
 
@@ -156,6 +157,8 @@ def _python_issues(
         The package sources this instance knows.
     interpreter
         The `(major, minor, micro)` the project's tasks run on, `task_interpreter`'s answer.
+    named_python
+        `lakana.yaml`'s `python:`, if the project names one; the issues then name it.
 
     Returns
     -------
@@ -169,6 +172,7 @@ def _python_issues(
         platform_version=platform_version(),
         python=interpreter,
         sources=sources,
+        named_python=named_python,
     )
     reason = python.reason()
     if reason is not None:
@@ -713,6 +717,7 @@ def _deploy(
                     settings.python,
                     sources,
                     task_interpreter(project.python),
+                    project.python,
                 )
                 if has_python
                 else []

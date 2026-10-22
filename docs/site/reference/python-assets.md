@@ -156,6 +156,9 @@ there is one, the line, as `path:line: message`. Fix the cause and deploy again.
 | `pyproject.toml: the index named N points at URL, but the package index registered as M is URL2 …` | The project's index has the name of a registered index and another URL. Checked at a deploy only, and not for an index whose `url` is a folder, such as `wheelhouse`. | Use the registered URL, or give your index another name, then run `uv lock`. |
 | `pyproject.toml: `extra-index-url` names the registered package index N …` (or `index-url`) | A registered index is named as `index-url` or `extra-index-url`. | Declare it as a `[[tool.uv.index]]` table with `explicit = true` instead, and name its packages under `[tool.uv.sources]`, then run `uv lock`. |
 | `requires-python '…' does not admit the worker's Python X` | The project's Python range excludes the worker's Python. | Widen `requires-python`, then `uv lock`. |
+| `requires-python '…' does not admit Python X, which python: in lakana.yaml names` | The project's Python range excludes the Python that `python:` in `lakana.yaml` chooses. | Widen `requires-python` and run `uv lock`, or name another Python. |
+| `this project names Python X in lakana.yaml, and this worker runs Python tasks on its own Python Y without containers …` | The worker runs tasks without containers (`LAKANA_RUN__RUNNER=local`), so it has only its own Python. | Run the project on a worker with `LAKANA_RUN__RUNNER=docker`, or set `python:` to the worker's version (or remove it) and deploy again. |
+| `environment build failed: the task's log could not be written while its environment was built …` | The worker could not keep the build's output. | Read the worker's log for the cause, then start the run again. |
 | `this instance cannot run Python assets: …` | The worker has no `LAKANA_RUN__SERVER_URL`, or no `uv`. | Ask whoever runs the instance; see "Operator settings" below. |
 
 ## What a task may read and write
@@ -280,8 +283,23 @@ registered package indexes; see [What a deploy checks](#what-a-deploy-checks) an
 | `LAKANA_RUN__HTTPS_PROXY` | unset | Proxy for the build. A credential goes in the userinfo (`http://user:password@host:3128`); a URL with a query string is refused at startup; a path segment that looks like a token is warned about at startup, as for `LAKANA_RUN__INDEX_URL`. |
 | `LAKANA_RUN__NO_PROXY` | unset | Hosts that bypass the proxy. |
 | `LAKANA_RUN__CA_BUNDLE` | unset | An absolute path of a PEM file the build trusts. |
+| `LAKANA_RUN__RUNNER` | `local` | How Python tasks run: `local`, as processes of the worker (not isolated from it), or `docker`, each task and each environment build in a container of its own that the launcher service starts. Another value stops the worker at start. |
+| `LAKANA_RUN__LAUNCHER_SOCKET` | `/run/lakana-launcher/launcher.sock` | With `docker`: the launcher's socket, in a volume the worker and the launcher share. An absolute path. |
+| `LAKANA_RUN__TASK_MEMORY` | `2GB` | With `docker`: the memory limit of each task container and build container, outside the worker's own limit. Binary units (`1GB` is `1024MB`), at least `64MB`. |
+| `LAKANA_RUN__TASK_CPUS` | `1` | With `docker`: the CPUs of each task container and build container (above 0). |
+| `LAKANA_RUN__TASK_PIDS` | `256` | With `docker`: the most processes in each task container and build container (16 or more). |
 
-The last four follow the rules of the `LAKANA_GIT__*` settings (see [Git network settings](network-settings.md#git-network-settings)); the
+With `LAKANA_RUN__RUNNER=docker`, `LAKANA_RUN__HTTPS_PROXY` and `LAKANA_RUN__CA_BUNDLE` are refused
+at start: builds reach the package indexes through the egress service, and a build container
+trusts only the publicly trusted certificate authorities of its task image. A package index or a
+proxy whose certificate a private certificate authority signed therefore needs
+`LAKANA_RUN__RUNNER=local` for now (see [Python assets](../how-to/deploy-with-compose.md#python-assets)
+in "Deploying with Compose"). At start a `docker` worker asks the launcher to remove the containers
+an earlier worker process on the same host left; a launcher that cannot be reached is logged, the
+worker starts anyway, and each Python task fails with `runner unavailable: …` until it is reached.
+
+`LAKANA_RUN__INDEX_URL`, `LAKANA_RUN__HTTPS_PROXY`, `LAKANA_RUN__NO_PROXY` and
+`LAKANA_RUN__CA_BUNDLE` follow the rules of the `LAKANA_GIT__*` settings (see [Git network settings](network-settings.md#git-network-settings)); the
 index and the proxy may carry a password, and it is redacted from errors, logs and uv's output.
 Set `LAKANA_RUN__*` where the worker reads them. Related settings are
 `LAKANA_RUN__DRAIN_GRACE_SECONDS` and `LAKANA_TASK_TOKENS__MAX_TTL_SECONDS`. The latter caps the
@@ -289,8 +307,8 @@ lifetime of every task token and is read by the server and by the worker: set it
 on both. A cap lowered on the server only is not applied to the tokens the worker mints. A task
 fails at once if the cap is below its needs (see "Failure, retry and cancel" above).
 
-The worker needs `uv` on its `PATH` (the Lakana image ships it) and logs at startup whether it
-can run Python assets, and why not. Its cache directory is `$XDG_CACHE_HOME/lakana-worker`, else
+With `local`, the worker needs `uv` on its `PATH` (the Lakana image ships it); with `docker`, the
+task image carries it. The worker logs at startup whether it can run Python assets, and why not. Its cache directory is `$XDG_CACHE_HOME/lakana-worker`, else
 `~/.cache/lakana-worker`:
 
 - `venvs/` holds the venvs (at most `LAKANA_RUN__VENV_KEEP`), next to one pair of empty lock

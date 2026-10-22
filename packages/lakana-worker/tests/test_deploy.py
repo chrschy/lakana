@@ -2775,7 +2775,8 @@ def test_a_deploy_checks_requires_python_against_the_python_the_project_names(
     assert refused.status is DeployStatus.FAILED
     assert refused.error_message is not None
     assert (
-        "requires-python '>=3.12' does not admit the worker's Python 3.11." in refused.error_message
+        "requires-python '>=3.12' does not admit Python 3.11, which python: in lakana.yaml names"
+        in refused.error_message
     )
     commit(world.repo_path, {"lakana.yaml": 'python: "3.12"\n'})
     run = _submit_and_run(session, principal, world, settings=settings)

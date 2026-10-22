@@ -973,6 +973,25 @@ access-controlled on the server; `read_only=True` seals it (0400/0500) for a tas
   The cost is one build per project for a lock several projects share. Within one project, a
   vendored package changed without a change to `uv.lock` or `pyproject.toml` still reuses the
   built environment, as the local venv cache does.
+  The project id the worker passes is `python_tasks.environment_owner(repository_id,
+  environment_id)`, a UUIDv5 of the repository and the environment, never a name: one
+  repository deployed to dev and prod gets two environments, so a dev deployer who changes a
+  vendored package without changing the lock cannot hand that code to prod's tasks and prod's
+  token. A project deleted and registered again gets a new repository id and a new key.
+- **The worker's start with `LAKANA_RUN__RUNNER=docker`** (`__main__._python_runtime`): one
+  `LauncherClient` on `LAKANA_RUN__LAUNCHER_SOCKET` serves `DockerRunner` and
+  `DockerEnvironments`, both owned by `launcher_owner(socket.gethostname())`; the worker asks
+  the launcher once at start to remove what an earlier process of this host left (`cleanup`),
+  and starts anyway if the launcher cannot be reached. The attempt directory is
+  `tempfile.mkdtemp(prefix="attempt-")` directly under the work directory, which must be the
+  mount of the launcher's work volume: the launcher mounts `<attempt>/code` and `<attempt>/task`
+  by name (`requests._ATTEMPT` accepts mkdtemp's names; a test pins the agreement). The local
+  runner refuses a project whose `python:` names another Python than the worker's own
+  (`no_runtime`). `LAKANA_RUN__HTTPS_PROXY` and `LAKANA_RUN__CA_BUNDLE` are refused at start
+  with the docker runner: no build request field carries a CA bundle, so a private-CA index or
+  TLS-inspecting proxy is unsupported under DockerRunner rather than half-working (passing a
+  bundle would need a request field, a file the launcher, which holds the Docker socket, writes
+  into a build mount, and `SSL_CERT_FILE` in the build; revisit with the egress proxy).
 - **A build gets only what its lock needs**: the credentials of the registered indexes it uses
   (an index without a credential is a host to reach, not an entry of `UV_INDEX`), the operator's
   index, and the hosts of those indexes for the egress proxy. Credentials are decrypted only when

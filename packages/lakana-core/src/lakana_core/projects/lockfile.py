@@ -829,6 +829,7 @@ def lockfile_issues(
     python: tuple[int, int, int],
     sources: KnownSources,
     deploying: bool = True,
+    named_python: str | None = None,
 ) -> list[ProjectIssue]:
     """Validate the dependency files of a project that has a Python asset.
 
@@ -842,7 +843,8 @@ def lockfile_issues(
     platform_version
         The validating worker's version.
     python
-        The validating worker's ``(major, minor, micro)``.
+        The ``(major, minor, micro)`` the project's tasks run on (`task_interpreter`): the
+        validating worker's own, or the one `named_python` names.
     sources
         The sources a lock may name on this instance: the registered package
         indexes and the operator's index (PyPI and the folder `wheelhouse`
@@ -851,6 +853,9 @@ def lockfile_issues(
         Whether this is the check of a deploy. The check before an execution
         passes `False`, which leaves out the one rule that is for a deploy
         only: an index with a registered index's name and another URL.
+    named_python
+        `lakana.yaml`'s `python:`, when the project names one: an issue with `requires-python`
+        then points at that setting instead of at the worker's Python.
 
     Returns
     -------
@@ -974,12 +979,16 @@ def lockfile_issues(
                 )
             )
         elif not admitted:
+            interpreter = (
+                f"the worker's Python {shown}"
+                if named_python is None
+                else f"Python {_shown(named_python)}, which python: in lakana.yaml names"
+            )
             issues.append(
                 ProjectIssue(
                     LOCK_FILE,
                     None,
-                    f"requires-python '{_shown(specifier)}' does not admit "
-                    f"the worker's Python {shown}",
+                    f"requires-python '{_shown(specifier)}' does not admit {interpreter}",
                 )
             )
     return issues

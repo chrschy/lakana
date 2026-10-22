@@ -53,6 +53,7 @@ from worker_test_helpers import ActionAllowList, ReadsById
 import lakana._artifact_manifest as sdk_manifest
 import lakana.errors as sdk_errors
 import lakana.runner as harness_runner
+import lakana_worker.launcher.requests as launcher_requests
 import lakana_worker.python_tasks as python_tasks_module
 import lakana_worker.task_checks as task_checks_module
 import lakana_worker.task_lease as task_lease_module
@@ -151,6 +152,7 @@ from lakana_core.storage.resolver import StorageResolver
 from lakana_worker.attempt_sweep import AttemptSweeper
 from lakana_worker.deploy_sweep import DeploySweeper
 from lakana_worker.index_credentials import IndexAccess
+from lakana_worker.launcher_client import LogSinkFailed
 from lakana_worker.poller import WorkerPool, poll_once
 from lakana_worker.python_support import PythonSupport
 from lakana_worker.python_tasks import KeeperStop, PythonRuntime
@@ -6733,3 +6735,309 @@ def test_a_task_with_neither_stamp_nor_baseline_has_nothing_to_set_back(
         f"{LOST_MESSAGE} {SET_BACK_NOTHING}",
     )
     assert task.failure_code == "worker_lost"
+
+
+@dataclass
+class FakeEnvironments:
+    """Stands in for `DockerEnvironments`, recording what each attempt asked for.
+
+    Parameters
+    ----------
+    calls
+        One entry per `acquire`.
+    resolve
+        Whether `acquire` calls the index resolver, as a build would.
+    error
+        Raised by `acquire` instead of handing out a lease.
+    """
+
+    calls: list[dict[str, object]] = field(default_factory=list)
+    resolve: bool = False
+    error: Exception | None = None
+
+    def acquire(
+        self,
+        lock_sha256: str,
+        project: Path,
+        on_log: Callable[[bytes], None],
+        indexes: IndexResolver | None,
+        *,
+        python: str,
+        attempt: str,
+        used: tuple[RegisteredIndex, ...],
+        project_id: uuid.UUID,
+    ) -> VenvLease:
+        """Record the request and hand out a key.
+
+        Parameters
+        ----------
+        lock_sha256
+            The lock digest.
+        project
+            The code directory.
+        on_log
+            The log sink.
+        indexes
+            The resolver.
+        python
+            The task's Python.
+        attempt
+            The attempt directory's name.
+        used
+            The registered indexes the lock uses.
+        project_id
+            The project the environment belongs to.
+
+        Returns
+        -------
+        VenvLease
+            A lease with a key and nothing to release.
+
+        Raises
+        ------
+        Exception
+            `error`, when set.
+        """
+        resolved = list(indexes()) if self.resolve and indexes is not None else []
+        self.calls.append(
+            {
+                "python": python,
+                "attempt": attempt,
+                "project": project,
+                "used": used,
+                "project_id": project_id,
+                "resolved": [access.name for access in resolved],
+            }
+        )
+        if self.error is not None:
+            raise self.error
+        return VenvLease(path=Path("/env"), python=Path("/env/bin/python"), key="e" * 64)
+
+
+def _name_python(py: PyWorld, python: str) -> None:
+    """Record `python:` in the deployed manifest, as a deploy of such a `lakana.yaml` would.
+
+    Parameters
+    ----------
+    py
+        The world.
+    python
+        The version.
+    """
+    with py.world.session() as session:
+        version = session.get(JobVersion, py.world.version_id)
+        assert version is not None
+        version.manifest_json = {**version.manifest_json, "python": python}
+        session.commit()
+
+
+def test_a_docker_worker_builds_the_projects_python_and_the_task_carries_the_key(
+    py: PyWorld,
+) -> None:
+    """The environment comes from the launcher; the venv cache is not asked."""
+    py.deploy()
+    _name_python(py, "3.12")
+    environments = FakeEnvironments()
+    engine = py.engine(_writer(py.world), environments=environments)
+
+    run_claimed(engine, py.claim_python(engine))
+
+    (call,) = environments.calls
+    assert call["python"] == "3.12"
+    assert str(call["attempt"]).startswith("attempt-")
+    assert Path(str(call["project"])).name == "code"
+    (task,) = py.runner.tasks
+    assert (task.environment_key, task.python) == ("e" * 64, "3.12")
+    assert py.leases == []
+    assert _task(py.world, "gold.scores").status is TaskStatus.SUCCEEDED
+
+
+def test_the_attempt_the_build_names_is_the_directory_the_task_runs_in(py: PyWorld) -> None:
+    """The launcher mounts ``<attempt>/code`` of its work volume; the worker's paths agree.
+
+    The work volume is mounted at the worker's work directory, so an attempt directory must be
+    a direct child of it, its code must be ``code`` inside it, and its name must be one the
+    launcher accepts.
+    """
+    py.deploy()
+    environments = FakeEnvironments()
+    engine = py.engine(_writer(py.world), environments=environments)
+
+    run_claimed(engine, py.claim_python(engine))
+
+    (call,) = environments.calls
+    (task,) = py.runner.tasks
+    assert task.attempt_dir.parent == (py.root / "work").absolute()
+    assert call["attempt"] == task.attempt_dir.name
+    assert call["project"] == task.code_dir == task.attempt_dir / "code"
+    assert launcher_requests._ATTEMPT.match(str(call["attempt"])) is not None
+
+
+def test_the_environment_belongs_to_the_project_in_its_environment(py: PyWorld) -> None:
+    """The key's project is a UUID of the repository and the environment, never a name.
+
+    Two environments of one repository never share an environment build: a deployer of dev
+    could otherwise change vendored code without changing the lock, and prod would run it.
+    """
+    py.deploy()
+    environments = FakeEnvironments()
+    engine = py.engine(_writer(py.world), environments=environments)
+
+    run_claimed(engine, py.claim_python(engine))
+
+    with py.world.session() as session:
+        version = session.get(JobVersion, py.world.version_id)
+        assert version is not None
+        repository, environment = version.repository_id, version.environment_id
+    (call,) = environments.calls
+    assert isinstance(call["project_id"], uuid.UUID)
+    assert call["project_id"] == python_tasks_module.environment_owner(repository, environment)
+    assert python_tasks_module.environment_owner(repository, uuid.uuid4()) != call["project_id"]
+    assert python_tasks_module.environment_owner(uuid.uuid4(), environment) != call["project_id"]
+
+
+def test_a_docker_build_resolves_only_the_indexes_its_lock_uses(py: PyWorld) -> None:
+    """Another registered index with a secret in the same environment is never decrypted."""
+    _register_team_index(py, password="the-password")
+    with py.world.session() as session:
+        other = uuid.uuid4()
+        session.add(
+            PackageIndex(
+                id=other,
+                name="other",
+                url="https://other.example.org/simple",
+                credential_secret="other-index",
+            )
+        )
+        session.commit()
+        owner = session.get(Principal, py.world.admin.id)
+        assert owner is not None
+        SecretService(session, AllowAllAuthorization(), _INDEX_KEY).create(
+            PrincipalRef(id=owner.id, name=owner.name, type=owner.type),
+            environment="dev",
+            name="other-index",
+            values={"username": "ci", "password": "other-password"},
+            use=SecretUse(SecretUseKind.PACKAGE_INDEX, other, "other"),
+        )
+    py.deploy(_lock() + _TEAM_PACKAGE)
+    environments = FakeEnvironments(resolve=True)
+    engine = _with_key(py.engine(_writer(py.world), environments=environments))
+
+    run_claimed(engine, py.claim_python(engine))
+
+    (call,) = environments.calls
+    assert [index.name for index in cast(tuple[RegisteredIndex, ...], call["used"])] == ["team"]
+    assert call["resolved"] == ["team"]
+
+
+@pytest.mark.parametrize(
+    ("error", "status", "code", "message"),
+    [
+        (
+            LogSinkFailed("the log sink failed"),
+            TaskStatus.FAILED,
+            "internal",
+            "environment build failed: the task's log could not be written while its "
+            "environment was built; the worker's log has the cause",
+        ),
+        (
+            VenvBuildRefused("environment build failed: the launcher refused the build: no"),
+            TaskStatus.FAILED,
+            "secret_refused",
+            "environment build failed: the launcher refused the build: no",
+        ),
+        (
+            VenvBuildError("runner unavailable: the launcher is busy"),
+            TaskStatus.PENDING,
+            "build_failed",
+            "runner unavailable: the launcher is busy",
+        ),
+    ],
+)
+def test_a_failed_docker_build_ends_the_task_with_its_code(
+    py: PyWorld, error: Exception, status: TaskStatus, code: str, message: str
+) -> None:
+    """A sink that fails while the build logs ends the task; the worker goes on.
+
+    Parameters
+    ----------
+    py
+        The world.
+    error
+        What `acquire` raises.
+    status
+        The task's status afterwards.
+    code
+        Its failure code.
+    message
+        The attempt's message.
+    """
+    py.deploy()
+    engine = py.engine(_forged, environments=FakeEnvironments(error=error))
+
+    task, recorded = _fails(py, engine)
+
+    assert (task.status, task.failure_code, recorded) == (status, code, message)
+    assert py.runner.tasks == [] and py.tokens() == []
+
+
+def test_a_project_that_names_another_python_is_refused_on_the_local_runner(py: PyWorld) -> None:
+    """The local runner has one interpreter: its own."""
+    py.deploy()
+    other = "3.12" if sys.version_info[:2] != (3, 12) else "3.13"
+    _name_python(py, other)
+
+    task, message = _fails(py, py.engine(_forged))
+
+    own = f"{sys.version_info.major}.{sys.version_info.minor}"
+    assert task.status is TaskStatus.FAILED
+    assert task.failure_code == "no_runtime"
+    assert message == (
+        f"this project names Python {other} in lakana.yaml, and this worker runs Python tasks "
+        f"on its own Python {own} without containers (LAKANA_RUN__RUNNER=local). Run it on a "
+        f'worker with LAKANA_RUN__RUNNER=docker, or set python: "{own}" (or remove it) in '
+        "lakana.yaml and deploy again"
+    )
+    assert py.runner.tasks == []
+
+
+def test_a_project_that_names_the_workers_own_python_runs_on_the_local_runner(
+    py: PyWorld,
+) -> None:
+    """Naming the version the worker runs is no reason to refuse."""
+    py.deploy()
+    _name_python(py, f"{sys.version_info.major}.{sys.version_info.minor}")
+    engine = py.engine(_writer(py.world))
+
+    run_claimed(engine, py.claim_python(engine))
+
+    (task,) = py.runner.tasks
+    assert task.python == f"{sys.version_info.major}.{sys.version_info.minor}"
+    assert task.environment_key is None
+
+
+def test_a_project_without_python_runs_on_the_workers_python(py: PyWorld) -> None:
+    """No `python:` and either runner: the worker's own version."""
+    py.deploy()
+    environments = FakeEnvironments()
+    engine = py.engine(_writer(py.world), environments=environments)
+
+    run_claimed(engine, py.claim_python(engine))
+
+    assert environments.calls[0]["python"] == f"{sys.version_info.major}.{sys.version_info.minor}"
+
+
+def test_requires_python_is_checked_against_the_python_the_project_names(py: PyWorld) -> None:
+    """Under docker the lock must admit the named Python, and the message names lakana.yaml."""
+    py.deploy(_lock().replace(b'requires-python = ">=3.11"', b'requires-python = ">=3.13"'))
+    _name_python(py, "3.12")
+    environments = FakeEnvironments()
+
+    task, message = _fails(py, py.engine(_forged, environments=environments))
+
+    assert task.status is TaskStatus.FAILED
+    assert (
+        "uv.lock: requires-python '>=3.13' does not admit Python 3.12, which python: in "
+        "lakana.yaml names" in message
+    )
+    assert environments.calls == []

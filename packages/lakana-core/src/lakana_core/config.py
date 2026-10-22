@@ -464,12 +464,30 @@ class RunConfig(BaseModel):
         carry a password, which is hidden in logs and error messages.
     https_proxy
         Proxy that the environment build uses, as a URL. It may carry a password, which is hidden
-        in logs and error messages.
+        in logs and error messages. Local runner only: refused with `LAKANA_RUN__RUNNER=docker`.
     no_proxy
         Comma-separated hosts that bypass the proxy.
     ca_bundle
         Absolute path of a PEM file of certificate authorities that the environment build trusts,
         for an internal package index. The file must exist and be readable on the worker.
+        Local runner only: refused with `LAKANA_RUN__RUNNER=docker`.
+    runner
+        How Python tasks run: `local` (the default: as processes of the worker, not isolated
+        from it) or `docker` (each task and each environment build in a container of its own,
+        started by the launcher service).
+    launcher_socket
+        Absolute path of the launcher's Unix socket, in the volume the worker shares with the
+        launcher service. Read with `LAKANA_RUN__RUNNER=docker` only.
+    task_memory
+        Memory limit of each task container and environment build container, with a unit such
+        as 2GB or 512MB (binary: 1GB is 1024MB; at least 64MB). It is outside the worker's own
+        memory limit. Read with `LAKANA_RUN__RUNNER=docker` only.
+    task_cpus
+        CPUs of each task container and environment build container. Read with
+        `LAKANA_RUN__RUNNER=docker` only.
+    task_pids
+        Most processes in each task container and environment build container. Read with
+        `LAKANA_RUN__RUNNER=docker` only.
     """
 
     model_config = ConfigDict(hide_input_in_errors=True)
@@ -491,6 +509,54 @@ class RunConfig(BaseModel):
     https_proxy: SecretStr | None = None
     no_proxy: str | None = None
     ca_bundle: Path | None = None
+    runner: Literal["local", "docker"] = "local"
+    launcher_socket: Path = Path("/run/lakana-launcher/launcher.sock")
+    task_memory: str = "2GB"
+    task_cpus: float = Field(default=1.0, gt=0, le=1024, allow_inf_nan=False)
+    task_pids: int = Field(default=256, ge=16, le=4_194_304)
+
+    @field_validator("runner", mode="before")
+    @classmethod
+    def _runner_is_local_or_docker(cls, value: object) -> object:
+        """Accept the runner in any letter case, and name the two values otherwise.
+
+        Parameters
+        ----------
+        value
+            The configured text.
+
+        Returns
+        -------
+        object
+            The lower-case value.
+
+        Raises
+        ------
+        ValueError
+            If it is neither.
+        """
+        cleaned = value.strip().lower() if isinstance(value, str) else value
+        if cleaned not in ("local", "docker"):
+            raise ValueError("LAKANA_RUN__RUNNER must be local or docker.")
+        return cleaned
+
+    @field_validator("task_memory")
+    @classmethod
+    def _task_memory_parses(cls, value: str) -> str:
+        """Refuse a task memory `parse_task_memory` cannot read.
+
+        Parameters
+        ----------
+        value
+            The configured text.
+
+        Returns
+        -------
+        str
+            `value`, unchanged.
+        """
+        parse_task_memory(value)
+        return value
 
     @field_validator("server_url")
     @classmethod
@@ -554,7 +620,7 @@ class RunConfig(BaseModel):
             _check_no_proxy(value)
         return value
 
-    @field_validator("venv_cache", "ca_bundle")
+    @field_validator("venv_cache", "ca_bundle", "launcher_socket")
     @classmethod
     def _paths_are_absolute(cls, value: Path | None) -> Path | None:
         """Require absolute, single-line paths.
@@ -589,6 +655,41 @@ class RunConfig(BaseModel):
         """
         if self.renew_seconds >= self.lease_seconds:
             raise ValueError("LAKANA_RUN__RENEW_SECONDS must be below LAKANA_RUN__LEASE_SECONDS")
+        return self
+
+    @model_validator(mode="after")
+    def _docker_builds_go_through_the_egress_proxy(self) -> Self:
+        """Refuse the local runner's build network settings with the docker runner.
+
+        A build container reaches its package indexes only through the egress service, and it
+        trusts only the certificate authorities of its task image: neither setting would reach
+        it, so each is refused at start rather than ignored.
+
+        Returns
+        -------
+        Self
+            `self`.
+
+        Raises
+        ------
+        ValueError
+            If `runner` is ``docker`` and `https_proxy` or `ca_bundle` is set.
+        """
+        if self.runner == "docker" and self.https_proxy is not None:
+            raise ValueError(
+                "LAKANA_RUN__HTTPS_PROXY applies to builds of the local runner; with "
+                "LAKANA_RUN__RUNNER=docker builds reach the package indexes through the egress "
+                "service: set LAKANA_EGRESS__UPSTREAM_PROXY there, and unset this one."
+            )
+        if self.runner == "docker" and self.ca_bundle is not None:
+            raise ValueError(
+                "LAKANA_RUN__CA_BUNDLE applies to builds of the local runner; a build container "
+                "trusts only the publicly trusted certificate authorities of its task image, so "
+                "with LAKANA_RUN__RUNNER=docker a package index or proxy signed by a private "
+                "certificate authority cannot be reached. Unset LAKANA_RUN__CA_BUNDLE and serve "
+                "the index with a publicly trusted certificate, or keep LAKANA_RUN__RUNNER=local "
+                "for such an index."
+            )
         return self
 
 
@@ -1210,6 +1311,42 @@ def parse_memory_limit(text: str) -> int | None:
             "LAKANA_WORKER__MEMORY_LIMIT must be at least 512MB: a worker needs about that much "
             "to start. Use off to run without a limit."
         )
+    return size
+
+
+MIN_TASK_MEMORY = 64 * 1024**2
+"""The least memory a task container may get."""
+
+
+def parse_task_memory(text: str) -> int:
+    """Parse `LAKANA_RUN__TASK_MEMORY`, a task container's memory limit.
+
+    Parameters
+    ----------
+    text
+        A size such as ``"2GB"`` or ``"512MB"``, binary units as in Docker.
+
+    Returns
+    -------
+    int
+        Bytes.
+
+    Raises
+    ------
+    ValueError
+        If it is not a size, is below 64 MB or above 1 PiB; the message names the setting.
+    """
+    cleaned = text.strip().lower()
+    message = (
+        "LAKANA_RUN__TASK_MEMORY must be a size with a unit, such as 2GB or 512MB (binary: "
+        "1GB is 1024MB), at least 64MB."
+    )
+    matched = _MEMORY_SIZE.fullmatch(cleaned) if len(cleaned) <= _MEMORY_TEXT_MAX else None
+    if matched is None or matched.group(2) not in _MEMORY_UNITS:
+        raise ValueError(message)
+    size = int(float(matched.group(1)) * _MEMORY_UNITS[matched.group(2)])
+    if not MIN_TASK_MEMORY <= size <= _MEMORY_MAX:
+        raise ValueError(message)
     return size
 
 

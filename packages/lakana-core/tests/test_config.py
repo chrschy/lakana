@@ -22,6 +22,7 @@ from lakana_core.config import (
     StorageConfig,
     WebhookConfig,
     WorkerConfig,
+    parse_task_memory,
     warn_about_tokens_in_url_paths,
 )
 from lakana_core.identifiers import shown
@@ -1106,3 +1107,93 @@ def test_a_negative_package_cache_setting_is_refused(
     monkeypatch.setenv(variable, "-1")
     with pytest.raises(PydanticValidationError, match=variable.split("__")[1].lower()):
         Settings()
+
+
+def test_the_runner_settings_default_to_the_local_runner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Local stays the default; docker reads its socket and the task limits."""
+    assert RunConfig().runner == "local"
+    assert RunConfig().launcher_socket == Path("/run/lakana-launcher/launcher.sock")
+    assert (RunConfig().task_memory, RunConfig().task_cpus, RunConfig().task_pids) == (
+        "2GB",
+        1.0,
+        256,
+    )
+    assert parse_task_memory("2GB") == 2 * 1024**3
+    monkeypatch.setenv("LAKANA_DATABASE__URL", "sqlite://")
+    monkeypatch.setenv("LAKANA_RUN__RUNNER", "Docker")
+    monkeypatch.setenv("LAKANA_RUN__TASK_MEMORY", "512MB")
+    assert (Settings().run.runner, Settings().run.task_memory) == ("docker", "512MB")
+
+
+@pytest.mark.parametrize(
+    ("text", "size"),
+    [("64MB", 64 * 1024**2), ("1.5g", int(1.5 * 1024**3)), (" 1GiB ", 1024**3), ("1tb", 1024**4)],
+)
+def test_a_task_memory_reads_binary_units(text: str, size: int) -> None:
+    """Units are binary, as Docker's are.
+
+    Parameters
+    ----------
+    text
+        The setting.
+    size
+        Bytes.
+    """
+    assert parse_task_memory(text) == size
+
+
+@pytest.mark.parametrize("text", ["63MB", "0", "2048TB", "1" * 40 + "MB", "4 apples", ""])
+def test_a_task_memory_out_of_bounds_is_refused_with_the_setting_named(text: str) -> None:
+    """Below 64 MB, above 1 PiB or not a size: one message that says what to write.
+
+    Parameters
+    ----------
+    text
+        The setting.
+    """
+    with pytest.raises(ValueError, match="LAKANA_RUN__TASK_MEMORY must be a size with a unit"):
+        parse_task_memory(text)
+
+
+@pytest.mark.parametrize(
+    ("values", "message"),
+    [
+        ({"runner": "podman"}, "LAKANA_RUN__RUNNER must be local or docker"),
+        ({"runner": 3}, "LAKANA_RUN__RUNNER must be local or docker"),
+        ({"task_memory": "32MB"}, "LAKANA_RUN__TASK_MEMORY must be a size with a unit"),
+        ({"task_memory": "lots"}, "LAKANA_RUN__TASK_MEMORY must be a size with a unit"),
+        ({"launcher_socket": "launcher.sock"}, "absolute"),
+        ({"runner": "docker", "https_proxy": "http://proxy:3128"}, "LAKANA_EGRESS__UPSTREAM_PROXY"),
+        ({"runner": "docker", "ca_bundle": "/etc/ssl/corp.pem"}, "LAKANA_RUN__CA_BUNDLE"),
+        ({"task_pids": 4}, "task_pids"),
+        ({"task_cpus": 0}, "task_cpus"),
+        ({"task_cpus": float("inf")}, "task_cpus"),
+    ],
+)
+def test_a_runner_setting_that_cannot_work_is_refused_at_start(
+    values: dict[str, object], message: str
+) -> None:
+    """Each message names the setting and what to write instead.
+
+    Parameters
+    ----------
+    values
+        The settings.
+    message
+        Part of the error.
+    """
+    with pytest.raises(pydantic.ValidationError, match=message):
+        RunConfig(**values)  # ty: ignore[invalid-argument-type]
+
+
+def test_a_private_ca_with_the_docker_runner_is_refused_with_the_way_out() -> None:
+    """A build container cannot trust a private CA yet: the message says what still works."""
+    with pytest.raises(pydantic.ValidationError) as caught:
+        RunConfig(runner="docker", ca_bundle=Path("/etc/ssl/corp.pem"))
+    text = str(caught.value)
+    assert "LAKANA_RUN__CA_BUNDLE" in text
+    assert "publicly trusted" in text
+    assert "LAKANA_RUN__RUNNER=local" in text
+    assert "/etc/ssl/corp.pem" not in text
+    assert RunConfig(runner="local", ca_bundle=Path("/etc/ssl/corp.pem")).ca_bundle is not None
+    assert RunConfig(runner="local", https_proxy=SecretStr("http://proxy:3128")).https_proxy

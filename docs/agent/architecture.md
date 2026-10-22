@@ -689,7 +689,9 @@ poll loop, classification) are under "The run engine (M5c1)", "Python tasks (M5c
 
 **The runner protocol.** `Runner.run(task: PythonTask, on_log, stop: StopSignal) -> RunOutcome`.
 `LocalProcessRunner` runs the harness as a subprocess of the worker; `DockerRunner` (M7b) asks
-the launcher to run it in a container of its own and implements the same protocol. `run` blocks until the process is reaped and its output drained; call it from a thread
+the launcher to run it in a container of its own and implements the same protocol;
+`LAKANA_RUN__RUNNER` (`local` by default, or `docker`) picks one at the worker's start, and with
+`docker` `PythonRuntime.environments` (`DockerEnvironments`) replaces the local venv cache. `run` blocks until the process is reaped and its output drained; call it from a thread
 that outlives the process, because the parent-death signal is tied to the thread that started it.
 
 **One attempt.** claim, then the `lakana-python-task` thread: verify the code tarball and unpack

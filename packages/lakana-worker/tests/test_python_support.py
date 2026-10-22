@@ -49,3 +49,16 @@ def test_worker_cache_dir(tmp_path: Path) -> None:
     )
     assert worker_cache_dir().name == "lakana-worker"
     assert worker_cache_dir({}).parts[-2:] == (".cache", "lakana-worker")
+
+
+def test_a_docker_worker_needs_no_uv_of_its_own() -> None:
+    """The task image carries uv; only the local runner needs one on the worker's PATH."""
+    assert PythonSupport(server_url="http://server:8000", uv=None, needs_uv=False).reason() is None
+    assert PythonSupport(server_url="http://server:8000", uv=None, needs_uv=False).fix() == ""
+    assert (
+        PythonSupport(server_url="http://server:8000", uv=None).reason()
+        == "uv is not on the worker's PATH"
+    )
+    assert detect(RunConfig(server_url="http://server:8000", runner="docker")).needs_uv is False
+    assert detect(RunConfig(server_url="http://server:8000")).needs_uv is True
+    assert PythonSupport(needs_uv=False).reason() == "LAKANA_RUN__SERVER_URL is not set"
