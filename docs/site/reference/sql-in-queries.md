@@ -75,3 +75,16 @@ groups have a message of their own:
 | `setval`, `nextval`, `currval` | they change or read a sequence, which is the engine's state, not data | remove the call |
 | `to_aggregate_state` | it picks an aggregate function by a name given as data | remove the call |
 | any name starting with `__` | it is internal to DuckDB | write the SQL it stands for, such as `CAST` or `BETWEEN` |
+
+## A view the checks now refuse
+
+A view's SQL is checked when the view is created. A later Lakana may check more strictly, so a
+view created earlier can hold SQL that is now refused. A query over such a view that fails tells
+you which view it is:
+
+`View 'gold.v' is refused by Lakana's query checks, which may have become stricter since it was created. Ask its owner to recreate it; the error then says what to change.`
+
+The message shows none of the view's SQL, because you may not be allowed to read what the view
+reads. Whoever owns the view creates it again with the same SQL: the refusal then names what is
+not allowed (a function from the list above, for example), and they change the SQL until the
+view is created.

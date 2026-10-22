@@ -826,3 +826,9 @@ def test_diagnose_views_refuses_a_view_the_guard_refuses_without_running_it(
     assert str(result) == VIEW_REFUSED_BY_GUARD.format(view="gold.v")
     assert "read_text" not in str(result)
     assert "current_setting" not in str(result)
+
+
+def test_the_user_documentation_quotes_the_refused_view_message() -> None:
+    """The reference page shows the message exactly as a reader gets it."""
+    page = Path(__file__).parents[3] / "docs" / "site" / "reference" / "sql-in-queries.md"
+    assert f"`{VIEW_REFUSED_BY_GUARD.format(view='gold.v')}`" in page.read_text(encoding="utf-8")
