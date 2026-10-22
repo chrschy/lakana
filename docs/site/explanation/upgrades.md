@@ -117,6 +117,7 @@ Each cell is a summary. The page named in the last column has the detail. The ch
 
 | Release | What it asks | Where |
 |---|---|---|
+| 0.19.0 | No migration. **Security fix**: upgrade the server and every worker. **Breaking:** queries run on DuckDB 2.0: `//` and `%` by zero fail (use `TRY` or `NULLIF`), an untyped `NULL AS x` in a write is refused (add a `CAST`), a table function's alias is its value, `price = 1.1` after a float-to-double widening matches only newer rows, some Parquet files from other writers may not read; the worker needs macOS 10.15 or glibc 2.27. A `PIVOT` lists its values; `CONNECT BY`, DuckDB-internal and sequence functions are refused; a query opens only the tables it reads. The worker stops at start-up on an unusable CA bundle; an unverifiable store certificate fails at once. | [Notes for 0.19.0](#notes-for-0190) |
 | 0.18.0 | Migrations `0047` (CI trust rules and CI tokens) and `0048` (measured sizes), both adding only empty tables and columns. A new environment's storage root must be in the environment's scheme, name a bucket or container, and may not be `file:///`, contain `::`, or lie in another environment's files (422 with a root to use; existing environments are not changed). An allowed webhook host may no longer reach loopback or cloud metadata addresses, except the entry `localhost`. Log lines worth an alert end with `event=<code>`. Copy the new healthchecks from a fresh `compose.yaml`. The workers trim uv's package cache above 10 GiB (`0` keeps it untrimmed). `lakana init` writes CI files that deploy without a stored secret; `--ci-auth pat` for the old ones. | [Notes for 0.18.0](#notes-for-0180) |
 | 0.17.0 | Migrations `0042` to `0046`. **Breaking:** a dropped table's files, and those of the tables of a deleted environment, are deleted after `LAKANA_TABLES__UNDO_DAYS` (7 days; restore with `lakana table undrop` or `lakana env restore`), and `DELETE /api/v1/environments/{name}` answers 200 with the environment; the first administrator's token is written to `LAKANA_BOOTSTRAP_TOKEN_FILE`, never to the log; ADMINs no longer see other people's SQL text or column values in the audit log until granted `READ_QUERY_TEXT`. Set `LAKANA_TABLES__UNDO_DAYS` the same on the server and the workers. A new storage root must be written canonically. Nothing expires unless retention is set. Sign-in events are written once per token every 15 minutes. | [Notes for 0.17.0](#notes-for-0170) |
 | 0.16.0 | Migrations `0036` to `0041`. `GET /api/v1/grants` without a filter now returns every grant, in pages of 100 (follow `X-Next-Cursor`), and the principal and group lists come newest first, paged the same way. Filters and masks that exist are not checked again; a new one is type-checked when it is created. Descriptions appear after the next deploy; table readers count from the upgrade on; search finds the columns of existing tables once the sweep has filled them in (1,000 tables take about 20 hours). Upgrade the workers together with the server, so that every task failure gets its code. | [Notes for 0.16.0](#notes-for-0160) |
@@ -130,6 +131,14 @@ Each cell is a summary. The page named in the last column has the detail. The ch
 | 0.9.0 | Upgrade every worker before you deploy Python assets; rewrite `asset(deps=...)` as `asset(inputs=...)`; move helper modules out of `assets/`; an older bundle needs three additions. | [Upgrading](../how-to/deploy-with-compose.md#upgrading), [Projects and deploys](../how-to/projects.md) |
 
 ## Notes for the next release
+
+Nothing yet.
+
+## Notes for 0.19.0
+
+**Security fix: upgrade the server and every worker.** This release closes a way for a reader to
+get around row filters and column masks; the security advisory published with the release has the
+details.
 
 ### Queries run on DuckDB 2.0
 
@@ -185,9 +194,14 @@ what to write instead. Each refusal names its cause in the run's error message.
   the values of its ON column listed". Write `PIVOT ... ON a IN ('x', 'y') USING ...`.
 - **Refused functions.** DuckDB's internal functions (any name starting with `__`), the sequence
   functions `setval`, `nextval` and `currval`, `index_key` and `to_aggregate_state` are refused,
-  and `stats()` stays refused. The sequence functions and `to_aggregate_state` say what the call
+  and `stats()` stays refused. So are the functions that run or plan SQL given as a value
+  (`json_serialize_plan`, and `postgres_execute` and `mysql_execute`, next to the `query` functions
+  refused before). The sequence functions and `to_aggregate_state` say what the call
   does and "Remove the call; a query reads tables only." Remove the call; for a `__` function,
   write the SQL it stands for, such as `CAST` or `BETWEEN`.
+- **`CONNECT BY` is refused.** A hierarchical query with `START WITH ... CONNECT BY` runs as a
+  recursive query, which a submitted query may not use. Write it without hierarchical recursion,
+  for example with one join per level ([SQL in queries](../reference/sql-in-queries.md)).
 - **A query opens only the tables it reads**, in local mode too: any other file or address is
   refused with "the query tried to open a file or an address that is not one of the tables it
   reads." A query that read a file by its path never worked through the guard; nothing to do.
