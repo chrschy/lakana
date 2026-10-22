@@ -297,7 +297,8 @@ proxy whose certificate a private certificate authority signed therefore needs
 in "Deploying with Compose"). The egress service lets a build reach port 443 of each package
 index's host, and another port only when the index's URL names it (a registered index with a
 credential, or `LAKANA_RUN__INDEX_URL`); it tunnels https only, so an `http://` index cannot be
-reached from a build. `docker compose logs egress` names each host and port it refuses
+reached from a build, and an `http://` `LAKANA_RUN__INDEX_URL` stops a `docker` worker at start
+with a message (serve the index over https, or keep `LAKANA_RUN__RUNNER=local`). `docker compose logs egress` names each host and port it refuses
 (`Refused a build connection from … to <host>:<port>: not in its token.`). At start a `docker` worker asks the launcher to remove the containers
 its own earlier process left (the worker keeps its name for the launcher in `launcher-owner` in its
 cache directory, so workers that share a host name never remove each other's tasks); a launcher
