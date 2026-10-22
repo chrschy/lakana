@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import shlex
+import sys
 
 import pytest
 
@@ -15,6 +16,7 @@ from lakana_core.projects.lockfile import (
     lockfile_issues,
     python_admitted,
     source_issues,
+    task_interpreter,
     used_indexes,
     versions_compatible,
 )
@@ -74,7 +76,12 @@ def _messages(pyproject: str | None, lock: bytes | None, **kwargs: object) -> li
     }
     options.update(kwargs)
     deploying = options.pop("deploying", True) is True
-    issues = lockfile_issues(pyproject, lock, deploying=deploying, **options)  # type: ignore[arg-type]
+    issues = lockfile_issues(
+        pyproject,
+        lock,
+        deploying=deploying,
+        **options,  # ty: ignore[invalid-argument-type]
+    )
     return [issue.render() for issue in issues]
 
 
@@ -1011,3 +1018,24 @@ def test_a_declared_url_with_a_query_is_the_registered_index_and_shows_no_token(
     (message,) = _messages(_PYPROJECT + declared, _GOOD, sources=_SOURCES)
     assert "needs `explicit = true`" in message
     assert "hunter2" not in message and "token" not in message
+
+
+def test_a_named_python_is_checked_at_its_first_release() -> None:
+    """Without `python:` the worker's own interpreter counts; a named other one counts as x.y.0."""
+    assert task_interpreter(None) == tuple(sys.version_info[:3])
+    own = f"{sys.version_info.major}.{sys.version_info.minor}"
+    assert task_interpreter(own) == tuple(sys.version_info[:3])
+    assert task_interpreter("3.99") == (3, 99, 0)
+
+
+def test_requires_python_names_lakana_yaml_when_the_project_names_its_python() -> None:
+    """`python:` decides the interpreter, so the issue points there, not at the worker."""
+    lock = _lock(("lakana", "0.8.3"), ("polars", "1.44.2"), requires_python=">=3.13")
+    assert _messages(_PYPROJECT, lock, python=(3, 12, 0), named_python="3.12") == [
+        "uv.lock: requires-python '>=3.13' does not admit Python 3.12, which python: in "
+        "lakana.yaml names"
+    ]
+    assert _messages(_PYPROJECT, lock, python=(3, 12, 4)) == [
+        "uv.lock: requires-python '>=3.13' does not admit the worker's Python 3.12.4"
+    ]
+    assert _messages(_PYPROJECT, lock, python=(3, 13, 0), named_python="3.13") == []

@@ -355,8 +355,10 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.draft != 'true' && needs.changes.outputs.already_tested != 'true' }}
     runs-on: ${{ (github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER) || 'ubuntu-latest' }}
-    # No test waits without a bound, and nothing here may hold a runner if one does.
-    timeout-minutes: 30
+    # No test waits without a bound, and nothing here may hold a runner if one does. 45, not
+    # 30: the job took 22-24 minutes before the Docker isolation step, which adds an image
+    # build and about two minutes of tests.
+    timeout-minutes: 45
     # A separate job, rather than folded into `test` above, so a Docker or
     # testcontainers hiccup shows up as its own failure instead of masking
     # unit test results in the same job.
@@ -372,8 +374,16 @@ jobs:
       # outage must not take them down with the Python-asset tests.
       - name: Integration tests
         run: >-
-          uv run pytest -m integration
+          uv run pytest -m "integration and not docker"
           --ignore=packages/lakana-server/tests/test_python_assets_integration.py
+      # The exit criterion of task isolation, against this runner's Docker Engine (28 or later:
+      # GitHub's ubuntu-latest has it). Its own step, so a Docker failure is named as such.
+      # LAKANA_TEST_DOCKER=1 turns "no Docker here" from a skip into a failure.
+      - name: Docker isolation tests
+        if: ${{ !cancelled() }}
+        env:
+          LAKANA_TEST_DOCKER: "1"
+        run: uv run pytest -m docker packages/lakana-worker/tests
       # The Python-asset tests install from an offline wheel directory. Building it is
       # the only step that may ask a package index, and only for wheels the cache does
       # not hold: the locked wheels are cached by uv.lock, the lakana wheel is rebuilt

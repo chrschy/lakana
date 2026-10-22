@@ -24,10 +24,14 @@ class PythonSupport:
         `LAKANA_RUN__SERVER_URL`, or `None`.
     uv
         Absolute path of the `uv` executable, or `None` when it is not on `PATH`.
+    needs_uv
+        Whether this worker builds venvs itself (the local runner); a docker worker's task
+        image carries uv.
     """
 
     server_url: str | None = None
     uv: str | None = None
+    needs_uv: bool = True
 
     def reason(self) -> str | None:
         """Say why Python assets cannot run here.
@@ -39,7 +43,7 @@ class PythonSupport:
         """
         if self.server_url is None:
             return "LAKANA_RUN__SERVER_URL is not set"
-        if self.uv is None:
+        if self.needs_uv and self.uv is None:
             return "uv is not on the worker's PATH"
         return None
 
@@ -57,7 +61,7 @@ class PythonSupport:
                 "(Compose bundle: LAKANA_RUN__SERVER_URL=http://server:8000; local mode sets "
                 "it itself)"
             )
-        if self.uv is None:
+        if self.needs_uv and self.uv is None:
             return (
                 "install uv where the worker runs and put it on the worker's PATH "
                 "(the Lakana image ships it)"
@@ -76,11 +80,14 @@ def detect(run: RunConfig) -> PythonSupport:
     Returns
     -------
     PythonSupport
-        The server URL and where `uv` is (an absolute path: the child runs elsewhere).
+        The server URL, where `uv` is (an absolute path: the child runs elsewhere), and whether
+        this worker needs it (`LAKANA_RUN__RUNNER=local`).
     """
     found = shutil.which("uv")
     return PythonSupport(
-        server_url=run.server_url, uv=None if found is None else os.path.abspath(found)
+        server_url=run.server_url,
+        uv=None if found is None else os.path.abspath(found),
+        needs_uv=run.runner == "local",
     )
 
 

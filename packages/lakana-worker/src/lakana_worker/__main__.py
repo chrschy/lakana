@@ -29,7 +29,12 @@ from lakana_core.catalog.location_sweep import (
 from lakana_core.catalog.location_sweep import sweep_table_locations
 from lakana_core.catalog.usage import MEASURE_MAX_SECONDS as SIZE_MEASURE_MAX_SECONDS
 from lakana_core.catalog.usage import measure_table_sizes
-from lakana_core.config import QueryLimitsConfig, Settings, warn_about_tokens_in_url_paths
+from lakana_core.config import (
+    QueryLimitsConfig,
+    Settings,
+    parse_task_memory,
+    warn_about_tokens_in_url_paths,
+)
 from lakana_core.db import create_engine
 from lakana_core.errors import LakanaError
 from lakana_core.grants.authorization import GrantAuthorization
@@ -48,8 +53,10 @@ from lakana_worker.ca_bundle import CaBundleError, find_ca_bundle, query_ca_bund
 from lakana_worker.caches import CacheKeeper, CachePaths, PackageCacheTrim, TrimSettings
 from lakana_worker.deploy import DeploySettings, platform_version
 from lakana_worker.deploy_sweep import DeploySweeper, sweep_deploy_checkouts
+from lakana_worker.docker_environments import DockerEnvironments
 from lakana_worker.executor import check_limits, install_drain, install_heartbeat
 from lakana_worker.heartbeat import WorkerHeartbeat
+from lakana_worker.launcher_client import LauncherClient, LauncherUnavailable, claim_owner
 from lakana_worker.memory import resolve_limit, start_watchdog
 from lakana_worker.notify import DeliveryLoop, NotifySettings
 from lakana_worker.pipeline import install_maintenance_timeout
@@ -57,7 +64,7 @@ from lakana_worker.poller import WorkerPool, poll_forever
 from lakana_worker.processes import UnsafeDirectory, prepare_private_directory
 from lakana_worker.python_support import PythonSupport, detect, worker_cache_dir
 from lakana_worker.python_tasks import PythonRuntime, token_ttl
-from lakana_worker.runners import LocalProcessRunner
+from lakana_worker.runners import DockerRunner, LocalProcessRunner, Runner
 from lakana_worker.scheduler import SchedulerLoop
 from lakana_worker.spill import sweep_spill_directories
 from lakana_worker.tasks import RunEngine, TaskSettings
@@ -232,7 +239,11 @@ def _python_runtime(
         token lifetime plus the venv build timeout), every
         `LAKANA_RUN__SWEEP_INTERVAL` seconds. As often, its cache keeper measures the three
         directories and, with `uv` and `LAKANA_WORKER__PACKAGE_CACHE_MAX_BYTES` above 0, trims
-        uv's cache (`lakana_worker.caches`).
+        uv's cache (`lakana_worker.caches`). With `LAKANA_RUN__RUNNER=docker`, a
+        `DockerRunner` and `DockerEnvironments` on the launcher at
+        `LAKANA_RUN__LAUNCHER_SOCKET`, owned by this worker (`claim_owner`: the host name and a
+        token kept in the cache directory, unique among live workers); the attempt directories
+        must then be the launcher's work volume, which it mounts by attempt name.
     """
     cache = worker_cache_dir()
     if python.reason() is None:
@@ -272,6 +283,35 @@ def _python_runtime(
             ),
         )
     )
+    runner: Runner
+    environments: DockerEnvironments | None = None
+    if run.runner == "docker":
+        client = LauncherClient(run.launcher_socket)
+        owner = claim_owner(cache, socket.gethostname())
+        memory_mb = parse_task_memory(run.task_memory) // 1024**2
+        runner = DockerRunner(
+            client,
+            owner=owner,
+            memory_mb=memory_mb,
+            cpus=run.task_cpus,
+            pids=run.task_pids,
+            kill_grace=run.kill_grace,
+        )
+        environments = DockerEnvironments(
+            client=client,
+            owner=owner,
+            memory_mb=memory_mb,
+            cpus=run.task_cpus,
+            pids=run.task_pids,
+            build_timeout=run.venv_build_timeout,
+            max_bytes=run.venv_max_bytes,
+            operator_index=_secret(run.index_url),
+        )
+    else:
+        runner = LocalProcessRunner(
+            kill_grace=run.kill_grace,
+            memory_limit=resolve_limit(settings.worker.memory_limit).bytes,
+        )
     return PythonRuntime(
         support=python,
         work_dir=cache / "attempts",
@@ -287,10 +327,7 @@ def _python_runtime(
             no_proxy=run.no_proxy,
             ca_bundle=run.ca_bundle,
         ),
-        runner=LocalProcessRunner(
-            kill_grace=run.kill_grace,
-            memory_limit=resolve_limit(settings.worker.memory_limit).bytes,
-        ),
+        runner=runner,
         kill_grace=run.kill_grace,
         max_ttl_seconds=settings.task_tokens.max_ttl_seconds,
         limits=DeployLimits(),
@@ -303,7 +340,37 @@ def _python_runtime(
             max_age=DeployLimits().job_seconds, interval=run.sweep_interval
         ),
         caches=CacheKeeper(paths, interval=run.sweep_interval, trim=trim, stop=stop),
+        environments=environments,
     )
+
+
+def _clean_up_after_restart(runtime: PythonRuntime) -> None:
+    """Ask the launcher to remove what this worker's earlier process left running.
+
+    A launcher that cannot be reached is logged and the worker starts anyway: the launcher may
+    start after it, and each task then says the same until it does.
+
+    Parameters
+    ----------
+    runtime
+        The runtime; does nothing for the local runner.
+    """
+    environments = runtime.environments
+    if environments is None:
+        return
+    logger.info(
+        "Python tasks run in containers through the launcher at %s (LAKANA_RUN__RUNNER=docker); "
+        "attempt directories are in %s, which must be the launcher's work volume.",
+        environments.client.socket_path,
+        runtime.work_dir,
+    )
+    try:
+        removed = environments.client.cleanup(environments.owner)
+    except LauncherUnavailable as exc:
+        logger.warning("%s", exc)
+        return
+    if removed:
+        logger.info("Removed %d task containers an earlier process of this worker left.", removed)
 
 
 def make_worker_id(host: str) -> str:
@@ -363,12 +430,15 @@ def main() -> None:
     grace, is then asked to stop and, `LAKANA_QUERY_LIMITS__KILL_GRACE_SECONDS` later, killed;
     the scheduler thread is stopped and joined (for at least 5 s, else the drain grace) so it
     resigns the role. Whether this worker can run Python assets (`LAKANA_RUN__SERVER_URL`
-    set, `uv` on the `PATH`) is logged at startup; the engine gets a `PythonRuntime`
-    either way, which runs a Python task as a supervised subprocess while the
-    loop keeps serving query runs. The tokens it mints for those tasks
-    are capped by `LAKANA_TASK_TOKENS__MAX_TTL_SECONDS`. Before anything else a
-    watchdog thread starts (`LAKANA_WORKER__MEMORY_LIMIT`, default 4GB): over the limit
-    the worker records why against what it runs, kills its tasks and exits with
+    set, and `uv` on the `PATH` for the local runner) is logged at startup; the engine gets a
+    `PythonRuntime` either way, which runs a Python task as a supervised subprocess (or, with
+    `LAKANA_RUN__RUNNER=docker`, a container the launcher starts) while the
+    loop keeps serving query runs. A docker worker first asks the launcher to remove the
+    containers an earlier process of this worker left (its owner is kept in the cache
+    directory); a launcher that cannot be reached is logged and the worker starts anyway.
+    The tokens it mints for those tasks are capped by `LAKANA_TASK_TOKENS__MAX_TTL_SECONDS`.
+    Before anything else a watchdog thread starts (`LAKANA_WORKER__MEMORY_LIMIT`, default
+    4GB): over the limit the worker records why against what it runs, kills its tasks and exits with
     `lakana_worker.memory.EXIT_CODE`. While it holds the scheduler role it
     also sweeps the artifact store every `LAKANA_RUN__SWEEP_INTERVAL` seconds (expired uploads,
     files and manifest objects no version names) and the table locations (the files of creates
@@ -428,7 +498,9 @@ def main() -> None:
     )
     python = detect(settings.run)
     reason = python.reason()
-    if reason is None:
+    if reason is None and settings.run.runner == "docker":
+        logger.info("Python assets: enabled (in containers).")
+    elif reason is None:
         logger.info("Python assets: enabled (uv at %s).", python.uv)
     else:
         logger.info("Python assets: disabled: %s. To enable it: %s.", reason, python.fix())
@@ -444,6 +516,7 @@ def main() -> None:
     install_maintenance_timeout(settings.run.maintenance_timeout)
     install_query_text(settings.audit.query_text)
     runtime = _python_runtime(settings, python, drain)
+    _clean_up_after_restart(runtime)
     limiter = DenialAuditLimiter(settings.denial_audit.per_principal_per_minute)
     authorization = functools.partial(_authorization, limiter=limiter)
     run_engine = RunEngine(

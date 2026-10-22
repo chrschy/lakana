@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import base64
+import errno
 import io
 import os
 import socket
@@ -268,6 +269,52 @@ def test_stop_stops_a_running_task(tmp_path: Path) -> None:
 
     assert results[0]["stopped"] is True
     assert launcher.stop(StopRequest("t1")) == {"stopped": False}
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [(500, {"message": "cannot stop container: permission denied"}), EngineError("timed out")],
+    ids=["docker-refuses", "docker-unreachable"],
+)
+def test_a_stop_docker_did_not_carry_out_answers_false_and_a_retry_stops_the_task(
+    tmp_path: Path, failure: Any
+) -> None:
+    """The caller asks again on False; a True it cannot trust would end its retries early."""
+    engine = FakeEngine(hold=True)
+    launcher = _started(engine, tmp_path)
+    results: list[dict[str, object]] = []
+    worker = threading.Thread(
+        target=lambda: results.append(launcher.run(_run(), lambda line: None))
+    )
+    worker.start()
+    _until(lambda: _task_started(engine))
+    real = engine.request
+    _intercept(engine, lambda method, path, body: path.endswith("/stop"), failure)
+
+    assert launcher.stop(StopRequest("t1")) == {"stopped": False}
+    assert worker.is_alive()
+
+    engine.request = real  # ty: ignore[invalid-assignment]
+    assert launcher.stop(StopRequest("t1")) == {"stopped": True}
+    worker.join(10)
+    assert results[0]["stopped"] is True
+
+
+def test_a_stop_of_a_container_that_already_ended_or_is_gone_answers_true(tmp_path: Path) -> None:
+    """Docker's 304 (not running) and 404 (removed) mean nothing of the task runs any more."""
+    engine = FakeEngine(hold=True)
+    launcher = _started(engine, tmp_path)
+    worker = threading.Thread(target=lambda: launcher.run(_run(), lambda line: None))
+    worker.start()
+    _until(lambda: _task_started(engine))
+    real = engine.request
+
+    for status in (304, 404):
+        _intercept(engine, lambda method, path, body: path.endswith("/stop"), (status, b""))
+        assert launcher.stop(StopRequest("t1")) == {"stopped": True}
+        engine.request = real  # ty: ignore[invalid-assignment]
+    launcher.stop(StopRequest("t1"))
+    worker.join(10)
 
 
 def test_a_closed_connection_removes_the_container_and_its_network(tmp_path: Path) -> None:
@@ -1556,6 +1603,136 @@ def test_an_empty_cache_key_file_is_refused_with_the_fix(tmp_path: Path) -> None
 
     with pytest.raises(StartError, match=r"cache\.key.*delete it and restart"):
         _started(FakeEngine(), tmp_path)
+
+
+def test_a_fifo_at_the_cache_key_is_refused_without_hanging_the_start(tmp_path: Path) -> None:
+    """A FIFO planted as `cache.key` must not block the open until a writer appears."""
+    os.mkfifo(tmp_path / "cache.key", 0o600)
+    errors: list[BaseException] = []
+
+    def start() -> None:
+        """Start a launcher, keeping what it raised."""
+        try:
+            _started(FakeEngine(), tmp_path)
+        except BaseException as exc:  # handed to the test thread below
+            errors.append(exc)
+
+    thread = threading.Thread(target=start, daemon=True)
+    thread.start()
+    thread.join(10)
+    hung = thread.is_alive()
+    if hung:  # release the blocked open so the thread ends
+        with open(tmp_path / "cache.key", "wb"):
+            pass
+        thread.join(10)
+
+    assert not hung
+    assert len(errors) == 1 and isinstance(errors[0], StartError)
+    assert "regular file" in str(errors[0])
+
+
+def test_the_state_directory_is_synced_after_the_key_is_linked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The link is durable only once its directory is: a crash must not lose the key's name."""
+    synced: list[bool] = []
+    real = os.fsync
+
+    def record(descriptor: int) -> None:
+        """Note whether a directory or a file is synced, then sync it.
+
+        Parameters
+        ----------
+        descriptor
+            The descriptor synced.
+        """
+        synced.append(stat.S_ISDIR(os.fstat(descriptor).st_mode))
+        real(descriptor)
+
+    monkeypatch.setattr(os, "fsync", record)
+
+    _started(FakeEngine(), tmp_path)
+
+    assert synced == [False, True]
+
+
+def test_stale_temporary_key_files_are_swept_at_start(tmp_path: Path) -> None:
+    """A launcher killed before linking leaves a temporary file; a later start removes it."""
+    stale = tmp_path / "cache.key.0123456789abcdef.tmp"
+    fresh = tmp_path / "cache.key.fedcba9876543210.tmp"
+    other = tmp_path / "cache.key.notours.tmp"
+    for path in (stale, fresh, other):
+        path.write_bytes(b"k" * 32)
+    os.utime(stale, (time.time() - 3600, time.time() - 3600))
+    os.utime(other, (time.time() - 3600, time.time() - 3600))
+
+    _started(FakeEngine(), tmp_path)
+
+    assert not stale.exists()
+    assert fresh.exists(), "a recent one may belong to a launcher starting next to this one"
+    assert other.exists(), "only the launcher's own names are swept"
+
+
+@pytest.mark.parametrize(
+    ("code", "text"),
+    [
+        (errno.ELOOP, "is a symbolic link"),
+        (errno.EACCES, "cannot be read by the launcher's user (permission denied)"),
+        (errno.EIO, "cannot be opened (Input/output error)"),
+    ],
+)
+def test_an_unopenable_cache_key_names_the_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: int, text: str
+) -> None:
+    """The message says what is wrong with the file, not always "a symbolic link".
+
+    Parameters
+    ----------
+    tmp_path
+        The state directory.
+    monkeypatch
+        Makes the open fail.
+    code
+        The errno of the failure.
+    text
+        What the message says.
+    """
+    real = os.open
+
+    def fail(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        """Fail the open of `cache.key` only.
+
+        Parameters
+        ----------
+        path
+            The path opened.
+        flags
+            Its flags.
+        *args
+            The mode, if any.
+        **kwargs
+            Keyword arguments of `os.open`.
+
+        Returns
+        -------
+        int
+            The descriptor of any other file.
+
+        Raises
+        ------
+        OSError
+            For `cache.key`.
+        """
+        if Path(path).name == "cache.key":
+            raise OSError(code, os.strerror(code))
+        return real(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", fail)
+
+    with pytest.raises(StartError) as caught:
+        _started(FakeEngine(), tmp_path)
+
+    assert text in str(caught.value) and "delete it and restart" in str(caught.value)
 
 
 def test_the_reaper_removes_private_caches_past_their_deadline(tmp_path: Path) -> None:

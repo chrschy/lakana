@@ -246,3 +246,58 @@ def _created_directories() -> list[str]:
             if words[:1] == ["mkdir"] or words[:2] == ["install", "-d"]:
                 found += [w.rstrip("/") for w in words if w.startswith("/")]
     return found
+
+
+_TASK_DOCKERFILE = _DOCKERFILE.with_name("Dockerfile.task")
+
+
+def test_the_task_image_carries_python_uv_and_the_build_entry_and_no_entrypoint() -> None:
+    """The launcher sets the command; an entrypoint in the image would run first."""
+    text = _TASK_DOCKERFILE.read_text(encoding="utf-8")
+
+    assert "ENTRYPOINT" not in text
+    assert "FROM py${PYTHON}" in text
+    for version in ("3.11", "3.12", "3.13", "3.14"):
+        assert re.search(
+            rf"^FROM python:{version}-slim@sha256:[0-9a-f]{{64}} AS py{version}$", text, re.M
+        )
+    assert (
+        "COPY packages/lakana-worker/src/lakana_worker/launcher/task_build.py"
+        " /opt/lakana-task/build.py" in text
+    )
+    assert "--uid 10001" in text and "--uid 10002" in text
+    assert "--gid 10003" in text
+    assert "install -d -o 10002 -g 10002 -m 0755 /env" in text
+    assert "USER 10001:10003" in text
+    ignore = _TASK_DOCKERFILE.with_name("Dockerfile.task.dockerignore").read_text(encoding="utf-8")
+    assert ignore.splitlines() == [
+        "*",
+        "!packages/lakana-worker/src/lakana_worker/launcher/task_build.py",
+    ]
+
+
+def test_the_task_image_pins_the_same_uv_as_the_main_image() -> None:
+    """A venv is built and run with the image's uv; both images move together."""
+
+    def uv_line(path: Path) -> str:
+        return next(
+            line
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.startswith("FROM ghcr.io/astral-sh/uv:")
+        )
+
+    assert uv_line(_TASK_DOCKERFILE) == uv_line(_DOCKERFILE)
+
+
+def test_the_task_image_drops_every_setuid_and_setgid_bit() -> None:
+    """Without no-new-privileges (snap Docker) a setuid `su` or `mount` would be uid 0 again.
+
+    The real-engine test (`test_docker_isolation_integration.py`) finds no such file in the
+    built image; this one keeps the step in place and before `USER`.
+    """
+    text = _TASK_DOCKERFILE.read_text(encoding="utf-8")
+    step = "find / -xdev -perm /6000 -type f -exec chmod a-s {} +"
+
+    assert step in text
+    assert text.index(step) < text.index("USER 10001:10003")
+    assert text.index(step) > text.index("useradd --system --uid 10002")

@@ -220,6 +220,47 @@ jobs:
           push: true
           tags: ghcr.io/lakana-labs/lakana:${{ steps.version.outputs.version }}
 
+  # One task image per supported Python, with the release's version: the launcher's allow-list in
+  # the Compose bundle names them. Built from the tag, like the main image.
+  publish-task-images:
+    needs: [release-please, build, approve, publish-sdk]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        python: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with: {ref: "${{ needs.release-please.outputs.tag }}"}
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1  # v4
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4
+        with: {registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}"}
+      - id: version
+        run: echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+        env: {TAG: "${{ needs.release-please.outputs.tag }}"}
+      - id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7
+        with:
+          context: .
+          file: Dockerfile.task
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            PYTHON=${{ matrix.python }}
+          tags: ghcr.io/lakana-labs/lakana-task:${{ steps.version.outputs.version }}-py${{ matrix.python }}
+      - name: Hand the pushed digest to the attestation job
+        # A matrix job has no single output, so each leg uploads the digest its own push reported.
+        run: echo "${DIGEST}" > digest.txt
+        env: {DIGEST: "${{ steps.build.outputs.digest }}"}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7
+        with:
+          name: task-digest-${{ matrix.python }}
+          path: digest.txt
+
   # Signs the pushed image by digest. Its own job: `publish-image` runs several third-party
   # actions, and any step of a job with `id-token: write` could ask for a signing certificate.
   # `gh attestation verify` reads attestations from GitHub, so nothing is pushed to the registry.
@@ -236,6 +277,31 @@ jobs:
         with:
           subject-name: ghcr.io/lakana-labs/lakana
           subject-digest: ${{ needs.publish-image.outputs.digest }}
+          push-to-registry: false
+
+  # Signs each task image by digest, like `attest-image`. The digest is the one the push step of
+  # the same matrix leg reported (an artifact), not a read-back from a mutable tag.
+  attest-task-images:
+    needs: publish-task-images
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write          # the Sigstore signing certificate
+      attestations: write      # stores the attestation
+    strategy:
+      matrix:
+        python: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
+        with:
+          name: task-digest-${{ matrix.python }}
+      - id: digest
+        run: echo "digest=$(tr -d '[:space:]' < digest.txt)" >> "$GITHUB_OUTPUT"
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-name: ghcr.io/lakana-labs/lakana-task
+          subject-digest: ${{ steps.digest.outputs.digest }}
           push-to-registry: false
 
   five-minute-release:
@@ -282,7 +348,7 @@ jobs:
           cat "$RUNNER_TEMP/out.md" >> "$GITHUB_STEP_SUMMARY"
 
   compose-smoke-release:
-    needs: [release-please, publish-image]
+    needs: [release-please, publish-image, publish-task-images]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions: {contents: read, packages: read}

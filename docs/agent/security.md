@@ -947,6 +947,90 @@ person's copy is private (files 0600, directories 0700, less the umask) because 
 access-controlled on the server; `read_only=True` seals it (0400/0500) for a task's inputs
 .
 
+## DockerRunner: the launcher client and environments (M7b, #38)
+
+- **The worker talks to the launcher only through `lakana_worker.launcher_client`.** One request
+  per connection, the launcher's token read (bounded, ASCII) from the file next to the socket and
+  added to every request. Every answer is untrusted input: anything outside the protocol (not
+  JSON, nested too deeply, a log that is not base64, a line over 1 MiB) is "runner unavailable",
+  never another exception. A refusal (`LauncherRefused`) is permanent; an unreachable launcher or
+  a Docker failure (`LauncherUnavailable`) is transient and names the `launcher` service and
+  `LAKANA_RUN__LAUNCHER_SOCKET`; a log sink that raises (`LogSinkFailed`) stops the container.
+- **`DockerRunner` sends the task description on the container's stdin and nowhere else**: the
+  token never appears in another request field, the environment or a command line. The
+  description is the local one with the container's paths (`/work/result.json`, `/work`) and no
+  parent pid. The container's output is redacted like a local task's, a token split across
+  Docker frames or log lines included; the result record in `<attempt>/task` is read with the
+  same distrust (`O_NOFOLLOW`, regular file, bounded) and a stale one is removed before the run.
+  Docker's `OOMKilled` sets the memory stop reason; a cancel set first wins.
+- **A stop is asked for until the launcher confirms it, and the worker does not wait forever.**
+  The launcher's `stop` answers `stopped: true` only when Docker stopped the container, found it
+  not running or gone, or the run has no container yet; a failed or refused Docker call is
+  logged and answered `false`. `DockerRunner` asks again on `false` (also before the launcher
+  registered the run): the first retry at the next poll, then a gap that doubles up to 5 s
+  (`runners.stop_retry_gap`). Its launcher call has a deadline of the task's timeout, the kill
+  grace and `runners.DEADLINE_MARGIN_SECONDS` (900 s: the launcher's image pull and wait
+  margin); past it the client closes the connection (`LauncherTimedOut`), which makes the
+  launcher kill and remove the container, and the task fails as timed out naming the launcher.
+- **An environment belongs to one project.** Its key (`docker_environments.environment_key`) is
+  the SHA-256 of the project's id, the lock digest, `pyproject.toml`'s digest, the Python version
+  and the credential-free index set; the launcher adds the image to the volume's name. The
+  project is in it because a lock pins every index package by hash but not the files of a path
+  source or a vendored package in the repository: without it, a project could commit another
+  project's exact `uv.lock` and `pyproject.toml` beside its own copy of a vendored package, and
+  the other project's tasks would run that code with their own token (PR 2 security review, I4).
+  The cost is one build per project for a lock several projects share. Within one project, a
+  vendored package changed without a change to `uv.lock` or `pyproject.toml` still reuses the
+  built environment, as the local venv cache does.
+  The project id the worker passes is `python_tasks.environment_owner(repository_id,
+  environment_id)`, a UUIDv5 of the repository and the environment, never a name: one
+  repository deployed to dev and prod gets two environments, so a dev deployer who changes a
+  vendored package without changing the lock cannot hand that code to prod's tasks and prod's
+  token. A project deleted and registered again gets a new repository id and a new key.
+- **The worker's start with `LAKANA_RUN__RUNNER=docker`** (`__main__._python_runtime`): one
+  `LauncherClient` on `LAKANA_RUN__LAUNCHER_SOCKET` serves `DockerRunner` and
+  `DockerEnvironments`, both owned by `launcher_client.claim_owner`: the host name and a random
+  token kept in `launcher-owner` in the worker's cache directory, locked (`flock`) for as long as
+  the worker runs. A second live worker on the same directory takes `launcher-owner.1` and so
+  on, so two workers that share a host name never share an owner: the `cleanup` one asks for at
+  its start removes only what an earlier process of the same worker left, never the other's
+  running tasks. Without a writable directory the token is random and nothing is kept (the
+  launcher's deadline label still removes leftovers). The worker asks the launcher once at
+  start to remove what its earlier process left (`cleanup`), and starts anyway if the launcher
+  cannot be reached. The attempt directory is
+  `tempfile.mkdtemp(prefix="attempt-")` directly under the work directory, which must be the
+  mount of the launcher's work volume: the launcher mounts `<attempt>/code` and `<attempt>/task`
+  by name (`requests._ATTEMPT` accepts mkdtemp's names; a test pins the agreement). The local
+  runner refuses a project whose `python:` names another Python than the worker's own
+  (`no_runtime`). `LAKANA_RUN__HTTPS_PROXY` and `LAKANA_RUN__CA_BUNDLE` are refused at start
+  with the docker runner: no build request field carries a CA bundle, so a private-CA index or
+  TLS-inspecting proxy is unsupported under DockerRunner rather than half-working (passing a
+  bundle would need a request field, a file the launcher, which holds the Docker socket, writes
+  into a build mount, and `SSL_CERT_FILE` in the build; revisit with the egress proxy).
+- **A build gets only what its lock needs**: the credentials of the registered indexes it uses
+  (an index without a credential is a host to reach, not an entry of `UV_INDEX`), the operator's
+  index, and the hosts of those indexes for the egress proxy. Credentials are decrypted only when
+  a build runs, never for an environment the launcher reports complete; the build's output is
+  redacted for every form of every credential before it reaches the task log.
+- **Incident response.** When an environment may be poisoned (a malicious dependency or vendored
+  package was deployed) or a worker may be compromised:
+  1. Stop the workers (`docker compose stop worker`), so nothing builds or runs meanwhile.
+  2. Remove the stack's task and build containers and their networks; the commands are in the
+     docstring of `lakana_worker.launcher.service` (filter
+     `label=lakana.launcher.stack=<project>`, where `<project>` is the Compose project name of
+     the stack, not a Lakana project).
+  3. Remove the built environments and the package caches:
+     `docker volume rm $(docker volume ls -q --filter label=lakana.launcher.stack=<project>)`.
+     Every environment is rebuilt from its lock on next use; a shared cache refills from the
+     indexes.
+  4. Rotate what a build or a task could have seen: the credentials of the registered package
+     indexes the affected projects use, and `LAKANA_RUN__INDEX_URL`'s password if it has one.
+     Restarting the launcher writes a new `launcher.token`; to make the cache key new as well,
+     delete `cache.key` in the launcher's state volume before the restart (the shared caches
+     then start empty).
+  5. Redeploy the fixed project, then start the workers again. Review the audit log and the
+     task logs of the affected projects for what ran meanwhile.
+
 ## The artifact store (M5c2b)
 
 User documentation: `docs/site/reference/artifacts.md` and `docs/site/explanation/artifacts.md`. The

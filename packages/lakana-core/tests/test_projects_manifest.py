@@ -27,6 +27,7 @@ from lakana_core.projects.manifest import (
     manifest_assets,
     manifest_jobs,
     manifest_lock_sha256,
+    manifest_python,
     manifest_tables,
     python_entry,
 )
@@ -624,3 +625,16 @@ def test_job_notify_reads_a_manifest_entry_and_a_damaged_one_as_none() -> None:
         {"format": "json"},
     ):
         assert job_notify({"jobs": {"a": {"notify": bad}}}, "a") is None
+
+
+def test_the_manifest_records_python_only_when_the_project_names_one() -> None:
+    """An older worker reads no `python` key and runs on its own interpreter, as before."""
+    config = ResolvedProjectConfig()
+    graph = build_graph([])
+
+    assert "python" not in build_manifest([], graph, config)
+    named = build_manifest([], graph, config, python="3.12")
+    assert named["python"] == "3.12"
+    assert manifest_python(named) == "3.12"
+    assert manifest_python({"python": "3.9"}) is None
+    assert manifest_python({}) is None

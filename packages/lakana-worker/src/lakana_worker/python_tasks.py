@@ -8,7 +8,9 @@ Three threads take part, and each owns its own database session:
   the target's state, mints a token bound to this attempt and calls the
   runner. It is the thread that starts the process, and it outlives it: the
   runner returns only after the process is reaped. On every path out it
-  revokes the token, releases the venv and removes the attempt directory;
+  revokes the token, releases the venv and removes the attempt directory.
+  Under DockerRunner (`environments` set) the environment comes from the
+  launcher and the process is a container; the steps around it are the same;
 - the **lease keeper** (``lakana-lease``, unchanged) renews the lease
   and learns of a cancel request, a lost lease or the drain. `KeeperStop`
   turns that into the runner's stop signal;
@@ -78,6 +80,7 @@ from lakana_core.projects.lockfile import (
     lock_digest,
     lockfile_issues,
     source_issues,
+    task_interpreter,
     used_indexes,
 )
 from lakana_core.projects.manifest import (
@@ -86,6 +89,7 @@ from lakana_core.projects.manifest import (
     entry_input_kinds,
     entry_output,
     manifest_lock_sha256,
+    manifest_python,
 )
 from lakana_core.projects.package_indexes import registered_indexes
 from lakana_core.projects.package_sources import KnownSources, RegisteredIndex
@@ -104,11 +108,13 @@ from lakana_worker.attempt_sweep import AttemptSweeper
 from lakana_worker.caches import CacheKeeper
 from lakana_worker.deploy import platform_version
 from lakana_worker.deploy_sweep import DeploySweeper
+from lakana_worker.docker_environments import DockerEnvironments
 from lakana_worker.index_credentials import (
     IndexAccess,
     IndexCredentialError,
     resolve_index_access,
 )
+from lakana_worker.launcher_client import LogSinkFailed
 from lakana_worker.processes import (
     CappedSink,
     UnsafeDirectory,
@@ -196,6 +202,20 @@ _MIXED_ALSO = (
 """Added after `_DECLARED_AGAIN` when both kinds of issue are present: the run cannot pass
 before the deploy."""
 
+_LOCAL_PYTHON = (
+    "this project names Python {python} in lakana.yaml, and this worker runs Python tasks on "
+    "its own Python {own} without containers (LAKANA_RUN__RUNNER=local). Run it on a worker "
+    'with LAKANA_RUN__RUNNER=docker, or set python: "{own}" (or remove it) in lakana.yaml and '
+    "deploy again"
+)
+"""The failure of a project that names a Python the local runner does not have."""
+
+_BUILD_LOG_FAILED = (
+    "environment build failed: the task's log could not be written while its environment was "
+    "built; the worker's log has the cause"
+)
+"""The failure of a launcher build whose output the task's log sink would not take."""
+
 _INACTIVE = "the run principal is deactivated or deleted"
 _NO_MESSAGE = "the task failed without a message"
 _NO_WRITE = (
@@ -219,6 +239,30 @@ _STOPPED: Mapping[FailureKind, str] = {
 """The message recorded for an attempt the worker stopped, by how it is recorded.
 
 A cancel normally carries the run's text from `cancel_kind`; this one is the fallback."""
+
+
+def environment_owner(repository_id: uuid.UUID, environment_id: uuid.UUID) -> uuid.UUID:
+    """Name the project whose tasks may share an environment the launcher built.
+
+    A project is a repository deployed to an environment. Its lock pins every package from an
+    index by hash, but not the files of a path source in the repository, so a deployer of one
+    environment could change vendored code without changing the lock; keying the build by the
+    repository alone would hand that code to the same repository's tasks in another
+    environment, with that environment's token. The id is therefore derived from both.
+
+    Parameters
+    ----------
+    repository_id
+        The project version's repository.
+    environment_id
+        The environment it is deployed to.
+
+    Returns
+    -------
+    uuid.UUID
+        A name-based UUID, the same for every version of the project in that environment.
+    """
+    return uuid.uuid5(repository_id, f"environment:{environment_id}")
 
 
 def _stop_text(stop: tuple[FailureKind, str | None]) -> str:
@@ -503,6 +547,12 @@ class _Prepared:
         ``float`` or ``exact``, from the manifest entry.
     sources
         The package sources this instance knew when the attempt was prepared.
+    python
+        The Python the task runs on: the manifest's `python`, else the worker's own.
+    named_python
+        The manifest's `python`, if the project names one.
+    project_id
+        `environment_owner` of the project version: whose environments the task may use.
     """
 
     environment: str
@@ -517,6 +567,9 @@ class _Prepared:
     input_versions: dict[str, int]
     decimals: str
     sources: KnownSources
+    python: str
+    named_python: str | None
+    project_id: uuid.UUID
 
 
 @dataclass
@@ -643,6 +696,9 @@ class PythonRuntime:
     caches
         Measures the worker's caches and trims uv's package cache, in a thread of its own;
         `None` measures nothing.
+    environments
+        Gets each task's environment from the launcher (`LAKANA_RUN__RUNNER=docker`); `None`
+        builds venvs locally with `acquire_venv`, the local runner.
     """
 
     support: PythonSupport
@@ -658,6 +714,7 @@ class PythonRuntime:
     sweeper: AttemptSweeper | None = None
     deploy_sweeper: DeploySweeper | None = None
     caches: CacheKeeper | None = None
+    environments: DockerEnvironments | None = None
 
     def maintain(self) -> None:
         """Sweep leftover attempt directories and deploy checkouts, and measure the caches."""
@@ -925,14 +982,20 @@ class PythonRuntime:
             cleanup.callback(self._remove, attempt_dir, claimed)
             code_dir = self._unpack(tarball, prepared.code_sha256, attempt_dir / "code")
             del tarball
-            lock_sha256 = self._check_lock(code_dir, prepared.lock_sha256, prepared.sources)
-            resolver = self._index_resolver(
-                session,
-                engine,
-                prepared.environment,
-                self._used_indexes(code_dir, prepared.sources),
+            lock_sha256 = self._check_lock(
+                code_dir, prepared.lock_sha256, prepared.sources, prepared.named_python
             )
-            lease = self._venv(lock_sha256, code_dir, sink, resolver)
+            used = self._used_indexes(code_dir, prepared.sources)
+            resolver = self._index_resolver(session, engine, prepared.environment, used)
+            lease = self._venv(
+                lock_sha256,
+                code_dir,
+                sink,
+                resolver,
+                python=prepared.python,
+                used=used,
+                project_id=prepared.project_id,
+            )
             cleanup.callback(lease.release)
             baseline: Baseline | None = None
             if prepared.output == "artifact":
@@ -984,6 +1047,8 @@ class PythonRuntime:
                     input_versions=prepared.input_versions,
                     decimals=prepared.decimals,
                     task_run_id=claimed.task_run_id,
+                    environment_key=lease.key,
+                    python=prepared.python,
                 ),
                 sink,
                 KeeperStop(keeper),
@@ -1184,6 +1249,14 @@ class PythonRuntime:
             raise TaskFailure(
                 FailureKind.PERMANENT, CANNOT_RUN.format(reason=reason), FailureCode.NO_RUNTIME
             )
+        own = f"{sys.version_info.major}.{sys.version_info.minor}"
+        named = manifest_python(version.manifest_json)
+        if self.environments is None and named is not None and named != own:
+            raise TaskFailure(
+                FailureKind.PERMANENT,
+                _LOCAL_PYTHON.format(python=named, own=own),
+                FailureCode.NO_RUNTIME,
+            )
         try:
             ref = TableRef.from_dotted(env.name, claimed.asset)
         except ValidationError as exc:
@@ -1271,6 +1344,9 @@ class PythonRuntime:
             input_versions=versions,
             decimals=entry_decimals(entry),
             sources=KnownSources(registered_indexes(session), self.venvs.index_url),
+            python=named or own,
+            named_python=named,
+            project_id=environment_owner(version.repository_id, version.environment_id),
         )
         return prepared, tarball
 
@@ -1567,8 +1643,10 @@ class PythonRuntime:
             raise TaskFailure(FailureKind.TRANSIENT, str(exc), FailureCode.INTERNAL) from exc
 
     @staticmethod
-    def _check_lock(code_dir: Path, expected: str | None, sources: KnownSources) -> str:
-        """Validate the deployed lockfile again, against this worker.
+    def _check_lock(
+        code_dir: Path, expected: str | None, sources: KnownSources, named_python: str | None
+    ) -> str:
+        """Validate the deployed lockfile again, against this worker and the task's Python.
 
         Parameters
         ----------
@@ -1578,6 +1656,9 @@ class PythonRuntime:
             The manifest's lock digest, if it records one.
         sources
             The package sources this instance knows.
+        named_python
+            The manifest's `python`, if the project names one: `requires-python` must admit it
+            (`task_interpreter`), else the worker's own Python.
 
         Returns
         -------
@@ -1624,9 +1705,10 @@ class PythonRuntime:
             pyproject,
             lock,
             platform_version=platform_version(),
-            python=(sys.version_info.major, sys.version_info.minor, sys.version_info.micro),
+            python=task_interpreter(named_python),
             sources=sources,
             deploying=False,
+            named_python=named_python,
         )
         if issues:
             raise TaskFailure(
@@ -1723,20 +1805,34 @@ class PythonRuntime:
         code_dir: Path,
         sink: Callable[[bytes], None],
         indexes: IndexResolver | None = None,
+        *,
+        python: str,
+        used: tuple[RegisteredIndex, ...] = (),
+        project_id: uuid.UUID,
     ) -> VenvLease:
         """Get the venv of the lockfile and `pyproject.toml`, building it on first use.
+
+        With `environments` set the launcher builds it in a container, from the attempt's code
+        in its work volume; otherwise `acquire_venv` builds it on the worker.
 
         Parameters
         ----------
         lock_sha256
             The lock digest.
         code_dir
-            The unpacked code.
+            The unpacked code: ``code`` in the attempt directory, whose name the launcher
+            mounts from its work volume.
         sink
             Receives the build's output.
         indexes
             Returns the credentials of the registered indexes the lock uses; called only if a
             build runs.
+        python
+            The task's Python (DockerRunner only; the local runner has its own).
+        used
+            The registered indexes the lock uses (DockerRunner only).
+        project_id
+            `environment_owner` of the project version (DockerRunner only).
 
         Returns
         -------
@@ -1746,12 +1842,31 @@ class PythonRuntime:
         Raises
         ------
         TaskFailure
-            Permanent for an unsafe cache (a configuration error) and for a build that cannot
-            succeed until a credential, an index or the lock changes; transient when the build
-            failed otherwise.
+            Permanent for an unsafe cache (a configuration error), for a build that cannot
+            succeed until a credential, an index or the lock changes, and for a launcher build
+            whose output the log sink would not take; transient when the build failed otherwise.
         """
         try:
+            if self.environments is not None:
+                return self.environments.acquire(
+                    lock_sha256,
+                    code_dir,
+                    sink,
+                    indexes,
+                    python=python,
+                    attempt=code_dir.parent.name,
+                    used=used,
+                    project_id=project_id,
+                )
             return self.acquire_venv(self.venvs, lock_sha256, code_dir, sink, indexes)
+        except LogSinkFailed as exc:
+            logger.warning(
+                "The output of an environment build could not be written to the task's log.",
+                exc_info=True,
+            )
+            raise TaskFailure(
+                FailureKind.PERMANENT, _BUILD_LOG_FAILED, FailureCode.INTERNAL
+            ) from exc
         except VenvBuildRefused as exc:
             raise TaskFailure(FailureKind.PERMANENT, str(exc), FailureCode.SECRET_REFUSED) from exc
         except VenvCacheUnsafe as exc:

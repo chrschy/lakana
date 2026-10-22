@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import re
 import shlex
+import sys
 import tomllib
 
 from lakana_core.errors import ValidationError
@@ -135,6 +136,28 @@ def _clause_holds(
     if operator == "<=":
         return have <= want
     return have < want
+
+
+def task_interpreter(python: str | None) -> tuple[int, int, int]:
+    """Name the interpreter a project's tasks run on, for the `requires-python` check.
+
+    Parameters
+    ----------
+    python
+        `lakana.yaml`'s `python:`, or `None`.
+
+    Returns
+    -------
+    tuple of int
+        This process's ``(major, minor, micro)`` when `python` is `None` or its own version;
+        otherwise ``(3, minor, 0)``: the task image's micro release is not known here, so a
+        project that names a version must admit its first release.
+    """
+    own = sys.version_info
+    if python is None or python == f"{own.major}.{own.minor}":
+        return (own.major, own.minor, own.micro)
+    major, minor = (int(part) for part in python.split("."))
+    return (major, minor, 0)
 
 
 def python_admitted(specifier: str, python: tuple[int, int, int]) -> bool | None:
@@ -806,6 +829,7 @@ def lockfile_issues(
     python: tuple[int, int, int],
     sources: KnownSources,
     deploying: bool = True,
+    named_python: str | None = None,
 ) -> list[ProjectIssue]:
     """Validate the dependency files of a project that has a Python asset.
 
@@ -819,7 +843,8 @@ def lockfile_issues(
     platform_version
         The validating worker's version.
     python
-        The validating worker's ``(major, minor, micro)``.
+        The ``(major, minor, micro)`` the project's tasks run on (`task_interpreter`): the
+        validating worker's own, or the one `named_python` names.
     sources
         The sources a lock may name on this instance: the registered package
         indexes and the operator's index (PyPI and the folder `wheelhouse`
@@ -828,6 +853,9 @@ def lockfile_issues(
         Whether this is the check of a deploy. The check before an execution
         passes `False`, which leaves out the one rule that is for a deploy
         only: an index with a registered index's name and another URL.
+    named_python
+        `lakana.yaml`'s `python:`, when the project names one: an issue with `requires-python`
+        then points at that setting instead of at the worker's Python.
 
     Returns
     -------
@@ -951,12 +979,16 @@ def lockfile_issues(
                 )
             )
         elif not admitted:
+            interpreter = (
+                f"the worker's Python {shown}"
+                if named_python is None
+                else f"Python {_shown(named_python)}, which python: in lakana.yaml names"
+            )
             issues.append(
                 ProjectIssue(
                     LOCK_FILE,
                     None,
-                    f"requires-python '{_shown(specifier)}' does not admit "
-                    f"the worker's Python {shown}",
+                    f"requires-python '{_shown(specifier)}' does not admit {interpreter}",
                 )
             )
     return issues

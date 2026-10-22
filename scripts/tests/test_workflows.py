@@ -1472,7 +1472,7 @@ def test_every_published_artefact_gets_a_build_provenance_attestation() -> None:
         return [s for s in job["steps"] if "attest-build-provenance" in str(s.get("uses"))]
 
     attesting = {name for name, job in jobs.items() if attest(job)}
-    assert attesting == {"attest-dist", "attest-image"}
+    assert attesting == {"attest-dist", "attest-image", "attest-task-images"}
     for name in attesting:
         perms = jobs[name]["permissions"]
         assert perms["id-token"] == "write", name
@@ -1729,3 +1729,92 @@ def test_the_site_is_built_for_the_address_it_is_served_from() -> None:
     """GitHub Pages serves the project under `/lakana/`, so the build needs that `site_url`."""
     config = (ROOT / "mkdocs.yml").read_text()
     assert re.search(r"^site_url: https://lakana-labs\.github\.io/lakana/$", config, re.MULTILINE)
+
+
+def test_a_release_publishes_one_task_image_per_supported_python() -> None:
+    """One image per supported Python, `lakana-task:<version>-py3.X`, built with the release."""
+    job = _jobs("release.yml")["publish-task-images"]
+
+    assert job["strategy"]["matrix"]["python"] == ["3.11", "3.12", "3.13", "3.14"]
+    build = next(step for step in job["steps"] if "build-push-action" in step.get("uses", ""))
+    assert build["with"]["file"] == "Dockerfile.task"
+    assert build["with"]["tags"] == (
+        "ghcr.io/lakana-labs/lakana-task:"
+        "${{ steps.version.outputs.version }}-py${{ matrix.python }}"
+    )
+    assert "PYTHON=${{ matrix.python }}" in build["with"]["build-args"]
+    assert "publish-task-images" in _jobs("release.yml")["compose-smoke-release"]["needs"]
+
+
+def test_the_task_images_wait_for_the_approval_and_are_attested() -> None:
+    """The gate is explicit, and each image is signed by digest like the main image."""
+    jobs = _jobs("release.yml")
+    publish = jobs["publish-task-images"]
+
+    assert "approve" in publish["needs"]
+    attest = jobs["attest-task-images"]
+    assert "publish-task-images" in attest["needs"]
+    assert attest["permissions"] == {
+        "contents": "read",
+        "id-token": "write",
+        "attestations": "write",
+    }
+    step = next(s for s in attest["steps"] if "attest-build-provenance" in s.get("uses", ""))
+    assert step["with"]["subject-name"] == "ghcr.io/lakana-labs/lakana-task"
+    assert step["with"]["subject-digest"] == "${{ steps.digest.outputs.digest }}"
+    assert attest["strategy"]["matrix"]["python"] == ["3.11", "3.12", "3.13", "3.14"]
+
+
+def test_the_attested_digest_is_the_one_the_push_step_reported() -> None:
+    """No read-back from a mutable tag: the push step's digest travels in an artifact."""
+    jobs = _jobs("release.yml")
+    publish, attest = jobs["publish-task-images"], jobs["attest-task-images"]
+    build = next(s for s in publish["steps"] if "build-push-action" in s.get("uses", ""))
+    assert build["id"]
+    upload = next(s for s in publish["steps"] if "upload-artifact" in s.get("uses", ""))
+    assert upload["with"]["name"] == "task-digest-${{ matrix.python }}"
+    writer = next(
+        s for s in publish["steps"] if f"steps.{build['id']}.outputs.digest" in json.dumps(s)
+    )
+    assert "digest" in writer["run"] or "digest" in json.dumps(writer.get("env", {}))
+    download = next(s for s in attest["steps"] if "download-artifact" in s.get("uses", ""))
+    assert download["with"]["name"] == "task-digest-${{ matrix.python }}"
+    text = json.dumps(attest)
+    assert "imagetools" not in text
+    assert "docker login" not in text
+    assert attest["permissions"].get("packages") is None
+
+
+def test_the_docker_isolation_tests_have_a_step_of_their_own_that_needs_docker() -> None:
+    """The exit criterion of task isolation runs on the integration job's Docker Engine.
+
+    Its own step, so a Docker failure is named as such; `LAKANA_TEST_DOCKER=1` makes a missing
+    Docker a failure instead of a skip, and the first step leaves these tests out.
+    """
+    steps = _jobs("ci.yml")["integration"]["steps"]
+    first = next(step for step in steps if step.get("name") == "Integration tests")
+    docker = next(step for step in steps if step.get("name") == "Docker isolation tests")
+
+    assert '-m "integration and not docker"' in first["run"]
+    assert docker["env"] == {"LAKANA_TEST_DOCKER": "1"}
+    assert docker["if"] == "${{ !cancelled() }}"
+    assert docker["run"] == "uv run pytest -m docker packages/lakana-worker/tests"
+    assert steps.index(docker) == steps.index(first) + 1
+
+
+def test_the_integration_job_has_room_for_the_docker_isolation_tests() -> None:
+    """The integration job's timeout leaves room for the Docker isolation step.
+
+    The job took 22 to 24 minutes before the Docker step; that step adds an image build (four
+    Python bases and uv: the legacy builder builds every stage) and two minutes of tests.
+    """
+    assert _jobs("ci.yml")["integration"]["timeout-minutes"] == 45
+
+
+def test_the_two_dockerfiles_pin_the_same_python_314_base_image() -> None:
+    """The release image and the 3.14 task image must not drift to different digests."""
+    pin = re.compile(r"^FROM (python:3\.14-slim@sha256:[0-9a-f]{64})", re.MULTILINE)
+    main = set(pin.findall((ROOT / "Dockerfile").read_text()))
+    task = set(pin.findall((ROOT / "Dockerfile.task").read_text()))
+    assert len(main) == 1
+    assert main == task

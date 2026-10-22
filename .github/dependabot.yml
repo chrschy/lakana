@@ -23,7 +23,7 @@ updates:
       prefix: "ci"            # hidden from the changelog
 
   - package-ecosystem: "docker"
-    directory: "/"                # the Dockerfile: the python base image and the pinned uv image
+    directory: "/"                # Dockerfile and Dockerfile.task: the python base images and the pinned uv image
     schedule:
       interval: "weekly"
     groups:

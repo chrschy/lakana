@@ -24,9 +24,11 @@ from lakana_core.config import Settings
 from lakana_core.projects.limits import DeployLimits
 from lakana_worker import deploy_sweep, pipeline
 from lakana_worker.__main__ import _python_runtime, configure_logging, main, make_worker_id
+from lakana_worker.docker_environments import DockerEnvironments
+from lakana_worker.launcher_client import LauncherUnavailable
 from lakana_worker.python_support import PythonSupport
 from lakana_worker.python_tasks import PythonRuntime
-from lakana_worker.runners import LocalProcessRunner
+from lakana_worker.runners import DockerRunner, LocalProcessRunner
 
 
 class _StandInHeartbeat:
@@ -1967,3 +1969,166 @@ def test_the_heartbeat_writes_what_the_cache_keeper_measured(
         main()
     keeper = poll_forever_mock.call_args.kwargs["engine"].python.caches
     assert heartbeat_stand_in[0].kwargs["caches"] == keeper.latest
+
+
+def _main_with_docker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cleanup: Callable[[object, str], int]
+) -> mock.MagicMock:
+    """Run `main` with `LAKANA_RUN__RUNNER=docker` and a stand-in for the launcher's cleanup.
+
+    Parameters
+    ----------
+    tmp_path
+        Pytest's per-test directory.
+    monkeypatch
+        The fixture.
+    cleanup
+        Replaces `LauncherClient.cleanup`.
+
+    Returns
+    -------
+    mock.MagicMock
+        The `poll_forever` mock.
+    """
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{tmp_path}/lakana.db")
+    monkeypatch.setenv("LAKANA_RUN__RUNNER", "docker")
+    monkeypatch.setenv("LAKANA_RUN__TASK_MEMORY", "1GB")
+    monkeypatch.setenv("LAKANA_RUN__SERVER_URL", "http://server:8000")
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    for name in ("LAKANA_RUN__CA_BUNDLE", "LAKANA_RUN__HTTPS_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr("lakana_worker.launcher_client.LauncherClient.cleanup", cleanup)
+    with (
+        mock.patch("lakana_worker.__main__.poll_forever") as poll_forever_mock,
+        mock.patch("lakana_worker.__main__.SchedulerLoop") as scheduler_mock,
+        mock.patch("lakana_worker.__main__.signal.signal"),
+        mock.patch("lakana_worker.__main__.socket.gethostname", return_value="worker-7"),
+        mock.patch("lakana_worker.python_support.shutil.which", return_value=None),
+    ):
+        scheduler_mock.return_value.start.return_value.is_alive.return_value = False
+        main()
+    return poll_forever_mock
+
+
+def test_main_builds_a_docker_runtime_and_cleans_up_what_it_left(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`LAKANA_RUN__RUNNER=docker`: DockerRunner, DockerEnvironments and one `cleanup` at start."""
+    caplog.set_level(logging.INFO)
+    cleaned: list[str] = []
+
+    def cleanup(client: object, owner: str) -> int:
+        """Record the owner and say two containers were removed.
+
+        Parameters
+        ----------
+        client
+            The launcher client.
+        owner
+            Whose containers.
+
+        Returns
+        -------
+        int
+            Two.
+        """
+        cleaned.append(owner)
+        return 2
+
+    poll_forever_mock = _main_with_docker(tmp_path, monkeypatch, cleanup)
+
+    python = poll_forever_mock.call_args.kwargs["engine"].python
+    assert isinstance(python.runner, DockerRunner)
+    assert isinstance(python.environments, DockerEnvironments)
+    owner = python.environments.owner
+    token = (tmp_path / "xdg" / "lakana-worker" / "launcher-owner").read_text()
+    assert (owner, python.environments.memory_mb) == (f"worker-7.{token}", 1024)
+    assert python.runner._owner == owner
+    assert python.environments.client.socket_path == Path("/run/lakana-launcher/launcher.sock")
+    assert python.support.reason() is None
+    assert cleaned == [owner]
+    assert "Python tasks run in containers through the launcher" in caplog.text
+    assert "Python assets: enabled (in containers)." in caplog.text
+    assert "Removed 2 task containers an earlier process of this worker left." in caplog.text
+    assert str(tmp_path / "xdg" / "lakana-worker" / "attempts") in caplog.text
+
+
+def test_a_docker_worker_starts_while_the_launcher_is_down_and_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The launcher may start after the worker: a warning, and each task says it again."""
+    caplog.set_level(logging.INFO)
+
+    def cleanup(client: object, owner: str) -> int:
+        """Fail as an unreachable launcher does.
+
+        Parameters
+        ----------
+        client
+            The launcher client.
+        owner
+            Whose containers.
+
+        Raises
+        ------
+        LauncherUnavailable
+            Always.
+        """
+        raise LauncherUnavailable("runner unavailable: the launcher's socket cannot be reached")
+
+    poll_forever_mock = _main_with_docker(tmp_path, monkeypatch, cleanup)
+
+    poll_forever_mock.assert_called_once()
+    assert "runner unavailable: the launcher's socket cannot be reached" in caplog.text
+    assert "Removed" not in caplog.text
+
+
+def test_a_local_worker_has_no_environments_and_asks_no_launcher(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The default: LocalProcessRunner, venvs built by the worker, no cleanup call."""
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{tmp_path}/lakana.db")
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    monkeypatch.delenv("LAKANA_RUN__RUNNER", raising=False)
+    cleanup = mock.Mock()
+    monkeypatch.setattr("lakana_worker.launcher_client.LauncherClient.cleanup", cleanup)
+    with (
+        mock.patch("lakana_worker.__main__.poll_forever") as poll_forever_mock,
+        mock.patch("lakana_worker.__main__.SchedulerLoop") as scheduler_mock,
+        mock.patch("lakana_worker.__main__.signal.signal"),
+    ):
+        scheduler_mock.return_value.start.return_value.is_alive.return_value = False
+        main()
+    python = poll_forever_mock.call_args.kwargs["engine"].python
+    assert isinstance(python.runner, LocalProcessRunner)
+    assert python.environments is None
+    cleanup.assert_not_called()
+
+
+def test_a_docker_worker_that_finds_nothing_left_says_nothing_about_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A clean start: no line about removed containers."""
+    caplog.set_level(logging.INFO)
+
+    def cleanup(client: object, owner: str) -> int:
+        """Say nothing was left.
+
+        Parameters
+        ----------
+        client
+            The launcher client.
+        owner
+            Whose containers.
+
+        Returns
+        -------
+        int
+            Zero.
+        """
+        return 0
+
+    _main_with_docker(tmp_path, monkeypatch, cleanup)
+
+    assert "Python tasks run in containers through the launcher" in caplog.text
+    assert "Removed" not in caplog.text
