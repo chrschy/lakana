@@ -947,6 +947,55 @@ person's copy is private (files 0600, directories 0700, less the umask) because 
 access-controlled on the server; `read_only=True` seals it (0400/0500) for a task's inputs
 .
 
+## DockerRunner: the launcher client and environments (M7b, #38)
+
+- **The worker talks to the launcher only through `lakana_worker.launcher_client`.** One request
+  per connection, the launcher's token read (bounded, ASCII) from the file next to the socket and
+  added to every request. Every answer is untrusted input: anything outside the protocol (not
+  JSON, nested too deeply, a log that is not base64, a line over 1 MiB) is "runner unavailable",
+  never another exception. A refusal (`LauncherRefused`) is permanent; an unreachable launcher or
+  a Docker failure (`LauncherUnavailable`) is transient and names the `launcher` service and
+  `LAKANA_RUN__LAUNCHER_SOCKET`; a log sink that raises (`LogSinkFailed`) stops the container.
+- **`DockerRunner` sends the task description on the container's stdin and nowhere else**: the
+  token never appears in another request field, the environment or a command line. The
+  description is the local one with the container's paths (`/work/result.json`, `/work`) and no
+  parent pid. The container's output is redacted like a local task's, a token split across
+  Docker frames or log lines included; the result record in `<attempt>/task` is read with the
+  same distrust (`O_NOFOLLOW`, regular file, bounded) and a stale one is removed before the run.
+  Docker's `OOMKilled` sets the memory stop reason; a cancel set first wins.
+- **An environment belongs to one project.** Its key (`docker_environments.environment_key`) is
+  the SHA-256 of the project's id, the lock digest, `pyproject.toml`'s digest, the Python version
+  and the credential-free index set; the launcher adds the image to the volume's name. The
+  project is in it because a lock pins every index package by hash but not the files of a path
+  source or a vendored package in the repository: without it, a project could commit another
+  project's exact `uv.lock` and `pyproject.toml` beside its own copy of a vendored package, and
+  the other project's tasks would run that code with their own token (PR 2 security review, I4).
+  The cost is one build per project for a lock several projects share. Within one project, a
+  vendored package changed without a change to `uv.lock` or `pyproject.toml` still reuses the
+  built environment, as the local venv cache does.
+- **A build gets only what its lock needs**: the credentials of the registered indexes it uses
+  (an index without a credential is a host to reach, not an entry of `UV_INDEX`), the operator's
+  index, and the hosts of those indexes for the egress proxy. Credentials are decrypted only when
+  a build runs, never for an environment the launcher reports complete; the build's output is
+  redacted for every form of every credential before it reaches the task log.
+- **Incident response.** When an environment may be poisoned (a malicious dependency or vendored
+  package was deployed) or a worker may be compromised:
+  1. Stop the workers (`docker compose stop worker`), so nothing builds or runs meanwhile.
+  2. Remove the stack's task and build containers and their networks; the commands are in the
+     docstring of `lakana_worker.launcher.service` (filter
+     `label=lakana.launcher.stack=<project>`).
+  3. Remove the built environments and the package caches:
+     `docker volume rm $(docker volume ls -q --filter label=lakana.launcher.stack=<project>)`.
+     Every environment is rebuilt from its lock on next use; a shared cache refills from the
+     indexes.
+  4. Rotate what a build or a task could have seen: the credentials of the registered package
+     indexes the affected projects use, and `LAKANA_RUN__INDEX_URL`'s password if it has one.
+     Restarting the launcher writes a new `launcher.token`; to make the cache key new as well,
+     delete `cache.key` in the launcher's state volume before the restart (the shared caches
+     then start empty).
+  5. Redeploy the fixed project, then start the workers again. Review the audit log and the
+     task logs of the affected projects for what ran meanwhile.
+
 ## The artifact store (M5c2b)
 
 User documentation: `docs/site/reference/artifacts.md` and `docs/site/explanation/artifacts.md`. The

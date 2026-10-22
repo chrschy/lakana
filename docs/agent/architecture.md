@@ -677,7 +677,9 @@ poll loop, classification) are under "The run engine (M5c1)", "Python tasks (M5c
 | `lakana_core.grants.authorization` | core | Scope rules for bound tokens. |
 | `lakana_core.runs.lockdown` | core | The claim-form run context. |
 | `lakana_worker.python_support` | worker | Whether this worker can run Python assets; the cache directory. |
-| `lakana_worker.runners` | worker | `Runner`, `LocalProcessRunner`, `unpack_code`. |
+| `lakana_worker.runners` | worker | `Runner`, `LocalProcessRunner`, `DockerRunner`, `unpack_code`. |
+| `lakana_worker.launcher_client` | worker | The worker's side of the launcher's socket: one request per connection with the launcher's token; `LauncherUnavailable`, `LauncherRefused`, `LogSinkFailed`. |
+| `lakana_worker.docker_environments` | worker | Environments built by the launcher, one volume per project, lock, `pyproject.toml`, Python and index set. |
 | `lakana_worker.launcher` | launcher (own service) | The only holder of the Docker socket: request schema, container specs, the Docker Engine client, the run/build/stop/status/cleanup operations, the Unix-socket server (`lakana-launcher`); standard library only (contract `launcher-stands-alone`). |
 | `lakana_worker.venvs` | worker | The venv cache. |
 | `lakana_worker.python_tasks` | worker | One Python attempt: prepare, supervise, classify. |
@@ -686,8 +688,8 @@ poll loop, classification) are under "The run engine (M5c1)", "Python tasks (M5c
 | `lakana_worker.task_lease`, `task_outcome` | worker | The lease keeper and its loss; how an attempt ended (`TaskOutcome`, `TaskFailure`). |
 
 **The runner protocol.** `Runner.run(task: PythonTask, on_log, stop: StopSignal) -> RunOutcome`.
-`LocalProcessRunner` is the only implementation; `DockerRunner` (M7b) will implement the same
-protocol. `run` blocks until the process is reaped and its output drained; call it from a thread
+`LocalProcessRunner` runs the harness as a subprocess of the worker; `DockerRunner` (M7b) asks
+the launcher to run it in a container of its own and implements the same protocol. `run` blocks until the process is reaped and its output drained; call it from a thread
 that outlives the process, because the parent-death signal is tied to the thread that started it.
 
 **One attempt.** claim, then the `lakana-python-task` thread: verify the code tarball and unpack
