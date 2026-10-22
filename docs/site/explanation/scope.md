@@ -44,10 +44,10 @@ PostgreSQL, so that a small team gets them in one install instead of assembling 
 | Area | What Lakana covers |
 |---|---|
 | Analytics | SQL assets, incremental tables, lineage, governed queries |
-| Data modelling | Medallion layers and Kimball-lite star schemas, merge and history write modes, translated metadata, measures as metadata (before v1.0.0, #249) |
+| Data modelling | Medallion layers and Kimball-lite star schemas, merge and history write modes, translated metadata, measures as metadata (milestone M8d, before v1.0.0, #249) |
 | Data science | Python assets, reproducible environments, exploration through the SDK (including from your own notebook) |
 | ML | Training and batch scoring as assets, versioned model artifacts, experiment tracking, a feature store |
-| Operations | Runs, schedules, retries, audit, secrets, access policies, table and environment retention (0.17.0, #87), deploys from CI without a stored secret (0.18.0, #15), health checks and stable log codes (0.18.0, #205, #207) |
+| Operations | Runs, schedules, retries, audit, secrets, access policies, table and environment retention (0.17.0, #87), deploys from CI without a stored secret (0.18.0, #15), health checks and stable log codes (0.18.0, #205, #207), queries on DuckDB 2.0 with a hardened sandbox (0.19.0, #96) |
 
 How the larger pieces are meant to work:
 
