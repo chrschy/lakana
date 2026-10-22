@@ -2149,6 +2149,15 @@ def test_a_serialised_read_is_accepted() -> None:
     assert query_child.reads_only(document)
 
 
+def test_the_serialiser_gives_an_empty_text_when_duckdb_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An error from the serialiser becomes the empty text that `reads_only` refuses."""
+    monkeypatch.setattr(query_child, "SERIALISE", "SELECT CAST(? AS INTEGER)")
+    assert query_child._serialised(duckdb.connect(), "SELECT 1") == ""
+    assert not query_child.reads_only("")
+
+
 def test_a_statement_duckdb_cannot_serialise_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     """Fail closed when the serialiser reports an error for SQL the statement check accepted."""
     monkeypatch.setattr(query_child, "SERIALISE", "SELECT error('cannot serialise') || ?")
