@@ -236,7 +236,9 @@ worker stops claiming, finishes the item it is running and returns, and a runnin
 released after `LAKANA_RUN__DRAIN_GRACE_SECONDS`; the bundle's `stop_grace_period: 45s` covers that
 for a SQL task and for a Python task: its process is asked to stop only when that grace has run
 out and then gets `LAKANA_RUN__KILL_GRACE` (10 s) to exit, so with the defaults its release takes
-about 32 s. A venv build in progress is not interrupted at all (#48). A worker killed before the
+about 32 s. A venv build in progress is stopped when that grace has run out, like a running
+process (`KeeperStop` reaches `venvs.acquire` and `DockerEnvironments.acquire` as `stop`, #291).
+A worker killed before the
 release leaves the task to the scheduler's reclaim, like any worker that dies.
 A task whose worker dies outright is reclaimed by the scheduler, which also fails the task's
 orphaned write `QueryRun`. Since M5c3b the same sweep ends the ad-hoc queries and deploys such a

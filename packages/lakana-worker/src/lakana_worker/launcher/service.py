@@ -97,6 +97,8 @@ _WAIT_MARGIN = 60.0
 """Seconds past a run's timeout and grace that the wait for its container may last."""
 _SUBNET_TRIES = 8
 """How many subnets are tried when Docker says one overlaps an address pool of its own."""
+_LOCK_POLL = 0.2
+"""Seconds between looks at a queued build's stop while it waits for its environment's lock."""
 _REST_MARGIN = 60
 """Seconds past its last token's expiry that a build's subnet stays out of use."""
 _CACHE_MAX_AGE = 14 * 86400
@@ -969,8 +971,15 @@ class Launcher:
             volume = environment_volume(self.settings, request.python, request.environment)
             with self._lock:
                 lock = self._build_locks.setdefault(volume, threading.Lock())
-            with lock:
+            # A build of the same environment may run for minutes: a stop or a closed connection
+            # ends the wait for it, so a cancelled task does not wait for another's build.
+            while not lock.acquire(timeout=_LOCK_POLL):
+                if live.stopped.is_set():
+                    return {**_STOPPED_BEFORE_START, "complete": False}
+            try:
                 return self._build_locked(request, emit, name, live, volume)
+            finally:
+                lock.release()
         finally:
             self.forget(name, request.owner, live)
 

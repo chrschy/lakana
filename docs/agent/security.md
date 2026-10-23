@@ -989,6 +989,16 @@ access-controlled on the server; `read_only=True` seals it (0400/0500) for a tas
   grace and `runners.DEADLINE_MARGIN_SECONDS` (900 s: the launcher's image pull and wait
   margin); past it the client closes the connection (`LauncherTimedOut`), which makes the
   launcher kill and remove the container, and the task fails as timed out naming the launcher.
+- **A build stops with its task (#291).** The supervisor's `KeeperStop` reaches the build as
+  `stop`: `DockerEnvironments.acquire` asks the launcher to stop the build by id and owner, with
+  the same retries as a run, and once the launcher confirmed it waits at most `stop_wait` (30 s,
+  for an image pull the launcher cannot interrupt) before the task ends without the result; the
+  launcher kills the build container (grace 0), removes the private cache and the environment
+  volume and marks nothing complete. A build queued behind another build of its environment
+  stops waiting (`_LOCK_POLL`). The local runner's `venvs.acquire` polls `stop` with the size
+  watch, kills uv's process group, removes the build directory and publishes nothing; a wait for
+  another task's build lock ends too. `VenvBuildStopped` is classified by the keeper
+  (`_refuse_if_stopped`): cancelled, released or lease lost, never a build failure.
 - **An environment belongs to one project.** Its key (`docker_environments.environment_key`) is
   the SHA-256 of the project's id, the lock digest, `pyproject.toml`'s digest, the Python version
   and the credential-free index set; the launcher adds the image to the volume's name. The
@@ -4849,8 +4859,8 @@ matter for an operator deciding where to run it:
   task whose worker dies is reclaimed with its write run failed. The ad-hoc queries and deploys of
   a worker that dies (`SIGKILL`, power loss) are ended by the scheduler's sweep after about a
   lease, `FAILED` with the cause `worker_lost`; a write that had already committed ends
-  `SUCCEEDED`. Nothing stays `RUNNING` for ever. A venv build in progress is not interrupted
-  (#48).
+  `SUCCEEDED`. Nothing stays `RUNNING` for ever. A venv build in progress is stopped once the
+  drain grace has run out (#291).
 - **SeaweedFS's internal HTTP APIs are unreachable from the worker (#14), by network isolation.**
   The worker runs user SQL with DuckDB's `httpfs` (since allow-list mode, a query process opens
   only the URL prefixes of the tables it reads, but follows a redirect and lets a literal `..`

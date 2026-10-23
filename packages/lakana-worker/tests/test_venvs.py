@@ -28,6 +28,7 @@ from lakana_worker.venvs import (
     MARKER,
     VenvBuildError,
     VenvBuildRefused,
+    VenvBuildStopped,
     VenvCacheUnsafe,
     VenvSettings,
     acquire,
@@ -150,6 +151,7 @@ class Fake:
         self,
         sha: str = _SHA_A,
         indexes: venvs_module.IndexResolver | None = None,
+        stop: venvs_module.BuildStop | None = None,
         **overrides: object,
     ) -> venvs_module.VenvLease:
         """Acquire a venv with this fake's settings.
@@ -160,6 +162,8 @@ class Fake:
             The lock digest.
         indexes
             The index resolver, as the worker passes it.
+        stop
+            Says when the build is to stop, as the worker passes it.
         **overrides
             Fields of `VenvSettings` to replace.
 
@@ -169,7 +173,7 @@ class Fake:
             The lease.
         """
         settings = dataclasses.replace(self.settings, **overrides)  # type: ignore[arg-type]
-        return acquire(settings, sha, self.project, self.log.append, indexes)
+        return acquire(settings, sha, self.project, self.log.append, indexes, stop=stop)
 
     def output(self) -> bytes:
         """Return everything logged so far.
@@ -475,6 +479,71 @@ def test_the_build_is_killed_at_its_time_limit(fake: Fake) -> None:
         fake.acquire(build_timeout=0.3)
     assert str(caught.value) == "environment build failed: timed out after 0s"
     assert time.monotonic() - started < 10
+
+
+def _leftovers(fake: Fake) -> list[str]:
+    """List what a build left in the venv cache besides its lock files.
+
+    Parameters
+    ----------
+    fake
+        The fake.
+
+    Returns
+    -------
+    list of str
+        Venv directories and build directories, by name.
+    """
+    return sorted(p.name for p in fake.settings.cache.iterdir() if not p.name.endswith(".lock"))
+
+
+def test_a_stop_during_the_build_kills_it_and_caches_nothing(fake: Fake) -> None:
+    """#291: a cancel, a lost lease or a drain ends the build within a second or so."""
+    fake.behave(sleep=30)
+    stop = threading.Event()
+    threading.Timer(0.3, stop.set).start()
+    started = time.monotonic()
+
+    with pytest.raises(VenvBuildStopped, match="stopped"):
+        fake.acquire(stop=stop.is_set)
+
+    assert time.monotonic() - started < 5
+    assert not _alive(fake.calls()[0]["pid"])
+    assert _leftovers(fake) == []
+    fake.behave()
+    fake.acquire().release()
+    assert len(fake.calls()) == 2, "the next acquire builds again: nothing was cached"
+
+
+def test_a_stop_before_the_build_runs_no_uv(fake: Fake) -> None:
+    """#291: a task stopped before its build starts never starts one."""
+    with pytest.raises(VenvBuildStopped):
+        fake.acquire(stop=lambda: True)
+
+    assert fake.calls() == []
+
+
+def test_a_stop_while_another_task_builds_the_same_venv_ends_the_wait(fake: Fake) -> None:
+    """#291: a stopped task does not wait for another task's build of its venv."""
+    fake.behave(sleep=3)
+    first: list[object] = []
+    builder = threading.Thread(target=lambda: first.append(fake.acquire()))
+    builder.start()
+    deadline = time.monotonic() + 5
+    while not fake.calls():
+        assert time.monotonic() < deadline, "the first build never started"
+        time.sleep(0.01)
+    stop = threading.Event()
+    threading.Timer(0.3, stop.set).start()
+    started = time.monotonic()
+
+    with pytest.raises(VenvBuildStopped):
+        fake.acquire(stop=stop.is_set)
+
+    assert time.monotonic() - started < 2
+    builder.join(10)
+    assert isinstance(first[0], venvs_module.VenvLease)
+    first[0].release()
 
 
 def test_a_build_that_closes_its_output_and_hangs_is_still_killed(fake: Fake) -> None:

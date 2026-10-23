@@ -143,6 +143,21 @@ build requests (`build takes exactly the fields ...`), and the task fails until 
 upgraded. The shared build caches get new names, so the first build of each environment after
 the upgrade downloads its packages again.
 
+### A cancel stops an environment build
+
+A cancel, a drain past its grace or a lost lease now stops a task's environment build at once,
+with either runner, instead of waiting for it to end (up to `LAKANA_RUN__VENV_BUILD_TIMEOUT`,
+600 s). Nothing of the stopped build is kept: the next run of the project builds its environment
+again.
+
+### Only the worker that started a task can stop it
+
+The launcher stops a task or a build only for the worker that started it, also when a worker's
+connection closes. Nothing changes for a bundle whose workers and launcher run the same release.
+A worker of 0.20.0 next to a launcher of this release cannot stop its tasks (the launcher
+refuses its stop request), so its cancelled tasks run until their timeout: upgrade the workers
+and the launcher together.
+
 ### One build holds at most 32 connections of the egress proxy
 
 `egress` lets one build hold at most 32 connections at once

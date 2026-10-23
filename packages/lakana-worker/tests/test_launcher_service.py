@@ -480,6 +480,53 @@ def test_two_builds_of_one_environment_run_once(tmp_path: Path) -> None:
     assert launcher.status(StatusRequest("3.13", KEY)) == {"complete": True}
 
 
+def test_a_build_stopped_while_it_waits_for_another_build_ends_at_once(tmp_path: Path) -> None:
+    """#291: a stop reaches a build queued behind a build of the same environment."""
+    engine = FakeEngine(hold=True)
+    launcher = _started(engine, tmp_path, built=False)
+    first = threading.Thread(target=lambda: launcher.build(_build("b1"), lambda line: None))
+    first.start()
+    _until(lambda: _task_started(engine))
+    results: list[dict[str, object]] = []
+    second = threading.Thread(
+        target=lambda: results.append(launcher.build(_build("b2"), lambda line: None))
+    )
+    second.start()
+    _until(lambda: _named(launcher, "build", "b2") in launcher._live)
+
+    assert launcher.stop(StopRequest("b2", "w1")) == {"stopped": True}
+    second.join(5)
+
+    assert not second.is_alive(), "the queued build waited for the other build to end"
+    assert results[0]["stopped"] is True and results[0]["complete"] is False
+    assert first.is_alive()
+    launcher.stop(StopRequest("b1", "w1"))
+    first.join(10)
+
+
+def test_a_stopped_build_leaves_no_environment_and_no_cache(tmp_path: Path) -> None:
+    """#291: what a stopped build wrote is removed; the next build starts clean."""
+    engine = FakeEngine(hold=True)
+    launcher = _started(engine, tmp_path, built=False)
+    volume = environment_volume(launcher.settings, "3.13", KEY)
+    cache = cache_volume(launcher.settings, _build(), key=launcher._cache_key)
+    results: list[dict[str, object]] = []
+    worker = threading.Thread(
+        target=lambda: results.append(launcher.build(_build(), lambda line: None))
+    )
+    worker.start()
+    _until(lambda: _task_started(engine))
+    assert volume in engine.volumes and cache in engine.volumes
+
+    assert launcher.stop(StopRequest("b1", "w1")) == {"stopped": True}
+    worker.join(10)
+
+    assert results[0]["complete"] is False
+    assert volume not in engine.volumes and cache not in engine.volumes
+    assert launcher.status(StatusRequest("3.13", KEY)) == {"complete": False}
+    assert not launcher._marker(volume).exists()
+
+
 def test_a_failed_build_leaves_no_marker_and_no_volume(tmp_path: Path) -> None:
     """Review focus: the next build of the same environment starts clean."""
     engine = FakeEngine(exit_code=1)

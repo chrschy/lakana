@@ -47,6 +47,7 @@ import time
 from collections.abc import Callable, Generator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Protocol
 
 from lakana_worker.git import proxy_secrets
 from lakana_worker.index_credentials import (
@@ -73,10 +74,59 @@ _FAILED = "environment build failed"
 _TAIL_BYTES = 64 * 1024
 """How much of uv's output is kept, unredacted and in memory only, to tell why a build failed."""
 
+BuildStop = Callable[[], bool]
+"""Says whether a build is to stop: the task was cancelled, lost its lease or the worker drains.
+Asked between the steps of a build and at least twice a second while uv runs."""
+_LOCK_POLL_SECONDS = 0.1
+"""How often a build waiting for another build of its venv asks whether it is to stop."""
+_STOPPED = (
+    f"{_FAILED}: stopped before it ended (the task was cancelled, lost its lease, or the worker "
+    "is stopping); nothing of it was kept"
+)
+
 IndexResolver = Callable[[], Sequence[IndexAccess]]
 """Returns the registered indexes a build uses, with their credentials decrypted. Called only
 when a build really runs, on the thread that runs it; raises `VenvBuildRefused` with a message
 that is safe to show when a credential cannot be read."""
+
+
+class AcquireVenv(Protocol):
+    """The shape of `acquire`, which a test may replace."""
+
+    def __call__(
+        self,
+        settings: VenvSettings,
+        lock_sha256: str,
+        project: Path,
+        on_log: Callable[[bytes], None],
+        indexes: IndexResolver | None = None,
+        /,
+        *,
+        stop: BuildStop | None = None,
+    ) -> VenvLease:
+        """Return the venv of a lockfile, building it on first use.
+
+        Parameters
+        ----------
+        settings
+            The cache settings.
+        lock_sha256
+            The lock digest.
+        project
+            The unpacked code directory.
+        on_log
+            Receives the build's redacted output.
+        indexes
+            Returns the registered indexes the lock uses, with their credentials.
+        stop
+            Says when the task is to stop.
+
+        Returns
+        -------
+        VenvLease
+            The venv.
+        """
+        ...
 
 
 UV_NOT_STARTED = 127
@@ -160,6 +210,10 @@ class VenvBuildRefused(VenvBuildError):
     A package index refused the credential, a credential's secret is missing, or a package
     has no wheel while a credential is in play.
     """
+
+
+class VenvBuildStopped(VenvBuildError):
+    """The build was stopped because its task is to stop; nothing of it was kept."""
 
 
 class _UvExited(VenvBuildError):
@@ -464,8 +518,9 @@ def _run_uv(
     max_bytes: int,
     watch: Path,
     sink: Tee,
+    stop: BuildStop | None = None,
 ) -> None:
-    """Run uv to completion, streaming its output and enforcing both limits.
+    """Run uv to completion, streaming its output and enforcing both limits and the stop.
 
     uv is started through `UV_LAUNCHER`, so that it does not outlive a worker
     that is killed while it builds.
@@ -486,9 +541,13 @@ def _run_uv(
         The directory uv builds the venv in.
     sink
         Receives stdout and stderr, merged.
+    stop
+        Asked at every step; when it says so, the process group is killed.
 
     Raises
     ------
+    VenvBuildStopped
+        If `stop` said so before uv ended.
     VenvBuildError
         If uv could not be started, timed out, or grew `watch` past `max_bytes`.
     _UvExited
@@ -520,6 +579,9 @@ def _run_uv(
     code = -1
     try:
         while failure is None:
+            if stop is not None and stop():
+                failure = _STOPPED
+                break
             remaining = end - time.monotonic()
             if remaining <= 0:
                 failure = timed_out
@@ -549,6 +611,8 @@ def _run_uv(
         process.wait()
         pipe.close()
         sink.close()
+    if failure == _STOPPED:
+        raise VenvBuildStopped(failure)
     if failure is None and tree_size(watch) > max_bytes:
         failure = too_large
     if failure is not None:
@@ -565,6 +629,7 @@ def _build(
     project: Path,
     on_log: Callable[[bytes], None],
     indexes: IndexResolver | None = None,
+    stop: BuildStop | None = None,
 ) -> None:
     """Build the venv of `key` and publish it atomically.
 
@@ -583,9 +648,13 @@ def _build(
     indexes
         Returns the registered indexes the lock uses, with their credentials;
         `None` for a lock that uses none.
+    stop
+        Says when to stop; the build directory is removed and nothing is published.
 
     Raises
     ------
+    VenvBuildStopped
+        If `stop` said so before the venv was published.
     VenvBuildRefused
         If a credential cannot be read (raised by `indexes`), a registered
         index answered 401 or 403, or a package has no wheel while a
@@ -644,6 +713,7 @@ def _build(
                     max_bytes=settings.max_bytes,
                     watch=build,
                     sink=sink,
+                    stop=stop,
                 )
             except _UvExited as exc:
                 output = sink.text()
@@ -732,6 +802,35 @@ def _evict(settings: VenvSettings, key: str) -> None:
             os.close(descriptor)
 
 
+def _lock_building(descriptor: int, stop: BuildStop | None) -> None:
+    """Take a venv's build lock, giving up when the task is to stop.
+
+    Parameters
+    ----------
+    descriptor
+        The build lock file.
+    stop
+        Asked while another build holds the lock; `None` waits as long as it takes.
+
+    Raises
+    ------
+    VenvBuildStopped
+        If `stop` said so while the lock was held by another build.
+    """
+    if stop is None:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        return
+    while True:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            if stop():
+                raise VenvBuildStopped(_STOPPED) from None
+            time.sleep(_LOCK_POLL_SECONDS)
+        else:
+            return
+
+
 def _usable(target: Path) -> bool:
     """Tell whether a cached venv is complete and its interpreter still resolves.
 
@@ -754,6 +853,8 @@ def acquire(
     project: Path,
     on_log: Callable[[bytes], None],
     indexes: IndexResolver | None = None,
+    *,
+    stop: BuildStop | None = None,
 ) -> VenvLease:
     """Return the venv of a lockfile, building it if this is its first use.
 
@@ -772,6 +873,9 @@ def acquire(
         Returns the registered indexes the lock uses, with their credentials.
         Called only if a build runs: a cached venv is used without reading a
         secret or contacting an index.
+    stop
+        Says when the task is to stop (#291): a wait for another task's build of
+        the venv ends, and a running build is killed and leaves nothing behind.
 
     Returns
     -------
@@ -780,6 +884,8 @@ def acquire(
 
     Raises
     ------
+    VenvBuildStopped
+        If `stop` said so before the venv was there.
     VenvCacheUnsafe
         If the cache directory, a lock file or the venv directory is unsafe.
     VenvBuildRefused
@@ -812,10 +918,12 @@ def acquire(
                 fcntl.flock(use, fcntl.LOCK_UN)
                 building = _open_lock(settings.cache / f"{key}.build.lock")
                 try:
-                    fcntl.flock(building, fcntl.LOCK_EX)
+                    _lock_building(building, stop)
                     if not _usable(target):
+                        if stop is not None and stop():
+                            raise VenvBuildStopped(_STOPPED)
                         with _counted_build():
-                            _build(settings, key, project, on_log, indexes)
+                            _build(settings, key, project, on_log, indexes, stop)
                         with contextlib.suppress(OSError):
                             _evict(settings, key)
                 finally:

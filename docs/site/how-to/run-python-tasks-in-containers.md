@@ -24,7 +24,9 @@ a build container, to the package indexes the build may use.
   it used more than its container's memory limit" and is retried while it has attempts left.
 - **Leftovers.** When a task ends, is cancelled or times out, or its worker stops or dies (its
   connection to the launcher closes), the container is removed with every process in it,
-  including those the task started in the background.
+  including those the task started in the background. An environment build is stopped the same
+  way: a cancel, a drain past its grace or a lost lease kills the build container, and nothing of
+  the half-built environment is kept, so the next run builds it again.
 
 Inside the container a task runs without capabilities, with a read-only root filesystem, as uid
 10001 in a group of its own, and with `no-new-privileges` where Docker allows it.
@@ -51,9 +53,6 @@ Inside the container a task runs without capabilities, with a read-only root fil
   `LAKANA_RUN__VENV_MAX_BYTES` is refused once it is built; nothing stops a build from filling the
   disk while it runs. The launcher keeps the 10 most recently used environments and removes a
   build cache that nobody used for 14 days.
-- **A build is not stopped by a cancel.** A cancel, a drain or a lost lease waits for a running
-  environment build to end, up to `LAKANA_RUN__VENV_BUILD_TIMEOUT` (600 s)
-  ([#291](https://github.com/lakana-labs/lakana/issues/291)).
 - **The local runner and local mode.** `LAKANA_RUN__RUNNER=local` and local mode
   (`lakana server start --local`) run tasks as the worker's own processes, so one instance stays
   one trust domain: see [Isolation](../explanation/python-assets.md#isolation-one-instance-is-one-trust-domain).

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import threading
+import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -22,7 +24,7 @@ from lakana_worker.docker_environments import (
 from lakana_worker.index_credentials import IndexAccess
 from lakana_worker.launcher.task_build import NO_INTERPRETER, NO_SDK, TOO_LARGE
 from lakana_worker.runners import NO_SDK_MESSAGE
-from lakana_worker.venvs import VenvBuildError, VenvBuildRefused, VenvLease
+from lakana_worker.venvs import VenvBuildError, VenvBuildRefused, VenvBuildStopped, VenvLease
 
 LOCK = "a" * 64
 PROJECT = uuid.UUID("00000000-0000-4000-8000-000000000001")
@@ -89,6 +91,7 @@ def _acquire(
     used: tuple[RegisteredIndex, ...] = (),
     project_id: uuid.UUID = PROJECT,
     lock: str = LOCK,
+    stop: Callable[[], bool] | None = None,
 ) -> VenvLease:
     """Acquire an environment with the test's defaults.
 
@@ -108,6 +111,8 @@ def _acquire(
         The project.
     lock
         The lock digest.
+    stop
+        Says when the build is to stop.
 
     Returns
     -------
@@ -123,6 +128,7 @@ def _acquire(
         attempt="attempt-abc_12",
         used=used,
         project_id=project_id,
+        stop=stop,
     )
 
 
@@ -501,3 +507,154 @@ def test_every_index_is_sent_with_its_port() -> None:
         "odd.example.org:443",
         "pkgs.example.org:443",
     ]
+
+
+_STOPPED_BUILD: dict[str, object] = {
+    "complete": False,
+    "exit": None,
+    "oom_killed": False,
+    "timed_out": False,
+    "stopped": True,
+}
+
+
+def test_a_stop_during_a_build_asks_the_launcher_to_stop_it(tmp_path: Path) -> None:
+    """#291: the worker stops the build container by its id and owner, and ends at once."""
+    launcher = FakeLauncher()
+
+    def build(request: dict[str, Any], on_log: Callable[[bytes], None]) -> dict[str, object]:
+        """Build until the launcher is asked to stop.
+
+        Parameters
+        ----------
+        request
+            The request.
+        on_log
+            The log sink.
+
+        Returns
+        -------
+        dict
+            A stopped build.
+        """
+        assert launcher.released.wait(10)
+        return dict(_STOPPED_BUILD)
+
+    launcher.scripts.update({"status": _status(False), "build": build})
+    stop = threading.Event()
+    threading.Timer(0.3, stop.set).start()
+    started = time.monotonic()
+
+    with pytest.raises(VenvBuildStopped, match="stopped"):
+        _acquire(_environments(launcher, poll_seconds=0.05), _project(tmp_path), stop=stop.is_set)
+
+    assert time.monotonic() - started < 5
+    assert launcher.stopped == [launcher.requests[1]["build"]]
+    assert launcher.owners == ["worker-1"]
+
+
+def test_a_stop_before_the_build_sends_none(tmp_path: Path) -> None:
+    """#291: a task stopped before its build starts never asks for one."""
+    launcher = FakeLauncher(scripts={"status": _status(False)})
+
+    with pytest.raises(VenvBuildStopped):
+        _acquire(_environments(launcher), _project(tmp_path), stop=lambda: True)
+
+    assert [r["op"] for r in launcher.requests] == ["status"]
+
+
+def test_a_built_environment_is_used_even_when_the_task_is_stopping(tmp_path: Path) -> None:
+    """Nothing is built, so nothing is stopped: the task's own stop takes it from there."""
+    launcher = FakeLauncher(scripts={"status": _status(True)})
+
+    lease = _acquire(_environments(launcher), _project(tmp_path), stop=lambda: True)
+
+    assert lease.key is not None and launcher.stopped == []
+
+
+def test_a_stop_the_launcher_has_not_registered_yet_is_asked_again(tmp_path: Path) -> None:
+    """#291: the launcher answers False until it registered the build; the worker asks again."""
+    launcher = FakeLauncher()
+    answers = [False, False, True]
+    released = threading.Event()
+
+    def stop_later(ident: str, owner: str) -> bool:
+        """Answer False twice, then stop.
+
+        Parameters
+        ----------
+        ident
+            The build's id.
+        owner
+            The worker that asks.
+
+        Returns
+        -------
+        bool
+            The next answer.
+        """
+        launcher.stopped.append(ident)
+        answer = answers.pop(0)
+        if answer:
+            released.set()
+        return answer
+
+    launcher.stop = stop_later  # ty: ignore[invalid-assignment]
+    building = threading.Event()
+
+    def build(request: dict[str, Any], on_log: Callable[[bytes], None]) -> dict[str, object]:
+        """Start, then build until stopped.
+
+        Parameters
+        ----------
+        request
+            The request.
+        on_log
+            The log sink.
+
+        Returns
+        -------
+        dict
+            A stopped build.
+        """
+        building.set()
+        released.wait(10)
+        return dict(_STOPPED_BUILD)
+
+    launcher.scripts.update({"status": _status(False), "build": build})
+
+    with pytest.raises(VenvBuildStopped):
+        _acquire(
+            _environments(launcher, poll_seconds=0.02), _project(tmp_path), stop=building.is_set
+        )
+
+    assert len(launcher.stopped) == 3
+
+
+def test_a_launcher_that_does_not_answer_after_a_stop_is_not_waited_for(tmp_path: Path) -> None:
+    """#291: once the stop is confirmed the worker waits a bounded time (an image pull)."""
+    launcher = FakeLauncher()
+    freed = threading.Event()
+    building = threading.Event()
+    launcher.scripts.update(
+        {
+            "status": _status(False),
+            "build": lambda request, on_log: (
+                building.set(),
+                freed.wait(30),
+                dict(_STOPPED_BUILD),
+            )[2],
+        }
+    )
+    started = time.monotonic()
+    try:
+        with pytest.raises(VenvBuildStopped):
+            _acquire(
+                _environments(launcher, poll_seconds=0.02, stop_wait=0.3),
+                _project(tmp_path),
+                stop=building.is_set,
+            )
+    finally:
+        freed.set()
+
+    assert time.monotonic() - started < 5
