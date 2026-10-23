@@ -7041,3 +7041,54 @@ def test_requires_python_is_checked_against_the_python_the_project_names(py: PyW
         "lakana.yaml names" in message
     )
     assert environments.calls == []
+
+
+def _protect(py: PyWorld, environment: str) -> None:
+    """Mark an environment protected, as `lakana env protect` does.
+
+    Parameters
+    ----------
+    py
+        The world.
+    environment
+        Its name.
+    """
+    with py.world.session() as session:
+        row = session.execute(
+            select(Environment).where(Environment.name == environment)
+        ).scalar_one()
+        row.is_protected = True
+        session.commit()
+
+
+def test_a_protected_environment_refuses_python_tasks_on_the_local_runner(py: PyWorld) -> None:
+    """The spec: a protected environment refuses Python tasks on a local-runner worker."""
+    py.deploy()
+    engine = py.engine(_forged)
+    claimed = py.claim_python(engine)
+    _protect(py, "dev")
+
+    run_claimed(engine, claimed)
+
+    message = _attempts(py.world, claimed.task_run_id)[0].error_message
+    assert message == (
+        "environment 'dev' is protected, and this worker runs Python tasks without isolation "
+        "(LAKANA_RUN__RUNNER=local). Run the task on a worker with LAKANA_RUN__RUNNER=docker; "
+        'the how-to "Run Python tasks in containers" says how.'
+    )
+    task = _task(py.world, claimed.asset)
+    assert task.status is TaskStatus.FAILED
+    assert task.failure_code == "no_runtime"
+    assert py.runner.tasks == []
+
+
+def test_a_protected_environment_runs_python_tasks_in_containers(py: PyWorld) -> None:
+    """With DockerRunner the same task reaches its runner."""
+    py.deploy()
+    engine = py.engine(_writer(py.world), environments=FakeEnvironments())
+    claimed = py.claim_python(engine)
+    _protect(py, "dev")
+
+    run_claimed(engine, claimed)
+
+    assert len(py.runner.tasks) == 1

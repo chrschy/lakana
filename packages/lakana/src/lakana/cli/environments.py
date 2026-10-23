@@ -298,7 +298,8 @@ def protect(ctx: typer.Context, name: str) -> None:
     code (SQL, SDK, CLI and Iceberg REST clients alike) whatever the caller's
     grants; choose the identity a deployed job runs as with `lakana deployments set-run-as`. A
     holder of MANAGE_ENVIRONMENT can make one audited write with `--break-glass
-    --reason`. It also refuses deletion and storage changes.
+    --reason`. It also refuses deletion and storage changes, and runs Python
+    assets only on workers that run tasks in containers (LAKANA_RUN__RUNNER=docker).
 
     Parameters
     ----------

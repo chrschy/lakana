@@ -210,6 +210,13 @@ _LOCAL_PYTHON = (
 )
 """The failure of a project that names a Python the local runner does not have."""
 
+_PROTECTED = (
+    "environment '{environment}' is protected, and this worker runs Python tasks without "
+    "isolation (LAKANA_RUN__RUNNER=local). Run the task on a worker with "
+    'LAKANA_RUN__RUNNER=docker; the how-to "Run Python tasks in containers" says how.'
+)
+"""The failure of a Python task of a protected environment on a local-runner worker."""
+
 _BUILD_LOG_FAILED = (
     "environment build failed: the task's log could not be written while its environment was "
     "built; the worker's log has the cause"
@@ -1212,7 +1219,8 @@ class PythonRuntime:
         Raises
         ------
         TaskFailure
-            For every expected failure, with its kind.
+            For every expected failure, with its kind; permanent for a protected environment
+            on a worker without containers.
         LakanaError
             From namespace creation (classified by the caller).
         """
@@ -1224,6 +1232,12 @@ class PythonRuntime:
                 FailureKind.PERMANENT,
                 "the run or its project version no longer exists",
                 FailureCode.NOT_FOUND,
+            )
+        if env.is_protected and self.environments is None:
+            raise TaskFailure(
+                FailureKind.PERMANENT,
+                _PROTECTED.format(environment=env.name),
+                FailureCode.NO_RUNTIME,
             )
         check_integrity(session, engine, run, env, version)
         check_manifest_version(version.manifest_json)

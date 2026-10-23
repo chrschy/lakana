@@ -580,6 +580,13 @@ project version may write. See `lakana run`.", even when the caller's grants all
 without them gets the ordinary 403 or 404 first). Reads, grants, policies,
 secrets, repositories, deployments and table maintenance are unaffected.
 
+A protected environment runs Python assets only on workers that run tasks in containers
+(`LAKANA_RUN__RUNNER=docker`, the Compose bundle's default). A worker with the local runner fails
+such a task at once with "environment 'prod' is protected, and this worker runs Python tasks
+without isolation (LAKANA_RUN__RUNNER=local). …" (failure code `no_runtime`); give every worker that
+takes pipeline work the docker runner before you protect an environment with Python assets. SQL
+assets are not affected.
+
 For an incident, a holder of `MANAGE_ENVIRONMENT` can make exactly one write anyway:
 
 <!-- not tested: writes to a table of a protected `prod` environment, which the one-instance examples do not set up -->
