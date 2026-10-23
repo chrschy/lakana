@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.20.0](https://github.com/lakana-labs/lakana/compare/v0.19.0...v0.20.0) (2026-10-23)
+
+
+### ⚠ BREAKING CHANGES
+
+* **worker:** a protected environment no longer runs Python tasks on a worker with the local runner (`LAKANA_RUN__RUNNER=local`) or in local mode (`lakana server start --local`): such a task fails before any of its code runs, with `no_runtime` and a message naming the how-to "Run Python tasks in containers". Run those environments' workers with `LAKANA_RUN__RUNNER=docker` (the Compose bundle's default since the previous change), or remove the protection with `lakana env unprotect` where isolation is not needed. SQL assets are not affected.
+* **cli:** the Compose bundle runs each Python task in a container of its own and gains the services `launcher` (the only holder of the Docker socket) and `egress` (the environment builds' only way out). An existing bundle needs the new `compose.yaml` and four `.env` lines (`LAKANA_TASK_IMAGE=ghcr.io/lakana-labs/lakana-task:<version>`, `LAKANA_RUNNER=docker`, `LAKANA_DOCKER_SOCKET=/var/run/docker.sock`, `LAKANA_EGRESS_UPSTREAM_PROXY=`) and Docker Engine 28 or later. Task containers sit outside the worker's memory limit (budget `LAKANA_RUN__TASK_MEMORY`, 2 GB, per worker). With the docker runner, builds reach package indexes only through `egress`: `LAKANA_RUN__HTTPS_PROXY` and `LAKANA_RUN__CA_BUNDLE` are refused (put a proxy in `LAKANA_EGRESS_UPSTREAM_PROXY`), and so is an `http://` `LAKANA_RUN__INDEX_URL`; a registered package index on a port other than 443 without a credential, which builds of the local runner reached, is refused (403 from `egress`) until #301 — give it a credential or serve it on port 443. `LAKANA_RUNNER=local` runs tasks as the worker's own processes as before, but the launcher still starts and needs the same `.env` lines and Engine 28; to run without it, remove `launcher`, `egress` and the workers' `launcher` dependency from `compose.yaml` by hand.
+
+### Features
+
+* **cli:** run Python tasks in containers by default in the Compose bundle ([738c329](https://github.com/lakana-labs/lakana/commit/738c3292a0896272e96c232a507a02ce658a4eb9))
+* **worker:** run each Python task in its own container with DockerRunner ([#295](https://github.com/lakana-labs/lakana/issues/295)) ([56fa47a](https://github.com/lakana-labs/lakana/commit/56fa47ac57fea968bca002340cbbe9688513c6e7))
+* **worker:** run Python tasks of a protected environment only in containers ([c214d2f](https://github.com/lakana-labs/lakana/commit/c214d2f1c88543f8e0e6826be92da1a955f234ec))
+
+
+### Documentation
+
+* name the 0.20.0 upgrade notes and their row ([#307](https://github.com/lakana-labs/lakana/issues/307)) ([49b0c7d](https://github.com/lakana-labs/lakana/commit/49b0c7da1e076b78bd299c4865480b45b0ea9c7e))
+* record what 0.19.0 shipped in the scope and roadmap pages ([#289](https://github.com/lakana-labs/lakana/issues/289)) ([84d652a](https://github.com/lakana-labs/lakana/commit/84d652a66622c2b74ba2a89d0a4d55db4534b44c))
+
 ## [0.19.0](https://github.com/lakana-labs/lakana/compare/v0.18.0...v0.19.0) (2026-10-22)
 
 
