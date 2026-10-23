@@ -245,6 +245,31 @@ def test_a_run_reports_an_out_of_memory_kill_and_the_exit_code(tmp_path: Path) -
     assert (result["exit"], result["oom_killed"]) == (137, True)
 
 
+@pytest.mark.parametrize(("code", "oom"), [(137, True), (143, False), (1, False)])
+def test_a_sigkill_nobody_asked_for_is_an_out_of_memory_kill(
+    tmp_path: Path, code: int, oom: bool
+) -> None:
+    """Docker's `OOMKilled` can miss a kill by the memory limit; the SIGKILL exit cannot.
+
+    Nothing but the kernel sends SIGKILL to a task the launcher neither stopped nor timed out,
+    and the containerd event that sets the flag is lost when the container goes first.
+
+    Parameters
+    ----------
+    tmp_path
+        The launcher's directory.
+    code
+        The container's exit status, 128 + the signal for a signal.
+    oom
+        Whether it reads as an out-of-memory kill.
+    """
+    engine = FakeEngine(exit_code=code, oom=False)
+
+    result = _started(engine, tmp_path).run(_run(), lambda line: None)
+
+    assert (result["exit"], result["oom_killed"]) == (code, oom)
+
+
 def test_the_timeout_stops_the_container_with_its_grace(tmp_path: Path) -> None:
     """At the timeout the launcher asks Docker to stop the container, SIGKILL after the grace."""
     engine = FakeEngine(hold=True)
@@ -252,6 +277,7 @@ def test_the_timeout_stops_the_container_with_its_grace(tmp_path: Path) -> None:
     result = _started(engine, tmp_path).run(_run(timeout=1), lambda line: None)
 
     assert result["timed_out"] is True and result["exit"] == 137
+    assert result["oom_killed"] is False, "the launcher's own SIGKILL is not a memory kill"
     stops = [(p, q) for m, p, q in engine.calls if p.endswith("/stop")]
     assert stops and stops[0][1] == {"t": "3"}
 
@@ -270,7 +296,7 @@ def test_stop_stops_a_running_task(tmp_path: Path) -> None:
     assert launcher.stop(StopRequest("t1")) == {"stopped": True}
     worker.join(10)
 
-    assert results[0]["stopped"] is True
+    assert results[0]["stopped"] is True and results[0]["oom_killed"] is False
     assert launcher.stop(StopRequest("t1")) == {"stopped": False}
 
 
