@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import io
 import urllib.error
 from collections.abc import Callable
@@ -289,3 +290,42 @@ def test_the_release_job_waits_before_its_first_install() -> None:
     assert len(waits) == 1 and len(installs) == 1 and waits[0] < installs[0]
     assert "secrets." not in yaml.dump(steps[waits[0]])
     assert "steps.version.outputs.version" in steps[waits[0]]["run"]
+
+
+def test_a_truncated_body_counts_as_not_there_yet(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A read cut short (IncompleteRead is no OSError) is waited out, not raised."""
+
+    class Cut:
+        """A response whose body is cut short."""
+
+        def __enter__(self) -> Cut:
+            """Enter the block.
+
+            Returns
+            -------
+            Cut
+                Itself.
+            """
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            """Leave the block.
+
+            Parameters
+            ----------
+            *exc
+                Ignored.
+            """
+
+        def read(self) -> bytes:
+            """Fail the read.
+
+            Raises
+            ------
+            http.client.IncompleteRead
+                Always.
+            """
+            raise http.client.IncompleteRead(b"par")
+
+    monkeypatch.setattr(wait.urllib.request, "urlopen", lambda url, timeout: Cut())
+    assert wait.fetch_body("https://pypi.org/x") is None

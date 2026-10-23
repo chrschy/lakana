@@ -14,6 +14,7 @@ after the timeout, 2 for a wrong call.
 
 from __future__ import annotations
 
+import http.client
 import re
 import sys
 import time
@@ -105,7 +106,7 @@ def fetch_body(url: str) -> str | None:
     try:
         with urllib.request.urlopen(url, timeout=REQUEST_SECONDS) as response:  # nosec B310 -- fixed https URL
             return str(response.read().decode("utf-8", "replace"))
-    except OSError:  # HTTPError is one; 404 means not yet
+    except (OSError, http.client.HTTPException):  # HTTPError is an OSError; 404 means not yet
         return None
 
 

@@ -287,6 +287,7 @@ class _Comparison:
         self.head = head
         self.changes: list[Change] = []
         self._seen: set[tuple[str, str, bool]] = set()
+        self._unwrapping: set[tuple[int, str]] = set()
         self._base_path = {key: path for key, _, path, _ in self._operations(base)}
 
     def _add(self, breaking: bool, where: str, what: str) -> None:
@@ -345,23 +346,57 @@ class _Comparison:
             several their merge (properties and required fields of all members); the wrapper's
             own keys win. The boolean schema ``true`` is ``{}``.
         """
+        ref = (id(doc), schema["$ref"]) if isinstance(schema, dict) and "$ref" in schema else None
+        if ref is not None and ref in self._unwrapping:
+            return {}, schema["$ref"].rsplit("/", 1)[-1]  # a cycle adds no further constraint
         resolved, name = self._resolve(doc, schema)
         if not isinstance(resolved, dict):
             return {}, name
         members = resolved.get("allOf")
         if not isinstance(members, list) or not members:
             return resolved, name
+        if ref is not None:
+            self._unwrapping.add(ref)
+            try:
+                return self._unwrap_members(doc, resolved, members, name)
+            finally:
+                self._unwrapping.discard(ref)
+        return self._unwrap_members(doc, resolved, members, name)
+
+    def _unwrap_members(
+        self, doc: Mapping[str, Any], resolved: Schema, members: list[Any], name: str | None
+    ) -> tuple[Schema, str | None]:
+        """Merge the members of an ``allOf`` with the wrapper's own keys.
+
+        Parameters
+        ----------
+        doc
+            The document the schema belongs to.
+        resolved
+            The resolved wrapper schema.
+        members
+            Its ``allOf`` list.
+        name
+            The component name of the wrapper, if any.
+
+        Returns
+        -------
+        tuple
+            The merged schema and its component name.
+        """
         outer = {key: value for key, value in resolved.items() if key != "allOf"}
         if len(members) == 1:
             inner, inner_name = self._unwrap(doc, members[0])
-            return self._merge(doc, inner, outer), inner_name or name
+            return self._merge(doc, inner, outer, override=True), inner_name or name
         merged: Schema = {}
         for member in members:
             inner, _ = self._unwrap(doc, member)
             merged = self._merge(doc, merged, inner)
-        return self._merge(doc, merged, outer), name
+        return self._merge(doc, merged, outer, override=True), name
 
-    def _merge(self, doc: Mapping[str, Any], first: Schema, second: Schema) -> Schema:
+    def _merge(
+        self, doc: Mapping[str, Any], first: Schema, second: Schema, *, override: bool = False
+    ) -> Schema:
         """Combine two schemas that must both hold, taking the stricter value of each setting.
 
         Parameters
@@ -372,6 +407,9 @@ class _Comparison:
             A resolved schema, the earlier member.
         second
             A resolved schema, the later member.
+        override
+            True when `second` is the wrapper's own keys: a setting that is not a constraint
+            (a default, an example) then replaces the member's value instead of staying.
 
         Returns
         -------
@@ -408,6 +446,8 @@ class _Comparison:
                 merged[key] = bool(mine) or bool(value)
             elif key in _CONFLICTING:
                 conflicts.append(f"{key} {_shown(mine)} and {_shown(value)}")
+            elif override:
+                merged[key] = value
         allowed = [_allowed(first), _allowed(second)]
         if allowed[0] is not None and allowed[1] is not None:
             values = [item for item in allowed[0] if item in allowed[1]]

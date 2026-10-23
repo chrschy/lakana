@@ -1326,3 +1326,31 @@ def test_union_members_renamed_and_reordered_at_once_are_paired_by_shape() -> No
     base = _api(response=base_union, schemas={"A": a, "B": b})
     head = _api(response=head_union, schemas={"C": a, "D": b})
     assert compare(base, head) == []
+
+
+def test_a_default_beside_an_all_of_overrides_the_default_of_the_member() -> None:
+    """The wrapper's own default is the schema's default; a change of it is breaking."""
+    schemas = {"E": {**STRING, "default": "a"}}
+    ref = {"$ref": "#/components/schemas/E"}
+    base = _api(body=_obj({"a": {"allOf": [ref], "default": "b"}}), schemas=schemas)
+    head = _api(body=_obj({"a": {"allOf": [ref], "default": "c"}}), schemas=schemas)
+    assert _breaking(base, head) == [
+        "POST /api/v1/things: request body `a`: default changed from b to c"
+    ]
+
+
+def test_a_max_length_beside_an_all_of_still_combines_with_the_members() -> None:
+    """Constraints on the wrapper are stricter-wins, not an override."""
+    schemas = {"E": {**STRING, "maxLength": 5}}
+    ref = {"$ref": "#/components/schemas/E"}
+    base = _api(body=_obj({"a": {"allOf": [ref], "maxLength": 5}}), schemas=schemas)
+    head = _api(body=_obj({"a": {"allOf": [ref], "maxLength": 10}}), schemas=schemas)
+    assert compare(base, head) == []
+
+
+def test_a_component_that_refers_to_itself_through_all_of_does_not_recurse() -> None:
+    """A cycle adds no further constraint."""
+    schemas = {"Node": {"allOf": [{"$ref": "#/components/schemas/Node"}, _obj({"x": STRING})]}}
+    ref = {"$ref": "#/components/schemas/Node"}
+    doc = _api(response=ref, schemas=schemas)
+    assert compare(doc, copy.deepcopy(doc)) == []
