@@ -40,6 +40,10 @@ class ConnectionKind(enum.StrEnum):
     TCP = "tcp"
 
 
+class _Refusal(ValueError):
+    """A rule's own refusal; only these sentences reach a caller, never a library's text."""
+
+
 NAME = re.compile(r"\A[a-z][a-z0-9-]{0,62}\Z")
 """A connection's name, which code uses to refer to it."""
 ROOT_NAME = re.compile(r"\A[a-z0-9][a-z0-9_-]{0,62}\Z")
@@ -111,11 +115,11 @@ def _host(value: str) -> str:
 
     Raises
     ------
-    ValueError
+    _Refusal
         If it is not a lower-case name or IPv4 address without a trailing dot.
     """
     if _HOST.match(value) is None:
-        raise ValueError(
+        raise _Refusal(
             "must be a lower-case host name or IPv4 address without a trailing dot, "
             "such as db.example.com"
         )
@@ -137,11 +141,11 @@ def _no_control(value: str) -> str:
 
     Raises
     ------
-    ValueError
+    _Refusal
         For a control character.
     """
     if _CONTROL.search(value):
-        raise ValueError("must not contain control characters")
+        raise _Refusal("must not contain control characters")
     return value
 
 
@@ -164,26 +168,35 @@ def _https(value: str) -> str:
 
     Raises
     ------
-    ValueError
+    _Refusal
         For another scheme, a blank, control character or backslash, a user name or password,
         a query, a fragment, a host the egress token could not carry, or a port outside 1 to
         65535.
     """
+    if not value.isascii():
+        raise _Refusal(
+            "must be ASCII: percent-encode other characters in the path, and give a host "
+            "in its xn-- (punycode) form"
+        )
     if not value.startswith("https://"):
-        raise ValueError("must be an https:// URL: Lakana sends credentials only over TLS")
+        raise _Refusal("must be an https:// URL: Lakana sends credentials only over TLS")
     if "@" in value.partition("//")[2].partition("/")[0]:
-        raise ValueError(
+        raise _Refusal(
             "must not contain a user name or password; "
             "put the credential in the connection's secret"
         )
     if _URL_FORBIDDEN.search(value):
-        raise ValueError(
+        raise _Refusal(
             "must not contain a query, a fragment, blanks, control characters or backslashes"
         )
-    host, colon, port = urlsplit(value).netloc.partition(":")
+    try:
+        netloc = urlsplit(value).netloc
+    except ValueError:  # its text quotes the URL, which may carry a credential
+        raise _Refusal("is not a URL Lakana can read") from None
+    host, colon, port = netloc.partition(":")
     _host(host)
     if colon and (_PORT.match(port) is None or not 0 < int(port) < 65536):
-        raise ValueError("has a port that is not a number from 1 to 65535")
+        raise _Refusal("has a port that is not a number from 1 to 65535")
     return value
 
 
@@ -204,20 +217,16 @@ def _relative(value: str, *, allow_empty: bool = False) -> str:
 
     Raises
     ------
-    ValueError
+    _Refusal
         For an absolute path, a `..` segment, a NUL or another control character, a backslash,
         more than 1024 characters, or an empty path where one is needed.
     """
     if not value and not allow_empty:
-        raise ValueError(
-            "must name a path below the root, such as exports or . for the root itself"
-        )
+        raise _Refusal("must name a path below the root, such as exports or . for the root itself")
     if len(value) > 1024 or _CONTROL.search(value) or "\\" in value:
-        raise ValueError(
-            "must be at most 1024 characters, without control characters or backslashes"
-        )
+        raise _Refusal("must be at most 1024 characters, without control characters or backslashes")
     if value.startswith("/") or ".." in value.split("/"):
-        raise ValueError("must be relative and may not contain a .. segment")
+        raise _Refusal("must be relative and may not contain a .. segment")
     return value
 
 
@@ -236,14 +245,14 @@ def _certificate(value: str) -> str:
 
     Raises
     ------
-    ValueError
+    _Refusal
         If it is larger than 64 KiB, not one or more PEM certificates, or holds another PEM
         block (a private key pasted with the certificate would be stored as a plain setting).
     """
     if len(value) > MAX_CA_BYTES or len(value.encode("utf-8")) > MAX_CA_BYTES:
-        raise ValueError("must be at most 64 KiB")
+        raise _Refusal("must be at most 64 KiB")
     if value.count("-----BEGIN ") != value.count("-----BEGIN CERTIFICATE-----"):
-        raise ValueError(
+        raise _Refusal(
             "must hold only certificates (-----BEGIN CERTIFICATE-----); remove any key or "
             "other block, and keep private keys out of a connection's settings"
         )
@@ -252,7 +261,7 @@ def _certificate(value: str) -> str:
     except (ValueError, UnicodeEncodeError):
         found = []
     if not found:
-        raise ValueError("must be one or more PEM certificates (-----BEGIN CERTIFICATE-----)")
+        raise _Refusal("must be one or more PEM certificates (-----BEGIN CERTIFICATE-----)")
     return value
 
 
@@ -334,11 +343,11 @@ class _DatabaseAddress(_Part):
 
         Raises
         ------
-        ValueError
+        _Refusal
             For an explicit port 0.
         """
         if "port" in self.model_fields_set and self.port == 0:
-            raise ValueError("port must be a number from 1 to 65535")
+            raise _Refusal("port must be a number from 1 to 65535")
         if self.port == 0:
             object.__setattr__(self, "port", self.DEFAULT_PORT)
         return self
@@ -448,11 +457,11 @@ class _FileAddress(_Part):
 
         Raises
         ------
-        ValueError
+        _Refusal
             If it is not a root name.
         """
         if ROOT_NAME.match(value) is None:
-            raise ValueError(
+            raise _Refusal(
                 "must be the name of an ingestion root: lower-case letters, digits, '-' and '_'"
             )
         return value
@@ -546,11 +555,11 @@ class _HttpSettings(_Part):
 
         Raises
         ------
-        ValueError
+        _Refusal
             For a control character or a colon.
         """
         if value is not None and (":" in value or _CONTROL.search(value)):
-            raise ValueError("must not contain a colon or control characters")
+            raise _Refusal("must not contain a colon or control characters")
         return value
 
     @field_validator("api_key_name")
@@ -570,11 +579,11 @@ class _HttpSettings(_Part):
 
         Raises
         ------
-        ValueError
+        _Refusal
             If it is not an HTTP header name.
         """
         if value is not None and _HEADER_NAME.match(value) is None:
-            raise ValueError(
+            raise _Refusal(
                 "must be a header name of at most 128 letters, digits and '-', such as X-API-Key"
             )
         return value
@@ -641,17 +650,17 @@ class _HttpSettings(_Part):
 
         Raises
         ------
-        ValueError
+        _Refusal
             Naming the missing or the misplaced field.
         """
         for name in _AUTH_REQUIRED.get(self.auth, ()):
             if getattr(self, name) is None:
-                raise ValueError(f"{name} is required with auth {self.auth}")
+                raise _Refusal(f"{name} is required with auth {self.auth}")
         allowed = _AUTH_FIELDS[self.auth]
         for name in _AUTH_ONLY_FIELDS:
             if name not in allowed and getattr(self, name) is not None:
                 owners = ", ".join(a for a, f in _AUTH_FIELDS.items() if name in f)
-                raise ValueError(f"{name} applies to auth {owners} only, not to {self.auth}")
+                raise _Refusal(f"{name} applies to auth {owners} only, not to {self.auth}")
         if self.auth == "api_key" and self.api_key_in is None:
             object.__setattr__(self, "api_key_in", "header")
         return self
@@ -681,11 +690,11 @@ class _S3Address(_Part):
 
         Raises
         ------
-        ValueError
+        _Refusal
             If it is not an S3 bucket name.
         """
         if _BUCKET.match(value) is None:
-            raise ValueError(
+            raise _Refusal(
                 "must be an S3 bucket name: 3 to 63 lower-case letters, digits, '.' and '-'"
             )
         return value
@@ -707,11 +716,11 @@ class _S3Address(_Part):
 
         Raises
         ------
-        ValueError
+        _Refusal
             If it is not a region name.
         """
         if _REGION.match(value) is None:
-            raise ValueError("must be a region name such as eu-central-1")
+            raise _Refusal("must be a region name such as eu-central-1")
         return value
 
     @field_validator("endpoint")
@@ -804,11 +813,11 @@ class _GcsAddress(_Part):
 
         Raises
         ------
-        ValueError
+        _Refusal
             If it is not a GCS bucket name.
         """
         if _GCS_BUCKET.match(value) is None:
-            raise ValueError(
+            raise _Refusal(
                 "must be a GCS bucket name: lower-case letters, digits, '.', '_' and '-'"
             )
         return value
@@ -837,13 +846,11 @@ class _AzureAddress(_Part):
 
         Raises
         ------
-        ValueError
+        _Refusal
             If it is not an account name.
         """
         if _ACCOUNT.match(value) is None:
-            raise ValueError(
-                "must be a storage account name: 3 to 24 lower-case letters and digits"
-            )
+            raise _Refusal("must be a storage account name: 3 to 24 lower-case letters and digits")
         return value
 
     @field_validator("container")
@@ -863,11 +870,11 @@ class _AzureAddress(_Part):
 
         Raises
         ------
-        ValueError
+        _Refusal
             If it is not a container name.
         """
         if _CONTAINER.match(value) is None:
-            raise ValueError(
+            raise _Refusal(
                 "must be a container name: 3 to 63 lower-case letters, digits and single '-'"
             )
         return value
@@ -921,6 +928,10 @@ def _problem(kind: ConnectionKind, part: str, model: type[_Part], error: ModelEr
         return f"{part}.{field} is not a field of kind {kind.value}; its fields are {fields}"
     if first["type"] == "missing":
         return f"{part}.{field} is required for kind {kind.value}"
+    if first["type"] == "value_error" and not isinstance(
+        first.get("ctx", {}).get("error"), _Refusal
+    ):
+        return f"{part}.{field or 'value'} is not valid for kind {kind.value}"
     message = str(first["msg"]).removeprefix("Value error, ")
     if not field:  # a model validator's message starts with the field's name
         return f"{part}.{message}"
@@ -1130,6 +1141,12 @@ def check_secret_values(
     required, optional = secret_keys(kind, settings)
     allowed = required | optional
     if not allowed:
+        if kind is ConnectionKind.HTTP:
+            raise ValidationError(
+                f"An http connection with auth {settings.get('auth', 'none')} takes no secret; "
+                "set settings.auth to bearer, basic, api_key or oauth2 first, or leave out the "
+                "secret."
+            )
         raise ValidationError(f"A connection of kind {kind.value} takes no secret.")
     keys = ", ".join(sorted(allowed))
     for key in sorted(values):

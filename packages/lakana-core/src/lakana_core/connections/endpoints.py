@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
-from lakana_core.connections.kinds import ConnectionKind
+from lakana_core.connections.kinds import ConnectionKind, _kind
 
 PROXY_KINDS = frozenset(
     {
@@ -84,8 +84,13 @@ def endpoints(
     -------
     tuple of Endpoint
         Empty for the kinds read from a mount.
+
+    Raises
+    ------
+    ValidationError
+        For a kind Lakana does not know (through `kinds._kind`).
     """
-    kind = ConnectionKind(kind)
+    kind = _kind(kind)
     found: list[Endpoint] = []
     if kind in RELAY_KINDS:
         found.append(Endpoint(str(address["host"]), int(address["port"]), "service"))

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -265,6 +266,83 @@ def test_a_refusal_never_repeats_the_value() -> None:
     assert "hunter2" not in str(caught.value)
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://user:hunter2\uff20evil.com/",  # fullwidth @: urlsplit's error quotes the netloc
+        "https://hunter2\uff03evil.com/",  # fullwidth #
+        "https://api.example.com/hunter2\u00e9",
+    ],
+)
+@pytest.mark.parametrize(
+    ("kind", "build", "field"),
+    [
+        (K.HTTP, lambda url: ({"base_url": url}, {}), "address.base_url"),
+        (
+            K.HTTP,
+            lambda url: (
+                {"base_url": "https://api.example.com"},
+                {"auth": "oauth2", "client_id": "c", "token_url": url},
+            ),
+            "settings.token_url",
+        ),
+        (
+            K.S3,
+            lambda url: (
+                {"bucket": "raw-data", "region": "eu-central-1", "endpoint": url},
+                {"access_key_id": "a"},
+            ),
+            "address.endpoint",
+        ),
+    ],
+)
+def test_a_url_refusal_never_repeats_the_url(
+    kind: ConnectionKind,
+    build: Callable[[str], tuple[dict[str, Any], dict[str, Any]]],
+    field: str,
+    url: str,
+) -> None:
+    """A non-ASCII URL is refused with a fixed message: the value may carry a password."""
+    address, settings = build(url)
+    with pytest.raises(ValidationError, match=field.replace(".", r"\.")) as caught:
+        validate_connection(kind, address, settings)
+    assert "hunter2" not in str(caught.value)
+    assert "ASCII" in str(caught.value)
+
+
+def test_a_url_urlsplit_cannot_read_is_refused_with_a_fixed_message() -> None:
+    """An unbalanced IPv6 bracket makes urlsplit fail; the refusal is Lakana's sentence."""
+    with pytest.raises(ValidationError, match=r"address\.base_url is not a URL Lakana can read"):
+        validate_connection(K.HTTP, {"base_url": "https://[hunter2/"}, {})
+
+
+def test_a_third_party_error_text_never_reaches_a_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only Lakana's own sentences are shown; another library's message may quote the value."""
+    from lakana_core.connections import kinds
+
+    def leaky(value: str) -> str:
+        """Fail the way a library does, quoting its input.
+
+        Parameters
+        ----------
+        value
+            The input.
+
+        Raises
+        ------
+        ValueError
+            Always, quoting `value`.
+        """
+        raise ValueError(f"cannot parse {value!r}")
+
+    monkeypatch.setattr(kinds, "_host", leaky)
+    with pytest.raises(ValidationError, match=r"address\.host is not valid") as caught:
+        validate_connection(K.TCP, {"host": "hunter2", "port": 1}, {})
+    assert "hunter2" not in str(caught.value)
+
+
 def test_address_and_settings_together_are_bounded() -> None:
     """More than 16 KiB of JSON is refused before any model runs."""
     with pytest.raises(ValidationError, match="16 KiB"):
@@ -382,7 +460,10 @@ def test_secret_values_must_fit_the_kind() -> None:
         check_secret_values(K.AZURE, {}, {})
     with pytest.raises(ValidationError, match="takes no secret"):
         check_secret_values(K.DIRECTORY, {}, {"password": "p"})
-    with pytest.raises(ValidationError, match="takes no secret"):
+    with pytest.raises(
+        ValidationError,
+        match=r"auth none takes no secret; set settings\.auth to bearer, basic, api_key or oauth2",
+    ):
         check_secret_values(K.HTTP, {"auth": "none"}, {"token": "p"})
     check_secret_values(
         K.S3, {"access_key_id": "a"}, {"secret_access_key": "s", "session_token": "t"}

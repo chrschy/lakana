@@ -15,6 +15,7 @@ from lakana_core.connections.endpoints import (
 )
 from lakana_core.connections.kinds import ConnectionKind as K
 from lakana_core.connections.kinds import validate_connection
+from lakana_core.errors import ValidationError
 
 PINNED: list[tuple[K, dict[str, Any], dict[str, Any], tuple[Endpoint, ...]]] = [
     (
@@ -57,7 +58,7 @@ PINNED: list[tuple[K, dict[str, Any], dict[str, Any], tuple[Endpoint, ...]]] = [
     (
         K.S3,
         {
-            "bucket": "b",
+            "bucket": "raw-data",
             "region": "eu-central-1",
             "endpoint": "https://s3.eu-central-1.amazonaws.com",
         },
@@ -65,8 +66,14 @@ PINNED: list[tuple[K, dict[str, Any], dict[str, Any], tuple[Endpoint, ...]]] = [
         (Endpoint("s3.eu-central-1.amazonaws.com", 443, "service"),),
     ),
     (
+        K.S3,
+        {"bucket": "raw-data", "region": "us-east-1", "endpoint": "https://minio.local:9000"},
+        {"access_key_id": "a"},
+        (Endpoint("minio.local", 9000, "service"),),
+    ),
+    (
         K.GCS,
-        {"bucket": "b"},
+        {"bucket": "raw-data"},
         {},
         (
             Endpoint("storage.googleapis.com", 443, "service"),
@@ -75,7 +82,7 @@ PINNED: list[tuple[K, dict[str, Any], dict[str, Any], tuple[Endpoint, ...]]] = [
     ),
     (
         K.AZURE,
-        {"account": "acme01", "container": "c"},
+        {"account": "acme01", "container": "exports"},
         {},
         (Endpoint("acme01.blob.core.windows.net", 443, "service"),),
     ),
@@ -93,8 +100,22 @@ PINNED: list[tuple[K, dict[str, Any], dict[str, Any], tuple[Endpoint, ...]]] = [
 def test_endpoints_per_kind(
     kind: K, address: dict[str, Any], settings: dict[str, Any], expected: tuple[Endpoint, ...]
 ) -> None:
-    """The worker grants exactly these, and the fetch route returns exactly these."""
-    assert endpoints(kind, address, settings) == expected
+    """The worker grants exactly these, and the fetch route returns exactly these.
+
+    Each row is a validated, normalized connection, as the two callers see it.
+    """
+    checked_address, checked_settings = validate_connection(kind, address, settings)
+    assert checked_address == address
+    assert endpoints(kind, checked_address, checked_settings) == expected
+
+
+def test_an_unknown_kind_is_a_validation_error() -> None:
+    """The REST value of a kind works; anything else is refused like `validate_connection`."""
+    assert endpoints("tcp", {"host": "a", "port": 1}, {}) == (  # ty: ignore[invalid-argument-type]
+        Endpoint("a", 1, "service"),
+    )
+    with pytest.raises(ValidationError, match="not a connection kind"):
+        endpoints("oracle", {}, {})  # ty: ignore[invalid-argument-type]
 
 
 def test_every_kind_has_exactly_one_route() -> None:
