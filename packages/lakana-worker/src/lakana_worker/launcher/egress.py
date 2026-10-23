@@ -72,10 +72,9 @@ _PHRASES = {
 }
 _HINTS = {
     "build": (
-        "register the index (lakana index add) or set LAKANA_RUN__INDEX_URL. A registered "
-        "index on another port than 443 is reachable only with a credential (its URL then "
-        "reaches the launcher); without one, give it a credential or serve it on port 443 "
-        "(issue #301)"
+        "a build reaches only the host and port of the package indexes its project uses; "
+        "register the index (lakana index add) or set LAKANA_RUN__INDEX_URL, with the port "
+        "in its URL"
     ),
 }
 """What a refused client of each purpose can do about it."""

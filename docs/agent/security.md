@@ -1026,7 +1026,7 @@ access-controlled on the server; `read_only=True` seals it (0400/0500) for a tas
   into a build mount, and `SSL_CERT_FILE` in the build; #292).
 - **A build gets only what its lock needs**: the credentials of the registered indexes it uses
   (an index without a credential is a host to reach, not an entry of `UV_INDEX`), the operator's
-  index, and the hosts of those indexes for the egress proxy. Credentials are decrypted only when
+  index, and the `host:port` of each of those indexes for the egress proxy. Credentials are decrypted only when
   a build runs, never for an environment the launcher reports complete; the build's output is
   redacted for every form of every credential before it reaches the task log.
 - **A build's only way out is the egress proxy** (`launcher/egress.py`, `lakana-egress`,
@@ -1034,7 +1034,9 @@ access-controlled on the server; `read_only=True` seals it (0400/0500) for a tas
   each build network and puts a token in the build's `HTTPS_PROXY` (`egress_token.mint`):
   HMAC-SHA256 with `egress.key` (32 random bytes, hex, mode 0640, in the `egress-key` volume the
   proxy mounts read-only) over a purpose (`build`), the build network's /29, exact host:port
-  pairs (`requests.build_targets`: 443 of every host, plus a port an index URL names) and an
+  pairs (`requests.build_targets`: exactly the request's `targets`, the `host:port` of every index
+  the build may use, with a credential or without, from `docker_environments.build_targets`;
+  parsing refuses a credential or an operator index whose pair is not among them; #301) and an
   expiry (the build's timeout and a minute, counted after the image pull). The proxy keeps no
   state and knows nothing of builds: it tunnels `CONNECT host:port` only when the token
   verifies, the client's address is in the token's network (a token copied into another
@@ -1168,8 +1170,7 @@ start) authenticates a worker, compared with `hmac.compare_digest`.
   networks the proxy is attached to (a company index often is one; operator ranges are #303);
   with `LAKANA_EGRESS__UPSTREAM_PROXY` the proxy makes no address check of its own, the upstream
   proxy resolves and decides; a tunnel whose writes block can outlive its token's expiry by up to
-  the 300 s idle timeout; one build can hold all `LAKANA_EGRESS__MAX_CONNECTIONS` slots (#302);
-  a registered index on a port other than 443 without a credential is refused (#301).
+  the 300 s idle timeout; one build can hold all `LAKANA_EGRESS__MAX_CONNECTIONS` slots (#302).
 
 ## The artifact store (M5c2b)
 

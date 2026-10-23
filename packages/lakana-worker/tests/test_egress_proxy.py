@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import ipaddress
+import json
 import logging
 import select
 import socket
@@ -12,12 +13,18 @@ import socketserver
 import struct
 import threading
 import time
+import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+from fake_launcher import FakeLauncher
+from launcher_fakes import settings
 
+from lakana_core.projects.package_sources import RegisteredIndex
+from lakana_worker.docker_environments import DockerEnvironments
+from lakana_worker.index_credentials import IndexAccess
 from lakana_worker.launcher import egress
 from lakana_worker.launcher.egress import (
     EgressServer,
@@ -27,6 +34,7 @@ from lakana_worker.launcher.egress import (
     load_settings,
 )
 from lakana_worker.launcher.egress_token import ensure_key, mint, rotate_key
+from lakana_worker.launcher.requests import BuildRequest, build_targets, parse_request
 
 LOOPBACK = ipaddress.ip_network("127.0.0.0/8")
 _HEADER = "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\n"
@@ -1186,7 +1194,7 @@ def test_main_serves_quietly_with_a_key(
 
 
 def test_a_refused_build_is_told_what_to_do(proxy: Running) -> None:
-    """The 403 says how to make an index reachable, including one on another port than 443."""
+    """The 403 says how to make an index reachable; no port is special any more (#301)."""
     answer, connection = _connect(proxy.port, "pkgs.example.org:8443", proxy.token())
     body = connection.recv(4096).decode()
     connection.close()
@@ -1195,6 +1203,55 @@ def test_a_refused_build_is_told_what_to_do(proxy: Running) -> None:
     assert "pkgs.example.org:8443 is not a destination this build may reach" in body
     assert "lakana index add" in body
     assert "LAKANA_RUN__INDEX_URL" in body
-    assert "443" in body.split("reach", 1)[1]
-    assert "credential" in body
-    assert "#301" in body
+    assert "#301" not in body and "credential" not in body
+
+
+def test_an_index_on_another_port_without_a_credential_is_reachable(
+    tmp_path: Path, proxy: Running
+) -> None:
+    """#301 end to end: worker request, launcher parse, token, proxy; other ports stay closed."""
+    launcher = FakeLauncher(
+        scripts={
+            "status": lambda request, on_log: {"complete": False},
+            "build": lambda request, on_log: {"complete": True},
+        }
+    )
+    code = tmp_path / "attempt-abc_12" / "code"
+    code.mkdir(parents=True)
+    (code / "pyproject.toml").write_text('[project]\nname = "demo"\n')
+    index = RegisteredIndex("odd", f"https://localhost:{proxy.index}/simple")
+    environments = DockerEnvironments(
+        client=launcher,  # ty: ignore[invalid-argument-type]
+        owner="worker-1",
+        memory_mb=2048,
+        cpus=1.0,
+        pids=256,
+        build_timeout=600.0,
+        max_bytes=1 << 30,
+    )
+    environments.acquire(
+        "a" * 64,
+        code,
+        lambda chunk: None,
+        lambda: [IndexAccess("odd", index.url, "dev")],
+        python="3.13",
+        attempt="attempt-abc_12",
+        used=(index,),
+        project_id=uuid.UUID(int=1),
+    )
+    sent = json.dumps({**launcher.requests[1], "token": "t" * 64}).encode()
+    build = parse_request(sent, token="t" * 64, settings=settings(tmp_path))
+    assert isinstance(build, BuildRequest) and build.indexes == ()
+    token = proxy.token(build_targets(build))
+    with socket.socket() as spare:
+        spare.bind(("127.0.0.1", 0))
+        undeclared = spare.getsockname()[1]
+
+    answer, connection = _connect(proxy.port, f"localhost:{proxy.index}", token)
+    connection.sendall(b"ping")
+    echoed = connection.recv(4)
+    connection.close()
+
+    assert answer.split()[1] == b"200" and echoed == b"ping"
+    assert _status(proxy.port, f"localhost:{undeclared}", token) == b"403"
+    assert _status(proxy.port, "localhost:443", token) == b"403"

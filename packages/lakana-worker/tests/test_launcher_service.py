@@ -96,7 +96,7 @@ def _build(build: str = "b1", key: str = KEY) -> BuildRequest:
         attempt="attempt-x1",
         indexes=(),
         operator_index=None,
-        hosts=("pypi.org",),
+        targets=(("pypi.org", 443),),
         no_build=False,
         limits=LIMITS,
         max_bytes=1 << 30,

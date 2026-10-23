@@ -133,7 +133,15 @@ Each cell is a summary. The page named in the last column has the detail. The ch
 
 ## Notes for the next release
 
-Nothing yet.
+### Builds reach a package index on any port
+
+Under the docker runner a build now reaches each package index on the port of its URL, with a
+credential or without: a registered index on another port than 443 no longer needs a credential
+(the limit of 0.20.0). Upgrade the launcher and the workers together, as the bundle does: a
+worker of 0.20.0 and a launcher of this release (or the other way round) refuse each other's
+build requests (`build takes exactly the fields ...`), and the task fails until both are
+upgraded. The shared build caches get new names, so the first build of each environment after
+the upgrade downloads its packages again.
 
 ## Notes for 0.20.0
 

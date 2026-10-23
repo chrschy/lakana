@@ -93,11 +93,9 @@ A build reaches only the hosts of the package indexes its project may use: the p
 registered package indexes its lock names. A package's files must come from one of those hosts.
 `egress` refuses anything else, and the build fails with uv's error in the task's log.
 
-- **Port 443.** A build reaches port 443 of each of those hosts, and another port only when the
-  index's URL names it and reaches the launcher: a registered index with a credential, or
-  `LAKANA_RUN__INDEX_URL`. A registered index on another port without a credential is refused
-  until [#301](https://github.com/lakana-labs/lakana/issues/301): give it a credential or serve it
-  on port 443.
+- **Ports.** A build reaches each of those hosts on the port of the index's URL: port 443 unless
+  the URL names another (`https://pkgs.example.org:8443/simple`), with a credential or without.
+  Another port of the same host stays closed.
 - **https only.** `egress` tunnels https, so an `http://` index cannot be reached from a build,
   and an `http://` `LAKANA_RUN__INDEX_URL` stops a worker with the docker runner at start.
 - **Addresses.** `egress` never connects to loopback, link-local (cloud metadata), multicast or
@@ -234,7 +232,7 @@ If a project may have deployed a malicious dependency or package, or a worker ma
 | `The group of the Docker socket (...) is a group that task or build containers run in` (launcher log) | The Docker group's id is 10002 or 10003. | Give the Docker group another id on the host. |
 | `The Docker socket ... is writable by everyone` (launcher log) | The socket's mode lets any local user control Docker. | Restrict it to the docker group on the host: `chmod 660`, owned by root:docker. |
 | `this task was ended because it used more than its container's memory limit` | The task used more than `LAKANA_RUN__TASK_MEMORY`. A task process killed by signal 9 that Lakana neither stopped nor timed out reads the same way, because the memory limit is by far the most likely sender; a task that kills itself, an operator's `docker kill` or `docker rm -f`, or the host's own OOM killer also end a task with that signal and read as this message. | Read less in the task, or raise the setting. |
-| `... is not a destination this build may reach` (in uv's error), `Refused a build connection ... not in its token.` (egress log) | The build tried a host or port that is not one of its indexes. | Register the index (`lakana index add`), or set `LAKANA_RUN__INDEX_URL`; for another port than 443, see [Package indexes and proxies](#package-indexes-and-proxies). |
+| `... is not a destination this build may reach` (in uv's error), `Refused a build connection ... not in its token.` (egress log) | The build tried a host or port that is not one of its indexes. | Register the index (`lakana index add`), or set `LAKANA_RUN__INDEX_URL`, with the port in its URL; see [Package indexes and proxies](#package-indexes-and-proxies). |
 | `python: must be one of "3.11", "3.12", "3.13", "3.14" ...` | The version has no task image, or lacks quotes. | Write one of the four, in quotes. |
 | `this project names Python X in lakana.yaml, and this worker runs Python tasks on its own Python Y without containers ...` | A local-runner worker took the task. | Run it on a worker with `LAKANA_RUN__RUNNER=docker`, or remove `python:`. |
 | `the launcher refused the task: ...` | Worker and launcher settings disagree. | Compare `LAKANA_LAUNCHER__IMAGES` and the `LAKANA_LAUNCHER__MAX_*` ceilings with the `LAKANA_RUN__TASK_*` settings. |

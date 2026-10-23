@@ -113,8 +113,32 @@ def environment_key(
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
-def build_hosts(used: Sequence[RegisteredIndex], operator_index: str | None) -> list[str]:
-    """List the hosts a build may reach through the egress proxy.
+def _endpoint(url: str) -> str:
+    """Name the host and port a URL connects to.
+
+    Parameters
+    ----------
+    url
+        An index URL.
+
+    Returns
+    -------
+    str
+        ``host:port``, the host in lower case, the port the scheme's own (443 for https, 80 for
+        http) when the URL names none; empty for a URL without a host.
+    """
+    parts = urlsplit(url)
+    if not parts.hostname:
+        return ""
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    return f"{parts.hostname.lower()}:{port}"
+
+
+def build_targets(used: Sequence[RegisteredIndex], operator_index: str | None) -> list[str]:
+    """List the host:port pairs a build may reach through the egress proxy.
+
+    Every index is sent with its port, whether it has a credential or not: the launcher's token
+    grants exactly these pairs (#301).
 
     Parameters
     ----------
@@ -126,13 +150,15 @@ def build_hosts(used: Sequence[RegisteredIndex], operator_index: str | None) -> 
     Returns
     -------
     list of str
-        The default index's hosts, then each registered index's, lower case, without repeats.
+        The default index's pairs (port 443 of the public index's hosts), then each registered
+        index's, without repeats.
     """
-    hosts = (
-        [urlsplit(operator_index).hostname or ""] if operator_index else list(PUBLIC_INDEX_HOSTS)
-    )
-    hosts += [urlsplit(index.url).hostname or "" for index in used]
-    return list(dict.fromkeys(host.lower() for host in hosts if host))
+    if operator_index:
+        targets = [_endpoint(operator_index)]
+    else:
+        targets = [f"{host}:443" for host in PUBLIC_INDEX_HOSTS]
+    targets += [_endpoint(index.url) for index in used]
+    return list(dict.fromkeys(target for target in targets if target))
 
 
 @dataclass
@@ -251,7 +277,7 @@ class DockerEnvironments:
                     if a.password is not None
                 ],
                 "operator_index": self.operator_index,
-                "hosts": build_hosts(used, self.operator_index),
+                "targets": build_targets(used, self.operator_index),
                 "no_build": wheels_only(accesses),
                 "memory_mb": self.memory_mb,
                 "cpus": self.cpus,

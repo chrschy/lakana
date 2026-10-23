@@ -15,7 +15,7 @@ from lakana_core.projects.package_sources import RegisteredIndex
 from lakana_worker.docker_environments import (
     PUBLIC_INDEX_HOSTS,
     DockerEnvironments,
-    build_hosts,
+    build_targets,
     environment_key,
     index_set,
 )
@@ -226,11 +226,11 @@ def test_a_build_sends_only_credentialed_indexes_and_the_hosts(tmp_path: Path) -
 
     build = launcher.requests[1]
     assert build["indexes"] == [{"url": TEAM.url, "username": "ci", "password": PASSWORD}]
-    assert build["hosts"] == [
-        "pypi.org",
-        "files.pythonhosted.org",
-        "open.example.org",
-        "pkgs.example.org",
+    assert build["targets"] == [
+        "pypi.org:443",
+        "files.pythonhosted.org:443",
+        "open.example.org:443",
+        "pkgs.example.org:443",
     ]
     assert (build["no_build"], build["attempt"], build["operator_index"]) == (
         True,
@@ -322,7 +322,7 @@ def test_the_operator_index_password_is_redacted_and_sent(tmp_path: Path) -> Non
     _acquire(environments, _project(tmp_path), on_log=logs.append)
 
     assert launcher.requests[1]["operator_index"] == operator
-    assert launcher.requests[1]["hosts"] == ["mirror.example.org"]
+    assert launcher.requests[1]["targets"] == ["mirror.example.org:443"]
     assert b"Op3rat0r-Pass" not in b"".join(logs)
 
 
@@ -482,10 +482,22 @@ def test_the_key_covers_project_lock_pyproject_python_and_index_set() -> None:
 
 def test_the_operator_index_replaces_the_public_hosts() -> None:
     """With `LAKANA_RUN__INDEX_URL` the build reaches that host, not PyPI's."""
-    assert (
-        build_hosts((), None) == list(PUBLIC_INDEX_HOSTS) == ["pypi.org", "files.pythonhosted.org"]
-    )
-    assert build_hosts((TEAM,), "https://op:pw@Mirror.Example.org/simple") == [
-        "mirror.example.org",
-        "pkgs.example.org",
+    assert list(PUBLIC_INDEX_HOSTS) == ["pypi.org", "files.pythonhosted.org"]
+    assert build_targets((), None) == ["pypi.org:443", "files.pythonhosted.org:443"]
+    assert build_targets((TEAM,), "https://op:pw@Mirror.Example.org/simple") == [
+        "mirror.example.org:443",
+        "pkgs.example.org:443",
+    ]
+
+
+def test_every_index_is_sent_with_its_port() -> None:
+    """#301: an index on another port reaches the launcher with it, credential or not."""
+    odd = RegisteredIndex("odd", "https://Odd.Example.org:8443/simple")
+    again = RegisteredIndex("again", "https://odd.example.org/other")
+
+    assert build_targets((odd, again, TEAM), "https://mirror.example.org:9443/simple") == [
+        "mirror.example.org:9443",
+        "odd.example.org:8443",
+        "odd.example.org:443",
+        "pkgs.example.org:443",
     ]
