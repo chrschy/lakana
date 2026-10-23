@@ -36,6 +36,7 @@ from lakana_core.secrets.crypto import SecretBinding, encrypt_secret_values
 from lakana_core.secrets.keys import KeyProvider
 from lakana_core.secrets.uses import (
     SecretUse,
+    adopt_connection_secret,
     lock_entry,
     own_secret_steps,
     record_binding,
@@ -287,7 +288,8 @@ class SecretService:
             The plaintext key-value bag to encrypt and store.
         use
             What the secret is for; `None` leaves it unbound until `bind`. Naming it from an
-            index or repository binds it only for someone who may manage secrets.
+            index or repository binds it only for someone who may manage secrets. A
+            connection's secret becomes the one the connection uses.
 
         Returns
         -------
@@ -320,6 +322,9 @@ class SecretService:
             self._session, self._key_provider, p, env, name=name, values=values, use=use
         )
         try:
+            if use is not None and use.kind is SecretUseKind.CONNECTION:
+                self._session.flush()
+                adopt_connection_secret(self._session, p, secret, env.name)
             self._session.commit()
         except IntegrityError as exc:
             self._session.rollback()
@@ -333,6 +338,9 @@ class SecretService:
 
     def bind(self, p: PrincipalRef, secret_id: uuid.UUID, use: SecretUse) -> Secret:
         """Bind a secret to a use, whatever it was bound to before.
+
+        Bound to a connection, the secret becomes the one the connection uses, and the
+        connection's other secrets are unbound, in the same transaction.
 
         Parameters
         ----------
@@ -376,6 +384,7 @@ class SecretService:
                 f"Give {use.wanted()} a secret of its own: {own_secret_steps(env.name, use)}."
             )
         record_binding(self._session, p, secret, scope, use)
+        adopt_connection_secret(self._session, p, secret, env.name)
         self._session.commit()
         return secret
 

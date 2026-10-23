@@ -643,6 +643,7 @@ def test_keeping_the_bound_secret_needs_only_manage_connection(world: World) -> 
 
     row = world.connection("prod", "crm-db")
     assert row is not None
+    # An administrator's binding makes it the connection's secret at once.
     world.make_secret("prod", "new-pw", {"password": "new"}, SecretUse.connection(row))
     view = service.update(world.data_engineer, "prod", "crm-db", secret="new-pw")
 
@@ -1180,7 +1181,11 @@ def test_new_values_let_go_of_any_other_secret_bound_to_the_connection(world: Wo
     world.postgres(world.data_engineer)
     row = world.connection("prod", "crm-db")
     assert row is not None
-    world.make_secret("prod", "old-pw", {"password": "old"}, SecretUse.connection(row))
+    # A second bound secret cannot be made through the services any more; a row written by
+    # an earlier release or by hand is let go all the same.
+    old = world.make_secret("prod", "old-pw", {"password": "old"})
+    old.use_kind, old.use_target_id = SecretUseKind.CONNECTION, row.id
+    world.session.commit()
 
     world.connections().update(
         world.data_engineer,
@@ -1226,3 +1231,188 @@ def test_settings_that_take_no_secret_need_the_secret_cleared(world: World) -> N
 
     view = service.update(world.admin, "prod", "api", settings={"auth": "none"}, clear=["secret"])
     assert (view.settings, view.secret) == ({"auth": "none"}, None)
+
+
+def test_a_create_that_loses_a_race_for_the_name_is_a_conflict(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The database refuses the second row at the flush; the answer is the 409, not a crash.
+
+    Parameters
+    ----------
+    world
+        The world.
+    monkeypatch
+        Hides the first connection from the early check, as a concurrent create would.
+    """
+    world.postgres(world.data_engineer, secret_values=None)
+    original = ConnectionService._exists
+    calls: list[str] = []
+
+    def hidden_once(self: ConnectionService, env: Environment, name: str) -> bool:
+        """Answer `False` the first time, then look.
+
+        Parameters
+        ----------
+        self
+            The service.
+        env
+            The environment.
+        name
+            The connection's name.
+
+        Returns
+        -------
+        bool
+            `False` first, the truth afterwards.
+        """
+        calls.append(name)
+        return False if len(calls) == 1 else original(self, env, name)
+
+    monkeypatch.setattr(ConnectionService, "_exists", hidden_once)
+
+    with pytest.raises(AlreadyExistsError) as caught:
+        world.postgres(world.data_engineer)
+
+    assert str(caught.value) == (
+        "environment `prod` already has a connection `crm-db`; change it with "
+        "`lakana connection update crm-db --env prod`"
+    )
+    monkeypatch.undo()
+    row = world.connection("prod", "crm-db")
+    assert row is not None and row.secret_id is None
+    assert world.audit_types().count("CONNECTION_CREATED") == 1
+
+
+def test_a_secret_that_loses_a_race_for_its_name_is_a_conflict(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `<name>-connection` created at the same moment is refused at the flush with the 409.
+
+    Parameters
+    ----------
+    world
+        The world.
+    monkeypatch
+        Hides the secret from the early check, once, as a concurrent create would.
+    """
+    world.make_secret("prod", "crm-db-connection", {"password": "theirs"})
+    original = ConnectionService._secret_named
+    calls: list[str] = []
+
+    def hidden_once(self: ConnectionService, env: Environment, secret: str) -> Secret | None:
+        """Answer `None` the first time, then look.
+
+        Parameters
+        ----------
+        self
+            The service.
+        env
+            The environment.
+        secret
+            The name.
+
+        Returns
+        -------
+        Secret or None
+            `None` first, the row afterwards.
+        """
+        calls.append(secret)
+        return None if len(calls) == 1 else original(self, env, secret)
+
+    monkeypatch.setattr(ConnectionService, "_secret_named", hidden_once)
+
+    for attempt in ("create", "update"):
+        calls.clear()
+        with pytest.raises(AlreadyExistsError) as caught:
+            if attempt == "create":
+                world.postgres(world.data_engineer)
+            else:
+                world.connections().update(
+                    world.data_engineer, "prod", "crm-db", secret_values={"password": "mine"}
+                )
+        assert str(caught.value) == (
+            "a secret `crm-db-connection` already exists in `prod`; bind it with "
+            "--secret crm-db-connection or remove it first"
+        )
+        if attempt == "create":
+            assert world.connection("prod", "crm-db") is None
+            world.postgres(world.data_engineer, secret_values=None)
+    row = world.connection("prod", "crm-db")
+    assert row is not None and row.secret_id is None
+    assert world.values("prod", "crm-db-connection") == {"password": "theirs"}
+
+
+def test_an_administrator_binding_makes_the_secret_the_connections_own(world: World) -> None:
+    """`lakana secret bind X --connection crm-db` needs no second step, and lets go of the old."""
+    world.postgres(world.data_engineer)
+    row = world.connection("prod", "crm-db")
+    assert row is not None
+    service = world.secrets()
+
+    created = world.make_secret(
+        "prod",
+        "x-pw",
+        {"password": "x"},
+        service.use_from_names(world.admin, "prod", SecretUseKind.CONNECTION, "crm-db"),
+    )
+    assert world.connections().get(world.analyst, "prod", "crm-db").secret == "x-pw"
+    assert world.secret("prod", "crm-db-connection").use_kind is None
+
+    other = world.make_secret("prod", "y-pw", {"password": "y"})
+    service.bind(world.admin, other.id, SecretUse.connection(row))
+
+    assert world.connections().get(world.analyst, "prod", "crm-db").secret == "y-pw"
+    assert world.secret("prod", "x-pw").use_kind is None
+    assert world.secret("prod", "y-pw").use_target_id == row.id
+    bound = world.session.execute(
+        select(Secret.name).where(
+            Secret.use_kind == SecretUseKind.CONNECTION, Secret.use_target_id == row.id
+        )
+    ).scalars()
+    assert list(bound) == ["y-pw"]
+    assert created.id != other.id
+
+
+def test_clearing_a_secret_the_connection_does_not_have_is_refused(world: World) -> None:
+    """`clear=["secret"]` names something the connection does not have."""
+    world.postgres(world.data_engineer, secret_values=None)
+
+    with pytest.raises(ValidationError) as caught:
+        world.connections().update(world.data_engineer, "prod", "crm-db", clear=["secret"])
+
+    assert str(caught.value) == "connection `crm-db` has no secret to clear"
+
+
+def test_a_grant_in_one_environment_manages_no_connection_of_another(world: World) -> None:
+    """MANAGE_CONNECTION on `dev` creates, changes and deletes nothing in `prod`."""
+    world.postgres(world.admin, secret_values=None)
+    erin = _principal(world.session, "erin")
+    GrantService(world.session, AllowAllAuthorization()).grant(
+        world.admin,
+        principal="erin",
+        role=Role.DATA_ENGINEER,
+        kind=SecurableKind.ENVIRONMENT,
+        environment="dev",
+    )
+    service = world.connections()
+
+    with pytest.raises(PermissionDenied):
+        world.postgres(erin, name="other", secret_values=None)
+    with pytest.raises(PermissionDenied):
+        service.update(erin, "prod", "crm-db", address={"host": "evil.example.net"})
+    with pytest.raises(PermissionDenied):
+        service.delete(erin, "prod", "crm-db")
+
+    row = world.connection("prod", "crm-db")
+    assert row is not None and row.address["host"] == "db.example.com"
+    assert world.connection("prod", "other") is None
+    service.create(
+        erin,
+        "dev",
+        name="crm-db",
+        kind=ConnectionKind.POSTGRESQL,
+        address=dict(_PG),
+        settings={"user": "r"},
+    )
+    assert world.connection("dev", "crm-db") is not None

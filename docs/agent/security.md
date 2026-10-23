@@ -3578,7 +3578,8 @@ that uses it. User reference: `docs/site/reference/package-indexes.md`; how-to:
   secret already bound; naming any other secret, or a change `moves_secret` reports (address,
   weaker TLS, CA certificate, `auth`, `api_key_in`) without new values, also needs
   `MANAGE_SECRET` (`lakana_core.connections.service`). A connection keeps one bound secret: taking
-  a secret unbinds every other one bound to it, and clearing its secret or deleting it unbinds
+  a secret (in `ConnectionService`, or `SecretService.create`/`bind` with a connection use, which
+  also set `Connection.secret_id`) unbinds every other one bound to it, and clearing its secret or deleting it unbinds
   them (unbound, so only `MANAGE_SECRET` binds them again). `lock_entry` refuses a connection of
   another environment than the secret's. The four places that decrypt a secret
   for an index, a repository, storage or a webhook check the use first and refuse another one,

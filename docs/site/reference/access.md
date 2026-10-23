@@ -85,9 +85,11 @@ What the answer takes into account:
   ([Other people's query text and column values](lists.md#other-peoples-query-text-and-column-values-in-the-audit-log)).
 - **`MANAGE_CONNECTION`** creates, changes and deletes the connections of an environment (the
   source systems its assets read); reading them needs only `READ_ENVIRONMENT`. The roles
-  `DATA_ENGINEER` and `ADMIN` carry it. Naming an existing secret for a connection, or changing the
-  address of a connection that has a secret without giving it a new one, also needs
-  `MANAGE_SECRET`, which only `ADMIN` carries. A task's token never has it.
+  `DATA_ENGINEER` and `ADMIN` carry it. It may give a connection a new secret or keep the one
+  bound to it; naming any other secret also needs `MANAGE_SECRET`, which only `ADMIN` carries. So
+  does changing, on a connection that has a secret, its address or how the secret is sent (TLS
+  weakened, CA certificate, `auth`, `api_key_in`), unless the same change gives a new secret.
+  A task's token never has it.
 - **`MINT_TASK_TOKEN`** is the right to mint a task token for oneself. Minting one for another
   principal needs the `ADMIN` role on the instance too.
 - **Task tokens** may not ask, not even about their own principal: a task's token can do less

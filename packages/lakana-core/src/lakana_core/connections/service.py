@@ -27,7 +27,7 @@ import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, NoReturn
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -73,6 +73,7 @@ from lakana_core.secrets.uses import (
     bind_or_require_named_secrets,
     lock_row,
     record_refusal,
+    release_connection_secrets,
     require_secret_management_for_url_change,
 )
 
@@ -483,7 +484,7 @@ class ConnectionService:
             created_by=p.id,
         )
         self._session.add(row)
-        self._session.flush()
+        self._flush(env, name)
         try:
             if secret_values is not None:
                 row.secret_id = self._new_secret(p, env, row, dict(secret_values)).id
@@ -732,6 +733,8 @@ class ConnectionService:
                     f"connection `{shown(name)}` has nothing to clear called `{shown(key)}`; "
                     f"clear `secret` or one of its settings: {', '.join(sorted(row.settings))}"
                 )
+        if _CLEAR_SECRET in clear and row.secret_id is None:
+            raise ValidationError(f"connection `{shown(name)}` has no secret to clear")
         if _CLEAR_SECRET in clear and (secret is not None or secret_values is not None):
             raise ValidationError(
                 "give a new secret or clear the secret, not both in the same change"
@@ -902,15 +905,75 @@ class ConnectionService:
         try:
             self._session.commit()
         except IntegrityError as exc:
-            self._session.rollback()
-            if self._exists(env, name):
-                raise AlreadyExistsError(self._taken(env, name)) from exc
-            if self._secret_named(env, f"{name}-connection") is not None:
-                raise AlreadyExistsError(self._secret_taken(env, name)) from exc
-            raise ConflictError(
-                f"Could not save connection `{shown(name)}`: the write failed for a reason other "
-                "than a name collision. Try again."
-            ) from exc
+            self._collision(env, name, exc)
+
+    def _flush(self, env: Environment, name: str, *, secret_first: bool = False) -> None:
+        """Flush, and turn a unique-constraint failure into a named error, as `_commit` does.
+
+        A concurrent create of the same connection or secret is refused by the database at the
+        first flush, not only at the commit.
+
+        Parameters
+        ----------
+        env
+            The environment.
+        name
+            The connection's name.
+        secret_first
+            Look for a clashing `<name>-connection` secret before the connection (the flush
+            wrote a secret, and the connection exists already on an update).
+
+        Raises
+        ------
+        AlreadyExistsError
+            If the connection or the secret exists.
+        ConflictError
+            If the write failed for another reason.
+        """
+        try:
+            self._session.flush()
+        except IntegrityError as exc:
+            self._collision(env, name, exc, secret_first=secret_first)
+
+    def _collision(
+        self, env: Environment, name: str, exc: IntegrityError, *, secret_first: bool = False
+    ) -> NoReturn:
+        """Roll back after a refused write and say which name was taken.
+
+        Parameters
+        ----------
+        env
+            The environment.
+        name
+            The connection's name.
+        exc
+            The database's refusal; its text, which holds the statement and its parameters,
+            never reaches the caller.
+        secret_first
+            Look for the secret before the connection.
+
+        Raises
+        ------
+        AlreadyExistsError
+            If the connection or the secret `<name>-connection` exists.
+        ConflictError
+            Otherwise.
+        """
+        self._session.rollback()
+        checks = [
+            (lambda: self._exists(env, name), self._taken),
+            (
+                lambda: self._secret_named(env, f"{name}-connection") is not None,
+                self._secret_taken,
+            ),
+        ]
+        for found, message in reversed(checks) if secret_first else checks:
+            if found():
+                raise AlreadyExistsError(message(env, name)) from exc
+        raise ConflictError(
+            f"Could not save connection `{shown(name)}`: the write failed for a reason other "
+            "than a name collision. Try again."
+        ) from exc
 
     def _secret_named(self, env: Environment, secret: str) -> Secret | None:
         """Find a secret of an environment by name, revoked or not.
@@ -1039,7 +1102,7 @@ class ConnectionService:
             values=values,
             use=SecretUse.connection(row),
         )
-        self._session.flush()
+        self._flush(env, row.name, secret_first=True)
         self._let_go(p, env, row, keep=secret.id)
         return secret
 
@@ -1132,29 +1195,4 @@ class ConnectionService:
         keep
             The secret that stays bound, or `None` to let go of all.
         """
-        bound = self._session.execute(
-            select(Secret)
-            .where(
-                Secret.use_kind == SecretUseKind.CONNECTION,
-                Secret.use_target_id == row.id,
-            )
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        ).scalars()
-        audit = AuditService(self._session)
-        for secret in bound:
-            if secret.id == keep:
-                continue
-            audit.record(
-                p.id,
-                AuditEventType.SECRET_BOUND,
-                securable=Securable.environment_scope(env.name),
-                detail={
-                    "name": secret.name,
-                    "use": None,
-                    "target": None,
-                    "url": None,
-                    "previous": SecretUseKind.CONNECTION.value,
-                },
-            )
-            secret.use_kind, secret.use_target_id = None, None
+        release_connection_secrets(self._session, p, row.id, env.name, keep=keep)

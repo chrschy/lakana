@@ -707,6 +707,91 @@ def lock_entry(session: Session, use: SecretUse, environment: Environment) -> Se
     return dataclasses.replace(use, target_url=found.url)
 
 
+def release_connection_secrets(
+    session: Session,
+    p: PrincipalRef,
+    connection_id: uuid.UUID,
+    environment_name: str,
+    *,
+    keep: uuid.UUID | None,
+) -> None:
+    """Unbind every secret bound to a connection but `keep`, each with `SECRET_BOUND`.
+
+    A connection uses one bound secret; whatever makes a secret its own lets go of the others,
+    so that "keep the secret bound to it" can only mean that one. A secret let go is unbound,
+    not revoked, and only `MANAGE_SECRET` binds it again. The caller holds the connection's
+    row lock; the secret rows are locked here, after it. Nothing is committed.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    p
+        The acting principal.
+    connection_id
+        The connection.
+    environment_name
+        Its environment, for the audit events.
+    keep
+        The secret that stays bound, or `None` to let go of all.
+    """
+    bound = session.execute(
+        select(Secret)
+        .where(
+            Secret.use_kind == SecretUseKind.CONNECTION,
+            Secret.use_target_id == connection_id,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).scalars()
+    audit = AuditService(session)
+    for secret in bound:
+        if secret.id == keep:
+            continue
+        audit.record(
+            p.id,
+            AuditEventType.SECRET_BOUND,
+            securable=Securable.environment_scope(environment_name),
+            detail={
+                "name": secret.name,
+                "use": None,
+                "target": None,
+                "url": None,
+                "previous": SecretUseKind.CONNECTION.value,
+            },
+        )
+        secret.use_kind, secret.use_target_id = None, None
+
+
+def adopt_connection_secret(
+    session: Session, p: PrincipalRef, secret: Secret, environment_name: str
+) -> None:
+    """Make a secret just bound to a connection the one the connection uses.
+
+    Sets `Connection.secret_id` and lets go of the connection's other secrets, in the same
+    transaction. The caller holds the connection's row lock (`lock_entry`) and has flushed
+    the secret. Nothing is committed.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    p
+        The acting principal.
+    secret
+        The secret, bound to a connection.
+    environment_name
+        Its environment, for the audit events.
+    """
+    if secret.use_kind is not SecretUseKind.CONNECTION or secret.use_target_id is None:
+        return
+    connection = session.get(Connection, secret.use_target_id)
+    if connection is None:
+        return
+    connection.secret_id = secret.id
+    release_connection_secrets(session, p, connection.id, environment_name, keep=secret.id)
+
+
 def bind_or_require_named_secrets(
     session: Session,
     authz: AuthorizationService,
