@@ -1083,7 +1083,10 @@ def test_delete_is_refused_while_a_deployed_version_declares_it(world: World) ->
 
 
 def test_declared_by_reads_an_unusual_manifest_without_failing(world: World) -> None:
-    """Entries that are not Python assets or whose connections are malformed declare nothing."""
+    """A malformed Python entry declares every name it spells; a delete is refused, not let through.
+
+    Entries that are not Python assets, or name no string, declare nothing.
+    """
     world.postgres(world.admin, secret_values=None)
     version = deploy_manifest(world.session, "prod", "analytics", {"customers": ["crm-db"]})
     version.manifest_json = {
@@ -1094,6 +1097,8 @@ def test_declared_by_reads_an_unusual_manifest_without_failing(world: World) -> 
             {"table": "c", "kind": "python", "connections": [1, None]},
             {"table": 7, "kind": "python", "connections": ["crm-db"]},
             {"table": "d", "kind": "python", "connections": ["crm-db"]},
+            {"table": "e", "kind": "python", "connections": ["crm-db", "crm-db", 3]},
+            {"table": "f", "kind": "python", "connections": {"crm-db": 1}},
         ]
     }
     world.session.commit()
@@ -1101,7 +1106,26 @@ def test_declared_by_reads_an_unusual_manifest_without_failing(world: World) -> 
     env_id = world.session.execute(
         select(Environment.id).where(Environment.name == "prod")
     ).scalar_one()
-    assert world.connections().declared_by(env_id, "crm-db") == [("analytics", "d")]
+    assert world.connections().declared_by(env_id, "crm-db") == [
+        ("analytics", "b"),
+        ("analytics", "d"),
+        ("analytics", "e"),
+    ]
+
+
+def test_a_malformed_entry_that_names_a_connection_refuses_its_delete(world: World) -> None:
+    world.postgres(world.admin, secret_values=None)
+    version = deploy_manifest(world.session, "prod", "analytics", {"customers": []})
+    version.manifest_json = {
+        "assets": [{"table": "customers", "kind": "python", "connections": "crm-db"}]
+    }
+    world.session.commit()
+    with pytest.raises(ConflictError) as info:
+        world.connections().delete(world.admin, "prod", "crm-db")
+    assert str(info.value) == (
+        "connection `crm-db` is used by `analytics: customers` in `prod`; "
+        "deploy a version without it first."
+    )
 
 
 def test_list_is_paged(world: World) -> None:

@@ -576,6 +576,54 @@ def entry_decimals(entry: object) -> str:
     return "exact" if asset_kind(entry) == "python" and value == "exact" else DEFAULT_DECIMALS
 
 
+@dataclass(frozen=True)
+class EntryConnections:
+    """What a stored manifest entry says about connections.
+
+    Parameters
+    ----------
+    names
+        Every distinct string the entry names as a connection, in order; for a malformed value
+        too (a bare string counts as one name), so that a reader that must fail safe can treat
+        them as declared.
+    readable
+        Whether the value is what a deploy writes: absent, or a list of distinct valid names.
+    """
+
+    names: tuple[str, ...]
+    readable: bool
+
+
+def read_entry_connections(entry: object) -> EntryConnections:
+    """Read the connections a Python asset declares from a stored manifest entry, failing safe.
+
+    Parameters
+    ----------
+    entry
+        One element of `manifest_json["assets"]`; untrusted.
+
+    Returns
+    -------
+    EntryConnections
+        Nothing (and readable) for an entry that is not a Python asset or has no
+        `connections`; otherwise the string names and whether the value is well-formed.
+    """
+    raw = (
+        entry.get("connections")
+        if asset_kind(entry) == "python" and isinstance(entry, Mapping)
+        else None
+    )
+    if raw is None:
+        return EntryConnections((), readable=True)
+    if isinstance(raw, str):
+        return EntryConnections((raw,), readable=False)
+    if not isinstance(raw, list):
+        return EntryConnections((), readable=False)
+    names = tuple(dict.fromkeys(name for name in raw if isinstance(name, str)))
+    readable = len(names) == len(raw) and all(NAME.match(name) for name in names)
+    return EntryConnections(names, readable)
+
+
 def entry_connections(entry: object) -> tuple[str, ...]:
     """Read the connections a Python asset declares from a stored manifest entry.
 
@@ -588,16 +636,13 @@ def entry_connections(entry: object) -> tuple[str, ...]:
     -------
     tuple of str
         The names; empty for an entry that is not a Python asset, one deployed before
-        connections, and one whose value is not a list of valid connection names (logged once
-        per such entry, without its content).
+        connections, and one whose value is not a list of distinct valid connection names
+        (logged once per such entry, without its content). A reader that must fail safe uses
+        `read_entry_connections`.
     """
-    if asset_kind(entry) != "python" or not isinstance(entry, Mapping):
-        return ()
-    raw = entry.get("connections")
-    if raw is None:
-        return ()
-    if isinstance(raw, list) and all(isinstance(name, str) and NAME.match(name) for name in raw):
-        return tuple(raw)
+    read = read_entry_connections(entry)
+    if read.readable:
+        return read.names
     logger.warning(
         "A stored deploy manifest has an asset entry whose connections cannot be read; it is "
         "read as declaring none. Deploy the repository again to replace it."

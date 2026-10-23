@@ -66,6 +66,7 @@ from lakana_core.models import (
     SecretUseKind,
 )
 from lakana_core.pagination import Page, newest_first
+from lakana_core.projects.manifest import manifest_assets, read_entry_connections
 from lakana_core.secrets.keys import KeyProvider
 from lakana_core.secrets.service import insert_secret, rotate_values
 from lakana_core.secrets.uses import (
@@ -349,9 +350,10 @@ class ConnectionService:
     def _declarations(self, environment_id: uuid.UUID) -> dict[str, builtins.list[tuple[str, str]]]:
         """Read which assets of the deployed versions declare which connections.
 
-        Reads each repository's current project version in the environment; a stored
-        manifest is untrusted, so an entry that is not a Python asset with a list of names
-        declares nothing.
+        Reads each repository's current project version in the environment. A stored manifest
+        is untrusted: an entry that is not a Python asset declares nothing, and a Python entry
+        whose `connections` is malformed declares every string it names
+        (`read_entry_connections`), so its delete is refused rather than let through.
 
         Parameters
         ----------
@@ -374,16 +376,11 @@ class ConnectionService:
         ).all()
         found: dict[str, set[tuple[str, str]]] = {}
         for repository, manifest in rows:
-            assets = manifest.get("assets") if isinstance(manifest, dict) else None
-            for entry in assets if isinstance(assets, list) else ():
-                if not isinstance(entry, dict) or entry.get("kind") != "python":
-                    continue
-                table, declared = entry.get("table"), entry.get("connections")
-                if not isinstance(table, str) or not isinstance(declared, list):
-                    continue
-                for name in declared:
-                    if isinstance(name, str):
-                        found.setdefault(name, set()).add((repository, table))
+            for table, entry in manifest_assets(manifest).items():
+                # Fail safe: a malformed entry declares every name it spells, so a delete is
+                # refused rather than let through.
+                for name in read_entry_connections(entry).names:
+                    found.setdefault(name, set()).add((repository, table))
         return {name: sorted(pairs) for name, pairs in found.items()}
 
     def create(

@@ -40,7 +40,7 @@ from lakana_core.ci_oidc.scope import (
 from lakana_core.connections.service import missing_connections
 from lakana_core.db import db_now
 from lakana_core.errors import ConflictError, NotFoundError, ValidationError
-from lakana_core.identifiers import TableRef
+from lakana_core.identifiers import TableRef, shown
 from lakana_core.jobs.audit import start_detail
 from lakana_core.jobs.cron import next_fire_after
 from lakana_core.models import (
@@ -71,13 +71,13 @@ from lakana_core.projects.git_input import is_full_sha, validate_ref
 from lakana_core.projects.issues import ProjectIssue, ProjectValidationError
 from lakana_core.projects.lookups import deployment_row, environment_by_name, repository_by_name
 from lakana_core.projects.manifest import (
-    entry_connections,
     entry_output,
     job_notify,
     job_schedule,
     manifest_assets,
     manifest_jobs,
     manifest_tables,
+    read_entry_connections,
 )
 from lakana_core.projects.parse import ParsedAsset
 from lakana_core.runs.kept import kept_tables
@@ -185,28 +185,52 @@ def connection_issues(
     ]
 
 
-def _manifest_connections(manifest: object) -> list[DeclaredConnections]:
+UNREADABLE_CONNECTIONS_MESSAGE = (
+    "Asset `{asset}`: the connections this project version declares cannot be read, so they "
+    "cannot be checked against environment `{environment}`. Deploy the repository again to "
+    "record a new version."
+)
+"""Why a deploy or rollback stops: a manifest entry's `connections` is malformed."""
+
+
+def _manifest_connections(
+    manifest: object, environment_name: str
+) -> tuple[list[DeclaredConnections], list[ProjectIssue]]:
     """Read what each asset of a manifest declares.
 
     Parameters
     ----------
     manifest
         A manifest; untrusted when stored (a rollback's target).
+    environment_name
+        For the message about an entry that cannot be read.
 
     Returns
     -------
-    list of DeclaredConnections
-        One per asset that declares any; the path is ``""`` when the entry has none.
+    tuple
+        One `DeclaredConnections` per asset that declares any (the path is ``""`` when the
+        entry has none), and one issue per entry whose `connections` cannot be read: such an
+        entry is refused, never skipped.
     """
     found: list[DeclaredConnections] = []
-    for table, entry in manifest_assets(manifest).items():
-        names = entry_connections(entry)
-        if names:
-            path = entry.get("path")
-            found.append(
-                DeclaredConnections(table, path if isinstance(path, str) else "", None, names)
+    unreadable: list[ProjectIssue] = []
+    for table, entry in sorted(manifest_assets(manifest).items()):
+        read = read_entry_connections(entry)
+        path = entry.get("path")
+        shown_path = path if isinstance(path, str) else ""
+        if not read.readable:
+            unreadable.append(
+                ProjectIssue(
+                    shown_path,
+                    None,
+                    UNREADABLE_CONNECTIONS_MESSAGE.format(
+                        asset=shown(table), environment=environment_name
+                    ),
+                )
             )
-    return found
+        elif read.names:
+            found.append(DeclaredConnections(table, shown_path, None, read.names))
+    return found, unreadable
 
 
 _KIND_PHRASES = {
@@ -902,14 +926,12 @@ class DeployService:
         Raises
         ------
         ProjectValidationError
-            Naming each missing connection; the transaction is rolled back first.
+            Naming each missing connection, and each asset whose stored connections cannot be
+            read; the transaction is rolled back first.
         """
-        issues = connection_issues(
-            self._session,
-            environment_id,
-            environment_name,
-            _manifest_connections(manifest),
-            lock=True,
+        declared, issues = _manifest_connections(manifest, environment_name)
+        issues += connection_issues(
+            self._session, environment_id, environment_name, declared, lock=True
         )
         if issues:
             self._session.rollback()

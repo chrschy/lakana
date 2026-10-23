@@ -31,6 +31,7 @@ from lakana_core.jobs.cron import next_fire_after
 from lakana_core.models import (
     AuditEvent,
     AuditEventType,
+    Connection,
     DeployKind,
     DeployRun,
     DeployStatus,
@@ -4086,10 +4087,19 @@ def test_a_rollback_to_a_version_whose_connections_exist_moves_the_pointer(
     assert service.execute_rollback(principal, run, worker_id="w1").id == first.id
 
 
+@pytest.mark.parametrize("gone", [False, True], ids=["still-there", "deleted-meanwhile"])
 def test_the_connection_check_is_taken_again_after_a_unique_violation_rolls_it_back(
-    session: Session, env: None, principal: PrincipalRef, monkeypatch: pytest.MonkeyPatch
+    session: Session,
+    env: None,
+    principal: PrincipalRef,
+    monkeypatch: pytest.MonkeyPatch,
+    gone: bool,
 ) -> None:
-    """The rollback after a lost insert releases the share locks; the retry takes them again."""
+    """The rollback after a lost insert releases the share locks; the retry checks again.
+
+    With `gone`, the connection disappears between the lost insert and the retry, and the
+    retry's answer is the one that counts: the record is refused.
+    """
     repo = _repo(session)
     _connection(session, principal, "crm-db")
     winner = _deployed(session, principal, repo, "a" * 40, _customers("crm-db"))
@@ -4112,18 +4122,103 @@ def test_the_connection_check_is_taken_again_after_a_unique_violation_rolls_it_b
         session: Session, environment_id: uuid.UUID, names: list[str], *, lock: bool
     ) -> list[str]:
         checks.append(lock)
+        if gone and len(checks) == 2:
+            session.execute(delete(Connection).where(Connection.name == "crm-db"))
         return real_missing(session, environment_id, names, lock=lock)
 
     monkeypatch.setattr(service, "_existing_job_version", blind_first)
     monkeypatch.setattr(deploys_module, "missing_connections", spy)
-    service.record_deploy(
-        principal,
-        run,
-        manifest=_manifest(_customers("crm-db")),
-        code_uri="u",
-        code_sha256="0" * 64,
-        diff=DeployDiff(),
-        expected_job_version_id=winner.id,
-        worker_id="w1",
-    )
+
+    def record() -> JobVersion:
+        return service.record_deploy(
+            principal,
+            run,
+            manifest=_manifest(_customers("crm-db")),
+            code_uri="u",
+            code_sha256="0" * 64,
+            diff=DeployDiff(),
+            expected_job_version_id=winner.id,
+            worker_id="w1",
+        )
+
+    if not gone:
+        assert record().id == winner.id
+        assert checks == [True, True]
+        return
+    with pytest.raises(ProjectValidationError) as info:
+        record()
     assert checks == [True, True]
+    assert [issue.message for issue in info.value.issues] == [
+        _unknown("bronze.customers", "crm-db")
+    ]
+    refused = session.get(DeployRun, view.id)
+    assert refused is not None
+    assert refused.status is DeployStatus.RUNNING
+
+
+_UNREADABLE = (
+    "Asset `bronze.customers`: the connections this project version declares cannot be read, "
+    "so they cannot be checked against environment `dev`. Deploy the repository again to "
+    "record a new version."
+)
+
+
+def _malformed_manifest() -> dict:
+    """Build a manifest whose `bronze.customers` names its connection as a bare string.
+
+    Returns
+    -------
+    dict
+        The manifest.
+    """
+    manifest = _manifest(_customers("crm-db"))
+    manifest["assets"][0]["connections"] = "crm-db"
+    return manifest
+
+
+def test_record_deploy_refuses_connections_it_cannot_read(
+    session: Session, env: None, principal: PrincipalRef
+) -> None:
+    """A malformed entry never skips the check, even when the named connection exists."""
+    repo = _repo(session)
+    _connection(session, principal, "crm-db")
+    service = DeployService(session, AllowAllAuthorization())
+    view = service.submit(principal, "dev", repository=repo.name, kind=DeployKind.DEPLOY)
+    run = _claimed(session, session.get(DeployRun, view.id))
+    run.resolved_sha = "a" * 40
+    with pytest.raises(ProjectValidationError) as info:
+        service.record_deploy(
+            principal,
+            run,
+            manifest=_malformed_manifest(),
+            code_uri="u",
+            code_sha256="0" * 64,
+            diff=DeployDiff(),
+            expected_job_version_id=None,
+            worker_id="w1",
+        )
+    assert [issue.render() for issue in info.value.issues] == [
+        f"assets/bronze/customers.py: {_UNREADABLE}"
+    ]
+    assert session.query(JobVersion).count() == 0
+
+
+def test_a_rollback_to_a_version_with_unreadable_connections_is_refused(
+    session: Session, env: None, principal: PrincipalRef
+) -> None:
+    repo = _repo(session)
+    _connection(session, principal, "crm-db")
+    first = _deployed(session, principal, repo, "a" * 40, _customers("crm-db"))
+    second = _deployed(session, principal, repo, "b" * 40, _customers())
+    first.manifest_json = _malformed_manifest()
+    session.commit()
+    service = DeployService(session, AllowAllAuthorization())
+    view = service.submit(
+        principal, "dev", repository="analytics", kind=DeployKind.ROLLBACK, to_previous=True
+    )
+    run = _claimed(session, session.get(DeployRun, view.id))
+    with pytest.raises(ProjectValidationError) as info:
+        service.execute_rollback(principal, run, worker_id="w1")
+    assert [issue.message for issue in info.value.issues] == [_UNREADABLE]
+    pointer = session.execute(select(EnvironmentDeployment)).scalar_one()
+    assert pointer.current_job_version_id == second.id

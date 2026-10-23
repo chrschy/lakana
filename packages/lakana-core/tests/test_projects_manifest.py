@@ -18,6 +18,7 @@ from lakana_core.projects.manifest import (
     MANIFEST_VERSION,
     NOTIFY_VERSION,
     VERSION_WITHOUT_CHECKS,
+    EntryConnections,
     JobNotify,
     asset_kind,
     build_manifest,
@@ -35,6 +36,7 @@ from lakana_core.projects.manifest import (
     manifest_python,
     manifest_tables,
     python_entry,
+    read_entry_connections,
 )
 from lakana_core.projects.parse import ParsedAsset
 from lakana_core.projects.project_config import ResolvedProjectConfig, parse_project_config
@@ -752,3 +754,22 @@ def test_a_malformed_connections_entry_is_logged_once(caplog: pytest.LogCaptureF
     (record,) = caplog.records
     assert "connections" in record.getMessage()
     assert "Not OK" not in record.getMessage()
+
+
+@pytest.mark.parametrize(
+    ("entry", "names", "readable"),
+    [
+        ({"kind": "python", "connections": ["crm-db", "files"]}, ("crm-db", "files"), True),
+        ({"kind": "python"}, (), True),
+        ({"kind": "sql", "connections": ["crm-db"]}, (), True),
+        ({"kind": "python", "connections": "crm-db"}, ("crm-db",), False),
+        ({"kind": "python", "connections": ["crm-db", 3, "CRM"]}, ("crm-db", "CRM"), False),
+        ({"kind": "python", "connections": ["crm-db", "crm-db"]}, ("crm-db",), False),
+        ({"kind": "python", "connections": {"crm-db": 1}}, (), False),
+    ],
+)
+def test_read_entry_connections_names_every_string_and_says_whether_it_is_readable(
+    entry: dict, names: tuple[str, ...], readable: bool
+) -> None:
+    assert read_entry_connections(entry) == EntryConnections(names, readable)
+    assert entry_connections(entry) == (names if readable else ())
