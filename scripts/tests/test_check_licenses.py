@@ -433,8 +433,6 @@ def test_a_dependency_only_an_extra_pulls_in_is_judged(
     )
     monkeypatch.setattr("scripts.check_licenses.REPO_ROOT", tmp_path)
     monkeypatch.setattr("sys.argv", ["check_licenses"])
-    # pip-licenses comes from the uv cache the repo's own environment filled
-    monkeypatch.setenv("UV_OFFLINE", "1")
     monkeypatch.delenv("VIRTUAL_ENV", raising=False)
 
     assert main() == 1

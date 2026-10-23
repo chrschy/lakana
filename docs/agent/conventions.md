@@ -199,7 +199,8 @@ a new, justified entry in `scripts/check_licenses.py`'s `ALLOWLIST`; unlisted, i
 build the same as strong copyleft. `scripts/check_licenses.py` runs in `security.yml` on
 every PR, over an environment with every dependency group **and every extra of every
 workspace package** (`uv run --all-groups --all-extras --all-packages pip-licenses`): a
-dependency only `lakana[assets]` pulls in is judged like any other. It matches license metadata case-insensitively against nine copyleft families (short ids match
+dependency only `lakana[assets]` pulls in is judged like any other.
+It matches license metadata case-insensitively against nine copyleft families (short ids match
 as whole tokens, so `Simplified BSD` is not MPL), with
 each family's more specific needle checked before a more general one that would also match
 it (AGPL/LGPL before the bare GPL needle, since their names contain it).
@@ -238,6 +239,7 @@ but harmless. `packages/lakana-server/pyproject.toml` declares `fastapi`, `pyarr
 `uvicorn` under `[tool.hatch.metadata.hooks.custom]` (its `hatch_build.py` hook appends a
 `lakana-core==<version>` pin to that list) and no `[project.optional-dependencies]`
 section — the `lakana-server[psycopg]` extra above is still design intent, not built yet.
+Don't try `uv sync --extra psycopg` expecting it to exist.
 
 ### Native code inside a wheel
 
@@ -253,7 +255,6 @@ package downloads when it runs. Before a dependency with compiled code lands:
    dependency (connectorx, which bundles libkeyutils under LGPL-2.1, is the example).
 4. Record the result in the pull request. An `ALLOWLIST` entry for such a dependency names the
    bundled library and its licence in its comment.
-Don't try `uv sync --extra psycopg` expecting it to exist.
 
 ## Paginated list endpoints
 
