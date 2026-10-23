@@ -18,7 +18,7 @@ EXEMPT = (
     "scripts/tests/test_docs_only.py",
 )
 NOT_TESTED_CEILING = 54
-UNCHECKED_OUTPUT_CEILING = 113
+UNCHECKED_OUTPUT_CEILING = 77
 """Blocks marked as not tested; it only goes down, apart from the rises below.
 
 The artifact pages left six when they were written: the `artifact uploads abort` command,

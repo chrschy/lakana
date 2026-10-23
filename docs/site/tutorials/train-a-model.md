@@ -186,7 +186,7 @@ It prints a few lines, ending with the number of packages, and creates the file 
 and the Python version on the first line are your own, and the number of packages changes with the packages on the public
 index:
 
-<!-- output -->
+<!-- output: train-and-predict#lock -->
 ```text
 Using CPython 3.14.4 interpreter at: /home/you/lakana/.venv/bin/python3
 Resolved 34 packages in 327ms
@@ -228,7 +228,7 @@ lakana deploy --env dev
 You will see `Registered repository forecasts`, then the deploy. It lists all three assets as
 added. The identifier and the commit differ on your machine:
 
-<!-- output -->
+<!-- output: train-and-predict#deploy -->
 ```text
 Registered repository forecasts
 Queued deploy e8da041b-d090-49d8-9d8e-731f4b10d4bf
@@ -280,7 +280,7 @@ lakana sql "SELECT customer_id, predicted_spend FROM gold.spend_predictions ORDE
 
 You will see this:
 
-<!-- output -->
+<!-- output: train-and-predict#query -->
 ```text
 ┏━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━┓
 ┃ customer_id ┃ predicted_spend ┃
@@ -310,7 +310,7 @@ lakana artifact list --env dev
 
 You will see one row for the model. The `size` is that of its live versions:
 
-<!-- output -->
+<!-- output: train-and-predict#artifact-list -->
 ```text
 ┏━━━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━┓
 ┃ name        ┃ namespace ┃ current_version ┃ versions ┃ size  ┃
@@ -332,7 +332,7 @@ The first line names the file it made; your path is your own home folder. The se
 folder's content. A `joblib` file is binary, so you cannot read it as text; load it with
 `joblib.load` only if you trust it:
 
-<!-- output -->
+<!-- output: train-and-predict#artifact-download -->
 ```text
 Downloaded dev/models.spend_model version 1 to /home/you/spend-model/model.joblib
 model.joblib
@@ -461,7 +461,7 @@ lakana grant create --principal etl-dev --role DATA_ENGINEER --kind ENVIRONMENT 
 lakana deployments set-run-as forecasts --env dev --principal etl-dev
 ```
 
-<!-- output -->
+<!-- output: train-and-predict#schedule-bind -->
 ```text
 Created service-account etl-dev
 It can do nothing yet. Next:
@@ -532,7 +532,7 @@ cover five customers (and here the last digits show, as said above):
 lakana sql "SELECT customer_id, predicted_spend FROM gold.spend_predictions ORDER BY customer_id"
 ```
 
-<!-- output -->
+<!-- output: train-and-predict#schedule-query -->
 ```text
 ┏━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━┓
 ┃ customer_id ┃ predicted_spend    ┃
@@ -554,7 +554,7 @@ you have seen enough, as in [Run a job on a schedule](../how-to/run-a-job-on-a-s
 lakana job pause refresh_forecasts --env dev
 ```
 
-<!-- output -->
+<!-- output: train-and-predict#schedule-pause -->
 ```text
 Paused refresh_forecasts in dev; resume it with 'lakana job resume refresh_forecasts --env dev'.
 ```

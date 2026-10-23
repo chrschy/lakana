@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import io
 import urllib.error
 from collections.abc import Callable
@@ -45,37 +46,50 @@ class Clock:
         self.now += seconds
 
 
-def fetcher(visible_after: dict[str, float], clock: Clock) -> Callable[[str], int]:
-    """Build a fake `fetch`: a project's page answers 200 once the clock passed its time.
+def fetcher(
+    visible_after: dict[str, float], clock: Clock, *, simple_after: dict[str, float] | None = None
+) -> Callable[[str], str | None]:
+    """Build a fake `fetch`: a project's pages answer once the clock passed their time.
 
     Parameters
     ----------
     visible_after
-        Package name → the second from which PyPI shows its release; absent never.
+        Package name → the second from which the JSON API shows its release; absent never.
     clock
         The fake clock.
+    simple_after
+        Package name → the second from which the simple index lists the release; defaults to
+        `visible_after`.
 
     Returns
     -------
     Callable
-        The fake, taking a URL and returning the status.
+        The fake, taking a URL and returning the body, or None for a 404.
     """
+    simple = visible_after if simple_after is None else simple_after
 
-    def fetch(url: str) -> int:
+    def fetch(url: str) -> str | None:
         """Answer for one URL.
 
         Parameters
         ----------
         url
-            The JSON API URL.
+            The JSON API URL or the simple index URL.
 
         Returns
         -------
-        int
-            200 once visible, else 404.
+        str | None
+            The body once visible, else None.
         """
+        if "/simple/" in url:
+            name = url.split("/simple/")[1].strip("/")
+            norm = name.replace("-", "_")
+            at = simple.get(name, float("inf"))
+            if clock.now < at:
+                return f'<a href="{norm}-0.0.1.tar.gz">{norm}-0.0.1.tar.gz</a>'
+            return f'<a href="{norm}-1.2.3-py3-none-any.whl">x</a>'
         name = url.split("/pypi/")[1].split("/")[0]
-        return 200 if clock.now >= visible_after.get(name, float("inf")) else 404
+        return "{}" if clock.now >= visible_after.get(name, float("inf")) else None
 
     return fetch
 
@@ -95,15 +109,44 @@ def test_it_returns_at_once_when_every_package_is_visible() -> None:
     assert clock.sleeps == []
 
 
-def test_it_polls_every_fifteen_seconds_until_the_last_package_shows_up(
+def test_the_simple_url_is_the_index_page_of_the_project() -> None:
+    """The page pip reads, with the name as given."""
+    assert wait.simple_url("lakana-core") == "https://pypi.org/simple/lakana-core/"
+
+
+def test_it_polls_every_thirty_seconds_until_the_last_package_shows_up(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A lagging package is waited for, and the wait says which one."""
     clock = Clock()
     fetch = fetcher({**dict.fromkeys(wait.PACKAGES, 0.0), "lakana-worker": 100.0}, clock)
     wait.wait_for_release("1.2.3", fetch=fetch, sleep=clock.sleep, clock=clock.time)
-    assert clock.sleeps == [15.0] * 7
+    assert clock.sleeps == [30.0] * 4
     assert "lakana-worker" in capsys.readouterr().err
+
+
+def test_a_package_the_simple_index_does_not_list_yet_is_waited_for(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The JSON API alone is not enough: pip reads the simple index, which lags behind it."""
+    clock = Clock()
+    fetch = fetcher(
+        dict.fromkeys(wait.PACKAGES, 0.0),
+        clock,
+        simple_after={**dict.fromkeys(wait.PACKAGES, 0.0), "lakana-server": 200.0},
+    )
+    wait.wait_for_release("1.2.3", fetch=fetch, sleep=clock.sleep, clock=clock.time)
+    assert 200.0 <= clock.now < 240.0
+    assert "lakana-server" in capsys.readouterr().err
+
+
+def test_a_similar_version_on_the_simple_index_does_not_count() -> None:
+    """1.2.3 is not found in a listing of 1.2.30 or 11.2.3."""
+    page = '<a href="lakana-1.2.30.tar.gz">x</a><a href="lakana-11.2.3.tar.gz">x</a>'
+    assert not wait.lists_version(page, "1.2.3")
+    assert wait.lists_version('<a href="lakana-1.2.3.tar.gz">x</a>', "1.2.3")
+    assert wait.lists_version('<a href="lakana-1.2.3-py3-none-any.whl">x</a>', "1.2.3")
+    assert wait.lists_version('<a href="lakana_core-1.2.3-py3-none-any.whl">x</a>', "1.2.3")
 
 
 def test_it_gives_up_after_the_limit_and_names_the_missing_packages() -> None:
@@ -119,17 +162,17 @@ def test_it_gives_up_after_the_limit_and_names_the_missing_packages() -> None:
     assert clock.now == wait.TIMEOUT_SECONDS
 
 
-def test_the_defaults_are_ten_minutes_and_fifteen_seconds() -> None:
+def test_the_defaults_are_fifteen_minutes_and_thirty_seconds() -> None:
     """The bounds the release job relies on."""
-    assert wait.TIMEOUT_SECONDS == 600
-    assert wait.POLL_SECONDS == 15
+    assert wait.TIMEOUT_SECONDS == 900
+    assert wait.POLL_SECONDS == 30
     assert wait.PACKAGES == ("lakana", "lakana-core", "lakana-server", "lakana-worker")
 
 
-def test_fetch_status_reads_a_status_and_treats_a_failure_as_not_there(
+def test_fetch_body_reads_a_page_and_treats_a_failure_as_not_there(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A 404 and a dropped connection both mean "not yet"; neither raises."""
+    """A 404 and a dropped connection both mean "not yet" (None); neither raises."""
 
     class Response(io.BytesIO):
         """A response that is a context manager with a status."""
@@ -161,10 +204,10 @@ def test_fetch_status_reads_a_status_and_treats_a_failure_as_not_there(
         Response
             A 200.
         """
-        return Response()
+        return Response(b"page")
 
     monkeypatch.setattr(wait.urllib.request, "urlopen", ok)
-    assert wait.fetch_status("https://pypi.org/x") == 200
+    assert wait.fetch_body("https://pypi.org/x") == "page"
 
     def not_found(url: str, timeout: float) -> Response:
         """Answer 404.
@@ -184,7 +227,7 @@ def test_fetch_status_reads_a_status_and_treats_a_failure_as_not_there(
         raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)  # type: ignore[arg-type]
 
     monkeypatch.setattr(wait.urllib.request, "urlopen", not_found)
-    assert wait.fetch_status("https://pypi.org/x") == 404
+    assert wait.fetch_body("https://pypi.org/x") is None
 
     def dropped(url: str, timeout: float) -> Response:
         """Fail the connection.
@@ -204,7 +247,7 @@ def test_fetch_status_reads_a_status_and_treats_a_failure_as_not_there(
         raise urllib.error.URLError("connection reset")
 
     monkeypatch.setattr(wait.urllib.request, "urlopen", dropped)
-    assert wait.fetch_status("https://pypi.org/x") == 0
+    assert wait.fetch_body("https://pypi.org/x") is None
 
 
 def test_main_waits_for_the_version_in_the_environment(
@@ -247,3 +290,42 @@ def test_the_release_job_waits_before_its_first_install() -> None:
     assert len(waits) == 1 and len(installs) == 1 and waits[0] < installs[0]
     assert "secrets." not in yaml.dump(steps[waits[0]])
     assert "steps.version.outputs.version" in steps[waits[0]]["run"]
+
+
+def test_a_truncated_body_counts_as_not_there_yet(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A read cut short (IncompleteRead is no OSError) is waited out, not raised."""
+
+    class Cut:
+        """A response whose body is cut short."""
+
+        def __enter__(self) -> Cut:
+            """Enter the block.
+
+            Returns
+            -------
+            Cut
+                Itself.
+            """
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            """Leave the block.
+
+            Parameters
+            ----------
+            *exc
+                Ignored.
+            """
+
+        def read(self) -> bytes:
+            """Fail the read.
+
+            Raises
+            ------
+            http.client.IncompleteRead
+                Always.
+            """
+            raise http.client.IncompleteRead(b"par")
+
+    monkeypatch.setattr(wait.urllib.request, "urlopen", lambda url, timeout: Cut())
+    assert wait.fetch_body("https://pypi.org/x") is None

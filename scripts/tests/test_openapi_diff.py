@@ -1066,3 +1066,291 @@ def test_an_all_of_of_constraints_is_merged_without_becoming_an_object() -> None
     assert _breaking(base, head) == [
         "POST /api/v1/things: request body `a`: maxLength changed from 10 to 5"
     ]
+
+
+# allOf members are merged with the stricter value
+
+
+def _all_of(*members: dict[str, Any]) -> dict[str, Any]:
+    """Wrap schemas in an ``allOf``.
+
+    Parameters
+    ----------
+    *members
+        The member schemas.
+
+    Returns
+    -------
+    dict
+        The ``allOf`` schema.
+    """
+    return {"allOf": list(members)}
+
+
+def _field_change(base: dict[str, Any], head: dict[str, Any]) -> list[str]:
+    """List the breaking changes of a request field ``a`` between two schemas.
+
+    Parameters
+    ----------
+    base
+        The earlier schema of ``a``.
+    head
+        The later schema of ``a``.
+
+    Returns
+    -------
+    list of str
+        Each breaking change as text.
+    """
+    return _breaking(_api(body=_obj({"a": base})), _api(body=_obj({"a": head})))
+
+
+def test_a_max_length_narrowed_in_a_later_member_is_breaking() -> None:
+    """The issue's first example: the smaller maximum wins, wherever it stands."""
+    base = {**STRING, "maxLength": 10}
+    head = _all_of({**STRING, "maxLength": 10}, {"maxLength": 5})
+    assert _field_change(base, head) == [
+        "POST /api/v1/things: request body `a`: maxLength changed from 10 to 5"
+    ]
+
+
+def test_a_max_length_the_first_member_narrows_wins_over_a_later_wider_one() -> None:
+    """Members never loosen each other: 5 and 10 together are 5."""
+    base = {**STRING, "maxLength": 5}
+    head = _all_of({**STRING, "maxLength": 5}, {"maxLength": 10})
+    assert compare(_api(body=_obj({"a": base})), _api(body=_obj({"a": head}))) == []
+
+
+@pytest.mark.parametrize("key", ["maxLength", "maxItems", "maximum"])
+def test_the_smallest_maximum_of_the_members_wins(key: str) -> None:
+    """Every maximum takes the smallest value."""
+    kind = {"maxLength": STRING, "maxItems": {"type": "array"}, "maximum": INTEGER}[key]
+    base = {**kind, key: 5}
+    head = _all_of({**kind, key: 10}, {key: 5})
+    assert compare(_api(body=_obj({"a": base})), _api(body=_obj({"a": head}))) == []
+    tighter = _all_of({**kind, key: 10}, {key: 3})
+    assert _field_change(base, tighter) == [
+        f"POST /api/v1/things: request body `a`: {key} changed from 5 to 3"
+    ]
+
+
+@pytest.mark.parametrize("key", ["minLength", "minItems", "minimum"])
+def test_the_largest_minimum_of_the_members_wins(key: str) -> None:
+    """Every minimum takes the largest value."""
+    kind = {"minLength": STRING, "minItems": {"type": "array"}, "minimum": INTEGER}[key]
+    base = {**kind, key: 5}
+    head = _all_of({**kind, key: 1}, {key: 5})
+    assert compare(_api(body=_obj({"a": base})), _api(body=_obj({"a": head}))) == []
+    narrower = _all_of({**kind, key: 1}, {key: 8})
+    assert _field_change(base, narrower) == [
+        f"POST /api/v1/things: request body `a`: {key} changed from 5 to 8"
+    ]
+
+
+def test_items_of_the_members_are_merged_with_the_stricter_value() -> None:
+    """``items`` in two members merge like a property: the smaller maximum wins."""
+    base = {"type": "array", "items": {**STRING, "maxLength": 5}}
+    head = _all_of(
+        {"type": "array", "items": {**STRING, "maxLength": 10}}, {"items": {"maxLength": 5}}
+    )
+    assert compare(_api(body=_obj({"a": base})), _api(body=_obj({"a": head}))) == []
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "expected"),
+    [
+        (True, {**STRING}, {**STRING}),
+        ({**STRING}, True, {**STRING}),
+        ({**STRING}, False, False),
+    ],
+    ids=["true-then-schema", "schema-then-true", "false-wins"],
+)
+def test_additional_properties_of_the_members_merge(
+    first: object, second: object, expected: object
+) -> None:
+    """``True`` adds nothing to the other member; ``False`` closes the object.
+
+    Parameters
+    ----------
+    first
+        ``additionalProperties`` of the first member.
+    second
+        ``additionalProperties`` of the second member.
+    expected
+        The single schema the merge equals.
+    """
+    base = {"type": "object", "additionalProperties": expected}
+    head = _all_of(
+        {"type": "object", "additionalProperties": first}, {"additionalProperties": second}
+    )
+    assert compare(_api(body=_obj({"a": base})), _api(body=_obj({"a": head}))) == []
+
+
+def test_nullable_and_deprecated_of_the_members_combine() -> None:
+    """``nullable`` and ``deprecated`` combine: null only if all allow it, deprecated if any is."""
+    base = {**STRING, "deprecated": True}
+    head = _all_of(
+        {**STRING, "nullable": True, "deprecated": False}, {"nullable": False, "deprecated": True}
+    )
+    assert compare(_api(body=_obj({"a": base})), _api(body=_obj({"a": head}))) == []
+
+
+def test_a_conflict_inside_a_nested_all_of_is_kept_by_the_outer_merge() -> None:
+    """A conflict found in an inner ``allOf`` still reaches the report."""
+    base = {**STRING}
+    inner = _all_of({**STRING, "format": "date"}, {"format": "uuid"})
+    head = _all_of({"maxLength": 99}, inner)
+    assert _field_change(base, head) != []
+
+
+def test_an_enum_narrowed_in_a_second_member_is_breaking() -> None:
+    """The issue's second example: the enums of the members intersect."""
+    base = {**STRING, "enum": ["a", "b", "c"]}
+    head = _all_of({**STRING, "enum": ["a", "b", "c"]}, {"enum": ["a", "b"]})
+    changes = _field_change(base, head)
+    assert changes == ["POST /api/v1/things: request body `a`: value 'c' removed"]
+
+
+def test_the_enums_of_the_members_are_intersected_not_joined() -> None:
+    """``[a, b]`` and ``[b, c]`` allow only ``b``."""
+    base = {**STRING, "enum": ["b"]}
+    head = _all_of({**STRING, "enum": ["a", "b"]}, {"enum": ["b", "c"]})
+    assert compare(_api(body=_obj({"a": base})), _api(body=_obj({"a": head}))) == []
+
+
+def test_an_enum_and_a_const_of_two_members_intersect() -> None:
+    """A const is an enum of one value."""
+    base = {**STRING, "enum": ["b"]}
+    head = _all_of({**STRING, "enum": ["a", "b"]}, {"const": "b"})
+    assert compare(_api(body=_obj({"a": base})), _api(body=_obj({"a": head}))) == []
+
+
+def test_members_without_a_common_value_cannot_be_combined() -> None:
+    """Disjoint enums allow nothing: reported as breaking, not silently accepted."""
+    base = {**STRING, "enum": ["a"]}
+    head = _all_of({**STRING, "enum": ["a"]}, {"enum": ["b"]})
+    assert any("cannot be combined" in change for change in _field_change(base, head))
+
+
+def test_the_required_fields_of_all_members_are_joined() -> None:
+    """A field required by the second member only is required of the whole."""
+    base = _obj({"x": STRING, "y": STRING})
+    head = _all_of(_obj({"x": STRING, "y": STRING}), {"required": ["y"]})
+    assert _field_change(base, head) == ["POST /api/v1/things: request body `a.y`: now required"]
+
+
+def test_a_property_in_several_members_is_merged_with_the_stricter_value() -> None:
+    """A property tightened in a later member is a narrowing, not a widening."""
+    base = _obj({"x": {**STRING, "maxLength": 10}})
+    head = _all_of(_obj({"x": {**STRING, "maxLength": 10}}), _obj({"x": {"maxLength": 5}}))
+    assert _field_change(base, head) == [
+        "POST /api/v1/things: request body `a.x`: maxLength changed from 10 to 5"
+    ]
+    assert not any("widened" in change for change in _field_change(base, head))
+
+
+def test_a_property_tightened_in_a_later_member_is_not_reported_as_widened() -> None:
+    """The response side: the same property, read by the client, is not shown as any value."""
+    base = _obj({"x": {**STRING, "enum": ["a", "b"]}})
+    head = _all_of(_obj({"x": {**STRING, "enum": ["a", "b"]}}), _obj({"x": {"enum": ["a"]}}))
+    changes = [
+        str(change)
+        for change in compare(_api(response=_obj({"a": base})), _api(response=_obj({"a": head})))
+    ]
+    assert not any("any value" in change or "widened" in change for change in changes)
+
+
+def test_a_property_in_several_members_merges_recursively() -> None:
+    """Objects inside the shared property are merged the same way."""
+    base = _obj({"x": _obj({"y": {**STRING, "maxLength": 3}})})
+    head = _all_of(
+        _obj({"x": _obj({"y": {**STRING, "maxLength": 9}})}),
+        _obj({"x": _obj({"y": {"maxLength": 3}})}),
+    )
+    assert compare(_api(body=_obj({"a": base})), _api(body=_obj({"a": head}))) == []
+
+
+def test_members_of_different_types_cannot_be_combined() -> None:
+    """A string and an integer have no common value: breaking."""
+    head = _all_of(STRING, INTEGER)
+    changes = _field_change(STRING, head)
+    assert any("cannot be combined" in change and "type" in change for change in changes)
+
+
+def test_members_with_different_formats_cannot_be_combined() -> None:
+    """Two formats are incompatible unless they are the same."""
+    head = _all_of({**STRING, "format": "uuid"}, {"format": "date-time"})
+    changes = _field_change({**STRING, "format": "uuid"}, head)
+    assert any("cannot be combined" in change and "format" in change for change in changes)
+
+
+def test_members_with_different_patterns_cannot_be_combined() -> None:
+    """Two patterns are incompatible unless they are the same."""
+    head = _all_of({**STRING, "pattern": "^a"}, {"pattern": "b$"})
+    changes = _field_change({**STRING, "pattern": "^a"}, head)
+    assert any("cannot be combined" in change and "pattern" in change for change in changes)
+
+
+def test_members_with_the_same_format_and_pattern_combine() -> None:
+    """Equal values are no conflict."""
+    plain = {**STRING, "format": "uuid", "pattern": "^a"}
+    head = _all_of(plain, {"format": "uuid", "pattern": "^a"})
+    assert compare(_api(body=_obj({"a": plain})), _api(body=_obj({"a": head}))) == []
+
+
+def test_a_conflict_in_a_nested_property_is_reported() -> None:
+    """The conflict is found where the properties meet, not only at the top."""
+    head = _all_of(_obj({"x": STRING}), _obj({"x": INTEGER}))
+    changes = _field_change(_obj({"x": STRING}), head)
+    assert any("cannot be combined" in change and "`a.x`" in change for change in changes)
+
+
+def test_the_same_conflict_in_both_documents_is_not_a_change() -> None:
+    """A conflict that was already there is not news."""
+    both = _all_of(STRING, INTEGER)
+    assert compare(_api(body=_obj({"a": both})), _api(body=_obj({"a": copy.deepcopy(both)}))) == []
+
+
+def test_an_all_of_with_a_wrapper_keeps_the_stricter_value_of_the_wrapper() -> None:
+    """The wrapper's own keys are one more member, not an override."""
+    base = {**STRING, "maxLength": 5}
+    head = {"allOf": [{**STRING, "maxLength": 5}], "maxLength": 10}
+    assert compare(_api(body=_obj({"a": base})), _api(body=_obj({"a": head}))) == []
+
+
+def test_union_members_renamed_and_reordered_at_once_are_paired_by_shape() -> None:
+    """Two components of one kind, renamed and swapped, are the same union."""
+    a, b = _obj({"x": STRING}, ("x",)), _obj({"y": INTEGER}, ("y",))
+    base_union = {"oneOf": [{"$ref": "#/components/schemas/A"}, {"$ref": "#/components/schemas/B"}]}
+    head_union = {"oneOf": [{"$ref": "#/components/schemas/D"}, {"$ref": "#/components/schemas/C"}]}
+    base = _api(response=base_union, schemas={"A": a, "B": b})
+    head = _api(response=head_union, schemas={"C": a, "D": b})
+    assert compare(base, head) == []
+
+
+def test_a_default_beside_an_all_of_overrides_the_default_of_the_member() -> None:
+    """The wrapper's own default is the schema's default; a change of it is breaking."""
+    schemas = {"E": {**STRING, "default": "a"}}
+    ref = {"$ref": "#/components/schemas/E"}
+    base = _api(body=_obj({"a": {"allOf": [ref], "default": "b"}}), schemas=schemas)
+    head = _api(body=_obj({"a": {"allOf": [ref], "default": "c"}}), schemas=schemas)
+    assert _breaking(base, head) == [
+        "POST /api/v1/things: request body `a`: default changed from b to c"
+    ]
+
+
+def test_a_max_length_beside_an_all_of_still_combines_with_the_members() -> None:
+    """Constraints on the wrapper are stricter-wins, not an override."""
+    schemas = {"E": {**STRING, "maxLength": 5}}
+    ref = {"$ref": "#/components/schemas/E"}
+    base = _api(body=_obj({"a": {"allOf": [ref], "maxLength": 5}}), schemas=schemas)
+    head = _api(body=_obj({"a": {"allOf": [ref], "maxLength": 10}}), schemas=schemas)
+    assert compare(base, head) == []
+
+
+def test_a_component_that_refers_to_itself_through_all_of_does_not_recurse() -> None:
+    """A cycle adds no further constraint."""
+    schemas = {"Node": {"allOf": [{"$ref": "#/components/schemas/Node"}, _obj({"x": STRING})]}}
+    ref = {"$ref": "#/components/schemas/Node"}
+    doc = _api(response=ref, schemas=schemas)
+    assert compare(doc, copy.deepcopy(doc)) == []
