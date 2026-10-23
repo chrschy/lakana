@@ -493,6 +493,8 @@ def test_a_build_stopped_while_it_waits_for_another_build_ends_at_once(tmp_path:
     )
     second.start()
     _until(lambda: _named(launcher, "build", "b2") in launcher._live)
+    time.sleep(0.5)  # it keeps waiting while nobody stops it
+    assert second.is_alive()
 
     assert launcher.stop(StopRequest("b2", "w1")) == {"stopped": True}
     second.join(5)

@@ -2074,6 +2074,50 @@ def test_a_lease_lost_during_a_long_build_stops_the_build_and_records_nothing(
     assert _task(py.world, "gold.scores").lease_owner != engine.settings.worker_id
 
 
+def test_a_build_stopped_without_a_reason_fails_and_is_retried(py: PyWorld) -> None:
+    """A build that reports a stop nobody asked for is a transient build failure."""
+    seen: list[bool] = []
+
+    def stopped(
+        settings: VenvSettings,
+        sha: str,
+        project: Path,
+        on_log: Callable[[bytes], None],
+        indexes: IndexResolver | None = None,
+        *,
+        stop: Callable[[], bool] | None = None,
+    ) -> VenvLease:
+        """Report a stop at once.
+
+        Parameters
+        ----------
+        settings
+            Ignored.
+        sha
+            Ignored.
+        project
+            Ignored.
+        on_log
+            Ignored.
+        indexes
+            Ignored.
+        stop
+            The task's stop, recorded.
+
+        Raises
+        ------
+        VenvBuildStopped
+            Always.
+        """
+        seen.append(stop is not None and stop())
+        raise VenvBuildStopped("environment build failed: stopped before it ended")
+
+    _, message = _fails(py, py.engine(_forged, acquire_venv=stopped))
+
+    assert seen == [False]
+    assert "neither a cancel, a drain nor a lost lease" in message
+
+
 def test_a_principal_deactivated_during_the_build_fails_permanently(py: PyWorld) -> None:
     world = py.world
 

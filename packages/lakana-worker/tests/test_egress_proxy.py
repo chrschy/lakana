@@ -616,6 +616,42 @@ def test_the_cap_counts_every_client_of_one_attached_network_together(
     assert (same, outside) == (b"503", b"200")
 
 
+def test_a_full_proxy_is_busy_for_a_network_below_its_cap(tmp_path: Path, index: int) -> None:
+    """The total still applies when the client's network has room."""
+    server = _proxy(tmp_path, max_connections=1, max_connections_per_network=1, head_seconds=30.0)
+    token = Running(server.server_address[1], index, ensure_key(tmp_path / "egress.key")).token()
+    try:
+        idle = _held(server, 1, "127.0.0.2")
+        try:
+            status, body = _connect_from(
+                "127.0.0.3", server.server_address[1], f"localhost:{index}", token
+            )
+        finally:
+            for connection in idle:
+                connection.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert status == b"503" and b"busy" in body
+
+
+def test_the_client_network_of_a_mapped_or_unknown_connection(tmp_path: Path) -> None:
+    """An IPv4-mapped address counts as its IPv4 address; an unseen connection is looked up."""
+    server = _proxy(tmp_path)
+    try:
+        mapped = server.client_network("::ffff:127.0.0.2")
+        looked_up = server.network_of(object(), ("127.0.0.9", 1234))
+        server._forget(object())  # a connection without a ticket gives nothing back
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert mapped == ipaddress.ip_network("127.0.0.2/32")
+    assert looked_up == ipaddress.ip_network("127.0.0.9/32")
+    assert server.threads_of(looked_up) == 0
+
+
 def test_a_flood_from_one_network_takes_only_its_own_threads(tmp_path: Path, index: int) -> None:
     """#302: past its cap and a few answers, a network's connections are closed without a thread."""
     server = _proxy(tmp_path, max_connections=8, max_connections_per_network=2, head_seconds=30.0)

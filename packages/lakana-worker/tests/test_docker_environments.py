@@ -23,6 +23,7 @@ from lakana_worker.docker_environments import (
 )
 from lakana_worker.index_credentials import IndexAccess
 from lakana_worker.launcher.task_build import NO_INTERPRETER, NO_SDK, TOO_LARGE
+from lakana_worker.launcher_client import LauncherUnavailable
 from lakana_worker.runners import NO_SDK_MESSAGE
 from lakana_worker.venvs import VenvBuildError, VenvBuildRefused, VenvBuildStopped, VenvLease
 
@@ -636,25 +637,139 @@ def test_a_launcher_that_does_not_answer_after_a_stop_is_not_waited_for(tmp_path
     launcher = FakeLauncher()
     freed = threading.Event()
     building = threading.Event()
-    launcher.scripts.update(
-        {
-            "status": _status(False),
-            "build": lambda request, on_log: (
-                building.set(),
-                freed.wait(30),
-                dict(_STOPPED_BUILD),
-            )[2],
-        }
-    )
+    late = threading.Event()
+    logs: list[bytes] = []
+
+    def build(request: dict[str, Any], on_log: Callable[[bytes], None]) -> dict[str, object]:
+        """Hang through the stop, then log once the worker has given up.
+
+        Parameters
+        ----------
+        request
+            The request.
+        on_log
+            The log sink.
+
+        Returns
+        -------
+        dict
+            A stopped build.
+        """
+        building.set()
+        freed.wait(30)
+        on_log(b"late output\n")
+        late.set()
+        return dict(_STOPPED_BUILD)
+
+    launcher.scripts.update({"status": _status(False), "build": build})
     started = time.monotonic()
     try:
         with pytest.raises(VenvBuildStopped):
             _acquire(
                 _environments(launcher, poll_seconds=0.02, stop_wait=0.3),
                 _project(tmp_path),
+                on_log=logs.append,
                 stop=building.is_set,
             )
     finally:
         freed.set()
 
     assert time.monotonic() - started < 5
+    assert late.wait(5)
+    assert b"late output" not in b"".join(logs), "output after the worker gave up is dropped"
+
+
+def test_an_index_url_without_a_host_adds_no_target() -> None:
+    """A URL without a host names nothing to connect to."""
+    assert build_targets((RegisteredIndex("odd", "file:///srv/index"),), None) == [
+        "pypi.org:443",
+        "files.pythonhosted.org:443",
+    ]
+
+
+def test_a_launcher_failure_during_a_stoppable_build_is_the_build_error(tmp_path: Path) -> None:
+    """With a stop in play the launcher's own failure still reaches the task as before."""
+    logs: list[bytes] = []
+
+    def build(request: dict[str, Any], on_log: Callable[[bytes], None]) -> dict[str, object]:
+        """Log a line, then fail like an unreachable launcher.
+
+        Parameters
+        ----------
+        request
+            The request.
+        on_log
+            The log sink.
+
+        Raises
+        ------
+        LauncherUnavailable
+            Always.
+        """
+        on_log(b"Resolved 2 packages\n")
+        raise LauncherUnavailable("runner unavailable: gone")
+
+    launcher = FakeLauncher(scripts={"status": _status(False), "build": build})
+
+    with pytest.raises(VenvBuildError, match="runner unavailable: gone"):
+        _acquire(
+            _environments(launcher, poll_seconds=0.01),
+            _project(tmp_path),
+            on_log=logs.append,
+            stop=lambda: False,
+        )
+
+    assert b"Resolved 2 packages" in b"".join(logs)
+
+
+def test_a_launcher_that_cannot_take_the_stop_is_asked_again(tmp_path: Path) -> None:
+    """#291: an unreachable launcher's stop counts as not yet stopped."""
+    launcher = FakeLauncher()
+    calls: list[str] = []
+    released = threading.Event()
+
+    def unreachable_then_stop(ident: str, owner: str) -> bool:
+        """Fail once like an unreachable launcher, then stop.
+
+        Parameters
+        ----------
+        ident
+            The build's id.
+        owner
+            The worker that asks.
+
+        Returns
+        -------
+        bool
+            `True` on the second call.
+
+        Raises
+        ------
+        LauncherUnavailable
+            On the first call.
+        """
+        calls.append(ident)
+        if len(calls) == 1:
+            raise LauncherUnavailable("runner unavailable: gone")
+        released.set()
+        return True
+
+    launcher.stop = unreachable_then_stop  # ty: ignore[invalid-assignment]
+    building = threading.Event()
+    launcher.scripts.update(
+        {
+            "status": _status(False),
+            "build": lambda request, on_log: (
+                building.set(),
+                released.wait(10),
+                dict(_STOPPED_BUILD),
+            )[2],
+        }
+    )
+
+    with pytest.raises(VenvBuildStopped):
+        _acquire(
+            _environments(launcher, poll_seconds=0.02), _project(tmp_path), stop=building.is_set
+        )
+
+    assert len(calls) == 2

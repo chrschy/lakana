@@ -1075,6 +1075,15 @@ def test_a_target_is_a_permitted_host_and_a_port_in_one_spelling(target: str) ->
         parse_request(_raw(request), token=TOKEN, settings=SETTINGS)
 
 
+def test_a_target_that_is_not_a_string_is_refused() -> None:
+    """A number or a pair is not ``host:port``."""
+    for target in (443, ["pkgs.example.org", 443]):
+        with pytest.raises(Refused, match="targets:"):
+            parse_request(
+                _raw(_with(BUILD, indexes=[], targets=[target])), token=TOKEN, settings=SETTINGS
+            )
+
+
 def test_a_target_may_name_any_port_of_a_host_once() -> None:
     """Two ports of one host are two targets; the same pair twice is refused."""
     two = _with(BUILD, targets=["pkgs.example.org:443", "pkgs.example.org:8443"])

@@ -362,11 +362,23 @@ class DockerEnvironments:
         if stop is None:
             return self.client.call(request, on_log)
         box: dict[str, object] = {}
+        given_up = threading.Event()
+
+        def feed(chunk: bytes) -> None:
+            """Pass output on until the task stopped waiting for the build.
+
+            Parameters
+            ----------
+            chunk
+                A piece of the build's output.
+            """
+            if not given_up.is_set():
+                on_log(chunk)
 
         def call() -> None:
             """Run the launcher call on its own thread, keeping what it returned or raised."""
             try:
-                box["result"] = self.client.call(request, on_log)
+                box["result"] = self.client.call(request, feed)
             except Exception as exc:  # handed back to the waiting thread below
                 box["error"] = exc
 
@@ -389,6 +401,7 @@ class DockerEnvironments:
                 next_stop = now + gap
                 gap = stop_retry_gap(gap, self.poll_seconds)
             elif confirmed is not None and now - confirmed >= self.stop_wait:
+                given_up.set()
                 raise VenvBuildStopped(_STOPPED)
         error = box.get("error")
         if isinstance(error, BaseException):
