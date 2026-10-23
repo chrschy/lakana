@@ -64,6 +64,18 @@ write refused.
 | A view | Is created; on DuckDB 2.0 the column's type reads `null`. |
 | A write to a table | On DuckDB 2.0 refused with "Column 'x' is NULL without a type, which a Lakana table can't store; write `CAST(NULL AS <type>) AS x`, for example `CAST(NULL AS VARCHAR)`." On DuckDB 1.5 the column is created as an `integer`, which is rarely what you want. |
 
+## Clauses after a table name
+
+A `PIVOT (...)` or `UNPIVOT (...)` in the standard form, a `TABLESAMPLE` and a join inside
+parentheses work on a table as in DuckDB:
+`SELECT * FROM gold.sales PIVOT (sum(amount) FOR region IN ('eu', 'us'))`. They see the rows
+after your row filters and column masks: a masked column pivots on its masked value.
+
+These clauses have no meaning on a Lakana table and are refused with "'gold.sales' can't be read
+with ...; remove it from the query.": `AT (...)`, `ONLY`, `WITH ORDINALITY`, a table hint such as
+`WITH (NOLOCK)`, `FOR SYSTEM_TIME`, `PARTITION (...)`, `CHANGES (...)`, `ROWS FROM (...)`,
+`INDEXED BY` and `LATERAL VIEW`.
+
 ## Recursive queries are refused
 
 A query may not run recursively, in either spelling:
@@ -88,6 +100,7 @@ groups have a message of their own:
 | `setval`, `nextval`, `currval` | they change or read a sequence, which is the engine's state, not data | remove the call |
 | `to_aggregate_state` | it picks an aggregate function by a name given as data | remove the call |
 | any name starting with `__` | it is internal to DuckDB | write the SQL it stands for, such as `CAST` or `BETWEEN` |
+| an operator called by name, such as `"<"(id, 'a')`, `main."="(a, b)` or `"IS DISTINCT FROM"(a, b)` | DuckDB does not check its types when it is called by name, and fails with an internal error | write the operator itself: `id < 'a'`, `a IS DISTINCT FROM b` |
 
 ## A view the checks now refuse
 

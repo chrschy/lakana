@@ -7,8 +7,9 @@ bounded number of hops in one direction, and shows only what the caller may
 read: a node the caller can't READ is omitted, counted in `hidden_nodes`,
 and never walked through, so lineage can't reveal a hidden table's name or
 that two readable tables are connected through one. A dropped
-table's node is judged at the namespace it was recorded in, never as a
-table, so a table recreated under its name does not reveal it.
+table's node is judged at the namespace of the newest name recorded for its
+id, never as a table, so a table recreated under its name does not reveal it
+and the verdict does not depend on where the walk starts.
 """
 
 from __future__ import annotations
@@ -53,8 +54,8 @@ class LineageNode:
     id
         Its id.
     name
-        Its current dotted name, or the name recorded on its edges once
-        dropped.
+        Its current dotted name, or, once dropped, the newest name recorded
+        for it on any edge.
     kind
         ``TABLE``, ``EXTERNAL``, ``VIEW`` or ``ARTIFACT``; `None` once dropped. It says
         what a link's snapshot ids at this node mean: for an ``ARTIFACT`` they are
@@ -191,7 +192,7 @@ class LineageService:
         root_id = resolve_table_id(self._session, ref.environment, ref.namespace.joined(), ref.name)
         if environment_id is None or root_id is None:
             raise NotFoundError(f"Table {ref.dotted()!r} not found.")
-        root, _ = self._node(ref.environment, root_id, ref.dotted())
+        root, _ = self._node(ref.environment, environment_id, root_id)
         nodes: dict[uuid.UUID, LineageNode] = {root_id: root}
         links: list[LineageEdge] = []
         hidden: set[uuid.UUID] = set()
@@ -202,15 +203,15 @@ class LineageService:
                 break
             next_frontier: list[uuid.UUID] = []
             for edge in self._edges(environment_id, frontier, direction):
-                other_id, other_name = (
-                    (edge.source_table_id, edge.source_name)
+                other_id = (
+                    edge.source_table_id
                     if direction is LineageDirection.UPSTREAM
-                    else (edge.target_table_id, edge.target_name)
+                    else edge.target_table_id
                 )
                 if other_id in hidden:
                     continue
                 if other_id not in nodes:
-                    node, securable = self._node(ref.environment, other_id, other_name)
+                    node, securable = self._node(ref.environment, environment_id, other_id)
                     # A dropped node is never shown to a task token: a token's scope
                     # patterns cannot say which dropped table they were meant to cover.
                     if (
@@ -299,16 +300,20 @@ class LineageService:
         return list(chosen.values())
 
     def _node(
-        self, environment: str, table_id: uuid.UUID, recorded_name: str
+        self, environment: str, environment_id: uuid.UUID, table_id: uuid.UUID
     ) -> tuple[LineageNode, Securable | None]:
         """Describe a node, and the securable its visibility is checked against.
 
         A live table is checked under its current name, which resolves to
-        this very row. A dropped table is checked at the *namespace* its
-        edges recorded, never as a table: its name may since belong to a
-        different table, so a table-level grant must not decide.
-        Only a grant on that namespace or above, which would have covered
-        the table, shows it.
+        this very row. A dropped table is checked at the *namespace* of the
+        newest name recorded for its id on any edge (`_newest_recorded_name`),
+        never as a table: its name may since belong to a different table, so a
+        table-level grant must not decide. Only a grant on that namespace or
+        above, which would have covered the table, shows it. One name per id,
+        the newest recorded one, so a table renamed across namespaces
+        and then dropped gets one verdict from every root (#53). A legacy name
+        with more dots (`bronze.x.y`) is split at the last one: the namespace
+        `bronze.x`, the table `y`.
         The caller (`lineage`) hides a dropped node from any principal acting
         with a task token.
 
@@ -316,16 +321,17 @@ class LineageService:
         ----------
         environment
             The environment.
+        environment_id
+            The environment's id.
         table_id
             The node's id.
-        recorded_name
-            The dotted name its edge recorded.
 
         Returns
         -------
         tuple
-            The node, and its securable — `None` when a dropped node's
-            recorded name doesn't parse, which is treated as unreadable.
+            The node, and its securable — `None` when a dropped node has no
+            recorded name or its newest one doesn't parse, which is treated as
+            unreadable.
         """
         row = self._session.get(Table, table_id)
         namespace = None if row is None else self._session.get(Namespace, row.namespace_id)
@@ -333,12 +339,46 @@ class LineageService:
             path = NamespacePath.parse(namespace.path)
             node = LineageNode(id=table_id, name=f"{path}.{row.name}", kind=row.kind, dropped=False)
             return node, Securable.table_scope(environment, path, row.name)
-        node = LineageNode(id=table_id, name=recorded_name, kind=None, dropped=True)
+        recorded_name = self._newest_recorded_name(environment_id, table_id)
+        node = LineageNode(id=table_id, name=recorded_name or "", kind=None, dropped=True)
+        if recorded_name is None:
+            return node, None
         try:
             recorded = TableRef.from_dotted(environment, recorded_name)
         except ValidationError:
             return node, None
         return node, Securable.namespace_scope(environment, recorded.namespace)
+
+    def _newest_recorded_name(self, environment_id: uuid.UUID, table_id: uuid.UUID) -> str | None:
+        """Find the name the newest edge recorded for a table, at either end.
+
+        Parameters
+        ----------
+        environment_id
+            The environment.
+        table_id
+            The table's id.
+
+        Returns
+        -------
+        str or None
+            The name on the newest edge (by `created_at`, then id) that has the table as its
+            source or its target, or `None` when no edge names it.
+        """
+        newest: tuple[datetime, uuid.UUID, str] | None = None
+        for id_column, name_column in (
+            (LineageEdge.source_table_id, LineageEdge.source_name),
+            (LineageEdge.target_table_id, LineageEdge.target_name),
+        ):
+            row = self._session.execute(
+                select(LineageEdge.created_at, LineageEdge.id, name_column)
+                .where(LineageEdge.environment_id == environment_id, id_column == table_id)
+                .order_by(LineageEdge.created_at.desc(), LineageEdge.id.desc())
+                .limit(1)
+            ).first()
+            if row is not None and (newest is None or (row[0], row[1]) > newest[:2]):
+                newest = (row[0], row[1], row[2])
+        return None if newest is None else newest[2]
 
 
 def _link(edge: LineageEdge) -> LineageLink:

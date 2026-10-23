@@ -51,7 +51,9 @@ limits lie is in [Python assets: what they are for and how far they are trusted]
 - **Who sees a dropped table in `table lineage`.** Lineage lists only tables you may read. A table
   that was dropped stays in the history of the tables it fed, marked `dropped`, and is shown only
   to someone who may read its whole namespace (a grant on the namespace, the environment or the
-  instance) and never to a task token. A table created later under the same name is a new table:
+  instance) and never to a task token. For a table that was moved to another namespace before it
+  was dropped, that is the namespace of the last name Lakana recorded for it, and the table is
+  shown under that name. A table created later under the same name is a new table:
   a grant on it does not show the old one. It is counted in `hidden_nodes` instead. To let a
   colleague see the history, grant them read on the namespace.
 

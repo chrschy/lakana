@@ -107,7 +107,13 @@ type (struct, list, map, nanosecond timestamp, unknown) has no cast, and creatio
 closed, never guessed). The only conversion a policy may contain is a typed `DATE '...'` or
 `TIMESTAMP '...'` literal, which `validate_restricted_expression` accepts only for a string literal
 that is a real date or moment in the exact `YYYY-MM-DD[ HH:MM:SS[.ffffff]]` form; it is a constant, so it
-cannot fail on a stored value. Any other `CAST`, `TRY_CAST` or `::` stays outside the subset. A new
+cannot fail on a stored value. Any other `CAST`, `TRY_CAST` or `::` stays outside the subset.
+A comparison of a date with a timestamp is accepted, and the read compiles its date side to
+`TRY_CAST(<date> AS <timestamp type>)` (`query_rewrite._compiled_row_filter`, from the column
+types in `TableSource.mask_types`): a date outside the timestamp range becomes `NULL`, the
+comparison is unknown and the row hidden, never an error (#178). This is fail-closed only because
+the filter subset has no `IS NULL`, `IS DISTINCT FROM` or `COALESCE`: adding one of those to the
+subset must revisit it. A new
 node type added to the subset needs a rule in `_Checker.type_of`; one without a rule is refused
 (`its type could not be determined`). Existing policies are not re-checked; the read path is
 unchanged and still replaces the engine's text with a fixed message.
@@ -4214,8 +4220,11 @@ exit criterion is being re-run after the M3f fixes above — see
   the node can no longer be checked as that table. It is never checked under its recorded *name*
   as a table: a table recreated under that name has a different id, and a table-level `READ_TABLE`
   grant on it must not reveal the old node, its edges, snapshot ids or run ids. A dropped node is
-  visible only to a principal holding `READ_TABLE` on the namespace its edges recorded (a
-  namespace grant there or above, which would have covered the table) and to administrators.
+  visible only to a principal holding `READ_TABLE` on the namespace of the **newest** name recorded
+  for its id on any edge (`LineageService._newest_recorded_name`; a namespace grant there or above,
+  which would have covered the table) and to administrators. One name per id, not the name on the
+  edge the walk meets first, so the verdict and the name shown are the same from every root (#53);
+  a legacy name with more dots (`bronze.x.y`) is split at the last one (namespace `bronze.x`).
   Never add a code path that authorizes a dropped node through a `Securable.table_scope`.
   **A principal acting with a task token never sees a dropped node** (any token with a task
   scope, bound or not): a token's asset patterns can name a namespace without saying which
@@ -4225,9 +4234,10 @@ exit criterion is being re-run after the M3f fixes above — see
   (`drop_namespace`, in the same transaction), but a grant on an *ancestor* namespace or the
   environment covers a recreated namespace as it always did, and so shows the lineage of tables
   dropped from the old one; likewise an administrator who newly grants read on a recreated
-  namespace also exposes it. A rename does not rewrite recorded edge names, so a table renamed
-  across namespaces and then dropped is judged by the namespace of the edge that is shown. The pin
-  is `test_lineage_visibility_integration.py`.
+  namespace also exposes it. A rename does not write an edge, so a table renamed and then dropped
+  with no write after the rename is judged by its name before the rename. The pins are
+  `test_lineage_visibility_integration.py` and `test_lineage_graph.py` (the moved-then-dropped
+  tests).
 - **Maintenance deletion is confined to the table's own location.** Orphan candidates are only
   files under `<location>/data/` and `<location>/metadata/` that the table owns under the "most
   specific owner" rule (a nested table's files are never its own), that no remaining snapshot,

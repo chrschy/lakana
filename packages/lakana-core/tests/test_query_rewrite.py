@@ -521,6 +521,58 @@ def test_rewrite_aliases_an_unaliased_read_by_the_table_name() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("clause", "sql"),
+    [
+        ("PIVOT", "SELECT * FROM gold.sales PIVOT (sum(id) FOR region IN ('eu', 'us'))"),
+        ("UNPIVOT", "SELECT * FROM gold.sales UNPIVOT (v FOR k IN (a, b))"),
+        ("TABLESAMPLE", "SELECT * FROM gold.sales TABLESAMPLE RESERVOIR (1 ROWS)"),
+        ("JOIN", "SELECT * FROM (gold.sales JOIN gold.other ON TRUE)"),
+    ],
+)
+def test_rewrite_keeps_what_follows_a_table_reference(clause: str, sql: str) -> None:
+    """A clause sqlglot attaches to the table node survives its replacement (#280)."""
+    sources = {"gold.sales": _parquet("a.parquet"), "gold.other": _parquet("b.parquet")}
+
+    rewritten = rewrite_query(sql, sources)
+
+    assert clause in rewritten.sql
+    if clause == "JOIN":
+        assert _cte_alias("gold.other") + " AS other" in rewritten.sql
+
+
+@pytest.mark.parametrize(
+    ("sql", "named"),
+    [
+        ("SELECT * FROM gold.sales AT (VERSION => 1)", "AT (...)"),
+        ("SELECT * FROM ONLY gold.sales", "ONLY"),
+        ("SELECT * FROM gold.sales WITH ORDINALITY", "WITH ORDINALITY"),
+        ("SELECT * FROM gold.sales WITH (NOLOCK)", "a table hint"),
+    ],
+)
+def test_rewrite_refuses_a_table_clause_it_cannot_keep(sql: str, named: str) -> None:
+    """A clause on a table reference the rewrite cannot carry over is refused, never dropped."""
+    with pytest.raises(ValidationError) as caught:
+        rewrite_query(sql, {"gold.sales": _parquet("a.parquet")})
+
+    assert named in str(caught.value)
+    assert "'gold.sales'" in str(caught.value)
+
+
+def test_every_argument_of_a_table_reference_is_kept_or_refused_by_name() -> None:
+    """A table argument a later sqlglot adds fails here, so it is classified, not dropped."""
+    classified = {
+        "this",
+        "db",
+        "catalog",
+        "alias",
+        *query_rewrite._KEPT_TABLE_ARGS,
+        *query_rewrite._REFUSED_TABLE_CLAUSES,
+    }
+
+    assert set(exp.Table.arg_types) == classified
+
+
 def test_rewrite_keeps_the_quoting_of_the_table_name_it_uses_as_alias() -> None:
     """A table written with quotes keeps them, so `"Orders".id` still matches."""
     rewritten = rewrite_query(
@@ -630,6 +682,84 @@ def test_rewrite_leaves_a_qualifier_alone_in_a_sibling_branch() -> None:
     )
 
     assert "SELECT gold.orders.id FROM raw.other" in rewritten.sql
+
+
+_DATE = exp.DataType(this=exp.DType.DATE)
+_TIMESTAMP = exp.DataType(this=exp.DType.TIMESTAMP)
+
+
+@pytest.mark.parametrize(
+    ("row_filter", "compiled"),
+    [
+        (
+            "born < TIMESTAMP '2026-01-01 00:00:00'",
+            "TRY_CAST(born AS TIMESTAMP) < CAST('2026-01-01 00:00:00' AS TIMESTAMP)",
+        ),
+        (
+            "TIMESTAMP '2026-01-01 00:00:00' > Born",
+            "CAST('2026-01-01 00:00:00' AS TIMESTAMP) > TRY_CAST(Born AS TIMESTAMP)",
+        ),
+        ("born < seen", "TRY_CAST(born AS TIMESTAMP) < seen"),
+        ("NOT (seen = (born))", "NOT (seen = (TRY_CAST(born AS TIMESTAMP)))"),
+        ("seen > DATE '2026-01-01'", "seen > TRY_CAST(CAST('2026-01-01' AS DATE) AS TIMESTAMP)"),
+    ],
+)
+def test_rewrite_converts_the_date_side_of_a_date_timestamp_filter_with_try_cast(
+    row_filter: str, compiled: str
+) -> None:
+    """A date outside the timestamp range becomes NULL in the comparison, never an error (#178).
+
+    Parameters
+    ----------
+    row_filter
+        A stored filter comparing a date with a timestamp.
+    compiled
+        How the generated read writes it.
+    """
+    source = TableSource(
+        urls=["a.parquet"],
+        file_format="parquet",
+        columns={"born": "date", "seen": "timestamp"},
+        row_filters=(row_filter,),
+        mask_types={"born": _DATE, "seen": _TIMESTAMP},
+    )
+
+    rewritten = rewrite_query("SELECT * FROM gold.people", {"gold.people": source})
+
+    assert f"WHERE ({compiled})" in rewritten.sql
+
+
+@pytest.mark.parametrize(
+    "row_filter",
+    [
+        "born = DATE '2026-01-01'",
+        "seen > TIMESTAMP '2026-01-01 00:00:00'",
+        "born = born",
+        "name = 'born'",
+        "has_group('x')",
+    ],
+)
+def test_rewrite_leaves_a_filter_without_a_date_timestamp_comparison_as_written(
+    row_filter: str,
+) -> None:
+    """Only a date compared with a timestamp is converted; every other filter is kept verbatim.
+
+    Parameters
+    ----------
+    row_filter
+        A stored filter with no comparison of a date with a timestamp.
+    """
+    source = TableSource(
+        urls=["a.parquet"],
+        file_format="parquet",
+        columns={"born": "date", "seen": "timestamp", "name": "string"},
+        row_filters=(row_filter,),
+        mask_types={"born": _DATE, "seen": _TIMESTAMP},
+    )
+
+    rewritten = rewrite_query("SELECT * FROM gold.people", {"gold.people": source})
+
+    assert "TRY_CAST" not in rewritten.sql
 
 
 def test_rewrite_merges_its_ctes_ahead_of_the_querys_own() -> None:
@@ -1013,6 +1143,89 @@ def test_blacklist_tells_the_user_what_to_write_instead_of_an_internal_function(
     assert "__cast" in message
     assert "internal to DuckDB" in message
     assert "CAST" in message.replace("__cast", "")
+
+
+_COMPARISON_OPERATOR_NAMES = (
+    "<",
+    "<=",
+    "=",
+    ">",
+    ">=",
+    "!=",
+    "<>",
+    "IS DISTINCT FROM",
+    "IS NOT DISTINCT FROM",
+)
+"""The comparison operators DuckDB 2.0 lists as functions (and `<>`, which it may list later)."""
+
+
+@pytest.mark.parametrize("name", _COMPARISON_OPERATOR_NAMES)
+@pytest.mark.parametrize(
+    "template",
+    [
+        "SELECT \"{name}\"(id, 'a') FROM t",
+        "SELECT main.\"{name}\"(id, 'a') FROM t",
+        "SELECT system.main.\"{name}\"(id, 'a') FROM t",
+        "SELECT id.\"{name}\"('a') FROM t",
+        "SELECT * FROM t WHERE \"{name}\"(id, 'a')",
+        'SELECT list_filter([1, 2], x -> "{name}"(x, 1))',
+    ],
+)
+def test_blacklist_refuses_an_operator_called_by_name(name: str, template: str) -> None:
+    """A comparison called as a function is refused, with the operator to write instead (#293).
+
+    DuckDB 2.0 lists its comparison operators as functions; called by name with a text and a
+    number, it fails its own type check with an internal error that leaves the process unusable.
+
+    Parameters
+    ----------
+    name
+        The operator's function name.
+    template
+        Where the call is written: bare, schema- or catalog-qualified, as a method, in a
+        `WHERE` or in a lambda.
+    """
+    for spelling in (name, name.lower()):
+        with pytest.raises(ValidationError) as caught:
+            check_blacklist(template.format(name=spelling))
+
+        message = str(caught.value)
+        assert f'"{spelling}"' in message
+        assert "id < 'a'" in message
+        assert "write the operator itself" in message
+
+
+@pytest.mark.parametrize("name", ["+", "||", "~~", "!__postfix", "->>", "@>"])
+def test_blacklist_refuses_any_other_operator_called_by_name(name: str) -> None:
+    """No query needs an operator by name, so every name that is not a word is refused.
+
+    Parameters
+    ----------
+    name
+        An operator's function name.
+    """
+    with pytest.raises(ValidationError, match="write the operator itself"):
+        check_blacklist(f'SELECT "{name}"(1, 2)')
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT id < 'a', id <= 1, id = 1, id > 1, id >= 1, id != 1, id <> 1 FROM t",
+        "SELECT a IS DISTINCT FROM b, a IS NOT DISTINCT FROM b FROM t",
+        "SELECT * FROM t WHERE id < 3 AND name || 'x' = 'ax'",
+        'SELECT "lower"(name), main.lower(name), "my_func2"(1) FROM t',
+    ],
+)
+def test_blacklist_allows_operators_written_as_operators(sql: str) -> None:
+    """Operator syntax and functions with ordinary names, quoted or not, stay allowed.
+
+    Parameters
+    ----------
+    sql
+        A query using operators or ordinary function names.
+    """
+    check_blacklist(sql)
 
 
 @pytest.mark.parametrize("sql", ["SELECT 1 AS a__b", "SELECT my__func(1)", "SELECT x__ FROM t"])

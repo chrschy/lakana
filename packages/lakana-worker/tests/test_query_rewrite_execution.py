@@ -1168,3 +1168,256 @@ def test_a_column_mask_holds_for_a_read_inside_a_bare_values_list(tmp_path: Path
     rows = _fetch(rewrite_query(sql, {"gold.customers": source}))
 
     assert rows == [("***", 2)]
+
+
+def _sales(
+    tmp_path: Path, row_filters: tuple[str, ...] = (), column_masks: dict[str, str] | None = None
+) -> TableSource:
+    """Write a small sales file and describe it as a source.
+
+    Parameters
+    ----------
+    tmp_path
+        Directory to write into.
+    row_filters
+        The source's row filters.
+    column_masks
+        The source's column masks.
+
+    Returns
+    -------
+    TableSource
+        A parquet source with the columns `id`, `region` and `amount`.
+    """
+    path = tmp_path / "sales.parquet"
+    pq.write_table(
+        pa.table(
+            {"id": [1, 2, 3, 4], "region": ["eu", "us", "eu", "us"], "amount": [10, 20, 30, 40]}
+        ),
+        path,
+    )
+    return TableSource(
+        urls=[str(path)],
+        file_format="parquet",
+        columns={"id": "BIGINT", "region": "VARCHAR", "amount": "BIGINT"},
+        row_filters=row_filters,
+        column_masks=column_masks or {},
+    )
+
+
+_PIVOT = "SELECT * FROM gold.sales PIVOT (sum(amount) FOR region IN ('eu', 'us'))"
+
+
+def test_a_standard_pivot_returns_pivoted_rows(tmp_path: Path) -> None:
+    """`FROM t PIVOT (...)` pivots the rows instead of returning the table as stored (#280)."""
+    rows = _run(_PIVOT, {"gold.sales": _sales(tmp_path)})
+
+    assert rows == [(1, 10, None), (2, None, 20), (3, 30, None), (4, None, 40)]
+
+
+def test_a_standard_unpivot_returns_unpivoted_rows(tmp_path: Path) -> None:
+    """`FROM t UNPIVOT (...)` unpivots the rows (#280)."""
+    rows = _run(
+        "SELECT region, k, v FROM gold.sales AS s UNPIVOT (v FOR k IN (id, amount))",
+        {"gold.sales": _sales(tmp_path)},
+    )
+
+    assert len(rows) == 8
+    assert ("eu", "amount", 30) in rows
+    assert ("us", "id", 4) in rows
+
+
+def test_a_standard_pivot_applies_the_filter_and_the_mask_before_pivoting(
+    tmp_path: Path,
+) -> None:
+    """The pivot reads the filtered, masked rows: a hidden row or a masked amount never shows."""
+    source = _sales(tmp_path, row_filters=("region = 'eu'",), column_masks={"amount": "NULL"})
+
+    rows = _run(_PIVOT, {"gold.sales": source})
+
+    assert rows == [(1, None, None), (3, None, None)]
+
+
+def test_a_masked_column_used_as_the_pivot_value_stays_masked(tmp_path: Path) -> None:
+    """Pivoting on a masked column sees only the mask, so the real values match no column."""
+    source = _sales(tmp_path, column_masks={"region": "'hidden'"})
+
+    real = _run(_PIVOT, {"gold.sales": source})
+    masked = _run(
+        "SELECT * FROM gold.sales PIVOT (sum(amount) FOR region IN ('hidden'))",
+        {"gold.sales": source},
+    )
+
+    assert real == [(1, None, None), (2, None, None), (3, None, None), (4, None, None)]
+    assert masked == [(1, 10), (2, 20), (3, 30), (4, 40)]
+
+
+def test_a_standard_unpivot_of_a_masked_column_shows_only_the_mask(tmp_path: Path) -> None:
+    """Unpivoting a masked column yields the mask's value; the stored amounts never appear."""
+    source = _sales(tmp_path, column_masks={"amount": "0"})
+
+    rows = _run(
+        "SELECT k, v FROM gold.sales UNPIVOT (v FOR k IN (id, amount)) WHERE k = 'amount'",
+        {"gold.sales": source},
+    )
+
+    assert rows == [("amount", 0)] * 4
+
+
+def test_a_parenthesized_join_keeps_its_second_table(tmp_path: Path) -> None:
+    """`FROM (a JOIN b ON ...)` reads both tables; the rewrite used to drop the join."""
+    sources = {"gold.sales": _sales(tmp_path), "gold.orders": _parquet(str(_orders(tmp_path)))}
+
+    rows = _run(
+        "SELECT s.id, o.note FROM (gold.sales AS s JOIN gold.orders AS o ON s.id = o.id)", sources
+    )
+
+    assert rows == [(1, "a"), (2, "b"), (3, "c")]
+
+
+def test_a_table_sample_is_kept(tmp_path: Path) -> None:
+    """`TABLESAMPLE` on a table still samples; the rewrite used to drop it."""
+    rows = _run(
+        "SELECT * FROM gold.sales TABLESAMPLE RESERVOIR (1 ROWS)", {"gold.sales": _sales(tmp_path)}
+    )
+
+    assert len(rows) == 1
+
+
+def test_an_alias_with_column_names_renames_the_columns(tmp_path: Path) -> None:
+    """`AS s(a, b, c)` keeps its column names through the rewrite."""
+    rows = _run("SELECT s.c FROM gold.sales AS s(a, b, c)", {"gold.sales": _sales(tmp_path)})
+
+    assert rows == [(10,), (20,), (30,), (40,)]
+
+
+def test_every_operator_duckdb_lists_as_a_function_is_refused_by_name() -> None:
+    """Each function DuckDB lists under an operator's name is refused by the guard (#293).
+
+    Read from DuckDB's own catalog, so an operator a later DuckDB lists is checked here too.
+    The comparison operators must be among them: they are the ones DuckDB 2.0 fails on with an
+    internal error when called by name.
+    """
+    connection = duckdb.connect()
+    names = {
+        row[0]
+        for row in connection.execute(
+            "SELECT DISTINCT function_name FROM duckdb_functions()"
+        ).fetchall()
+        if not all(character.isalnum() or character == "_" for character in row[0])
+    }
+
+    assert {"<", "<=", "=", ">", ">=", "!=", "IS DISTINCT FROM", "IS NOT DISTINCT FROM"} <= names
+    for name in sorted(names):
+        with pytest.raises(ValidationError, match="write the operator itself"):
+            check_blacklist(f'SELECT "{name}"(1, 2)')
+
+
+_DATE_MAX_DAYS = 2_147_483_646
+"""Days after 1970-01-01 of DuckDB's largest date (5881580-07-10), far outside a timestamp."""
+_DATE_MIN_DAYS = -2_147_483_646
+"""Days before 1970-01-01 of DuckDB's smallest date (5877642-06-25 BC)."""
+_YEAR_300000_DAYS = 108_854_000
+"""A day in the year 300000, just outside the timestamp range (which ends in 294247)."""
+
+
+def _born_and_seen(tmp_path: Path) -> str:
+    """Write rows whose `born` dates reach both ends of DuckDB's date range.
+
+    Parameters
+    ----------
+    tmp_path
+        Where the file goes.
+
+    Returns
+    -------
+    str
+        The file's path. Rows 1 and 2 have ordinary dates (2000-01-01 and 2030-01-01), rows 3 to 6
+        dates outside the timestamp range; every `seen` is 2026-01-01 00:00:00.
+    """
+    path = tmp_path / "born.parquet"
+    ordinary = [
+        (date(2000, 1, 1) - date(1970, 1, 1)).days,
+        (date(2030, 1, 1) - date(1970, 1, 1)).days,
+    ]
+    days = [*ordinary, _DATE_MAX_DAYS, _DATE_MIN_DAYS, _YEAR_300000_DAYS, -_YEAR_300000_DAYS]
+    pq.write_table(
+        pa.table(
+            {
+                "id": pa.array(range(1, len(days) + 1), pa.int64()),
+                "born": pa.array(days, pa.int32()).cast(pa.date32()),
+                "seen": pa.array([datetime(2026, 1, 1)] * len(days), pa.timestamp("us")),
+            }
+        ),
+        path,
+    )
+    return str(path)
+
+
+@pytest.mark.parametrize(
+    ("row_filter", "hidden", "exact"),
+    [
+        ("born < TIMESTAMP '2026-01-01 00:00:00'", [1], [1, 4, 6]),
+        ("TIMESTAMP '2026-01-01 00:00:00' > born", [1], [1, 4, 6]),
+        ("born > TIMESTAMP '2026-01-01 00:00:00'", [2], [2, 3, 5]),
+        ("TIMESTAMP '2026-01-01 00:00:00' <= born", [2], [2, 3, 5]),
+        ("born < seen", [1], [1]),
+        ("seen > born", [1], [1]),
+        ("born >= seen", [2], [2]),
+        ("seen <> born", [1, 2], [1, 2]),
+        ("NOT (born < seen)", [2], [2]),
+        ("NOT (born = TIMESTAMP '2000-01-01 00:00:00') AND seen = seen", [2], [2, 3, 4, 5, 6]),
+        ("(born < seen) = FALSE", [2], [2]),
+        ("born < seen OR id = 4", [1, 4], [1, 4]),
+        ("born = DATE '2000-01-01'", [1], [1]),
+    ],
+)
+@pytest.mark.parametrize("stored", ["iceberg", "parquet"])
+def test_a_row_filter_comparing_a_date_with_a_timestamp_never_fails_on_dates_outside_the_range(
+    tmp_path: Path, row_filter: str, hidden: list[int], exact: list[int], stored: str
+) -> None:
+    """A date outside the timestamp range never fails the read and never passes a false filter.
+
+    Before #178 the engine's conversion of such a date failed the whole read. The date side is
+    now converted with `TRY_CAST`: where the engine has to convert such a date, the comparison
+    is unknown and the row hidden (`hidden`; a row passes only when the filter holds whatever the
+    comparison was, `id = 4` in an `OR`). Against a constant, DuckDB 2.0 moves the conversion to
+    the constant and compares dates, which gives the true answer for every date (`exact`). Both
+    are correct; the ordinary rows are the same in either. Two columns are always compared as
+    timestamps, so there `exact` is `hidden`.
+
+    Parameters
+    ----------
+    tmp_path
+        Where the file goes.
+    row_filter
+        A filter comparing the date column with a timestamp, in either order.
+    hidden
+        The rows shown when every date outside the timestamp range makes its comparison unknown.
+    exact
+        The rows for which the filter is true, for a comparison with a constant.
+    stored
+        Whether the column types come from an Iceberg schema or a raw table's stored Arrow
+        types.
+    """
+    if stored == "iceberg":
+        columns = {"id": "long", "born": "date", "seen": "timestamp"}
+        mask_types = {
+            "id": iceberg_cast_type(LongType()),
+            "born": exp.DataType(this=exp.DType.DATE),
+            "seen": exp.DataType(this=exp.DType.TIMESTAMP),
+        }
+    else:
+        columns = {"id": "int64", "born": "date32[day]", "seen": "timestamp[us]"}
+        mask_types = {name: arrow_cast_type(arrow) for name, arrow in columns.items()}
+    source = TableSource(
+        urls=[_born_and_seen(tmp_path)],
+        file_format="parquet",
+        columns=columns,
+        row_filters=(row_filter,),
+        mask_types={name: target for name, target in mask_types.items() if target is not None},
+    )
+
+    rows = _run("SELECT id FROM gold.people", {"gold.people": source})
+
+    assert rows in ([(i,) for i in hidden], [(i,) for i in exact])

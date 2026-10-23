@@ -353,6 +353,51 @@ namespace. A name is compared in lower case, after sqlglot has taken off quotes 
 catalog or schema qualifier, like the entries of `_BLACKLISTED_FUNCTIONS`.
 """
 
+
+def _is_operator_name(name: str) -> bool:
+    """Tell whether a called function's name is an operator rather than a word.
+
+    DuckDB 2.0 lists its operators as functions (`"<"`, `"||"`, `"IS DISTINCT FROM"`, ...),
+    callable by name, quoted and qualified (`main."<"(a, b)`, `a."<"(b)`). Called by name with
+    a text and a number, a comparison binds and then fails DuckDB's own type check with an
+    internal error that leaves the query process's database unusable (#293). No query needs an
+    operator by name, and every function DuckDB lists whose name is not made of letters, digits
+    and `_` is an operator, so `check_blacklist` refuses each of them, also one a later DuckDB
+    adds.
+
+    Parameters
+    ----------
+    name
+        The function name as written, without its schema.
+
+    Returns
+    -------
+    bool
+        True when the name holds a character other than a letter, a digit or `_`.
+    """
+    return not all(character.isalnum() or character == "_" for character in name)
+
+
+def _operator_call_message(name: str) -> str:
+    """Word the refusal of an operator called by name.
+
+    Parameters
+    ----------
+    name
+        The function name as written.
+
+    Returns
+    -------
+    str
+        The message, naming the call and the form to write instead.
+    """
+    return (
+        f'"{name}" is an operator called by name, which DuckDB does not check for types; '
+        "write the operator itself between its operands instead, such as id < 'a' or "
+        "a IS DISTINCT FROM b."
+    )
+
+
 _BLACKLISTED_COMMANDS = frozenset({"load", "create"})
 """Leading keywords of statements sqlglot parses to a generic `exp.Command`.
 
@@ -1704,8 +1749,106 @@ def _reader_select_sql(source: TableSource, index: int, dialect: str) -> str:
     # above. The URLs are still the variable's value, never text.
     sql = f"SELECT {', '.join(projections)} FROM {reader}"  # nosec B608
     if source.row_filters:
-        sql += " WHERE " + " AND ".join(f"({expression})" for expression in source.row_filters)
+        sql += " WHERE " + " AND ".join(
+            f"({_compiled_row_filter(expression, source.mask_types, dialect)})"
+            for expression in source.row_filters
+        )
     return sql
+
+
+_DATE_TYPES = frozenset({exp.DType.DATE, exp.DType.DATE32})
+"""The types a row filter's comparison treats as a date."""
+
+_TIMESTAMP_TYPES = frozenset(
+    {
+        exp.DType.DATETIME,
+        exp.DType.TIMESTAMP,
+        exp.DType.TIMESTAMPNTZ,
+        exp.DType.TIMESTAMP_S,
+        exp.DType.TIMESTAMP_MS,
+        exp.DType.TIMESTAMP_NS,
+        exp.DType.TIMESTAMPTZ,
+        exp.DType.TIMESTAMPLTZ,
+    }
+)
+"""The types a row filter's comparison treats as a timestamp."""
+
+_FILTER_COMPARISONS = (exp.EQ, exp.NEQ, exp.GT, exp.GTE, exp.LT, exp.LTE)
+"""The comparisons a row filter may contain (`policy.expressions`)."""
+
+
+def _operand_type(node: exp.Expr, types: Mapping[str, exp.DataType]) -> exp.DataType | None:
+    """Give the type of one side of a row filter's comparison, when it is a column or literal.
+
+    Parameters
+    ----------
+    node
+        The side, possibly in parentheses.
+    types
+        The table's column types (`TableSource.mask_types`), by column name.
+
+    Returns
+    -------
+    sqlglot.expressions.DataType or None
+        The column's type (its name compared without regard to case, as the database does), a
+        typed literal's type (`DATE '...'`, `TIMESTAMP '...'`), or `None` for anything else.
+    """
+    while isinstance(node, exp.Paren):
+        node = node.this
+    if isinstance(node, exp.Column) and not node.table:
+        by_lower = {name.lower(): target for name, target in types.items()}
+        return by_lower.get(node.name.lower())
+    if isinstance(node, exp.Cast) and isinstance(node.this, exp.Literal):
+        return node.to
+    return None
+
+
+def _compiled_row_filter(expression: str, types: Mapping[str, exp.DataType], dialect: str) -> str:
+    """Convert the date side of each comparison of a date with a timestamp with `TRY_CAST`.
+
+    DuckDB compares a date with a timestamp by converting the date, and that conversion fails
+    for a date outside the timestamp range (after 294247-01-10 or before 290309-12-22 BC), which
+    would fail every read the filter covers (#178). Written as `TRY_CAST`, such a date becomes
+    `NULL`, so the comparison is unknown and the row is hidden: a filter in the subset of
+    `policy.expressions` (comparisons, `AND`, `OR`, `NOT`, no `IS NULL`) is true only when it
+    would be true whatever the unknown comparison was, so the conversion never lets a row
+    through, and never fails. Against a constant, DuckDB 2.0's optimizer moves the conversion
+    onto the constant and compares dates, which is exact for every date; either way no row
+    passes a comparison that is false. A filter with no such comparison is returned as written.
+
+    Parameters
+    ----------
+    expression
+        One resolved, context-substituted row filter.
+    types
+        The table's column types (`TableSource.mask_types`), by column name.
+    dialect
+        The SQL dialect to parse and render it as.
+
+    Returns
+    -------
+    str
+        The filter, with `TRY_CAST(<date side> AS <timestamp type>)` where a date is compared
+        with a timestamp.
+    """
+    parsed = sqlglot.parse_one(expression, dialect=dialect)
+    changed = False
+    for comparison in list(parsed.find_all(*_FILTER_COMPARISONS)):
+        left, right = comparison.left, comparison.right
+        left_type, right_type = _operand_type(left, types), _operand_type(right, types)
+        if left_type is None or right_type is None:
+            continue
+        for side, side_type, other_type in (
+            (left, left_type, right_type),
+            (right, right_type, left_type),
+        ):
+            if side_type.this in _DATE_TYPES and other_type.this in _TIMESTAMP_TYPES:
+                inner = side
+                while isinstance(inner, exp.Paren):
+                    inner = inner.this
+                inner.replace(exp.TryCast(this=inner.copy(), to=other_type.copy()))
+                changed = True
+    return _render(parsed, dialect) if changed else expression
 
 
 def _masked_projection(mask: str, name: str, target: exp.DataType | None, dialect: str) -> str:
@@ -2128,6 +2271,65 @@ def _cte_alias(dotted: str) -> str:
     return "__lakana_" + re.sub(r"\W", "_", dotted) + "_" + digest
 
 
+_KEPT_TABLE_ARGS = frozenset({"joins", "pivots", "sample"})
+"""`exp.Table` args `rewrite_query` moves from a replaced table reference onto its replacement.
+
+The replacement is itself an `exp.Table` (the generated CTE's name), so each of these attaches
+to it exactly as it attached to the catalog name: a standard `PIVOT (...)`/`UNPIVOT (...)`, a
+`TABLESAMPLE`, and the `JOIN` of a parenthesized join (`FROM (gold.a JOIN gold.b ON ...)`, which
+sqlglot parses onto `a`'s own node). The policies are applied inside the CTE, so each of them
+reads the filtered, masked rows. Dropping them returned wrong results with no error (#280).
+"""
+
+_REFUSED_TABLE_CLAUSES = {
+    "laterals": "LATERAL VIEW",
+    "hints": "a table hint",
+    "system_time": "FOR SYSTEM_TIME",
+    "version": "a version clause",
+    "format": "a format clause",
+    "pattern": "a file pattern",
+    "ordinality": "WITH ORDINALITY",
+    "when": "AT (...)",
+    "only": "ONLY",
+    "partition": "PARTITION (...)",
+    "changes": "CHANGES (...)",
+    "rows_from": "ROWS FROM (...)",
+    "indexed": "INDEXED BY",
+}
+"""`exp.Table` args `rewrite_query` refuses on a catalog table, each with the name a refusal gives.
+
+None has a meaning on the generated read, and dropping one would silently change the result (a
+time-travel `AT (VERSION => 1)` would read the current rows). An argument in neither this nor
+`_KEPT_TABLE_ARGS` is refused under its own key; a test fails when sqlglot adds one.
+"""
+
+
+def _carry_table_clauses(table: exp.Table, replacement: exp.Table, dotted: str) -> None:
+    """Move the clauses attached to a catalog table reference onto the read that replaces it.
+
+    Parameters
+    ----------
+    table
+        The reference as the caller wrote it.
+    replacement
+        The reference to the generated read, modified in place.
+    dotted
+        The table's dotted name, for the refusal.
+
+    Raises
+    ------
+    ValidationError
+        If the reference carries a clause outside `_KEPT_TABLE_ARGS` and the naming args.
+    """
+    present = {key for key, value in table.args.items() if value not in (None, False, [])}
+    refused = sorted(present - _SAFE_TABLE_ARGS - _KEPT_TABLE_ARGS)
+    if refused:
+        names = ", ".join(_REFUSED_TABLE_CLAUSES.get(key, key) for key in refused)
+        raise ValidationError(f"{dotted!r} can't be read with {names}; remove it from the query.")
+    for key in sorted(present & _KEPT_TABLE_ARGS):
+        replacement.set(key, table.args[key])
+
+
 @_fail_closed
 def rewrite_query(
     sql: str, sources: Mapping[str, TableSource], dialect: str = "duckdb"
@@ -2229,6 +2431,7 @@ def rewrite_query(
             # fails in the database instead of binding to the wrong table.
             replacement.set("alias", exp.TableAlias(this=table.this.copy()))
             named.append((_qualifier_key(table), table))
+        _carry_table_clauses(table, replacement, dotted)
         table.replace(replacement)
     _drop_schema_from_qualified_columns(scopes, named)
     if not ctes:
@@ -2328,6 +2531,8 @@ def check_blacklist(sql: str, dialect: str = "duckdb") -> None:
             )
         if name in _BLACKLISTED_FUNCTIONS:
             raise ValidationError(f"{name} may not be called directly; query the catalog instead.")
+        if isinstance(func, exp.Anonymous) and _is_operator_name(func.name):
+            raise ValidationError(_operator_call_message(func.name))
         if name.startswith(_INTERNAL_FUNCTION_PREFIX):
             raise ValidationError(
                 f"{name} is internal to DuckDB and may not be called directly; "

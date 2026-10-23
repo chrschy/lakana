@@ -366,6 +366,18 @@ def test_a_dropped_node_with_an_unparseable_recorded_name_is_hidden(
     assert graph.hidden_nodes == 1
 
 
+def test_a_dropped_node_with_no_recorded_name_is_unreadable(session: Session) -> None:
+    """A dropped id that no edge names gets no securable, so it is never shown."""
+    ids = _tables(session, "c")
+    service = LineageService(session, _Readable(*_EVERYTHING))
+
+    node, securable = service._node("dev", ids["env"], uuid.uuid4())
+
+    assert node.dropped is True
+    assert node.name == ""
+    assert securable is None
+
+
 def test_a_wide_graph_is_capped_and_flagged_truncated(
     session: Session, principal: PrincipalRef
 ) -> None:
@@ -653,3 +665,136 @@ def test_a_dropped_node_asks_for_the_namespace_never_a_table(
 
     # The root is asked first, as a table; the dropped node after it.
     assert [(s.kind, s.table) for s in asked[1:]] == [(SecurableKind.NAMESPACE, None)]
+
+
+_READERS_OF_A_MOVED_TABLE = {
+    "old namespace only": (("bronze",), False),
+    "new namespace only": (("silver",), True),
+    "both namespaces": (("bronze", "silver"), True),
+}
+"""Namespace grants of a reader, and whether the moved, dropped table is theirs to see."""
+
+
+def _moved_then_dropped(session: Session) -> tuple[dict[str, uuid.UUID], uuid.UUID]:
+    """Record lineage of `x`, renamed from `bronze` to `silver` and then dropped.
+
+    `x` fed `bronze.a` as `bronze.x`, then, renamed, fed `silver.b` as `silver.x`; `a` and `b`
+    both feed `gold.c`. `x` has no table row any more.
+
+    Parameters
+    ----------
+    session
+        Database session.
+
+    Returns
+    -------
+    tuple
+        The ids of `a`, `b`, `c` and `"env"`, and `x`'s id.
+    """
+    environment_id, a = ensure_table(session, "dev", "bronze", "a")
+    _, b = ensure_table(session, "dev", "silver", "b")
+    _, c = ensure_table(session, "dev", "gold", "c")
+    x = uuid.uuid4()
+    _edge(session, environment_id, (x, "bronze.x"), (a, "bronze.a"), at=_T0)
+    _edge(session, environment_id, (x, "silver.x"), (b, "silver.b"), at=_T0 + timedelta(hours=1))
+    _edge(session, environment_id, (a, "bronze.a"), (c, "gold.c"), at=_T0 + timedelta(hours=2))
+    _edge(session, environment_id, (b, "silver.b"), (c, "gold.c"), at=_T0 + timedelta(hours=3))
+    return {"a": a, "b": b, "c": c, "env": environment_id}, x
+
+
+@pytest.mark.parametrize("reader", sorted(_READERS_OF_A_MOVED_TABLE))
+@pytest.mark.parametrize("root", ["bronze.a", "silver.b", "gold.c"])
+def test_a_table_moved_across_namespaces_then_dropped_gets_one_verdict_from_every_root(
+    session: Session, principal: PrincipalRef, reader: str, root: str
+) -> None:
+    """The newest recorded name decides, wherever the walk starts and whichever edge is first.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    principal
+        The caller.
+    reader
+        Which namespaces the caller may read (`_READERS_OF_A_MOVED_TABLE`).
+    root
+        The table the walk starts from.
+    """
+    _, x = _moved_then_dropped(session)
+    namespaces, visible = _READERS_OF_A_MOVED_TABLE[reader]
+    authz = _Readable("bronze.a", "silver.b", "gold.c", namespaces=namespaces)
+
+    graph = LineageService(session, authz).lineage(
+        principal, TableRef.from_dotted("dev", root), depth=2
+    )
+
+    shown = [node for node in graph.nodes if node.id == x]
+    assert bool(shown) is visible
+    if visible:
+        assert [(node.name, node.dropped) for node in shown] == [("silver.x", True)]
+        assert x in {edge.source_id for edge in graph.edges}
+    else:
+        assert all(x not in (edge.source_id, edge.target_id) for edge in graph.edges)
+        assert graph.hidden_nodes == 1
+
+
+def test_a_table_moved_then_dropped_is_shown_under_its_newest_name_downstream(
+    session: Session, principal: PrincipalRef
+) -> None:
+    """Downstream, a dropped target is judged by its newest recorded name, not the edge's."""
+    environment_id, a = ensure_table(session, "dev", "gold", "a")
+    _, b = ensure_table(session, "dev", "gold", "b")
+    y = uuid.uuid4()
+    _edge(session, environment_id, (a, "gold.a"), (y, "bronze.y"), at=_T0)
+    _edge(session, environment_id, (b, "gold.b"), (y, "silver.y"), at=_T0 + timedelta(hours=1))
+
+    old_reader = LineageService(session, _Readable("gold.a", namespaces=("bronze",)))
+    new_reader = LineageService(session, _Readable("gold.a", namespaces=("silver",)))
+
+    hidden = old_reader.lineage(principal, _ref("a"), direction=LineageDirection.DOWNSTREAM)
+    shown = new_reader.lineage(principal, _ref("a"), direction=LineageDirection.DOWNSTREAM)
+
+    assert [node.id for node in hidden.nodes] == [a]
+    assert hidden.edges == []
+    assert [(node.name, node.dropped) for node in shown.nodes if node.id == y] == [
+        ("silver.y", True)
+    ]
+
+
+def test_a_dropped_node_with_a_legacy_dotted_name_is_judged_at_the_namespace_before_the_last_dot(
+    session: Session, principal: PrincipalRef
+) -> None:
+    """`bronze.x.y` names the table `y` in the namespace `bronze.x`."""
+    ids = _tables(session, "c")
+    _edge(session, ids["env"], (uuid.uuid4(), "bronze.x.y"), (ids["c"], "gold.c"))
+    asked: list[Securable] = []
+
+    class _Spy(_Readable):
+        def permits(self, principal: PrincipalRef, action: Action, securable: Securable) -> bool:
+            """Record the securable, then answer as `_Readable` does.
+
+            Parameters
+            ----------
+            principal
+                The caller.
+            action
+                The action.
+            securable
+                The object, recorded.
+
+            Returns
+            -------
+            bool
+                As `_Readable.permits`.
+            """
+            asked.append(securable)
+            return super().permits(principal, action, securable)
+
+    graph = LineageService(session, _Spy("gold.c", namespaces=("bronze.x",))).lineage(
+        principal, _ref("c")
+    )
+
+    assert [(s.kind, str(s.namespace), s.table) for s in asked[1:]] == [
+        (SecurableKind.NAMESPACE, "bronze.x", None)
+    ]
+    assert "bronze.x.y" in _names(graph)

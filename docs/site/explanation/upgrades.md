@@ -167,6 +167,38 @@ builds need; a build past it gets a `503` that names the setting. Builds now dow
 many connections may need the setting raised under `egress` in `compose.yaml`; see
 [The egress proxy](../how-to/run-python-tasks-in-containers.md#the-egress-proxy).
 
+### A standard PIVOT pivots
+
+`SELECT * FROM gold.sales PIVOT (sum(amount) FOR region IN ('eu', 'us'))` and the standard
+`UNPIVOT (...)` now return pivoted rows; before, Lakana dropped the clause and returned the
+table's rows unchanged, with no error. The same held for a `TABLESAMPLE` after a table name and
+for the second table of a join written in parentheses (`FROM (gold.a JOIN gold.b ON ...)`). A
+query, view or asset that used one of these returns different rows after the upgrade. A clause
+Lakana cannot apply to a table (`AT (...)`, `ONLY`, `WITH ORDINALITY`, a table hint) is now
+refused instead of dropped; see
+[Clauses after a table name](../reference/sql-in-queries.md#clauses-after-a-table-name).
+
+### An operator called by name is refused
+
+A query that calls an operator as a function, such as `"<"(id, 'a')`, `main."="(a, b)` or
+`"IS DISTINCT FROM"(a, b)`, is now refused with a message that says to write the operator
+itself (`id < 'a'`). On DuckDB 2.0 such a call could fail with an internal error. A view or an
+asset written this way needs the operator written as an operator.
+
+### A date outside the timestamp range no longer fails a filtered read
+
+A row filter that compares a date with a timestamp (`born < seen`) used to fail every read it
+covered when a row held a date outside the timestamp range (a year such as 300000). Such a row is
+now hidden by the filter instead, and the read succeeds. See
+[Filter rows](../how-to/filter-rows.md).
+
+### Lineage shows a moved and dropped table the same way from every table
+
+A dropped table that had been renamed into another namespace used to be shown or hidden in
+`table lineage` depending on which table you started from. It is now judged by the last name
+Lakana recorded for it: it is shown, under that name, to a reader of that name's namespace, and
+hidden from a reader of only its earlier namespace.
+
 ## Notes for 0.20.0
 
 ### Python tasks run in containers in the Compose bundle
