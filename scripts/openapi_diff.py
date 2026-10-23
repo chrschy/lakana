@@ -25,7 +25,8 @@ more, a deprecation. Text (summaries, descriptions, titles, operation ids, tags)
 count, and neither does the name of a component schema: references are resolved and compared
 by shape, the alternatives of a union are paired by component name and then by kind (so
 ``Model`` and ``Model | None`` differ only by null, and a renamed component inside a union is
-compared by its shape), an ``allOf`` is compared as the merge of its members, and a path
+compared by its shape), an ``allOf`` is compared as the merge of its members (the stricter
+value of each setting; members that cannot be combined are breaking), and a path
 parameter is matched by its place in the path, not its name.
 
 Usage: ``python3 scripts/openapi_diff.py BASE HEAD [--require-breaking-title]``; the title is
@@ -56,6 +57,10 @@ _JSON = "application/json"
 _MAXIMA = ("maxLength", "maximum", "exclusiveMaximum", "maxItems", "maxProperties")
 _MINIMA = ("minLength", "minimum", "exclusiveMinimum", "minItems", "minProperties")
 _ANY = "any"
+_CONFLICTS = "x-merge-conflicts"
+"""Where the merge of an ``allOf`` lists what it could not combine."""
+_CONFLICTING = ("type", "format", "pattern", "anyOf", "oneOf", "multipleOf")
+"""Settings that cannot be combined by taking the stricter value; different ones conflict."""
 
 Schema = dict[str, Any]
 _Alternative = tuple[str | None, str, Schema]
@@ -196,6 +201,22 @@ def _allowed(schema: Schema) -> list[Any] | None:
     return None
 
 
+def _is_number(value: object) -> bool:
+    """Tell whether a value is a number (a boolean is not).
+
+    Parameters
+    ----------
+    value
+        Any value.
+
+    Returns
+    -------
+    bool
+        True for an int or a float.
+    """
+    return isinstance(value, int | float) and not isinstance(value, bool)
+
+
 def _shown(value: object) -> str:
     """Show a limit or a default in a message.
 
@@ -333,18 +354,119 @@ class _Comparison:
         outer = {key: value for key, value in resolved.items() if key != "allOf"}
         if len(members) == 1:
             inner, inner_name = self._unwrap(doc, members[0])
-            return {**inner, **outer}, inner_name or name
+            return self._merge(doc, inner, outer), inner_name or name
         merged: Schema = {}
         for member in members:
             inner, _ = self._unwrap(doc, member)
-            properties = {**merged.get("properties", {}), **inner.get("properties", {})}
-            required = [*merged.get("required", ()), *inner.get("required", ())]
-            merged = {**inner, **merged}
-            if properties:
-                merged["properties"] = properties
-            if required:
-                merged["required"] = list(dict.fromkeys(required))
-        return {**merged, **outer}, name
+            merged = self._merge(doc, merged, inner)
+        return self._merge(doc, merged, outer), name
+
+    def _merge(self, doc: Mapping[str, Any], first: Schema, second: Schema) -> Schema:
+        """Combine two schemas that must both hold, taking the stricter value of each setting.
+
+        Parameters
+        ----------
+        doc
+            The document the schemas belong to, to resolve references of shared properties.
+        first
+            A resolved schema, the earlier member.
+        second
+            A resolved schema, the later member.
+
+        Returns
+        -------
+        dict
+            The schema a value must match to match both: the smallest maximum, the largest
+            minimum, the intersection of the allowed values, the union of the required fields,
+            shared properties merged the same way. A setting only one member has is kept. What
+            cannot be combined (different types, formats, patterns, no common value, different
+            alternatives) is listed under ``_CONFLICTS`` and the first member's value stays.
+        """
+        merged: Schema = {**first}
+        conflicts = list(first.get(_CONFLICTS, ())) + list(second.get(_CONFLICTS, ()))
+        for key, value in second.items():
+            if key == _CONFLICTS or key not in merged:
+                if key != _CONFLICTS:
+                    merged[key] = value
+                continue
+            mine = merged[key]
+            if mine == value:
+                continue
+            if key in _MAXIMA and _is_number(mine) and _is_number(value):
+                merged[key] = min(mine, value)
+            elif key in _MINIMA and _is_number(mine) and _is_number(value):
+                merged[key] = max(mine, value)
+            elif key == "required" and isinstance(mine, list) and isinstance(value, list):
+                merged[key] = list(dict.fromkeys([*mine, *value]))
+            elif key == "properties" and isinstance(mine, dict) and isinstance(value, dict):
+                merged[key] = self._merge_properties(doc, mine, value)
+            elif key in ("items", "additionalProperties") and isinstance(mine, dict | bool):
+                merged[key] = self._merge_sub(doc, mine, value)
+            elif key == "nullable":
+                merged[key] = bool(mine) and bool(value)
+            elif key == "deprecated":
+                merged[key] = bool(mine) or bool(value)
+            elif key in _CONFLICTING:
+                conflicts.append(f"{key} {_shown(mine)} and {_shown(value)}")
+        allowed = [_allowed(first), _allowed(second)]
+        if allowed[0] is not None and allowed[1] is not None:
+            values = [item for item in allowed[0] if item in allowed[1]]
+            merged.pop("const", None)
+            merged["enum"] = values
+            if not values:
+                conflicts.append("enum and const without a common value")
+        if conflicts:
+            merged[_CONFLICTS] = list(dict.fromkeys(conflicts))
+        return merged
+
+    def _merge_properties(self, doc: Mapping[str, Any], first: Schema, second: Schema) -> Schema:
+        """Combine the ``properties`` of two members.
+
+        Parameters
+        ----------
+        doc
+            The document the schemas belong to.
+        first
+            The properties of the earlier member.
+        second
+            The properties of the later member.
+
+        Returns
+        -------
+        dict
+            All properties; one both members have is the merge of the two.
+        """
+        merged = dict(first)
+        for name, schema in second.items():
+            merged[name] = self._merge_sub(doc, merged[name], schema) if name in merged else schema
+        return merged
+
+    def _merge_sub(self, doc: Mapping[str, Any], first: object, second: object) -> Schema | bool:
+        """Combine two sub-schemas (a shared property, ``items``, ``additionalProperties``).
+
+        Parameters
+        ----------
+        doc
+            The document the schemas belong to.
+        first
+            The earlier schema, possibly a reference, or a boolean.
+        second
+            The later schema.
+
+        Returns
+        -------
+        dict or bool
+            The merged schema; ``False`` if either is ``False``; the other if one is ``True``.
+        """
+        if first is False or second is False:
+            return False
+        if first is True:
+            return second
+        if second is True:
+            return first
+        one, _ = self._unwrap(doc, first)
+        two, _ = self._unwrap(doc, second)
+        return self._merge(doc, one, two)
 
     def _alternatives(
         self, doc: Mapping[str, Any], schema: Schema, name: str | None
@@ -398,6 +520,9 @@ class _Comparison:
             if key in self._seen:
                 return
             self._seen.add(key)
+        for conflict in new.get(_CONFLICTS, ()):
+            if conflict not in old.get(_CONFLICTS, ()):
+                self._add(True, where, f"allOf members cannot be combined: {conflict}")
         if new.get("deprecated") and not old.get("deprecated"):
             self._add(False, where, "deprecated")
         if request and "default" in old and "default" in new and old["default"] != new["default"]:
@@ -419,8 +544,9 @@ class _Comparison:
     ) -> tuple[list[tuple[Schema, Schema]], list[_Alternative], list[_Alternative]]:
         """Pair the alternatives of two unions.
 
-        First by component name, then what is left by kind, in order: a renamed component, or
-        an inline schema that became a component, is still compared by its shape.
+        First by component name, then by identical shape (a component renamed and reordered at
+        once), then what is left by kind, in order: a renamed component, or an inline schema
+        that became a component, is still compared by its shape.
 
         Parameters
         ----------
@@ -438,6 +564,7 @@ class _Comparison:
         olds, news = list(olds), list(news)
         for same in (
             lambda a, b: a[0] is not None and a[0] == b[0],
+            lambda a, b: a[2] == b[2],
             lambda a, b: a[1] == b[1],
         ):
             for old in list(olds):
