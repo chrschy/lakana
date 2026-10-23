@@ -353,6 +353,51 @@ namespace. A name is compared in lower case, after sqlglot has taken off quotes 
 catalog or schema qualifier, like the entries of `_BLACKLISTED_FUNCTIONS`.
 """
 
+
+def _is_operator_name(name: str) -> bool:
+    """Tell whether a called function's name is an operator rather than a word.
+
+    DuckDB 2.0 lists its operators as functions (`"<"`, `"||"`, `"IS DISTINCT FROM"`, ...),
+    callable by name, quoted and qualified (`main."<"(a, b)`, `a."<"(b)`). Called by name with
+    a text and a number, a comparison binds and then fails DuckDB's own type check with an
+    internal error that leaves the query process's database unusable (#293). No query needs an
+    operator by name, and every function DuckDB lists whose name is not made of letters, digits
+    and `_` is an operator, so `check_blacklist` refuses each of them, also one a later DuckDB
+    adds.
+
+    Parameters
+    ----------
+    name
+        The function name as written, without its schema.
+
+    Returns
+    -------
+    bool
+        True when the name holds a character other than a letter, a digit or `_`.
+    """
+    return not all(character.isalnum() or character == "_" for character in name)
+
+
+def _operator_call_message(name: str) -> str:
+    """Word the refusal of an operator called by name.
+
+    Parameters
+    ----------
+    name
+        The function name as written.
+
+    Returns
+    -------
+    str
+        The message, naming the call and the form to write instead.
+    """
+    return (
+        f'"{name}" is an operator called by name, which DuckDB does not check for types; '
+        "write the operator itself between its operands instead, such as id < 'a' or "
+        "a IS DISTINCT FROM b."
+    )
+
+
 _BLACKLISTED_COMMANDS = frozenset({"load", "create"})
 """Leading keywords of statements sqlglot parses to a generic `exp.Command`.
 
@@ -2388,6 +2433,8 @@ def check_blacklist(sql: str, dialect: str = "duckdb") -> None:
             )
         if name in _BLACKLISTED_FUNCTIONS:
             raise ValidationError(f"{name} may not be called directly; query the catalog instead.")
+        if isinstance(func, exp.Anonymous) and _is_operator_name(func.name):
+            raise ValidationError(_operator_call_message(func.name))
         if name.startswith(_INTERNAL_FUNCTION_PREFIX):
             raise ValidationError(
                 f"{name} is internal to DuckDB and may not be called directly; "

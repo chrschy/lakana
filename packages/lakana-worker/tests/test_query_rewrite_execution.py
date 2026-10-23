@@ -1289,3 +1289,25 @@ def test_an_alias_with_column_names_renames_the_columns(tmp_path: Path) -> None:
     rows = _run("SELECT s.c FROM gold.sales AS s(a, b, c)", {"gold.sales": _sales(tmp_path)})
 
     assert rows == [(10,), (20,), (30,), (40,)]
+
+
+def test_every_operator_duckdb_lists_as_a_function_is_refused_by_name() -> None:
+    """Each function DuckDB lists under an operator's name is refused by the guard (#293).
+
+    Read from DuckDB's own catalog, so an operator a later DuckDB lists is checked here too.
+    The comparison operators must be among them: they are the ones DuckDB 2.0 fails on with an
+    internal error when called by name.
+    """
+    connection = duckdb.connect()
+    names = {
+        row[0]
+        for row in connection.execute(
+            "SELECT DISTINCT function_name FROM duckdb_functions()"
+        ).fetchall()
+        if not all(character.isalnum() or character == "_" for character in row[0])
+    }
+
+    assert {"<", "<=", "=", ">", ">=", "!=", "IS DISTINCT FROM", "IS NOT DISTINCT FROM"} <= names
+    for name in sorted(names):
+        with pytest.raises(ValidationError, match="write the operator itself"):
+            check_blacklist(f'SELECT "{name}"(1, 2)')

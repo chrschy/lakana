@@ -178,6 +178,13 @@ Lakana cannot apply to a table (`AT (...)`, `ONLY`, `WITH ORDINALITY`, a table h
 refused instead of dropped; see
 [Clauses after a table name](../reference/sql-in-queries.md#clauses-after-a-table-name).
 
+### An operator called by name is refused
+
+A query that calls an operator as a function, such as `"<"(id, 'a')`, `main."="(a, b)` or
+`"IS DISTINCT FROM"(a, b)`, is now refused with a message that says to write the operator
+itself (`id < 'a'`). On DuckDB 2.0 such a call could fail with an internal error. A view or an
+asset written this way needs the operator written as an operator.
+
 ## Notes for 0.20.0
 
 ### Python tasks run in containers in the Compose bundle

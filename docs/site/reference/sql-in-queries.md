@@ -100,6 +100,7 @@ groups have a message of their own:
 | `setval`, `nextval`, `currval` | they change or read a sequence, which is the engine's state, not data | remove the call |
 | `to_aggregate_state` | it picks an aggregate function by a name given as data | remove the call |
 | any name starting with `__` | it is internal to DuckDB | write the SQL it stands for, such as `CAST` or `BETWEEN` |
+| an operator called by name, such as `"<"(id, 'a')`, `main."="(a, b)` or `"IS DISTINCT FROM"(a, b)` | DuckDB does not check its types when it is called by name, and fails with an internal error | write the operator itself: `id < 'a'`, `a IS DISTINCT FROM b` |
 
 ## A view the checks now refuse
 

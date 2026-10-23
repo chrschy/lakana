@@ -1067,6 +1067,89 @@ def test_blacklist_tells_the_user_what_to_write_instead_of_an_internal_function(
     assert "CAST" in message.replace("__cast", "")
 
 
+_COMPARISON_OPERATOR_NAMES = (
+    "<",
+    "<=",
+    "=",
+    ">",
+    ">=",
+    "!=",
+    "<>",
+    "IS DISTINCT FROM",
+    "IS NOT DISTINCT FROM",
+)
+"""The comparison operators DuckDB 2.0 lists as functions (and `<>`, which it may list later)."""
+
+
+@pytest.mark.parametrize("name", _COMPARISON_OPERATOR_NAMES)
+@pytest.mark.parametrize(
+    "template",
+    [
+        "SELECT \"{name}\"(id, 'a') FROM t",
+        "SELECT main.\"{name}\"(id, 'a') FROM t",
+        "SELECT system.main.\"{name}\"(id, 'a') FROM t",
+        "SELECT id.\"{name}\"('a') FROM t",
+        "SELECT * FROM t WHERE \"{name}\"(id, 'a')",
+        'SELECT list_filter([1, 2], x -> "{name}"(x, 1))',
+    ],
+)
+def test_blacklist_refuses_an_operator_called_by_name(name: str, template: str) -> None:
+    """A comparison called as a function is refused, with the operator to write instead (#293).
+
+    DuckDB 2.0 lists its comparison operators as functions; called by name with a text and a
+    number, it fails its own type check with an internal error that leaves the process unusable.
+
+    Parameters
+    ----------
+    name
+        The operator's function name.
+    template
+        Where the call is written: bare, schema- or catalog-qualified, as a method, in a
+        `WHERE` or in a lambda.
+    """
+    for spelling in (name, name.lower()):
+        with pytest.raises(ValidationError) as caught:
+            check_blacklist(template.format(name=spelling))
+
+        message = str(caught.value)
+        assert f'"{spelling}"' in message
+        assert "id < 'a'" in message
+        assert "write the operator itself" in message
+
+
+@pytest.mark.parametrize("name", ["+", "||", "~~", "!__postfix", "->>", "@>"])
+def test_blacklist_refuses_any_other_operator_called_by_name(name: str) -> None:
+    """No query needs an operator by name, so every name that is not a word is refused.
+
+    Parameters
+    ----------
+    name
+        An operator's function name.
+    """
+    with pytest.raises(ValidationError, match="write the operator itself"):
+        check_blacklist(f'SELECT "{name}"(1, 2)')
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT id < 'a', id <= 1, id = 1, id > 1, id >= 1, id != 1, id <> 1 FROM t",
+        "SELECT a IS DISTINCT FROM b, a IS NOT DISTINCT FROM b FROM t",
+        "SELECT * FROM t WHERE id < 3 AND name || 'x' = 'ax'",
+        'SELECT "lower"(name), main.lower(name), "my_func2"(1) FROM t',
+    ],
+)
+def test_blacklist_allows_operators_written_as_operators(sql: str) -> None:
+    """Operator syntax and functions with ordinary names, quoted or not, stay allowed.
+
+    Parameters
+    ----------
+    sql
+        A query using operators or ordinary function names.
+    """
+    check_blacklist(sql)
+
+
 @pytest.mark.parametrize("sql", ["SELECT 1 AS a__b", "SELECT my__func(1)", "SELECT x__ FROM t"])
 def test_blacklist_allows_double_underscores_that_do_not_start_a_function_name(sql: str) -> None:
     """Only a function name that starts with `__` is internal; other names stay allowed.
