@@ -1147,6 +1147,62 @@ def test_the_largest_minimum_of_the_members_wins(key: str) -> None:
     ]
 
 
+def test_items_of_the_members_are_merged_with_the_stricter_value() -> None:
+    """``items`` in two members merge like a property: the smaller maximum wins."""
+    base = {"type": "array", "items": {**STRING, "maxLength": 5}}
+    head = _all_of(
+        {"type": "array", "items": {**STRING, "maxLength": 10}}, {"items": {"maxLength": 5}}
+    )
+    assert compare(_api(body=_obj({"a": base})), _api(body=_obj({"a": head}))) == []
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "expected"),
+    [
+        (True, {**STRING}, {**STRING}),
+        ({**STRING}, True, {**STRING}),
+        ({**STRING}, False, False),
+    ],
+    ids=["true-then-schema", "schema-then-true", "false-wins"],
+)
+def test_additional_properties_of_the_members_merge(
+    first: object, second: object, expected: object
+) -> None:
+    """``True`` adds nothing to the other member; ``False`` closes the object.
+
+    Parameters
+    ----------
+    first
+        ``additionalProperties`` of the first member.
+    second
+        ``additionalProperties`` of the second member.
+    expected
+        The single schema the merge equals.
+    """
+    base = {"type": "object", "additionalProperties": expected}
+    head = _all_of(
+        {"type": "object", "additionalProperties": first}, {"additionalProperties": second}
+    )
+    assert compare(_api(body=_obj({"a": base})), _api(body=_obj({"a": head}))) == []
+
+
+def test_nullable_and_deprecated_of_the_members_combine() -> None:
+    """``nullable`` and ``deprecated`` combine: null only if all allow it, deprecated if any is."""
+    base = {**STRING, "deprecated": True}
+    head = _all_of(
+        {**STRING, "nullable": True, "deprecated": False}, {"nullable": False, "deprecated": True}
+    )
+    assert compare(_api(body=_obj({"a": base})), _api(body=_obj({"a": head}))) == []
+
+
+def test_a_conflict_inside_a_nested_all_of_is_kept_by_the_outer_merge() -> None:
+    """A conflict found in an inner ``allOf`` still reaches the report."""
+    base = {**STRING}
+    inner = _all_of({**STRING, "format": "date"}, {"format": "uuid"})
+    head = _all_of({"maxLength": 99}, inner)
+    assert _field_change(base, head) != []
+
+
 def test_an_enum_narrowed_in_a_second_member_is_breaking() -> None:
     """The issue's second example: the enums of the members intersect."""
     base = {**STRING, "enum": ["a", "b", "c"]}
