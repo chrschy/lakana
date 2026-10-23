@@ -206,8 +206,9 @@ secret needs `MANAGE_SECRET` in that secret's environment, whatever credential t
 at that moment, because the URL is where the secret goes. So a holder of `MANAGE_PACKAGE_INDEX`
 cannot redirect the `password` of an environment's secret to a host of their choice. Grant the
 permission only to people you would trust with the index's own credential. This stops the
-redirection by an index manager, not code that runs in the worker: under the current runner a
-person who may deploy and run Python code reads what the worker reads anyway
+redirection by an index manager, not code that runs in the worker: under the local runner a
+person who may deploy and run Python code reads what the worker reads anyway (with the docker
+runner a task holds no credential, see [Run Python tasks in containers](../how-to/run-python-tasks-in-containers.md))
 (see
 [Isolation: one instance is one trust domain](../explanation/python-assets.md#isolation-one-instance-is-one-trust-domain)).
 `MANAGE_REPOSITORY` follows the same rules for a repository: its holder can name only a secret

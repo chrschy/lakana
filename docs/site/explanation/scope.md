@@ -117,8 +117,9 @@ How the larger pieces are meant to work:
   that lost power or its network, which is expected to free the role within about a lease (`lakana scheduler
   status` shows who holds it). Every wait
   shows its reason (M5c3b).
-- **Task isolation.** The default runner executes tasks as local processes and is not a sandbox.
-  A Docker runner, one container per task, comes before the public beta (M7b).
+- **Task isolation.** Local mode runs tasks as processes of the worker; the Compose bundle runs
+  each in a container of its own (`DockerRunner`, M7b), which isolates projects but shares the
+  host's kernel.
 
 ## Out of scope, by decision
 

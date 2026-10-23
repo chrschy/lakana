@@ -7,7 +7,9 @@ What the bundle does not do, or does not protect, today, and why. The steps to r
   restarts/`down`) sends `SIGTERM`: the worker stops claiming and lets a running task finish for
   up to 20 s (`LAKANA_RUN__DRAIN_GRACE_SECONDS`) before releasing it to another worker; the
   bundle sets `stop_grace_period: 45s`. A task whose venv is still being built is not stopped by
-  that. If Compose sends `SIGKILL` first, or the worker is lost, the platform ends what it held
+  that, nor by a cancel: with the docker runner too, the worker waits for the build to end, up to
+  `LAKANA_RUN__VENV_BUILD_TIMEOUT` (600 s), before the task ends
+  ([#291](https://github.com/lakana-labs/lakana/issues/291)). If Compose sends `SIGKILL` first, or the worker is lost, the platform ends what it held
   after about a minute: queries and deploys `FAILED` with the cause `worker_lost` (a write that
   had already committed ends `SUCCEEDED`), tasks released or reclaimed. Nothing stays `RUNNING`
   for ever; see [A worker that is lost](../how-to/stop-a-query.md#a-worker-that-is-lost) and
@@ -31,8 +33,10 @@ What the bundle does not do, or does not protect, today, and why. The steps to r
 The `seaweedfs` S3 gateway also listens on a gRPC port, 18333. SeaweedFS cannot turn it off, and it
 has no authentication. It is reachable from the worker, because the gateway is on the network the
 worker uses. User SQL cannot use it (DuckDB's HTTP filesystem cannot speak gRPC), but a Python
-task runs as trusted code in the worker and could remove the storage identity, which makes storage
-unavailable until the gateway restarts. See the SeaweedFS item above for what else is and is not
+task under the local runner runs as trusted code in the worker and could remove the storage
+identity, which makes storage unavailable until the gateway restarts. With the docker runner (the
+bundle's default) a task's network holds only the server, and a build reaches only its package
+indexes, so neither reaches the gateway. See the SeaweedFS item above for what else is and is not
 protected.
 
 ## A symlinked parent directory of the profile file

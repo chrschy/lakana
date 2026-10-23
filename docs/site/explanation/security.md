@@ -106,11 +106,14 @@ as two statements.
 
 ## What this does not protect
 
-- **One instance is one trust domain for Python code.** A Python task runs as the worker's operating
-  system user, so someone who may deploy Python code can read what the worker reads, filters and masks
-  included. Deploy Python only from people you would trust with the stored data, or run one instance per
-  group that does not trust the other
-  ([why](python-assets.md#isolation-one-instance-is-one-trust-domain)).
+- **Under the local runner, one instance is one trust domain for Python code.** A Python task runs as
+  the worker's operating system user, so someone who may deploy Python code can read what the worker
+  reads, filters and masks included. Deploy Python only from people you would trust with the stored data,
+  or run one instance per group that does not trust the other
+  ([why](python-assets.md#isolation-one-instance-is-one-trust-domain)). With the docker runner, the
+  Compose bundle's default, each task runs in a container without the worker's credentials; containers
+  share the host's kernel, so this is not a sandbox for hostile code
+  ([Run Python tasks in containers](../how-to/run-python-tasks-in-containers.md)).
 - **Files read outside Lakana.** A filter or a mask guards Lakana's own query path, not the files in
   the object storage. Keep the storage credentials with the people who run the instance.
 - **Local mode.** With storage on the local disk there is no cloud credential to scope, so a local
