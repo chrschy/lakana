@@ -364,5 +364,76 @@ def test_main_inspects_every_dependency_group(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr("sys.argv", ["check_licenses"])
     main()
     assert commands
-    assert commands[0][:3] == ["uv", "run", "--all-groups"]
+    assert commands[0][:5] == ["uv", "run", "--all-groups", "--all-extras", "--all-packages"]
     assert "pip-licenses" in commands[0]
+
+
+def _wheel(directory: Path, name: str, licence: str) -> Path:
+    """Write a minimal wheel whose metadata names a licence.
+
+    Parameters
+    ----------
+    directory
+        Where to write it.
+    name
+        The distribution name.
+    licence
+        Its `License:` metadata.
+
+    Returns
+    -------
+    Path
+        The wheel.
+    """
+    import base64
+    import hashlib
+    import zipfile
+
+    files = {
+        f"{name}/__init__.py": b"",
+        f"{name}-0.1.dist-info/METADATA": (
+            f"Metadata-Version: 2.1\nName: {name}\nVersion: 0.1\nLicense: {licence}\n"
+        ).encode(),
+        f"{name}-0.1.dist-info/WHEEL": (
+            b"Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
+        ),
+    }
+    record = [
+        f"{path},sha256={base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b'=').decode()},{len(data)}"
+        for path, data in files.items()
+    ]
+    record.append(f"{name}-0.1.dist-info/RECORD,,")
+    files[f"{name}-0.1.dist-info/RECORD"] = ("\n".join(record) + "\n").encode()
+    wheel = directory / f"{name}-0.1-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        for path, data in files.items():
+            archive.writestr(path, data)
+    return wheel
+
+
+@pytest.mark.integration
+def test_a_dependency_only_an_extra_pulls_in_is_judged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A copyleft package reachable only through an optional extra fails the gate."""
+    wheels = tmp_path / "wheels"
+    wheels.mkdir()
+    _wheel(wheels, "copyleftpkg", "GNU General Public License v3")
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\n"
+        'name = "probe"\nversion = "0"\nrequires-python = ">=3.11"\n'
+        "dependencies = []\n"
+        "[project.optional-dependencies]\n"
+        'fake = ["copyleftpkg"]\n'
+        "[dependency-groups]\n"
+        'dev = ["pip-licenses"]\n'
+        "[tool.uv]\npackage = false\n"
+        "[tool.uv.sources]\n"
+        'copyleftpkg = { path = "wheels/copyleftpkg-0.1-py3-none-any.whl" }\n'
+    )
+    monkeypatch.setattr("scripts.check_licenses.REPO_ROOT", tmp_path)
+    monkeypatch.setattr("sys.argv", ["check_licenses"])
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+
+    assert main() == 1
+    assert "copyleftpkg" in capsys.readouterr().err
