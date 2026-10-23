@@ -397,3 +397,19 @@ def test_a_broken_key_left_by_a_racing_launcher_is_replaced(
 
     assert read_key(path) == key
     assert [p.name for p in tmp_path.iterdir()] == ["egress.key"]
+
+
+def test_the_connection_host_pattern_is_the_tokens() -> None:
+    """A host a connection accepts is a host a token can carry, and the other way round."""
+    from lakana_core.connections import kinds
+    from lakana_worker.launcher import egress_token
+
+    assert kinds._HOST.pattern == egress_token._HOST.pattern
+
+
+def test_the_connection_root_name_pattern_is_the_launchers() -> None:
+    """A root a connection names is a root the launcher can configure."""
+    from lakana_core.connections import kinds
+    from lakana_worker.launcher import settings
+
+    assert kinds.ROOT_NAME.pattern == settings._ROOT_NAME.pattern

@@ -4,10 +4,15 @@ Plain helper functions and classes live in `core_test_helpers.py`, not here
 — see the module docstring there for why.
 """
 
+import datetime
 import uuid
 from collections.abc import Iterator
 
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import NameOID
 from sqlalchemy.orm import Session
 
 from lakana_core.auth import AllowAllAuthorization, PrincipalRef
@@ -84,3 +89,29 @@ def catalog(session: Session) -> CatalogService:
         The service under test.
     """
     return CatalogService(session, StorageResolver(session), AllowAllAuthorization())
+
+
+@pytest.fixture(scope="session")
+def test_ca_pem() -> str:
+    """Provide one self-signed CA certificate in PEM, valid for one day.
+
+    Returns
+    -------
+    str
+        The certificate, ``-----BEGIN CERTIFICATE-----`` included.
+    """
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Lakana test CA")])
+    now = datetime.datetime.now(datetime.UTC)
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now)
+        .not_valid_after(now + datetime.timedelta(days=1))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    return certificate.public_bytes(serialization.Encoding.PEM).decode("ascii")
