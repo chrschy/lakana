@@ -387,6 +387,7 @@ def test_a_stop_asks_the_launcher_to_stop_the_container(tmp_path: Path) -> None:
     outcome = _runner(launcher).run(job, lambda chunk: None, stop)
 
     assert launcher.stopped == [launcher.requests[0]["task"]]
+    assert launcher.owners == [launcher.requests[0]["owner"]], "#305: a stop names its owner"
     assert outcome.error_message == "stopped: cancelled"
     assert outcome.failure_code is FailureCode.CANCELLED
 
@@ -396,13 +397,15 @@ def test_a_stop_the_launcher_cannot_take_is_not_raised(tmp_path: Path) -> None:
     launcher = FakeLauncher()
     stop = StopSignal()
 
-    def down(ident: str) -> bool:
+    def down(ident: str, owner: str) -> bool:
         """Fail like an unreachable launcher.
 
         Parameters
         ----------
         ident
             The id.
+        owner
+            The worker that asks.
 
         Raises
         ------
@@ -777,13 +780,15 @@ def test_a_stop_the_launcher_has_not_registered_yet_is_asked_again(tmp_path: Pat
     answers = [False, False, True]
     asked: list[str] = []
 
-    def late(ident: str) -> bool:
+    def late(ident: str, owner: str) -> bool:
         """Answer not running twice, then stop the container.
 
         Parameters
         ----------
         ident
             The task's id.
+        owner
+            The worker that asks.
 
         Returns
         -------
@@ -1017,13 +1022,15 @@ def test_a_stop_the_launcher_keeps_refusing_is_asked_again_less_and_less_often(
         now[0] += tick
         return now[0]
 
-    def refuses(ident: str) -> bool:
+    def refuses(ident: str, owner: str) -> bool:
         """Answer that Docker did not stop the container.
 
         Parameters
         ----------
         ident
             The task's id.
+        owner
+            The worker that asks.
 
         Returns
         -------

@@ -345,8 +345,9 @@ not protect against. Each is accepted.
    row "Compromise of the launcher" above).
 3. **A compromised worker** holds the launcher's token. It can start allowed task images with its
    own code as uid 10001, mount any environment volume read-only by its key, build into an
-   environment that is not complete, and stop any run whose id it learns; it cannot choose an
-   image, a host path, a capability or a network. It also holds everything a worker holds anyway.
+   environment that is not complete, and stop another worker's run only if it learns both the
+   run's id and that worker's random owner name (#305); it cannot choose an image, a host path,
+   a capability or a network. It also holds everything a worker holds anyway.
 4. **Task images are named by tag** and pulled once when absent: a tag repointed in the registry
    before the first pull is what runs. Releases attest the images; the launcher does not verify
    an attestation.

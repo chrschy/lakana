@@ -1150,8 +1150,12 @@ start) authenticates a worker, compared with `hmac.compare_digest`.
     and the REST API with its own token (as before);
   - a compromised worker holds the launcher token: it can start allowed images with its own code
     as uid 10001, mount any environment volume read-only by key, build into an environment not yet
-    complete, stop any run whose id it learns (ids are random, and `stop` checks no owner), and
-    use any credential the worker can decrypt; it
+    complete, stop a run of another worker only if it learns both that run's id and that
+    worker's owner (`stop` and a closed connection act only on a run registered under the same
+    owner, `_same_owner`; another owner's id gets the answer an unknown id gets; owners are
+    `<host>.<16 random hex>`, `launcher_client.claim_owner`; a `run` or `build` that repeats
+    another worker's live id is refused as a duplicate, which tells only that the id is live, and
+    its closed connection ends nothing), and use any credential the worker can decrypt; it
     cannot choose an image, a host path, a capability or a network;
   - while the launcher is down, tasks fail as "runner unavailable" and are retried; containers it
     started keep running until it starts again and removes them (their tokens are revoked by the

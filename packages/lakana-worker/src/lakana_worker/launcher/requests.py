@@ -99,7 +99,7 @@ FIELDS: dict[str, frozenset[str]] = {
         }
     )
     | _LIMITS,
-    "stop": frozenset({"token", "op", "id"}),
+    "stop": frozenset({"token", "op", "id", "owner"}),
     "status": frozenset({"token", "op", "python", "environment"}),
     "cleanup": frozenset({"token", "op", "owner"}),
 }
@@ -163,7 +163,8 @@ class RunRequest:
     task
         The attempt's id; names the container and its network.
     owner
-        The worker that asked, for `cleanup`.
+        The worker that asked: only it may stop the run (`stop`, a closed connection), and
+        `cleanup` removes by it.
     python
         The Python version; selects the image.
     environment
@@ -200,7 +201,7 @@ class BuildRequest:
     build
         The build's id; names the container and its network.
     owner
-        The worker that asked.
+        The worker that asked: only it may stop the build.
     python
         The Python version; selects the image.
     environment
@@ -236,15 +237,18 @@ class BuildRequest:
 
 @dataclass(frozen=True)
 class StopRequest:
-    """Stop a running task or build.
+    """Stop a running task or build of the worker that asks.
 
     Parameters
     ----------
     id
         The task's or build's id.
+    owner
+        The worker that asks; only a run it started is stopped.
     """
 
     id: str
+    owner: str
 
 
 @dataclass(frozen=True)
@@ -760,7 +764,9 @@ def parse_request(raw: bytes, *, token: str, settings: LauncherSettings) -> Requ
     if op == "build":
         return _build(data, settings)
     if op == "stop":
-        return StopRequest(_pattern(data, "id", _ID, _ID_RULE))
+        return StopRequest(
+            _pattern(data, "id", _ID, _ID_RULE), _pattern(data, "owner", _OWNER, _OWNER_RULE)
+        )
     if op == "status":
         return StatusRequest(
             python=_python(data, settings),

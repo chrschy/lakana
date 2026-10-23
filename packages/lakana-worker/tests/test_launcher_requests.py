@@ -232,6 +232,12 @@ HOSTILE: list[Any] = [
     ),
     pytest.param({"op": "stop", "token": TOKEN}, "stop takes exactly", id="stop-missing"),
     pytest.param(
+        {"op": "stop", "token": TOKEN, "id": "a"}, "stop takes exactly", id="stop-without-owner"
+    ),
+    pytest.param(
+        {"op": "stop", "token": TOKEN, "id": "a", "owner": "w; rm"}, "owner:", id="stop-owner-shell"
+    ),
+    pytest.param(
         _with(RUN, Mounts=[{"Type": "bind", "Source": "/"}]), "run takes exactly", id="extra-Mounts"
     ),
     pytest.param(
@@ -318,10 +324,12 @@ HOSTILE: list[Any] = [
     pytest.param([1, 2], "one JSON object", id="a-list"),
     pytest.param("run", "one JSON object", id="a-string"),
     pytest.param(
-        {"op": "stop", "token": TOKEN, "id": "../lakana-server"}, "id:", id="stop-traversal"
+        {"op": "stop", "token": TOKEN, "id": "../lakana-server", "owner": "w1"},
+        "id:",
+        id="stop-traversal",
     ),
     pytest.param(
-        {"op": "stop", "token": TOKEN, "id": "a", "force": True},
+        {"op": "stop", "token": TOKEN, "id": "a", "owner": "w1", "force": True},
         "stop takes exactly",
         id="stop-extra",
     ),
@@ -473,7 +481,9 @@ def test_the_valid_requests_parse_into_their_plain_values() -> None:
     run = parse_request(_raw(RUN), token=TOKEN, settings=SETTINGS)
     build = parse_request(_raw(BUILD), token=TOKEN, settings=SETTINGS)
     stop = parse_request(
-        _raw({"token": TOKEN, "op": "stop", "id": "0f3c9a1e"}), token=TOKEN, settings=SETTINGS
+        _raw({"token": TOKEN, "op": "stop", "id": "0f3c9a1e", "owner": "worker-1"}),
+        token=TOKEN,
+        settings=SETTINGS,
     )
     status = parse_request(
         _raw({"token": TOKEN, "op": "status", "python": "3.13", "environment": KEY}),
@@ -491,7 +501,7 @@ def test_the_valid_requests_parse_into_their_plain_values() -> None:
     )
     assert isinstance(build, BuildRequest) and build.indexes[0].host == "pkgs.example.org"
     assert "p@ss word" not in repr(build)
-    assert isinstance(stop, StopRequest) and stop.id == "0f3c9a1e"
+    assert isinstance(stop, StopRequest) and (stop.id, stop.owner) == ("0f3c9a1e", "worker-1")
     assert isinstance(status, StatusRequest) and status.environment == KEY
     assert isinstance(cleanup, CleanupRequest) and cleanup.owner == "worker-1"
 

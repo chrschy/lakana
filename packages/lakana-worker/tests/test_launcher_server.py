@@ -169,7 +169,9 @@ def test_stop_status_and_cleanup_answer_one_result_line(served: Served) -> None:
     """The short operations need no stream."""
     token = served.token
 
-    assert _call({"op": "stop", "token": token, "id": "t9"}) == [{"result": {"stopped": False}}]
+    assert _call({"op": "stop", "token": token, "id": "t9", "owner": "w1"}) == [
+        {"result": {"stopped": False}}
+    ]
     assert _call({"op": "status", "token": token, "python": "3.13", "environment": "a" * 64}) == [
         {"result": {"complete": True}}
     ]
@@ -300,7 +302,7 @@ def test_a_failure_to_answer_does_not_stop_the_server(
         )
     monkeypatch.delattr(served.launcher, "handle")
 
-    assert _call({"op": "stop", "token": served.token, "id": "t9"}) == [
+    assert _call({"op": "stop", "token": served.token, "id": "t9", "owner": "w1"}) == [
         {"result": {"stopped": False}}
     ]
 
@@ -372,9 +374,33 @@ def test_a_refusal_sent_to_a_caller_that_left_is_dropped(served: Served) -> None
     time.sleep(0.2)
     served.server.slots = threading.BoundedSemaphore(1)
 
-    assert _call({"op": "stop", "token": served.token, "id": "t9"}) == [
+    assert _call({"op": "stop", "token": served.token, "id": "t9", "owner": "w1"}) == [
         {"result": {"stopped": False}}
     ]
+
+
+def test_another_owner_that_names_a_live_id_and_leaves_kills_nothing(served: Served) -> None:
+    """#305: the duplicate is refused, and its departure is not the first owner's departure."""
+    engine = served.engine
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.connect("l.sock")
+    client.sendall(json.dumps({**RUN, "token": served.token}).encode() + b"\n")
+    _wait_for(lambda: sum(path.endswith("/start") for _, path, _ in engine.calls) >= 2)
+
+    for _ in range(5):
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as intruder:
+            intruder.connect("l.sock")
+            intruder.sendall(
+                json.dumps({**RUN, "owner": "w2", "token": served.token}).encode() + b"\n"
+            )
+    _call({"op": "stop", "token": served.token, "id": "t1", "owner": "w2"})
+    time.sleep(0.3)
+
+    assert not any(path.endswith(("/kill", "/stop")) for _, path, _ in engine.calls)
+    assert served.launcher.stop(StopRequest("t1", "w1")) == {"stopped": True}
+    answer = client.makefile("rb").readline()
+    client.close()
+    assert json.loads(answer)["result"]["stopped"] is True
 
 
 def test_bytes_a_caller_sends_after_its_request_are_ignored(served: Served) -> None:
@@ -388,7 +414,7 @@ def test_bytes_a_caller_sends_after_its_request_are_ignored(served: Served) -> N
     client.sendall(b"noise")
     time.sleep(0.1)
     assert engine.containers
-    assert served.launcher.stop(StopRequest("t1")) == {"stopped": True}
+    assert served.launcher.stop(StopRequest("t1", "w1")) == {"stopped": True}
 
     answer = client.makefile("rb").readline()
     client.close()
@@ -483,7 +509,7 @@ def test_an_exception_while_parsing_is_answered_and_logged(
 
     monkeypatch.setattr(server_module, "parse_request", broken)
 
-    answer = _call({"op": "stop", "token": served.token, "id": "t9"})
+    answer = _call({"op": "stop", "token": served.token, "id": "t9", "owner": "w1"})
 
     assert answer == [{"error": "launcher internal error; see docker compose logs launcher"}]
     assert "unsupported operand" in caplog.text
@@ -710,7 +736,7 @@ def test_a_connection_that_sends_nothing_gets_no_answer_and_no_log_line(
 
     assert data == b""
     assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
-    assert _call({"op": "stop", "token": served.token, "id": "t9"}) == [
+    assert _call({"op": "stop", "token": served.token, "id": "t9", "owner": "w1"}) == [
         {"result": {"stopped": False}}
     ]
 
