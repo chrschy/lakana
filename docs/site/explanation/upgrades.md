@@ -192,6 +192,13 @@ covered when a row held a date outside the timestamp range (a year such as 30000
 now hidden by the filter instead, and the read succeeds. See
 [Filter rows](../how-to/filter-rows.md).
 
+### Lineage shows a moved and dropped table the same way from every table
+
+A dropped table that had been renamed into another namespace used to be shown or hidden in
+`table lineage` depending on which table you started from. It is now judged by the last name
+Lakana recorded for it: it is shown, under that name, to a reader of that name's namespace, and
+hidden from a reader of only its earlier namespace.
+
 ## Notes for 0.20.0
 
 ### Python tasks run in containers in the Compose bundle
