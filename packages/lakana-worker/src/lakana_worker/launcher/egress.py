@@ -397,10 +397,8 @@ def _read_head(connection: socket.socket, deadline: float) -> bytes | int:
     """
     head = bytearray()
     while not head.endswith(b"\r\n\r\n"):
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return 408
-        connection.settimeout(remaining)
+        # Past the deadline only bytes already waiting are read (bounded by the head size).
+        connection.settimeout(max(deadline - time.monotonic(), 0.001))
         try:
             byte = connection.recv(1)
         except TimeoutError:

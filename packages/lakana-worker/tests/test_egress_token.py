@@ -11,6 +11,7 @@ import os
 import stat
 from collections.abc import Callable
 from pathlib import Path
+from typing import NoReturn
 
 import pytest
 
@@ -323,3 +324,76 @@ def test_a_rotated_key_is_new_whole_and_never_written_through_a_link(tmp_path: P
     assert read_key(path) == third
     assert target.read_text(encoding="ascii") == "x"
     assert sorted(p.name for p in tmp_path.iterdir()) == ["egress.key", "elsewhere"]
+
+
+def test_a_key_that_cannot_be_read_is_no_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read error (a failing disk) gives no key rather than an exception.
+
+    Parameters
+    ----------
+    tmp_path
+        For the key.
+    monkeypatch
+        Makes the read fail as a disk error would.
+    """
+    path = tmp_path / "egress.key"
+    ensure_key(path)
+
+    def failing(descriptor: int, size: int) -> NoReturn:
+        """Fail like a disk error.
+
+        Parameters
+        ----------
+        descriptor
+            Unused.
+        size
+            Unused.
+
+        Raises
+        ------
+        OSError
+            Always.
+        """
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(os, "read", failing)
+
+    assert read_key(path) is None
+
+
+def test_a_broken_key_left_by_a_racing_launcher_is_replaced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the launcher that linked first left garbage, this one's key replaces it.
+
+    Parameters
+    ----------
+    tmp_path
+        For the key.
+    monkeypatch
+        Lets the other launcher link a broken file first.
+    """
+    path = tmp_path / "egress.key"
+    real_link = os.link
+
+    def broken_first(source: Path, target: Path) -> None:
+        """Leave a truncated key just before this launcher links.
+
+        Parameters
+        ----------
+        source
+            The temporary file.
+        target
+            The key path.
+        """
+        path.write_text("abc", encoding="ascii")
+        real_link(source, target)
+
+    monkeypatch.setattr(os, "link", broken_first)
+
+    key = ensure_key(path)
+
+    assert read_key(path) == key
+    assert [p.name for p in tmp_path.iterdir()] == ["egress.key"]
