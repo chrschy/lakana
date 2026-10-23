@@ -18,6 +18,7 @@ Pages:
 - [Upgrade to the release with artifacts](upgrade-to-artifacts.md): the migration, the order and the way back.
 - [Manage secrets](manage-secrets.md): see how each stored secret is encrypted and set an older one again.
 - [Use a private package index](private-package-index.md): install your team's own package in Python assets, with a password that stays out of the project.
+- [Run Python tasks in containers](run-python-tasks-in-containers.md): what a container per task isolates, how to set it, and what each message means.
 - [Train a scikit-learn model and score with it](models-with-scikit-learn.md): store a model as an artifact and read it in another asset.
 - [Inspect and download artifact versions](inspect-and-download-artifact-versions.md): see what an artifact holds and copy a version to your machine.
 - [Limit how many versions are kept](limit-artifact-versions.md): keep only the newest versions of an artifact.

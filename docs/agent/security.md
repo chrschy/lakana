@@ -852,8 +852,23 @@ code in this area has to know.
   the private per-attempt directory and the process group the supervisor kills are hygiene.
   What bounds a task is its token. Therefore everyone who may deploy Python code to an
   instance is trusted with everything its worker can read; run one instance per client. Never
-  describe this runner as isolation in code, docs or messages. Isolation comes with
-  `DockerRunner` (M7b, #38), which implements the same `Runner` protocol.
+  describe this runner as isolation in code, docs or messages. Local mode and
+  `LAKANA_RUN__RUNNER=local` keep this.
+- **`DockerRunner` isolates projects, not hostile code.** Each task runs in a container that the
+  launcher (`lakana_worker.launcher`) starts with fixed fields (`requests.run_container_spec`,
+  `_host_config`): uid 10001 in group 10003 (`TASK_USER`; builds run as 10002:10002, so a task
+  cannot change its environment), `CapDrop: ALL`, not privileged, a read-only root filesystem,
+  code and environment read-only (`/code`, `/env`), a private `/work` (a work-volume subpath) and
+  a `/tmp` tmpfs (`noexec,nosuid,nodev`, 64 MiB), memory (no swap), CPU and pids limits, an init
+  process, private IPC and cgroup namespaces, no log driver, `no-new-privileges` where Docker
+  allows it (off on snap Docker, detected by a probe at start), and a network of its own
+  (internal, no IPv6, `gateway_mode_ipv4/6=isolated`) shared with the `server` service only.
+  The token is on stdin only. A task reaches every port the server's container listens on, and
+  the REST API with its own token, as before. Containers share the kernel. `Runner.isolated` is
+  true for this runner only; `PythonRuntime` refuses a mismatch of runner and environments, and
+  `_prepare` refuses a protected environment's task when the runtime is not isolated (read once
+  per attempt, when it is prepared: an attempt already past `_prepare` when the environment is
+  protected runs to its end).
 - **The environment build runs code too.** A package built from source (an sdist) runs its PEP 517 backend as the worker's user, with network access, and sees the
   index and proxy credentials passed to the build. The worker runs `uv sync --frozen --no-config`: the project's `[tool.uv]` settings and
   any `uv.toml` (a system-level one on the worker's host too) are not read at build time (a
@@ -1006,7 +1021,7 @@ access-controlled on the server; `read_only=True` seals it (0400/0500) for a tas
   with the docker runner: no build request field carries a CA bundle, so a private-CA index or
   TLS-inspecting proxy is unsupported under DockerRunner rather than half-working (passing a
   bundle would need a request field, a file the launcher, which holds the Docker socket, writes
-  into a build mount, and `SSL_CERT_FILE` in the build; revisit with the egress proxy).
+  into a build mount, and `SSL_CERT_FILE` in the build; #292).
 - **A build gets only what its lock needs**: the credentials of the registered indexes it uses
   (an index without a credential is a host to reach, not an entry of `UV_INDEX`), the operator's
   index, and the hosts of those indexes for the egress proxy. Credentials are decrypted only when
@@ -1065,6 +1080,90 @@ access-controlled on the server; `read_only=True` seals it (0400/0500) for a tas
      then start empty).
   5. Redeploy the fixed project, then start the workers again. Review the audit log and the
      task logs of the affected projects for what ran meanwhile.
+
+## Task isolation: the launcher (M7b, #38)
+
+User documentation: `docs/site/how-to/run-python-tasks-in-containers.md`. The launcher is the one
+remaining privileged component: it holds the Docker socket, which is root on the host. In the
+Compose bundle it runs as its own service with `network_mode: none`, `cap_drop: [ALL]`, a
+read-only filesystem and uid 0 only to open the socket, on the base interpreter
+(`python -I -S`) from its own copy of its code (`/opt/lakana-launcher`), so no `.pth` file of a
+dependency runs next to the socket. It listens on a Unix socket in the `launcher-socket` volume,
+which only it and the workers mount; `launcher.token` next to the socket (0640, new at every
+start) authenticates a worker, compared with `hmac.compare_digest`.
+
+- **Nothing the caller sends reaches Docker as-is.** `requests.parse_request` accepts one JSON
+  line of at most 512 KiB with exactly the fields of one of five operations (`FIELDS`: run,
+  build, stop, status, cleanup), refuses repeated keys, and checks each value against a pattern
+  or the operator's ceiling (`LAKANA_LAUNCHER__MAX_MEMORY_MB`, `MAX_CPUS`, `MAX_PIDS`, a week of
+  timeout). `requests.run_container_spec` and `build_container_spec` fix every field that matters
+  (user, capabilities, mounts, network, entrypoint, environment). Image references come only from
+  `LAKANA_LAUNCHER__IMAGES`; host paths only from `LAKANA_LAUNCHER__INGESTION_ROOTS`, bind-mounted
+  read-only and non-recursive at `/ingest/<name>` (no worker code asks for one yet). The settings
+  refuse `/` and anything under or holding a system directory (`settings.FORBIDDEN_ROOTS`), the
+  Docker socket's and the launcher's socket's directories; at start a probe container per root
+  refuses proc, sysfs and devtmpfs mounts, sockets, pipes and device nodes. Docker resolves a
+  symlinked root on the host, so the operator rules are documented in the how-to: a root is not
+  a symlink, it and its parents are writable only by root, and the Docker group's id is none of
+  10001 to 10003 (`_check_socket_group` refuses 10002 and 10003 and a world-writable socket).
+  `test_launcher_requests.py` holds every hostile shape of the design trial.
+- **Docker's subpath check is the second layer.** Code and scratch are subpaths of the work
+  volume (`<attempt>/code`, `<attempt>/task`, the attempt name matched by `requests._ATTEMPT`);
+  Docker refuses a subpath that leaves the volume through `..` or a link
+  (`test_a_subpath_that_is_a_link_out_of_the_volume_is_refused_by_docker`, docker tier).
+- **Standard library only, nothing else of Lakana** (import-linter contract
+  `launcher-stands-alone`; `test_launcher_imports.py` keeps it off the worker's other modules).
+  Any change to `lakana_worker/launcher/` gets a separate security review.
+- **The network.** Each task or build gets a /29 from `LAKANA_LAUNCHER__NETWORK_RANGE`
+  (`10.207.0.0/16`, private, a /24 or larger), internal and with an isolated gateway; at most three
+  quarters of the range's /29s are in use or resting at once, and the live runs together hold at
+  most `LAKANA_LAUNCHER__MAX_TOTAL_MEMORY_MB`. Both refusals are `EngineError`, which the worker
+  reports as "runner unavailable" and retries. Engine 28 is required, and at start the launcher
+  creates an isolated network and checks that Docker kept the option. A range that overlaps a
+  route of the host's LAN shadows that route for the host: the how-to tells operators to choose
+  a free range.
+- **Builds.** A build container gets the code read-only, its environment volume and a uv cache:
+  shared between builds with the same index set and credentials only when the build is wheels
+  only (`no_build`), else private to its environment; never mounted into a task. It gets the
+  credentials of the registered indexes its lock uses that have one (the worker decides which,
+  `require_use` first), the operator's `LAKANA_RUN__INDEX_URL` with its password, and a per-build
+  egress token (see "DockerRunner: the launcher client and environments" above for the proxy).
+  A registered credential makes the build wheels only; the operator's index password does not.
+  Build-time code of a dependency (an sdist, without a registered credential) sees the operator's
+  index password and the token and can reach the granted hosts; it cannot reach anything else. The
+  completion marker of an environment lives in the launcher's own volume (`launcher-state`), out
+  of every build's reach.
+- **Cleanup.** A container and its network are removed on exit, stop, timeout and a closed
+  connection (a dead worker); `Launcher.shutdown` removes them on SIGTERM; each carries
+  `lakana.launcher.deadline`, which a reaper enforces; at start the launcher removes everything
+  carrying its stack label. It keeps the 10 most recently used environments
+  (`KEEP_ENVIRONMENTS`) and removes a cache idle for 14 days.
+- **Residuals, accepted:**
+  - the shared kernel;
+  - `no-new-privileges` off on snap Docker;
+  - task images are named by tag and pulled once when absent: a tag repointed in the registry
+    before the first pull is what runs (the release attests the images; the launcher does not
+    verify attestations);
+  - a task's network is the server's too: it reaches every port the server container listens on,
+    and the REST API with its own token (as before);
+  - a compromised worker holds the launcher token: it can start allowed images with its own code
+    as uid 10001, mount any environment volume read-only by key, build into an environment not yet
+    complete, stop any run whose id it learns (ids are random, and `stop` checks no owner), and
+    use any credential the worker can decrypt; it
+    cannot choose an image, a host path, a capability or a network;
+  - while the launcher is down, tasks fail as "runner unavailable" and are retried; containers it
+    started keep running until it starts again and removes them (their tokens are revoked by the
+    worker when its call fails);
+  - no disk quota for `/work`, environment volumes or caches (`LAKANA_RUN__VENV_MAX_BYTES` is
+    checked after a build);
+  - the network range can shadow a LAN route (above);
+  - a launcher bug is host root.
+- **Egress residuals, accepted:** a direct connection may reach private addresses outside the
+  networks the proxy is attached to (a company index often is one; operator ranges are #303);
+  with `LAKANA_EGRESS__UPSTREAM_PROXY` the proxy makes no address check of its own, the upstream
+  proxy resolves and decides; a tunnel whose writes block can outlive its token's expiry by up to
+  the 300 s idle timeout; one build can hold all `LAKANA_EGRESS__MAX_CONNECTIONS` slots (#302);
+  a registered index on a port other than 443 without a credential is refused (#301).
 
 ## The artifact store (M5c2b)
 
@@ -2548,8 +2647,9 @@ carries any of the three, and a grant below instance scope never satisfied these
   redirect a secret to a host of their choice, because a secret is bound to one use and only
   `MANAGE_SECRET` binds it (see "Package index credentials (M5c2c)"). Under `LocalProcessRunner` a
   holder who also has `DEPLOY` and `RUN` still reads what the worker reads (one trust domain):
-  binding stops an index manager from redirecting a secret, not code that runs in the worker, and
-  becomes a boundary against such code only with the container runner. The rule is not retroactive:
+  binding stops an index manager from redirecting a secret, not code that runs in the worker. Under
+  `DockerRunner` a task container holds no credential, so there it holds against task code too
+  (build-time code of an sdist still sees what its build holds). The rule is not retroactive:
   what a
   holder of one of the three created earlier (grants, memberships, tokens) stays.
 
@@ -3119,7 +3219,9 @@ From the threat model:
   for hostile code; treating it as one would trade real usability for theatre.
   `LocalProcessRunner` runs a task as the worker's user: one instance is one trust domain, and
   everyone who may deploy Python code is trusted with everything the worker can read (see
-  "Python tasks and bound task tokens").
+  "Python tasks and bound task tokens"). `DockerRunner` isolates projects from each other and
+  from the worker, not hostile code from the host: containers share the kernel (see "Task
+  isolation: the launcher").
 - **Inference from a model, and code in a pickled artifact (M5c2b).** An artifact is all or
   nothing: no row filter or column mask applies to a file, so a model reveals what it was trained on
   to everyone who may read it, and loading a pickle runs what the file contains. See "The artifact
@@ -3141,8 +3243,8 @@ From the threat model:
   as `AUTHORIZATION_DENIED` with its reason. The residual is below, under "Package index
   credentials (M5c2c)". Under `LocalProcessRunner` a holder who also has `DEPLOY` and `RUN` still
   reads what the worker reads (one trust domain): binding stops an index manager from redirecting a
-  secret, not code that runs in the worker, and becomes a boundary against such code only with the
-  container runner. See "The three actions that need the `ADMIN` role".
+  secret, not code that runs in the worker. Under `DockerRunner` a task container holds no
+  credential. See "The three actions that need the `ADMIN` role".
 - **Infrastructure compromise.**
 - **An external Iceberg REST client holding its own storage credentials.** Lakana's Iceberg
   REST endpoints vend no storage credentials of their own —
@@ -3528,10 +3630,11 @@ that uses it. User reference: `docs/site/reference/package-indexes.md`; how-to:
 - **Residuals:** see "Private package indexes (M5c2c): residuals" in
   `docs/security/threat-model.md`. In short: under `LocalProcessRunner` a task can read what the
   worker reads: a concurrent build's credential in `/proc/<pid>/environ` of the uv process, and
-  the private wheels in the uv cache and in cached environments (one trust domain until
-  `DockerRunner`, M7b); the key of a built environment has no environment in it, so an
-  environment built with one environment's credential serves the same lock in another (the deploy
-  check still requires the secret there); an index that serves its files from another host that
+  the private wheels in the uv cache and in cached environments (one trust domain; under
+  `DockerRunner` a task container sees no build and no cache); under `LocalProcessRunner` the key
+  of a built environment has no environment in it, so an environment built with one environment's
+  credential serves the same lock in another (the deploy check still requires the secret there;
+  under `DockerRunner` the key holds `environment_owner`, the repository and the environment); an index that serves its files from another host that
   asks for the credential is not supported (the build fails and is retried, with no advice in the
   message); the worker's shared uv cache
   serves a private wheel to another project whose lock names its URL and hash (when the index
@@ -4750,7 +4853,7 @@ matter for an operator deciding where to run it:
   JWT signing was not chosen: network isolation needs no key distribution, and a signing key
   would have to stay out of the worker anyway. Asserted by
   `test_seaweedfs_internal_apis_are_unreachable_from_the_worker` (compose structure) and by a
-  check run inside the worker in `scripts/compose_smoke_test.sh` (CI). **Not protected:** the gateway's gRPC port 18333 (it includes IAM) cannot be turned off and has no authentication. It is reachable from the default network, so from code in the worker: user SQL cannot reach it, because DuckDB's HTTP filesystem cannot speak gRPC, but a Python task, which runs as trusted code in the worker today, could remove the storage identity and make storage unavailable until a restart. The planned container runner keeps task networks away from SeaweedFS. The isolation relies on Docker's own network isolation (the default); a daemon with `iptables: false`, Podman or rootless setups may not provide it. The S3
+  check run inside the worker in `scripts/compose_smoke_test.sh` (CI). **Not protected:** the gateway's gRPC port 18333 (it includes IAM) cannot be turned off and has no authentication. It is reachable from the default network, so from code in the worker: user SQL cannot reach it, because DuckDB's HTTP filesystem cannot speak gRPC, but a Python task under `LocalProcessRunner`, which runs as trusted code in the worker, could remove the storage identity and make storage unavailable until a restart. Under `DockerRunner` a task's network holds only the server and a build's only the egress proxy, which refuses the networks it is attached to, so neither reaches SeaweedFS. The isolation relies on Docker's own network isolation (the default); a daemon with `iptables: false`, Podman or rootless setups may not provide it. The S3
   keys, held by the worker as before, give full bucket access (per-environment scoping is the
   presigned-URL path above); anyone with Docker access to the host reaches everything. Any change
   that joins a worker or server to `seaweed-internal`, or publishes a port of `seaweedfs-core`,

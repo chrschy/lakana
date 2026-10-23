@@ -158,13 +158,14 @@ there is one, the line, as `path:line: message`. Fix the cause and deploy again.
 | `requires-python '…' does not admit the worker's Python X` | The project's Python range excludes the worker's Python. | Widen `requires-python`, then `uv lock`. |
 | `requires-python '…' does not admit Python X, which python: in lakana.yaml names` | The project's Python range excludes the Python that `python:` in `lakana.yaml` chooses. | Widen `requires-python` and run `uv lock`, or name another Python. |
 | `this project names Python X in lakana.yaml, and this worker runs Python tasks on its own Python Y without containers …` | The worker runs tasks without containers (`LAKANA_RUN__RUNNER=local`), so it has only its own Python. | Run the project on a worker with `LAKANA_RUN__RUNNER=docker`, or set `python:` to the worker's version (or remove it) and deploy again. |
-| `environment 'E' is protected, and this worker runs Python tasks without isolation (LAKANA_RUN__RUNNER=local) …` | A protected environment runs Python assets only in containers, and this worker runs tasks as its own processes. The task never started. | Run the task on a worker with `LAKANA_RUN__RUNNER=docker` (the Compose bundle's default), then run again. |
+| `environment 'E' is protected, and this worker runs Python tasks without isolation (LAKANA_RUN__RUNNER=local) …` | A protected environment runs Python assets only in containers, and this worker runs tasks as its own processes. The task never started. | Run the task on a worker with `LAKANA_RUN__RUNNER=docker` (the Compose bundle's default), then run again. See [Run Python tasks in containers](../how-to/run-python-tasks-in-containers.md#protected-environments). |
 | `environment build failed: the task's log could not be written while its environment was built …` | The worker could not keep the build's output. | Read the worker's log for the cause, then start the run again. |
 | `this instance cannot run Python assets: …` | The worker has no `LAKANA_RUN__SERVER_URL`, or no `uv`. | Ask whoever runs the instance; see "Operator settings" below. |
 
 ## What a task may read and write
 
-Each attempt of a Python asset is a **task** that runs in its own process on a worker. The
+Each attempt of a Python asset is a **task** that runs in its own process on a worker, or, with
+the docker runner, in a container of its own ([Run Python tasks in containers](../how-to/run-python-tasks-in-containers.md)). The
 worker gives the process a **task token**: a credential that is valid for this one attempt and
 only while it runs. With it, your code can:
 
@@ -249,8 +250,9 @@ not installed: it is imported from the checkout.
 
 The first task that needs an environment builds it from the lock (`uv sync --frozen`) and caches
 it, keyed by the hash of the lock together with your `pyproject.toml`, the Python version and the
-platform. Projects whose lock and `pyproject.toml` are both identical share the environment; a
-change to either builds a new one.
+platform. With the local runner, projects whose lock and `pyproject.toml` are both identical
+share the environment; with the docker runner an environment belongs to one project in one
+environment. A change to either file builds a new one.
 
 Put a Python asset's dependencies in `[project] dependencies`. Packages in a dependency group
 (`[dependency-groups]`, including `dev`, and `[tool.uv] default-groups`) are not installed for a
@@ -258,9 +260,10 @@ task. After a platform upgrade that changes the compatible `lakana`
 version, update the lock and redeploy: tasks of the old deploy fail with a message that says so. To install a package of your own from an index with a password, see [Use a private package index](../how-to/private-package-index.md).
 
 What the build can run: it installs only what the lock names, but a package that is built from
-source (a source distribution) runs its own build backend, as the
-worker's user, with network access, and it can see the index and proxy credentials the worker
-passes to the build. That is why a build that uses a registered index's credential builds nothing from source: uv runs with `--no-build`, and a package without a wheel fails the build with a message. The worker builds with `uv sync --frozen --no-config`: your `[tool.uv]`
+source (a source distribution) runs its own build backend, and it can see the index and proxy
+credentials the worker passes to the build. With the local runner it runs as the worker's user,
+with the worker's network access; with the docker runner it runs in the build's own container,
+which reaches only the package indexes' hosts. That is why a build that uses a registered index's credential builds nothing from source: uv runs with `--no-build`, and a package without a wheel fails the build with a message. The worker builds with `uv sync --frozen --no-config`: your `[tool.uv]`
 settings shape the lock on your machine (when you run `uv lock`) and are ignored at build time on
 the worker (a `uv.toml` is refused, see [What a deploy checks](#what-a-deploy-checks); the worker still reads the lock and
 the index definitions in `[[tool.uv.index]]`), and the lock decides which hosts the build
@@ -274,16 +277,16 @@ registered package indexes; see [What a deploy checks](#what-a-deploy-checks) an
 | Variable | Default | Meaning |
 |---|---|---|
 | `LAKANA_RUN__SERVER_URL` | unset | The server's `http(s)://host[:port]` URL as a task's process reaches it, without credentials, query or fragment. Unset, the worker refuses Python assets (a deploy says so; the worker's log says so at startup). The Compose bundle and local mode set it. |
-| `LAKANA_RUN__VENV_CACHE` | `<worker cache>/venvs` | Where venvs are kept. An absolute path. It must be private: owned by the worker's user, mode `0700`, not a symlink; otherwise tasks fail with "not private". |
-| `LAKANA_RUN__VENV_KEEP` | `10` | Venvs kept, most recently used first (at least 1). A venv in use is never removed. |
+| `LAKANA_RUN__VENV_CACHE` | `<worker cache>/venvs` | Local runner only. Where venvs are kept. An absolute path. It must be private: owned by the worker's user, mode `0700`, not a symlink; otherwise tasks fail with "not private". |
+| `LAKANA_RUN__VENV_KEEP` | `10` | Local runner only (the launcher keeps 10). Venvs kept, most recently used first (at least 1). A venv in use is never removed. |
 | `LAKANA_RUN__VENV_BUILD_TIMEOUT` | `600` | Seconds one build may run (above 0). |
 | `LAKANA_RUN__VENV_MAX_BYTES` | `5368709120` (5 GiB) | Largest size of one venv while it is built (above 0). |
 | `LAKANA_RUN__KILL_GRACE` | `10` | Seconds between SIGTERM and SIGKILL when a task is stopped (0 or more). |
 | `LAKANA_RUN__SWEEP_INTERVAL` | `3600` | Seconds between the worker's sweeps of attempt directories and deploy checkouts a dead worker left behind (the first runs at startup) and between the sweeps that the worker holding the scheduler role runs of the artifact store (expired uploads, files and manifest objects no version names), of table locations (the files of creates that never finished) and of the code archives of failed deploys. `0` turns all five sweeps off (0 or more); then nothing collects those leftovers. |
 | `LAKANA_RUN__INDEX_URL` | unset | An extra package index for the build (passed to uv as `UV_INDEX`). A credential goes in the URL's userinfo (`https://user:token@host/simple`, redacted from logs); a URL with a query string (`?token=...`) is refused at startup. Only userinfo is redacted from logs, **a token in the path is not**. The server and the worker do not refuse such a URL: when a path segment looks like a token (16 or more letters, digits and `-_.~%+`, with a digit or a capital letter among them; the form `https://host/<token>/simple/`), they start and log one warning at startup that names this setting and not the URL. If it is a token, move it into the userinfo; if it is a project or repository name, nothing needs doing. A token shorter than 16 characters in the path is not recognised, so there is no warning and it is not redacted: do not put one there. |
-| `LAKANA_RUN__HTTPS_PROXY` | unset | Proxy for the build. A credential goes in the userinfo (`http://user:password@host:3128`); a URL with a query string is refused at startup; a path segment that looks like a token is warned about at startup, as for `LAKANA_RUN__INDEX_URL`. |
-| `LAKANA_RUN__NO_PROXY` | unset | Hosts that bypass the proxy. |
-| `LAKANA_RUN__CA_BUNDLE` | unset | An absolute path of a PEM file the build trusts. |
+| `LAKANA_RUN__HTTPS_PROXY` | unset | Local runner only: refused with `docker`. Proxy for the build. A credential goes in the userinfo (`http://user:password@host:3128`); a URL with a query string is refused at startup; a path segment that looks like a token is warned about at startup, as for `LAKANA_RUN__INDEX_URL`. |
+| `LAKANA_RUN__NO_PROXY` | unset | Local runner only. Hosts that bypass the proxy. |
+| `LAKANA_RUN__CA_BUNDLE` | unset | Local runner only: refused with `docker`. An absolute path of a PEM file the build trusts. |
 | `LAKANA_RUN__RUNNER` | `local` | How Python tasks run: `local`, as processes of the worker (not isolated from it), or `docker`, each task and each environment build in a container of its own that the launcher service starts. Another value stops the worker at start. |
 | `LAKANA_RUN__LAUNCHER_SOCKET` | `/run/lakana-launcher/launcher.sock` | With `docker`: the launcher's socket, in a volume the worker and the launcher share. An absolute path. |
 | `LAKANA_RUN__TASK_MEMORY` | `2GB` | With `docker`: the memory limit of each task container and build container, outside the worker's own limit. Binary units (`1GB` is `1024MB`), at least `64MB`. |
@@ -294,8 +297,8 @@ With `LAKANA_RUN__RUNNER=docker`, `LAKANA_RUN__HTTPS_PROXY` and `LAKANA_RUN__CA_
 at start: builds reach the package indexes through the egress service, and a build container
 trusts only the publicly trusted certificate authorities of its task image. A package index or a
 proxy whose certificate a private certificate authority signed therefore needs
-`LAKANA_RUN__RUNNER=local` for now (see [Python assets](../how-to/deploy-with-compose.md#python-assets)
-in "Deploying with Compose"). The egress service lets a build reach port 443 of each package
+`LAKANA_RUN__RUNNER=local` for now ([#292](https://github.com/lakana-labs/lakana/issues/292); see
+[Run Python tasks in containers](../how-to/run-python-tasks-in-containers.md#package-indexes-and-proxies)). The egress service lets a build reach port 443 of each package
 index's host, and another port only when the index's URL names it (a registered index with a
 credential, or `LAKANA_RUN__INDEX_URL`; a registered index on another port without a credential
 is refused until [#301](https://github.com/lakana-labs/lakana/issues/301): give it a credential
@@ -337,8 +340,9 @@ task image carries it. The worker logs at startup whether it can run Python asse
   never symbolic links into it. `lakana env usage` and `lakana worker list` show how large the
   three directories are ([Is my instance healthy?](../how-to/instance-health.md#disk-use)). To
   reclaim all of it at once, stop the worker and delete the `uv/` directory (the next build
-  downloads what it needs again). A process that a task detaches from its
-  process group is not killed when the task ends.
+  downloads what it needs again). With the local runner, a process that a task detaches from
+  its process group is not killed when the task ends; with the docker runner it ends with the
+  task's container.
 - `attempts/` holds one directory per running attempt. It is removed when the attempt ends. After
   a hard kill of the worker, the leftover is removed by the worker's sweep: at start and then every
   `LAKANA_RUN__SWEEP_INTERVAL` seconds (the same setting paces the artifact store's sweep, and `0`

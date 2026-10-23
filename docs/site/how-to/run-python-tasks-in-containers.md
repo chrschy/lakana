@@ -1,0 +1,236 @@
+# Run Python tasks in containers
+
+With `LAKANA_RUN__RUNNER=docker`, every Python task runs in a container of its own, and every
+environment build in another one. The Compose bundle does this by default. This page says what
+that isolates and what it does not, how to set it, and what each message means.
+
+Two services of the bundle do the work. `launcher` is the only one that holds the Docker socket:
+a worker asks it, over a Unix socket, to start a task or a build. `egress` is the only way out of
+a build container, to the package indexes the build may use.
+
+## What it isolates
+
+- **The worker's secrets and files.** A task sees its project's code (read-only, at `/code`), its
+  built environment (read-only, at `/env`), a private scratch directory (`/work`) and a private
+  `/tmp`. Nothing of the worker's environment variables, settings, files or processes, and not
+  the Docker socket. Its task token arrives on its standard input, as with the local runner.
+- **Other projects.** Each task has a network of its own, on which the Lakana server is the only
+  other member: not the host, not the internet, not another task, not the database or the object
+  store. A task resolves no name outside it. An environment belongs to one project in one
+  environment and is built for its `uv.lock`, `pyproject.toml`, Python and set of package indexes,
+  by another user than the one the task runs as, so a task cannot change it.
+- **Resources.** Memory, CPUs and processes are limits of the container (`2GB`, `1` and `256` by
+  default), enforced by the kernel. A task over its memory ends with "this task was ended because
+  it used more than its container's memory limit" and is retried while it has attempts left.
+- **Leftovers.** When a task ends, is cancelled or times out, or its worker stops or dies (its
+  connection to the launcher closes), the container is removed with every process in it,
+  including those the task started in the background.
+
+Inside the container a task runs without capabilities, with a read-only root filesystem, as uid
+10001 in a group of its own, and with `no-new-privileges` where Docker allows it.
+
+## What it does not
+
+- **Containers share the host's kernel.** This isolates projects from each other and from the
+  worker. It is not a sandbox for code written to break out of a container: keep reviewing what
+  you deploy.
+- **A task still reaches the server.** It talks to Lakana's REST API with its own task token, as
+  before, and it can connect to every port the `server` container listens on.
+- **Builds run your dependencies' build code.** A package built from source (a source
+  distribution) runs its own code in the build container. That container holds the credentials of
+  the package indexes its lock uses and the password in `LAKANA_RUN__INDEX_URL`, if it has one, and
+  can reach those indexes' hosts. When the lock uses a registered package index with a credential,
+  Lakana installs wheels only and runs no package's build code. Prefer wheels, and review
+  dependencies as you review code.
+- **The launcher holds the Docker socket, which is root on the host.** It has no network, no
+  capabilities and a read-only filesystem, and it takes only a fixed set of requests from the
+  workers; a fault in it is still a fault on the host. Protect the host as you would any Docker
+  host, and give the Docker group only to people you would give root.
+- **Disk.** A task's scratch directory, the built environments and the build caches have no disk
+  quota (Docker volumes have none on most storage drivers). An environment larger than
+  `LAKANA_RUN__VENV_MAX_BYTES` is refused once it is built; nothing stops a build from filling the
+  disk while it runs. The launcher keeps the 10 most recently used environments and removes a
+  build cache that nobody used for 14 days.
+- **A build is not stopped by a cancel.** A cancel, a drain or a lost lease waits for a running
+  environment build to end, up to `LAKANA_RUN__VENV_BUILD_TIMEOUT` (600 s)
+  ([#291](https://github.com/lakana-labs/lakana/issues/291)).
+- **The local runner and local mode.** `LAKANA_RUN__RUNNER=local` and local mode
+  (`lakana server start --local`) run tasks as the worker's own processes, so one instance stays
+  one trust domain: see [Isolation](../explanation/python-assets.md#isolation-one-instance-is-one-trust-domain).
+
+## Turn it on or off
+
+In the Compose bundle it is on: `LAKANA_RUNNER=docker` in `.env`. To go back to tasks as the
+worker's own processes, set `LAKANA_RUNNER=local` and run the `docker compose` command of the
+[Quickstart](deploy-with-compose.md#quickstart) again. `launcher` and `egress` still start either
+way (see [Python assets](deploy-with-compose.md#python-assets) in "Deploying with Compose"). Local
+mode always runs tasks as processes.
+
+Docker Engine 28 or later is required: it is the first that keeps a task's network away from the
+host. On Docker installed as a snap, `no-new-privileges` is left off (the launcher logs
+"no-new-privileges is off: this Docker refuses it for task and build containers."); the other
+protections stay.
+
+Budget the host's memory for the workers' own limits plus one task's memory
+(`LAKANA_RUN__TASK_MEMORY`) per worker: a task container's memory is outside the worker's limit.
+
+## Choose the Python
+
+Tasks run on the worker's Python (3.14 in the bundle's image) unless the project's `lakana.yaml`
+names another:
+
+```yaml
+python: "3.12"
+```
+
+The versions are 3.11 to 3.14, in quotes. A worker without containers refuses a project that names
+another Python than its own. See [The Python of your tasks](../reference/lakana-yaml.md#the-python-of-your-tasks).
+
+## Package indexes and proxies
+
+A build reaches only the hosts of the package indexes its project may use: the public index
+(`pypi.org` and `files.pythonhosted.org`), or instead the host of `LAKANA_RUN__INDEX_URL`, and the
+registered package indexes its lock names. A package's files must come from one of those hosts.
+`egress` refuses anything else, and the build fails with uv's error in the task's log.
+
+- **Port 443.** A build reaches port 443 of each of those hosts, and another port only when the
+  index's URL names it and reaches the launcher: a registered index with a credential, or
+  `LAKANA_RUN__INDEX_URL`. A registered index on another port without a credential is refused
+  until [#301](https://github.com/lakana-labs/lakana/issues/301): give it a credential or serve it
+  on port 443.
+- **https only.** `egress` tunnels https, so an `http://` index cannot be reached from a build,
+  and an `http://` `LAKANA_RUN__INDEX_URL` stops a worker with the docker runner at start.
+- **Addresses.** `egress` never connects to loopback, link-local (cloud metadata), multicast or
+  reserved addresses, nor into the networks it is attached to (the bundle's own network with the
+  server, the database and the object store, and the build networks). Other private addresses
+  stay reachable, because a company's package index often has one; a list of ranges an operator
+  allows or refuses is [#303](https://github.com/lakana-labs/lakana/issues/303).
+- **A company proxy.** If your network sends https through a proxy, set
+  `LAKANA_EGRESS_UPSTREAM_PROXY` in `.env` (`http://[user:password@]host:port`). `egress` then
+  tunnels through that proxy and leaves the address checks above to it; it still lets a build
+  reach only its own indexes' hosts.
+- **A private certificate authority.** A build container trusts only the publicly trusted
+  certificate authorities of its task image. `LAKANA_RUN__HTTPS_PROXY` and `LAKANA_RUN__CA_BUNDLE`
+  apply only to the local runner and stop a worker with the docker runner at start. An index or a
+  proxy whose certificate a private authority signed needs `LAKANA_RUNNER=local` for now
+  ([#292](https://github.com/lakana-labs/lakana/issues/292)).
+
+A secret is sent only to the index it is bound to: see [Use a private package index](private-package-index.md).
+
+## Protected environments
+
+A protected environment runs Python tasks only on workers with `LAKANA_RUN__RUNNER=docker`. A
+worker with the local runner fails such a task at once (failure code `no_runtime`), so local mode
+cannot run the Python assets of a protected environment; SQL assets are not affected. Whether an
+environment is protected is read when a task's attempt is prepared: an attempt that was already
+under way on a local-runner worker when you protected the environment runs to its end there.
+Give every worker that takes pipeline work the docker runner before you protect an environment
+with Python assets (see [Protected environments](projects.md#protected-environments-lockdown-and-break-glass)).
+
+## Settings
+
+### The worker
+
+Set these where the worker reads them (in the bundle, under `x-lakana-env` in `compose.yaml`).
+Every variable is also in the [settings reference](../reference/settings.md).
+
+| Setting | Default | What it does |
+|---|---|---|
+| `LAKANA_RUN__RUNNER` | `local` (`docker` in the bundle) | How tasks run. |
+| `LAKANA_RUN__LAUNCHER_SOCKET` | `/run/lakana-launcher/launcher.sock` | The launcher's socket, in the volume the worker shares with it. |
+| `LAKANA_RUN__TASK_MEMORY` | `2GB` | A task's and a build's memory, outside the worker's own limit. |
+| `LAKANA_RUN__TASK_CPUS` | `1` | A task's and a build's CPUs. |
+| `LAKANA_RUN__TASK_PIDS` | `256` | A task's and a build's most processes. |
+
+`LAKANA_RUN__VENV_BUILD_TIMEOUT`, `LAKANA_RUN__VENV_MAX_BYTES`, `LAKANA_RUN__KILL_GRACE` and
+`LAKANA_RUN__INDEX_URL` apply to both runners. `LAKANA_RUN__VENV_CACHE`, `LAKANA_RUN__VENV_KEEP` and
+`LAKANA_RUN__NO_PROXY` apply to the local runner only, and so does the trim of the worker's package
+cache (`LAKANA_WORKER__PACKAGE_CACHE_MAX_BYTES`): with the docker runner the environments and
+caches are the launcher's volumes.
+
+### The launcher
+
+Set these under `environment:` of the `launcher` service in `compose.yaml`; the bundle sets the
+first two. Keep your additions when you replace `compose.yaml` on an upgrade.
+
+```yaml
+  launcher:
+    # ... the lines that are already here stay ...
+    environment:
+      LAKANA_LAUNCHER__NETWORK_RANGE: 10.99.0.0/16
+```
+
+| Setting | Default | What it does |
+|---|---|---|
+| `LAKANA_LAUNCHER__STACK` | the Compose project name | Prefixes every container, network and volume the launcher makes, and labels them `lakana.launcher.stack=<project>`. |
+| `LAKANA_LAUNCHER__IMAGES` | from `LAKANA_TASK_IMAGE` | The allowed task images, as JSON from Python version to image. |
+| `LAKANA_LAUNCHER__SOCKET` | `/run/lakana-launcher/launcher.sock` | Where the launcher listens; the token the workers send lies next to it. |
+| `LAKANA_LAUNCHER__NO_NEW_PRIVILEGES` | `auto` | `auto` sets `no-new-privileges` where Docker allows it; `on` refuses to start where it does not. |
+| `LAKANA_LAUNCHER__MAX_MEMORY_MB` | `16384` | The most memory one task or build may ask for, in MiB. |
+| `LAKANA_LAUNCHER__MAX_TOTAL_MEMORY_MB` | `65536` | The most memory the running tasks and builds may hold together; one more waits as "runner unavailable" and is retried. |
+| `LAKANA_LAUNCHER__MAX_CPUS` | `8` | The most CPUs one task or build may ask for. |
+| `LAKANA_LAUNCHER__MAX_PIDS` | `4096` | The most processes one task or build may ask for. |
+| `LAKANA_LAUNCHER__NETWORK_RANGE` | `10.207.0.0/16` | The private IPv4 range (a `/24` or larger) that each task and build network gets 8 addresses from. |
+| `LAKANA_LAUNCHER__INGESTION_ROOTS` | none | Host directories, by name, that a task may read at `/ingest/<name>`. No task asks for one in this release; data loading will. |
+| `LAKANA_LAUNCHER__PROBE_MAX_ENTRIES` | `100000` | The most entries the start-up check looks at in one ingestion root. |
+
+**The network range.** Task and build networks take their addresses from
+`LAKANA_LAUNCHER__NETWORK_RANGE`. If your network uses `10.207.0.0/16` (a VPN, a site, a company
+package index), the host would send that traffic into a task network instead: choose a range your
+network does not use. A `/16` holds 6,144 networks at once; the addresses of a build's network
+are not given out again until a minute after its egress token expires.
+
+**Ingestion roots.** The launcher refuses `/`, a directory under or holding `/run`, `/var/run`,
+`/var/lib/docker`, `/var/lib/containerd`, `/var/snap/docker`, `/proc`, `/sys`, `/dev`, `/etc`,
+`/root` or `/boot`, and the Docker socket's or its own socket's directory. At start it looks at each root from inside a container and refuses
+requests for a root that holds a socket, a pipe, a device or a system mount. Docker follows a link
+on the host when it mounts a root, which the launcher cannot see, so three rules are yours to keep:
+a root is not a symbolic link; neither the root nor any of its parent directories is writable by
+anyone but root; and the Docker group's id on the host is none of 10001, 10002 and 10003, the ids
+Lakana's containers run as (the launcher refuses to start when it is 10002 or 10003).
+
+### The egress proxy
+
+Set these under `environment:` of the `egress` service in `compose.yaml`.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `LAKANA_EGRESS__UPSTREAM_PROXY` | none (from `LAKANA_EGRESS_UPSTREAM_PROXY` in `.env`) | The proxy builds go through, `http://[user:password@]host:port`. |
+| `LAKANA_EGRESS__MAX_CONNECTIONS` | `256` | Connections at once, 1 to 4096. One build can hold all of them ([#302](https://github.com/lakana-labs/lakana/issues/302)). |
+| `LAKANA_EGRESS__LISTEN` | `0.0.0.0:3128` | Where the proxy listens. Leave it. |
+| `LAKANA_EGRESS__KEY` | `/run/lakana-egress/egress.key` | The key the launcher signs build tokens with; a new one at every launcher start. Leave it. |
+
+## Remove everything, or recover from an incident
+
+Everything the launcher makes carries the label `lakana.launcher.stack=<project>`, where
+`<project>` is the Compose project name (`lakana` unless you set `COMPOSE_PROJECT_NAME`).
+`docker compose down -v` does not remove it; the commands are under
+[Starting over](deploy-with-compose.md#starting-over).
+
+If a project may have deployed a malicious dependency or package, or a worker may be compromised:
+
+1. Stop the workers, so that nothing builds or runs meanwhile.
+2. Run the three commands of [Starting over](deploy-with-compose.md#starting-over) that remove the
+   launcher's containers, networks and volumes, but not `docker compose down -v`, which deletes
+   your data. Every environment is rebuilt from its lock on next use.
+3. Rotate what a build or a task could have seen: the credentials of the registered package
+   indexes the affected projects use, and the password in `LAKANA_RUN__INDEX_URL` if it has one.
+4. Deploy the fixed project, start the workers again, and read the audit log and the task logs of
+   the affected projects for what ran meanwhile.
+
+## When something goes wrong
+
+| Message | Cause | What to do |
+|---|---|---|
+| `runner unavailable: ... Check that the launcher service is running ...` | The worker cannot reach the launcher, Docker failed, or the launcher's memory or network limit is reached. | Look at the state of `launcher` in `docker compose ps` and at `docker compose logs launcher`. The task is retried. |
+| `Docker Engine 28 or later is needed` (launcher log) | The engine cannot keep a task's network away from the host. | Upgrade Docker. |
+| `LAKANA_LAUNCHER__NO_NEW_PRIVILEGES is on, but this Docker cannot ...` (launcher log) | Snap Docker refuses the option. | Set it to `auto`. |
+| `The group of the Docker socket (...) is a group that task or build containers run in` (launcher log) | The Docker group's id is 10002 or 10003. | Give the Docker group another id on the host. |
+| `this task was ended because it used more than its container's memory limit` | The task used more than `LAKANA_RUN__TASK_MEMORY`. | Read less in the task, or raise the setting. |
+| `... is not a destination this build may reach` (in uv's error), `Refused a build connection ... not in its token.` (egress log) | The build tried a host or port that is not one of its indexes. | Register the index (`lakana index add`), or set `LAKANA_RUN__INDEX_URL`; for another port than 443, see [Package indexes and proxies](#package-indexes-and-proxies). |
+| `python: must be one of "3.11", "3.12", "3.13", "3.14" ...` | The version has no task image, or lacks quotes. | Write one of the four, in quotes. |
+| `this project names Python X in lakana.yaml, and this worker runs Python tasks on its own Python Y without containers ...` | A local-runner worker took the task. | Run it on a worker with `LAKANA_RUN__RUNNER=docker`, or remove `python:`. |
+| `the launcher refused the task: ...` | Worker and launcher settings disagree. | Compare `LAKANA_LAUNCHER__IMAGES` and the `LAKANA_LAUNCHER__MAX_*` ceilings with the `LAKANA_RUN__TASK_*` settings. |
+| `environment 'prod' is protected, and this worker runs Python tasks without isolation ...` | A local-runner worker took a protected environment's task. | Give the worker `LAKANA_RUN__RUNNER=docker`. |
+| `LAKANA_RUN__HTTPS_PROXY applies to builds of the local runner ...`, `LAKANA_RUN__CA_BUNDLE applies to builds of the local runner ...` (worker log) | A local-runner setting on a docker-runner worker. | Unset it; see [Package indexes and proxies](#package-indexes-and-proxies). |
+| `timed out: the launcher reported no end of the task's container ...` | The launcher did not report the container's end within the task's timeout, its kill grace and 15 minutes. | Read `docker compose logs launcher`; the worker closed its connection, which removes the container. |

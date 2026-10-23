@@ -1,6 +1,6 @@
 # Python assets: what they are for and how far they are trusted
 
-Why a project has Python assets next to its SQL, and why one instance is one trust domain. The
+Why a project has Python assets next to its SQL, and when one instance is one trust domain. The
 steps are in [Projects and deploys](../how-to/projects.md#python-assets); the rules are in
 [Python assets (reference)](../reference/python-assets.md).
 
@@ -25,6 +25,13 @@ stop code that means harm.
 So one instance is one **trust domain**: everyone who may deploy Python code to it is trusted
 with everything the worker can read. Deploy only code and dependencies you would run on the
 worker itself, and run one instance per client or per group of people who do not trust each
-other. Task isolation, which runs each Python task in its own container, is planned before the public
-beta; until then, treat a Python asset like code you run on the worker's machine
+other. Under the local runner, treat a Python asset like code you run on the worker's machine
 yourself.
+
+**With `LAKANA_RUN__RUNNER=docker`** (the Compose bundle's default) each task runs in a container
+of its own and cannot read the worker's credentials or another project's environment: see
+[Run Python tasks in containers](../how-to/run-python-tasks-in-containers.md). Containers share
+the host's kernel, so this isolates projects, not code written to escape it; a task still talks to
+the server with its token, and a package built from source still runs its build code next to the
+build's index credentials. The local runner, and local mode (`lakana server start --local`), keep
+the one trust domain described above.

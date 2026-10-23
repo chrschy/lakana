@@ -176,8 +176,10 @@ Each Python task runs in a container of its own (`LAKANA_RUN__RUNNER=docker`, se
 `LAKANA_RUNNER` in `.env`): its code and environment read-only, a private scratch directory, the
 server as the only thing it can reach, and its own memory (`LAKANA_RUN__TASK_MEMORY`, 2 GB), CPU
 (1) and process (256) limits. Environments are built once per `uv.lock`, `pyproject.toml`, Python
-and set of package indexes, in volumes the launcher names `<project>-env-…`. What a project's
-Python code can and cannot do in either case is in [Python assets](projects.md#python-assets).
+and set of package indexes, in volumes the launcher names `<project>-env-…`. What that isolates
+and what it does not, its settings and its messages are in
+[Run Python tasks in containers](run-python-tasks-in-containers.md); what a project's Python code
+can and cannot do is in [Python assets](projects.md#python-assets).
 
 `LAKANA_RUNNER=local` changes only where tasks run: as the worker's own processes, without
 isolation. `launcher` and `egress` still start, so Docker Engine 28, the Docker socket and
@@ -1458,11 +1460,14 @@ docker compose down -v
 then delete the bundle directory. `down -v` removes the named volumes (`pgdata`, `seaweed`),
 so this discards the catalog and all stored data — there is no undo short of a backup.
 
-`down -v` leaves the launcher's environment and cache volumes; this removes them (use your
-project name if it is not `lakana`):
+`down -v` leaves what the launcher made: its environment and cache volumes, and any task or
+build container (with its network) that was still running when it stopped. These commands remove
+them, containers first (use your project name if it is not `lakana`):
 
-<!-- not tested: needs a running bundle; scripts/compose_smoke_test.sh runs the same command at its end -->
+<!-- not tested: needs a running bundle; scripts/compose_smoke_test.sh runs the volume command at its end -->
 ```bash
+docker ps -aq --filter "label=lakana.launcher.stack=lakana" | xargs -r docker rm -f -v
+docker network ls -q --filter "label=lakana.launcher.stack=lakana" | xargs -r docker network rm
 docker volume ls -q --filter "label=lakana.launcher.stack=lakana" | xargs -r docker volume rm
 ```
 
@@ -1526,7 +1531,8 @@ The bundle's known gaps (SeaweedFS's internal APIs, a venv build that a shutdown
 [Known gaps of the Compose bundle](../explanation/compose-known-gaps.md).
 
 Task containers share the host's kernel: they isolate projects from each other and from the
-worker, they are not a sandbox for hostile code.
+worker, they are not a sandbox for hostile code. The rest of what they do not cover is in
+[Run Python tasks in containers](run-python-tasks-in-containers.md#what-it-does-not).
 
 ## See also
 

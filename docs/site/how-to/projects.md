@@ -129,8 +129,10 @@ def station_scores(readings: pl.DataFrame, stations: pl.DataFrame) -> pl.DataFra
 in a comment, pinned to the version of the CLI that wrote the file. Delete `dependencies = []`
 and remove the `# ` in front of the `dependencies` line. `lakana` and every other package come
 from the public package index: `uv lock` and the worker's first build of the project's
-environment need a network connection to it (the worker uses `LAKANA_RUN__HTTPS_PROXY` if you set
-one, see [Operator settings](../reference/python-assets.md#operator-settings)). With the line uncommented, the file reads:
+environment need a network connection to it (a worker with the docker runner reaches it through
+the `egress` service, see [Run Python tasks in containers](run-python-tasks-in-containers.md#package-indexes-and-proxies);
+one with the local runner uses `LAKANA_RUN__HTTPS_PROXY` if you set one, see
+[Operator settings](../reference/python-assets.md#operator-settings)). With the line uncommented, the file reads:
 
 ```toml
 [project]
@@ -584,8 +586,11 @@ A protected environment runs Python assets only on workers that run tasks in con
 (`LAKANA_RUN__RUNNER=docker`, the Compose bundle's default). A worker with the local runner fails
 such a task at once with "environment 'prod' is protected, and this worker runs Python tasks
 without isolation (LAKANA_RUN__RUNNER=local). …" (failure code `no_runtime`); give every worker that
-takes pipeline work the docker runner before you protect an environment with Python assets. SQL
-assets are not affected.
+takes pipeline work the docker runner before you protect an environment with Python assets. Local
+mode runs tasks without containers, so it cannot run the Python assets of a protected environment.
+Protection is read when a task's attempt is prepared: an attempt already under way on a local-runner
+worker runs to its end. SQL assets are not affected. See
+[Run Python tasks in containers](run-python-tasks-in-containers.md).
 
 For an incident, a holder of `MANAGE_ENVIRONMENT` can make exactly one write anyway:
 
