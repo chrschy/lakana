@@ -1059,6 +1059,26 @@ def secret_keys(
     return frozenset(), frozenset()
 
 
+def takes_secret(kind: ConnectionKind, settings: Mapping[str, Any]) -> bool:
+    """Say whether a connection of this kind and these settings sends a secret.
+
+    Parameters
+    ----------
+    kind
+        The kind.
+    settings
+        Validated settings (the `http` auth decides).
+
+    Returns
+    -------
+    bool
+        Whether it takes one; `tcp` always may.
+    """
+    kind = _kind(kind)
+    required, optional = secret_keys(kind, settings)
+    return kind is ConnectionKind.TCP or bool(required | optional)
+
+
 def single_secret_key(kind: ConnectionKind, settings: Mapping[str, Any]) -> str | None:
     """Name the key `--password-stdin` stores stdin under.
 

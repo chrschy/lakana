@@ -15,6 +15,7 @@ from lakana_core.connections.kinds import (
     moves_secret,
     secret_keys,
     single_secret_key,
+    takes_secret,
     validate_connection,
 )
 from lakana_core.errors import ValidationError
@@ -628,3 +629,32 @@ def test_changing_the_auth_moves_the_secret() -> None:
         HTTP_ADDRESS,
         {"auth": "basic", "username": "u"},
     )
+
+
+@pytest.mark.parametrize(
+    ("kind", "settings", "takes"),
+    [
+        (K.POSTGRESQL, {"user": "r"}, True),
+        (K.HTTP, {"auth": "none"}, False),
+        (K.HTTP, {"auth": "bearer"}, True),
+        (K.DIRECTORY, {}, False),
+        (K.SQLITE_FILE, {}, False),
+        (K.AZURE, {}, True),
+        (K.TCP, {}, True),
+    ],
+)
+def test_takes_secret_follows_the_kind_and_the_http_auth(
+    kind: ConnectionKind, settings: dict[str, Any], takes: bool
+) -> None:
+    """Directory and sqlite-file never send one, http only with an auth, tcp always may.
+
+    Parameters
+    ----------
+    kind
+        The kind.
+    settings
+        Its settings.
+    takes
+        Whether it takes a secret.
+    """
+    assert takes_secret(kind, settings) is takes

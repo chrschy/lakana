@@ -20,17 +20,19 @@ import contextlib
 import logging
 import sqlite3
 import ssl
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from datetime import UTC, datetime
 from typing import Any, cast
 
 import sqlalchemy
+import sqlalchemy.exc
 from sqlalchemy import event, func, select
 from sqlalchemy.engine import CursorResult, Engine
 from sqlalchemy.engine.interfaces import DBAPIConnection, ExceptionContext
 from sqlalchemy.orm import Session
 
 from lakana_core.config import DatabaseConfig
+from lakana_core.errors import ConflictError
 from lakana_core.log_setup import LOG_FORMAT, SafeFormatter
 
 _BUSY_TIMEOUT_MS = 5000
@@ -322,3 +324,68 @@ def db_now(session: Session) -> datetime:
         Aware UTC time.
     """
     return _as_utc(session.execute(select(func.current_timestamp())).scalar_one())
+
+
+_CONCURRENT_STATES = frozenset({"40P01", "40001"})
+"""SQLSTATEs of a deadlock and a serialization failure: a concurrent change, safe to retry."""
+
+
+def _sqlstate(error: BaseException | None) -> str | None:
+    """Read the SQLSTATE a driver attached to its error.
+
+    Parameters
+    ----------
+    error
+        The driver's error (`DBAPIError.orig`).
+
+    Returns
+    -------
+    str or None
+        The five-character state: psycopg's ``pgcode``/``sqlstate``, or pg8000's ``"C"`` field
+        of its first argument; `None` when it carries none.
+    """
+    for attribute in ("pgcode", "sqlstate"):
+        value = getattr(error, attribute, None)
+        if isinstance(value, str):
+            return value
+    args = getattr(error, "args", ())
+    if args and isinstance(args[0], dict):
+        value = args[0].get("C")
+        return value if isinstance(value, str) else None
+    return None
+
+
+@contextlib.contextmanager
+def refuse_concurrent_change(session: Session, what: str) -> Generator[None]:
+    """Turn a deadlock or serialization failure inside the block into a `ConflictError`.
+
+    Two requests that lock the same rows in opposite orders make Postgres abort one of them;
+    that request changed nothing and may simply be sent again. The session is rolled back.
+
+    Parameters
+    ----------
+    session
+        The session the block writes with.
+    what
+        What changed, for the message (``connection `crm-db```).
+
+    Yields
+    ------
+    None
+        Control to the block.
+
+    Raises
+    ------
+    ConflictError
+        For SQLSTATE 40P01 (deadlock) or 40001 (serialization failure): "<what> changed at the
+        same time; try again."
+    DBAPIError
+        Any other database error, unchanged.
+    """
+    try:
+        yield
+    except sqlalchemy.exc.DBAPIError as exc:
+        if _sqlstate(exc.orig) not in _CONCURRENT_STATES:
+            raise
+        session.rollback()
+        raise ConflictError(f"{what} changed at the same time; try again.") from exc

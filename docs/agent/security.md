@@ -3581,7 +3581,11 @@ that uses it. User reference: `docs/site/reference/package-indexes.md`; how-to:
   a secret (in `ConnectionService`, or `SecretService.create`/`bind` with a connection use, which
   also set `Connection.secret_id`) unbinds every other one bound to it, and clearing its secret or deleting it unbinds
   them (unbound, so only `MANAGE_SECRET` binds them again). `lock_entry` refuses a connection of
-  another environment than the secret's. The four places that decrypt a secret
+  another environment than the secret's. A bind that moves a secret away from a connection empties
+  that connection's `secret_id` (both connections locked by id before the secret, so two moves in
+  opposite directions do not deadlock; a deadlock or serialization failure that still happens is a
+  409 to retry, `db.refuse_concurrent_change`), and a `secret_id` whose secret is not bound to that
+  connection counts as no secret. A secret is refused for a connection that takes none. The four places that decrypt a secret
   for an index, a repository, storage or a webhook check the use first and refuse another one,
   with the command that moves it. `MANAGE_PACKAGE_INDEX` and `MANAGE_REPOSITORY` are not
   `MANAGE_SECRET`: their holder can name only a secret already bound to that same entry, and

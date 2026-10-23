@@ -13,6 +13,7 @@ from __future__ import annotations
 import dataclasses
 import shlex
 import uuid
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import TypeVar
 from urllib.parse import urlsplit
@@ -23,6 +24,7 @@ from sqlalchemy.orm import Session
 from lakana_core.audit.authorization import AuditingAuthorization
 from lakana_core.audit.service import AuditService
 from lakana_core.auth import Action, AuthorizationService, PrincipalRef, Securable
+from lakana_core.connections.kinds import check_secret_values, takes_secret
 from lakana_core.errors import NotFoundError, PermissionDenied, ValidationError
 from lakana_core.identifiers import shown
 from lakana_core.models import (
@@ -790,6 +792,85 @@ def adopt_connection_secret(
         return
     connection.secret_id = secret.id
     release_connection_secrets(session, p, connection.id, environment_name, keep=secret.id)
+
+
+def lock_connections(session: Session, connection_ids: Iterable[uuid.UUID | None]) -> None:
+    """Lock connection rows in one fixed order (by id), before any secret row.
+
+    Two binds that touch the same two connections (a secret moved from one to the other, and
+    another moved back) take the locks in the same order, so neither waits for the other in a
+    cycle.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    connection_ids
+        The connections; `None` entries are skipped.
+    """
+    for connection_id in sorted({i for i in connection_ids if i is not None}, key=str):
+        lock_row(session, Connection, connection_id)
+
+
+def require_connection_takes(
+    session: Session, use: SecretUse, secret_name: str, values: Mapping[str, str] | None
+) -> None:
+    """Refuse a secret for a connection that would never send it, or with keys it does not take.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    use
+        The use; anything but a connection passes.
+    secret_name
+        The secret's name, for the message.
+    values
+        The secret's values when they are at hand (a new secret); only the kind and settings
+        are checked without them (a bind, which never decrypts).
+
+    Raises
+    ------
+    ValidationError
+        If the connection takes no secret, or `values` holds keys it does not take.
+    """
+    if use.kind is not SecretUseKind.CONNECTION or use.target_id is None:
+        return
+    connection = session.get(Connection, use.target_id)
+    if connection is None:
+        return
+    if not takes_secret(connection.kind, connection.settings):
+        raise ValidationError(
+            f"Connection '{plain(connection.name)}' (kind {connection.kind.value}) takes no "
+            f"secret, so secret '{plain(secret_name)}' cannot be bound to it. Bind the secret "
+            "elsewhere, or change the connection's settings so that it sends one (for http: "
+            "settings.auth)."
+        )
+    if values is not None:
+        check_secret_values(connection.kind, connection.settings, values)
+
+
+def detach_from_connection(
+    session: Session, secret: Secret, connection_id: uuid.UUID | None
+) -> None:
+    """Stop a connection from naming a secret that is being bound to another use.
+
+    The caller holds the connection's lock (`lock_connections`). Nothing is committed.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    secret
+        The secret, before or after its new binding.
+    connection_id
+        The connection it was bound to, or `None`.
+    """
+    if connection_id is None:
+        return
+    connection = session.get(Connection, connection_id)
+    if connection is not None and connection.secret_id == secret.id:
+        connection.secret_id = None
 
 
 def bind_or_require_named_secrets(

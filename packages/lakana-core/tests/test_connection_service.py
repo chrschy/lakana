@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 from core_test_helpers import deploy_manifest
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from lakana_core.audit.authorization import AuditingAuthorization
@@ -26,6 +27,7 @@ from lakana_core.connections.service import (
     ConnectionView,
     missing_connections,
 )
+from lakana_core.db import refuse_concurrent_change
 from lakana_core.errors import (
     AlreadyExistsError,
     ConflictError,
@@ -1416,3 +1418,190 @@ def test_a_grant_in_one_environment_manages_no_connection_of_another(world: Worl
         settings={"user": "r"},
     )
     assert world.connection("dev", "crm-db") is not None
+
+
+def test_moving_a_secret_to_another_connection_leaves_the_first_without_one(
+    world: World,
+) -> None:
+    """A secret bound to B is no longer A's: A shows none and its address moves freely."""
+    world.postgres(world.data_engineer)
+    world.postgres(world.data_engineer, name="other", secret_values=None)
+    first, second = world.connection("prod", "crm-db"), world.connection("prod", "other")
+    assert first is not None and second is not None
+    moved = world.secret("prod", "crm-db-connection")
+
+    world.secrets().bind(world.admin, moved.id, SecretUse.connection(second))
+
+    service = world.connections()
+    assert service.get(world.analyst, "prod", "crm-db").secret is None
+    assert service.get(world.analyst, "prod", "other").secret == "crm-db-connection"
+    row = world.connection("prod", "crm-db")
+    assert row is not None and row.secret_id is None
+    view = service.update(world.data_engineer, "prod", "crm-db", address={"host": "x.example.org"})
+    assert (view.address["host"], view.secret) == ("x.example.org", None)
+
+
+def test_moving_a_secret_to_an_index_leaves_the_connection_without_one(world: World) -> None:
+    """Any new use of the secret takes it from the connection that used it."""
+    world.postgres(world.data_engineer)
+    index = PackageIndexService(world.session, world.authz()).create(
+        world.admin, name="corp", url="https://corp.example.org/simple"
+    )
+    moved = world.secret("prod", "crm-db-connection")
+
+    world.secrets().bind(world.admin, moved.id, SecretUse.package_index(index))
+
+    row = world.connection("prod", "crm-db")
+    assert row is not None and row.secret_id is None
+
+
+def test_a_secret_id_that_disagrees_with_the_binding_counts_as_no_secret(world: World) -> None:
+    """A row pointing at a secret bound elsewhere (written by hand) shows and uses no secret."""
+    world.postgres(world.data_engineer, secret_values=None)
+    stray = world.make_secret("prod", "stray", {"password": "p"})
+    row = world.connection("prod", "crm-db")
+    assert row is not None
+    row.secret_id = stray.id
+    world.session.commit()
+    service = world.connections()
+
+    assert service.get(world.analyst, "prod", "crm-db").secret is None
+    with pytest.raises(ValidationError, match="has no secret to clear"):
+        service.update(world.data_engineer, "prod", "crm-db", clear=["secret"])
+    view = service.update(world.data_engineer, "prod", "crm-db", address={"host": "x.example.org"})
+    assert view.secret is None
+    assert world.secret("prod", "stray").use_kind is None
+
+
+def test_an_administrator_cannot_give_a_secret_to_a_connection_that_takes_none(
+    world: World,
+) -> None:
+    """Create and bind refuse a secret the connection's kind or settings never send."""
+    service = world.connections()
+    service.create(
+        world.admin,
+        "prod",
+        name="exports",
+        kind=ConnectionKind.DIRECTORY,
+        address={"root": "shared", "path": "exports"},
+        settings={},
+    )
+    service.create(
+        world.admin,
+        "prod",
+        name="api",
+        kind=ConnectionKind.HTTP,
+        address={"base_url": "https://api.example.com"},
+        settings={},
+    )
+    world.postgres(world.admin, secret_values=None)
+    secrets = world.secrets()
+
+    with pytest.raises(ValidationError) as caught:
+        world.make_secret(
+            "prod",
+            "dir-pw",
+            {"password": "p"},
+            secrets.use_from_names(world.admin, "prod", SecretUseKind.CONNECTION, "exports"),
+        )
+    assert str(caught.value) == (
+        "Connection 'exports' (kind directory) takes no secret, so secret 'dir-pw' cannot be "
+        "bound to it. Bind the secret elsewhere, or change the connection's settings so that "
+        "it sends one (for http: settings.auth)."
+    )
+    unbound = world.make_secret("prod", "api-pw", {"token": "t"})
+    api = world.connection("prod", "api")
+    assert api is not None
+    with pytest.raises(ValidationError, match="Connection 'api' \\(kind http\\) takes no secret"):
+        secrets.bind(world.admin, unbound.id, SecretUse.connection(api))
+    with pytest.raises(ValidationError, match="token is not a secret key of kind postgresql"):
+        world.make_secret(
+            "prod",
+            "pg-pw",
+            {"token": "t"},
+            secrets.use_from_names(world.admin, "prod", SecretUseKind.CONNECTION, "crm-db"),
+        )
+    assert world.secret("prod", "api-pw").use_kind is None
+
+
+class _PgError(Exception):
+    """A driver error carrying a SQLSTATE, as pg8000 (in `args[0]["C"]`) or psycopg does."""
+
+
+@pytest.mark.parametrize(
+    ("orig", "conflict"),
+    [
+        (_PgError({"C": "40P01", "M": "deadlock detected"}), True),
+        (_PgError({"C": "40001"}), True),
+        (_PgError({"C": "23505"}), False),
+        (_PgError("no state"), False),
+    ],
+)
+def test_a_deadlock_or_serialization_failure_is_a_conflict_to_retry(
+    session: Session, orig: _PgError, conflict: bool
+) -> None:
+    """Two administrators swapping secrets may deadlock; the caller is told to try again.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    orig
+        The driver's error.
+    conflict
+        Whether it is a concurrent change.
+    """
+    error = OperationalError("SELECT 1", {}, orig)
+
+    def fail() -> None:
+        """Raise the database error.
+
+        Raises
+        ------
+        OperationalError
+            Always.
+        """
+        raise error
+
+    if conflict:
+        with (
+            pytest.raises(ConflictError) as caught,
+            refuse_concurrent_change(session, "secret 's'"),
+        ):
+            fail()
+        assert str(caught.value) == "secret 's' changed at the same time; try again."
+    else:
+        with pytest.raises(OperationalError), refuse_concurrent_change(session, "secret 's'"):
+            fail()
+
+
+def test_a_bind_that_deadlocks_is_a_conflict(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The secret service maps the deadlock and keeps nothing.
+
+    Parameters
+    ----------
+    world
+        The world.
+    monkeypatch
+        Makes the commit fail as a deadlock would.
+    """
+    world.postgres(world.admin, secret_values=None)
+    row = world.connection("prod", "crm-db")
+    assert row is not None
+    secret = world.make_secret("prod", "pw", {"password": "p"})
+
+    def deadlock() -> None:
+        """Fail as Postgres does when it breaks a deadlock.
+
+        Raises
+        ------
+        OperationalError
+            Always.
+        """
+        raise OperationalError("COMMIT", {}, _PgError({"C": "40P01"}))
+
+    monkeypatch.setattr(world.session, "commit", deadlock)
+    with pytest.raises(ConflictError, match="changed at the same time; try again"):
+        world.secrets().bind(world.admin, secret.id, SecretUse.connection(row))
+    monkeypatch.undo()
+    assert world.secret("prod", "pw").use_kind is None

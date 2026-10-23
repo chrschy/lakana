@@ -41,9 +41,10 @@ from lakana_core.connections.kinds import (
     check_secret_values,
     fingerprint,
     moves_secret,
-    secret_keys,
+    takes_secret,
     validate_connection,
 )
+from lakana_core.db import refuse_concurrent_change
 from lakana_core.errors import (
     AlreadyExistsError,
     ConflictError,
@@ -203,25 +204,6 @@ def _changed(part: str, before: Mapping[str, Any], after: Mapping[str, Any]) -> 
     )
 
 
-def _takes_secret(kind: ConnectionKind, settings: Mapping[str, Any]) -> bool:
-    """Say whether a connection of this kind and these settings uses a secret.
-
-    Parameters
-    ----------
-    kind
-        The kind.
-    settings
-        Validated settings.
-
-    Returns
-    -------
-    bool
-        Whether it takes one.
-    """
-    required, optional = secret_keys(kind, settings)
-    return kind is ConnectionKind.TCP or bool(required | optional)
-
-
 class ConnectionService:
     """Connections of an environment, authorized and audited.
 
@@ -333,7 +315,7 @@ class ConnectionService:
         settings = dict(row.settings)
         if isinstance(settings.get("ca_certificate"), str):
             settings["ca_certificate"] = fingerprint(settings["ca_certificate"])
-        secret = self._session.get(Secret, row.secret_id) if row.secret_id is not None else None
+        secret = self._used_secret(row)
         creator = self._session.get(Principal, row.created_by)
         return ConnectionView(
             name=row.name,
@@ -470,7 +452,7 @@ class ConnectionService:
             raise ValidationError(_BOTH)
         if secret_values is not None:
             check_secret_values(kind, new_settings, secret_values)
-        elif secret is not None and not _takes_secret(kind, new_settings):
+        elif secret is not None and not takes_secret(kind, new_settings):
             check_secret_values(kind, new_settings, {})
         if self._exists(env, name):
             raise AlreadyExistsError(self._taken(env, name))
@@ -483,32 +465,33 @@ class ConnectionService:
             settings=new_settings,
             created_by=p.id,
         )
-        self._session.add(row)
-        self._flush(env, name)
-        try:
-            if secret_values is not None:
-                row.secret_id = self._new_secret(p, env, row, dict(secret_values)).id
-            elif secret is not None:
-                row.secret_id = self._named_secret(p, env, row, secret, registered=False).id
-        except SecretBindingRefused as refusal:
-            self._session.rollback()
-            record_refusal(self._authz, p, refusal)
-            raise
-        except LakanaError:
-            self._session.rollback()
-            raise
-        AuditService(self._session).record(
-            p.id,
-            AuditEventType.CONNECTION_CREATED,
-            securable=scope,
-            detail={
-                "name": name,
-                "kind": kind.value,
-                "address": new_address,
-                "secret": self._secret_name(row),
-            },
-        )
-        self._commit(env, name)
+        with refuse_concurrent_change(self._session, f"connection `{shown(name)}`"):
+            self._session.add(row)
+            self._flush(env, name)
+            try:
+                if secret_values is not None:
+                    row.secret_id = self._new_secret(p, env, row, dict(secret_values)).id
+                elif secret is not None:
+                    row.secret_id = self._named_secret(p, env, row, secret, registered=False).id
+            except SecretBindingRefused as refusal:
+                self._session.rollback()
+                record_refusal(self._authz, p, refusal)
+                raise
+            except LakanaError:
+                self._session.rollback()
+                raise
+            AuditService(self._session).record(
+                p.id,
+                AuditEventType.CONNECTION_CREATED,
+                securable=scope,
+                detail={
+                    "name": name,
+                    "kind": kind.value,
+                    "address": new_address,
+                    "secret": self._secret_name(row),
+                },
+            )
+            self._commit(env, name)
         return self._view(row, env)
 
     def list(
@@ -660,26 +643,27 @@ class ConnectionService:
             raise ValidationError("Nothing to change; give at least one change.")
         if secret is not None and secret_values is not None:
             raise ValidationError(_BOTH)
-        row = self._find(env, name, lock=True)
-        try:
-            self._change(
-                p,
-                env,
-                row,
-                address=address,
-                settings=settings,
-                secret=secret,
-                secret_values=secret_values,
-                clear=clear,
-            )
-        except SecretBindingRefused as refusal:
-            self._session.rollback()
-            record_refusal(self._authz, p, refusal)
-            raise
-        except LakanaError:
-            self._session.rollback()
-            raise
-        self._commit(env, row.name)
+        with refuse_concurrent_change(self._session, f"connection `{shown(name)}`"):
+            row = self._find(env, name, lock=True)
+            try:
+                self._change(
+                    p,
+                    env,
+                    row,
+                    address=address,
+                    settings=settings,
+                    secret=secret,
+                    secret_values=secret_values,
+                    clear=clear,
+                )
+            except SecretBindingRefused as refusal:
+                self._session.rollback()
+                record_refusal(self._authz, p, refusal)
+                raise
+            except LakanaError:
+                self._session.rollback()
+                raise
+            self._commit(env, row.name)
         return self._view(row, env)
 
     def _change(
@@ -727,6 +711,8 @@ class ConnectionService:
             If new values need a secret `<name>-connection` that exists and is not its own.
         """
         name = row.name
+        if row.secret_id is not None and self._used_secret(row) is None:
+            row.secret_id = None
         for key in clear:
             if key != _CLEAR_SECRET and key not in row.settings:
                 raise ValidationError(
@@ -772,7 +758,7 @@ class ConnectionService:
             require_secret_management_for_url_change(
                 self._session, self._authz, p, SecretUse.connection(row)
             )
-        if row.secret_id is not None and not _takes_secret(row.kind, new_settings):
+        if row.secret_id is not None and not takes_secret(row.kind, new_settings):
             raise ValidationError(
                 f"connection `{shown(name)}` would use a secret its settings do not take; "
                 "clear it in the same change (clear `secret`)"
@@ -819,25 +805,26 @@ class ConnectionService:
         scope = Securable.environment_scope(environment)
         self._authz.authorize(p, Action.MANAGE_CONNECTION, scope)
         env = self._environment(environment)
-        row = self._find(env, name, lock=True)
-        declared = self.declared_by(env.id, row.name)
-        if declared:
-            self._session.rollback()
-            repository, asset = declared[0]
-            more = f" and {len(declared) - 1} more" if len(declared) > 1 else ""
-            raise ConflictError(
-                f"connection `{shown(name)}` is used by `{shown(repository)}: {shown(asset)}`"
-                f"{more} in `{shown(env.name)}`; deploy a version without it first."
+        with refuse_concurrent_change(self._session, f"connection `{shown(name)}`"):
+            row = self._find(env, name, lock=True)
+            declared = self.declared_by(env.id, row.name)
+            if declared:
+                self._session.rollback()
+                repository, asset = declared[0]
+                more = f" and {len(declared) - 1} more" if len(declared) > 1 else ""
+                raise ConflictError(
+                    f"connection `{shown(name)}` is used by `{shown(repository)}: {shown(asset)}`"
+                    f"{more} in `{shown(env.name)}`; deploy a version without it first."
+                )
+            self._let_go(p, env, row, keep=None)
+            AuditService(self._session).record(
+                p.id,
+                AuditEventType.CONNECTION_DELETED,
+                securable=scope,
+                detail={"name": row.name, "kind": row.kind.value},
             )
-        self._let_go(p, env, row, keep=None)
-        AuditService(self._session).record(
-            p.id,
-            AuditEventType.CONNECTION_DELETED,
-            securable=scope,
-            detail={"name": row.name, "kind": row.kind.value},
-        )
-        self._session.delete(row)
-        self._session.commit()
+            self._session.delete(row)
+            self._session.commit()
 
     def _exists(self, env: Environment, name: str) -> bool:
         """Say whether an environment has a connection of this name.
@@ -1029,10 +1016,37 @@ class ConnectionService:
         str or None
             The secret's name, or `None`.
         """
+        secret = self._used_secret(row)
+        return secret.name if secret is not None else None
+
+    def _used_secret(self, row: Connection) -> Secret | None:
+        """Find the secret a connection uses: the one it names, if active and bound to it.
+
+        `secret_id` and the secret's binding agree whenever the services wrote them; a row that
+        names a secret bound elsewhere (or revoked) has no secret, so nothing that reads it can
+        send another use's credential to this connection's address.
+
+        Parameters
+        ----------
+        row
+            The connection.
+
+        Returns
+        -------
+        Secret or None
+            The secret, or `None`.
+        """
         if row.secret_id is None:
             return None
         secret = self._session.get(Secret, row.secret_id)
-        return secret.name if secret is not None else None
+        if (
+            secret is None
+            or secret.revoked_at is not None
+            or secret.use_kind is not SecretUseKind.CONNECTION
+            or secret.use_target_id != row.id
+        ):
+            return None
+        return secret
 
     def _own_secret(self, row: Connection) -> Secret | None:
         """Find the secret a connection uses, locked, if it is still bound to it and active.
@@ -1139,7 +1153,7 @@ class ConnectionService:
         SecretBindingRefused
             If the secret is not bound to the connection and `p` may not bind it.
         """
-        if not _takes_secret(row.kind, row.settings):
+        if not takes_secret(row.kind, row.settings):
             check_secret_values(row.kind, row.settings, {})
         secret = self._session.execute(
             select(Secret).where(

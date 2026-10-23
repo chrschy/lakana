@@ -22,7 +22,8 @@ from sqlalchemy.orm import Session
 from lakana_core.audit.service import AuditService
 from lakana_core.auth import Action, AuthorizationService, PrincipalRef, Securable
 from lakana_core.connections.endpoints import endpoints
-from lakana_core.errors import AlreadyExistsError, NotFoundError, ValidationError
+from lakana_core.db import refuse_concurrent_change
+from lakana_core.errors import AlreadyExistsError, ConflictError, NotFoundError, ValidationError
 from lakana_core.identifiers import shown
 from lakana_core.models import (
     LIVE_ENVIRONMENT,
@@ -37,9 +38,12 @@ from lakana_core.secrets.keys import KeyProvider
 from lakana_core.secrets.uses import (
     SecretUse,
     adopt_connection_secret,
+    detach_from_connection,
+    lock_connections,
     lock_entry,
     own_secret_steps,
     record_binding,
+    require_connection_takes,
     resolve_use,
     target_row,
     used_by_its_environment,
@@ -316,11 +320,40 @@ class SecretService:
         """
         self._authz.authorize(p, Action.MANAGE_SECRET, Securable.environment_scope(environment))
         env = self._get_environment(environment)
-        if use is not None:
-            use = lock_entry(self._session, use, env)
-        secret = insert_secret(
-            self._session, self._key_provider, p, env, name=name, values=values, use=use
-        )
+        with refuse_concurrent_change(self._session, f"Secret '{shown(name)}'"):
+            if use is not None:
+                use = lock_entry(self._session, use, env)
+                require_connection_takes(self._session, use, name, values)
+            secret = insert_secret(
+                self._session, self._key_provider, p, env, name=name, values=values, use=use
+            )
+            self._commit_created(secret, use, p, env, name)
+        return secret
+
+    def _commit_created(
+        self, secret: Secret, use: SecretUse | None, p: PrincipalRef, env: Environment, name: str
+    ) -> None:
+        """Commit a new secret; a connection's becomes the one it uses.
+
+        Parameters
+        ----------
+        secret
+            The pending secret.
+        use
+            Its use.
+        p
+            The acting principal.
+        env
+            Its environment.
+        name
+            Its name.
+
+        Raises
+        ------
+        AlreadyExistsError
+            If a secret of that name exists in the environment.
+        """
+        environment = env.name
         try:
             if use is not None and use.kind is SecretUseKind.CONNECTION:
                 self._session.flush()
@@ -334,7 +367,6 @@ class SecretService:
             raise AlreadyExistsError(
                 f"A secret named {name!r} already exists in environment {environment!r}."
             ) from exc
-        return secret
 
     def bind(self, p: PrincipalRef, secret_id: uuid.UUID, use: SecretUse) -> Secret:
         """Bind a secret to a use, whatever it was bound to before.
@@ -370,23 +402,66 @@ class SecretService:
         secret = self._get_secret(secret_id)
         env = self._session.get(Environment, secret.environment_id)
         assert env is not None  # nosec B101 -- environment_id is a non-nullable FK with ON DELETE CASCADE
-        scope = Securable.environment_scope(env.name)
-        self._authz.authorize(p, Action.MANAGE_SECRET, scope)
-        # The entry first and the secret second, the order every naming and URL change takes too.
+        self._authz.authorize(p, Action.MANAGE_SECRET, Securable.environment_scope(env.name))
+        with refuse_concurrent_change(self._session, f"Secret '{shown(secret.name)}'"):
+            self._bind_locked(p, secret, env, use)
+        return secret
+
+    def _bind_locked(
+        self, p: PrincipalRef, secret: Secret, env: Environment, use: SecretUse
+    ) -> None:
+        """Take the locks of a bind, check it and commit it.
+
+        The connections first (the one the secret leaves and the one it goes to, by id), then
+        the entry, then the secret: the order every naming and URL change takes too.
+
+        Parameters
+        ----------
+        p
+            The acting principal.
+        secret
+            The secret, read without a lock.
+        env
+            Its environment.
+        use
+            The new use.
+
+        Raises
+        ------
+        ValidationError
+            If the secret has been revoked, is the storage secret and `use` is not the
+            environment, or `use` is a connection that takes no secret.
+        ConflictError
+            If the secret was bound elsewhere while the locks were taken; try again.
+        """
+        previous = secret.use_target_id if secret.use_kind is SecretUseKind.CONNECTION else None
+        target = use.target_id if use.kind is SecretUseKind.CONNECTION else None
+        lock_connections(self._session, (previous, target))
         use = lock_entry(self._session, use, env)
         self._session.refresh(secret, with_for_update=True)
+        if secret.use_kind is SecretUseKind.CONNECTION and secret.use_target_id not in (
+            previous,
+            target,
+        ):
+            self._session.rollback()
+            raise ConflictError(
+                f"Secret '{shown(secret.name)}' changed at the same time; try again."
+            )
         if secret.revoked_at is not None:
-            raise ValidationError(f"Secret {secret_id} has been revoked and cannot be bound.")
+            raise ValidationError(f"Secret {secret.id} has been revoked and cannot be bound.")
         if use.kind is not SecretUseKind.ENVIRONMENT and env.storage_secret_ref == secret.name:
             raise ValidationError(
                 f"Secret '{shown(secret.name)}' is the storage secret of environment "
                 f"'{shown(env.name)}', so binding it to {use.wanted()} would stop its storage. "
                 f"Give {use.wanted()} a secret of its own: {own_secret_steps(env.name, use)}."
             )
+        require_connection_takes(self._session, use, secret.name, None)
+        scope = Securable.environment_scope(env.name)
+        if secret.use_target_id != target:
+            detach_from_connection(self._session, secret, previous)
         record_binding(self._session, p, secret, scope, use)
         adopt_connection_secret(self._session, p, secret, env.name)
         self._session.commit()
-        return secret
 
     def use_from_names(
         self, p: PrincipalRef, environment: str, kind: SecretUseKind, target: str | None
