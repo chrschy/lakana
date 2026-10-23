@@ -310,7 +310,7 @@ class LineageService:
         never as a table: its name may since belong to a different table, so a
         table-level grant must not decide. Only a grant on that namespace or
         above, which would have covered the table, shows it. One name per id,
-        whichever edge the walk met first, so a table renamed across namespaces
+        the newest recorded one, so a table renamed across namespaces
         and then dropped gets one verdict from every root (#53). A legacy name
         with more dots (`bronze.x.y`) is split at the last one: the namespace
         `bronze.x`, the table `y`.
