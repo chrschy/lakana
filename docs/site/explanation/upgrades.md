@@ -117,6 +117,7 @@ Each cell is a summary. The page named in the last column has the detail. The ch
 
 | Release | What it asks | Where |
 |---|---|---|
+| 0.20.0 | No migration. **Breaking:** the Compose bundle runs Python tasks in containers: replace `compose.yaml`, add four `.env` lines, Docker Engine 28 or later; budget `LAKANA_RUN__TASK_MEMORY` (2 GB) per worker; with the docker runner `LAKANA_RUN__HTTPS_PROXY`, `LAKANA_RUN__CA_BUNDLE` and an `http://` `LAKANA_RUN__INDEX_URL` are refused, and a registered index on another port than 443 needs a credential. A protected environment runs Python assets only on workers with `LAKANA_RUN__RUNNER=docker`, so no longer in local mode. | [Notes for 0.20.0](#notes-for-0200), [Run Python tasks in containers](../how-to/run-python-tasks-in-containers.md) |
 | 0.19.0 | No migration. **Security fix**: upgrade the server and every worker. **Breaking:** queries run on DuckDB 2.0: `//` and `%` by zero fail (use `TRY` or `NULLIF`), an untyped `NULL AS x` in a write is refused (add a `CAST`), a table function's alias is its value, `price = 1.1` after a float-to-double widening matches only newer rows, some Parquet files from other writers may not read; the worker needs macOS 10.15 or glibc 2.27. A `PIVOT` lists its values; `CONNECT BY`, DuckDB-internal and sequence functions are refused; a query opens only the tables it reads. The worker stops at start-up on an unusable CA bundle; an unverifiable store certificate fails at once. | [Notes for 0.19.0](#notes-for-0190) |
 | 0.18.0 | Migrations `0047` (CI trust rules and CI tokens) and `0048` (measured sizes), both adding only empty tables and columns. A new environment's storage root must be in the environment's scheme, name a bucket or container, and may not be `file:///`, contain `::`, or lie in another environment's files (422 with a root to use; existing environments are not changed). An allowed webhook host may no longer reach loopback or cloud metadata addresses, except the entry `localhost`. Log lines worth an alert end with `event=<code>`. Copy the new healthchecks from a fresh `compose.yaml`. The workers trim uv's package cache above 10 GiB (`0` keeps it untrimmed). `lakana init` writes CI files that deploy without a stored secret; `--ci-auth pat` for the old ones. | [Notes for 0.18.0](#notes-for-0180) |
 | 0.17.0 | Migrations `0042` to `0046`. **Breaking:** a dropped table's files, and those of the tables of a deleted environment, are deleted after `LAKANA_TABLES__UNDO_DAYS` (7 days; restore with `lakana table undrop` or `lakana env restore`), and `DELETE /api/v1/environments/{name}` answers 200 with the environment; the first administrator's token is written to `LAKANA_BOOTSTRAP_TOKEN_FILE`, never to the log; ADMINs no longer see other people's SQL text or column values in the audit log until granted `READ_QUERY_TEXT`. Set `LAKANA_TABLES__UNDO_DAYS` the same on the server and the workers. A new storage root must be written canonically. Nothing expires unless retention is set. Sign-in events are written once per token every 15 minutes. | [Notes for 0.17.0](#notes-for-0170) |
@@ -133,6 +134,38 @@ Each cell is a summary. The page named in the last column has the detail. The ch
 ## Notes for the next release
 
 Nothing yet.
+
+## Notes for 0.20.0
+
+### Python tasks run in containers in the Compose bundle
+
+The bundle gains two services, `launcher` and `egress`, and runs every Python task in a container
+of its own (`LAKANA_RUNNER=docker` in `.env`). An existing bundle needs the new `compose.yaml`
+and four `.env` lines (see [Upgrading](../how-to/deploy-with-compose.md#upgrading) on the Compose
+page); Docker Engine 28 or later is required. Task containers sit outside the worker's memory
+limit: budget `LAKANA_RUN__TASK_MEMORY` (2 GB) per worker on top of the workers' own. Builds reach
+package indexes only through `egress`: a corporate proxy goes in `LAKANA_EGRESS_UPSTREAM_PROXY`,
+and `LAKANA_RUN__HTTPS_PROXY` and `LAKANA_RUN__CA_BUNDLE` are refused with the docker runner, and
+so is an `http://` `LAKANA_RUN__INDEX_URL`. A registered package index on another port than 443
+that has no credential, which builds of the local runner reached, is refused (403 from `egress`)
+under the docker runner until [#301](https://github.com/lakana-labs/lakana/issues/301): give it a
+credential or serve it on port 443.
+`LAKANA_RUNNER=local` runs tasks as the worker's own processes again, as before, but the new
+`compose.yaml` still starts `launcher` and `egress`: Docker Engine 28, the Docker socket and
+`LAKANA_TASK_IMAGE` stay required, and the workers wait for the launcher (to drop both services,
+edit `compose.yaml` by hand, see [Python assets](../how-to/deploy-with-compose.md#python-assets)).
+Local mode is unchanged. What containers isolate and what they do not, every setting and every
+message: [Run Python tasks in containers](../how-to/run-python-tasks-in-containers.md).
+
+### A protected environment runs Python assets only in containers
+
+A worker with `LAKANA_RUN__RUNNER=local` now fails a Python task of a protected environment at
+once, with "environment 'prod' is protected, and this worker runs Python tasks without isolation
+(LAKANA_RUN__RUNNER=local). …" (failure code `no_runtime`). Before you upgrade, give every worker
+that takes pipeline work the docker runner, or a protected environment's Python assets stop
+running. Local mode runs tasks without containers, so it can no longer run the Python assets of a
+protected environment; unprotect it there (`lakana env unprotect`) if you rely on that. SQL assets
+are not affected.
 
 ## Notes for 0.19.0
 

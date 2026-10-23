@@ -298,7 +298,7 @@ Usage: `lakana env protect [OPTIONS] {name}`
 
 Protect environment NAME: lock writes down to deployed runs.
 
-A protected environment refuses every write outside runs of the deployed code (SQL, SDK, CLI and Iceberg REST clients alike) whatever the caller's grants; choose the identity a deployed job runs as with `lakana deployments set-run-as`. A holder of MANAGE_ENVIRONMENT can make one audited write with `--break-glass --reason`. It also refuses deletion and storage changes.
+A protected environment refuses every write outside runs of the deployed code (SQL, SDK, CLI and Iceberg REST clients alike) whatever the caller's grants; choose the identity a deployed job runs as with `lakana deployments set-run-as`. A holder of MANAGE_ENVIRONMENT can make one audited write with `--break-glass --reason`. It also refuses deletion and storage changes, and runs Python assets only on workers that run tasks in containers (LAKANA_RUN__RUNNER=docker).
 
 | Name | Type | Default | Description |
 |---|---|---|---|
@@ -1952,3 +1952,4 @@ Generate compose.yaml and .env for a team deployment, and save a profile.
 | `--port` | whole number | `8000` | Host port for the server. |
 | `--workers` | whole number | `2` | Worker replicas. |
 | `--image` | text | none | Override the Lakana image reference. |
+| `--task-image` | text | none | Override the task images' reference (without -py3.X). |

@@ -195,13 +195,16 @@ handling, and `docs/security/threat-model.md` for the local-mode threat row.
 `lakana bundle init` (`lakana.cli.deploy`) generates a Docker Compose bundle for a small team
 sharing one instance, instead of the one-machine, no-Docker topology local mode runs.
 Where local mode is one SQLite file and a `file://` lake supervised as two OS processes by
-the CLI itself, team mode is seven Compose services, plus two optional ones (`worker-interactive` and `worker-pipeline`, no replica until `.env` says so), each in its own container, built from
+the CLI itself, team mode is nine Compose services (with `launcher` and `egress`, the Python
+task containers' launcher and the builds' egress proxy), plus two optional ones (`worker-interactive` and `worker-pipeline`, no replica until `.env` says so), each in its own container, built from
 one image (`Dockerfile`, repo root — the same image runs the server, every worker, and the
 one-shot setup job, differing only in the command):
 
 ```
 postgres  ──(healthy)──▶ migrate ──(completed)──▶ server ──(healthy)──▶ setup
 seaweedfs ──(healthy)──▶ bucket  ─────────────────(completed)──────────▶ setup
+launcher  ──(healthy)──▶ egress
+launcher  ──(healthy)──▶ worker, worker-interactive, worker-pipeline
                           migrate ──(completed)──▶ worker (× LAKANA_WORKERS)
                           migrate ──(completed)──▶ worker-interactive (× LAKANA_WORKERS_INTERACTIVE, 0)
                           migrate ──(completed)──▶ worker-pipeline (× LAKANA_WORKERS_PIPELINE, 0)
@@ -225,7 +228,8 @@ mode's own `init`-adjacent bootstrap — refuses to overwrite a bundle that alre
 since doing so would silently rotate the secrets master key. See `docs/site/how-to/deploy-with-compose.md`
 for the full reference and `docs/agent/security.md`/`docs/security/threat-model.md` for the
 security posture this topology implies (no host ports for Postgres/SeaweedFS, `.env` as the
-root of trust, non-root uid 10001, TLS from an operator's reverse proxy).
+root of trust, non-root uid 10001 except the `launcher`, which holds the Docker socket, TLS from
+an operator's reverse proxy).
 
 **Worker shutdown (M5c1 and M5c3b):** on `SIGTERM` (tini, PID 1, forwards it at once) the
 worker stops claiming, finishes the item it is running and returns, and a running *task run* is
@@ -680,7 +684,7 @@ poll loop, classification) are under "The run engine (M5c1)", "Python tasks (M5c
 | `lakana_worker.runners` | worker | `Runner`, `LocalProcessRunner`, `DockerRunner`, `unpack_code`. |
 | `lakana_worker.launcher_client` | worker | The worker's side of the launcher's socket: one request per connection with the launcher's token; `LauncherUnavailable`, `LauncherRefused`, `LauncherTimedOut`, `LogSinkFailed`; `claim_owner` names the worker for the launcher's labels. |
 | `lakana_worker.docker_environments` | worker | Environments built by the launcher, one volume per project, lock, `pyproject.toml`, Python and index set. |
-| `lakana_worker.launcher` | launcher (own service) | The only holder of the Docker socket: request schema, container specs, the Docker Engine client, the run/build/stop/status/cleanup operations, the Unix-socket server (`lakana-launcher`); standard library only (contract `launcher-stands-alone`). |
+| `lakana_worker.launcher` | launcher (own service) | The only holder of the Docker socket: request schema, container specs, the Docker Engine client, the run/build/stop/status/cleanup operations, the Unix-socket server (`lakana-launcher`), and the builds' egress proxy (`launcher.egress`, the `egress` service) with its tokens (`launcher.egress_token`); standard library only (contract `launcher-stands-alone`). Security: `security.md`, "Task isolation: the launcher". User documentation: `docs/site/how-to/run-python-tasks-in-containers.md`. |
 | `lakana_worker.venvs` | worker | The venv cache. |
 | `lakana_worker.python_tasks` | worker | One Python attempt: prepare, supervise, classify. |
 | `lakana_worker.tasks`, `poller` | worker | Dispatch by manifest `kind`; query-only polling during a Python task. |
@@ -688,8 +692,9 @@ poll loop, classification) are under "The run engine (M5c1)", "Python tasks (M5c
 | `lakana_worker.task_lease`, `task_outcome` | worker | The lease keeper and its loss; how an attempt ended (`TaskOutcome`, `TaskFailure`). |
 
 **The runner protocol.** `Runner.run(task: PythonTask, on_log, stop: StopSignal) -> RunOutcome`.
-`LocalProcessRunner` runs the harness as a subprocess of the worker; `DockerRunner` (M7b) asks
-the launcher to run it in a container of its own and implements the same protocol;
+`LocalProcessRunner` runs the harness as a subprocess of the worker; `DockerRunner` asks
+the launcher to run it in a container of its own and implements the same protocol
+(`Runner.isolated` is true for it only, and a protected environment needs it);
 `LAKANA_RUN__RUNNER` (`local` by default, or `docker`) picks one at the worker's start, and with
 `docker` `PythonRuntime.environments` (`DockerEnvironments`) replaces the local venv cache. `run` blocks until the process is reaped and its output drained; call it from a thread
 that outlives the process, because the parent-death signal is tied to the thread that started it.

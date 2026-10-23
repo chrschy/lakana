@@ -986,6 +986,17 @@ class _CutConnectionsAfterTheProcess:
         self._cut = cut
         self.cut: list[int] = []
 
+    @property
+    def isolated(self) -> bool:
+        """Whether the wrapped runner isolates its tasks.
+
+        Returns
+        -------
+        bool
+            The inner runner's answer.
+        """
+        return self._inner.isolated
+
     def run(
         self, task: PythonTask, on_log: Callable[[bytes], None], stop: StopSignal
     ) -> RunOutcome:
@@ -1030,7 +1041,11 @@ def test_an_attempt_whose_database_connections_went_stale_still_records_its_outc
 
 
 def test_the_protected_environment(stack: _Stack, wheelhouse: Path) -> None:
-    """Exit criterion: in a protected environment the task writes; a user token is refused."""
+    """Protected: the run-as account writes, a user is refused, local Python is refused first.
+
+    The SQL asset proves the deployed run writes. On this stack's local runner the Python
+    asset ends `no_runtime` before any of its code runs: no token, no table.
+    """
     project = _deploy(
         stack,
         wheelhouse,
@@ -1047,16 +1062,24 @@ def test_the_protected_environment(stack: _Stack, wheelhouse: Path) -> None:
     admin.environments.set_protection(env, True)
     run = admin.runs.start(env, project.repository)
     assert run.run_as == account
-    stack.succeed(env, run.id)
-    assert stack.sql("SELECT count(*) AS n FROM gold.scores", env) == [{"n": 2}]
+    finished = stack.finish(env, run.id)
+    assert finished.status == "failed"
+    tasks = {task.asset: task for task in finished.tasks}
+    assert tasks["silver.clean"].status == "succeeded"
+    assert stack.sql("SELECT count(*) AS n FROM silver.clean", env) == [{"n": 2}]
+    scores = tasks["gold.scores"]
+    assert scores.status == "failed"
+    assert scores.failure is not None and scores.failure.code == "no_runtime"
+    assert scores.error_message == (
+        f"environment '{env}' is protected, and this worker runs Python tasks without "
+        "isolation (LAKANA_RUN__RUNNER=local). Run the task on a worker with "
+        'LAKANA_RUN__RUNNER=docker; the how-to "Run Python tasks in containers" says how.'
+    )
+    assert _tokens(stack, run.id) == []
+    with pytest.raises(NotFound):
+        admin.tables.get(env, "gold.scores")
     with pytest.raises(SdkPermissionDenied, match="is protected"):
-        admin.tables.replace(
-            env,
-            "gold.scores",
-            pa.table({"id": pa.array([9], pa.int64()), "score": pa.array([9], pa.int64())}),
-        )
-    tokens = _tokens(stack, run.id)
-    assert tokens and all(token.revoked_at is not None for token in tokens)
+        admin.tables.replace(env, "silver.clean", pa.table({"id": pa.array([9], pa.int64())}))
 
 
 def test_a_default_dependency_group_is_not_installed_for_a_task(

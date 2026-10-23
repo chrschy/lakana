@@ -302,8 +302,11 @@ bad release never advances past the point that would have caught it:
   `dist/requirements.txt` (the shared `dist` artifact only carries wheels/sdists) and builds
   **multi-arch** (`linux/amd64,linux/arm64`, via `docker/setup-qemu-action` +
   `docker/setup-buildx-action`), pushing `ghcr.io/lakana-labs/lakana:<version>` — a public package.
-- **`compose-smoke-release`** needs `publish-image` and runs
-  `scripts/compose_smoke_test.sh` against the just-pushed tag: `lakana bundle init` → `docker
+- **`compose-smoke-release`** needs `publish-image` and `publish-task-images` and runs
+  `scripts/compose_smoke_test.sh` against the just-pushed tag and its task images (the second
+  argument, `ghcr.io/lakana-labs/lakana-task:<version>`; CI's `compose-smoke` builds
+  `lakana-task:ci-py3.14` from the checkout, and the script builds the 3.11 image the launcher's
+  start-up probes need): `lakana bundle init` → `docker
   compose up -d --wait` → create/append/query → `docker compose down` → `up` again (proving
   a restart is a no-op and data survives) → query again. This is the same script CI's
   `compose-smoke` job runs against a locally built `lakana:ci` image on a PR that touches the

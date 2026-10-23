@@ -6,6 +6,7 @@ from __future__ import annotations
 import base64
 import errno
 import io
+import ipaddress
 import os
 import socket
 import stat
@@ -14,6 +15,7 @@ import subprocess
 import sys
 import threading
 import time
+import types
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -21,6 +23,7 @@ from typing import Any
 import pytest
 from launcher_fakes import FakeEngine, settings
 
+from lakana_worker.launcher.egress_token import read_key, verify
 from lakana_worker.launcher.engine import EngineError
 from lakana_worker.launcher.requests import (
     INGEST_PROBE_SCRIPT,
@@ -1229,7 +1232,7 @@ def test_a_network_that_is_already_gone_is_not_an_error(tmp_path: Path) -> None:
     engine = FakeEngine()
     launcher = _started(engine, tmp_path)
 
-    launcher._close_network("lakana-task-nothing")
+    launcher.close_network("lakana-task-nothing")
 
     assert ("DELETE", "/networks/lakana-task-nothing", None) in engine.calls
 
@@ -1653,7 +1656,10 @@ def test_the_state_directory_is_synced_after_the_key_is_linked(
 
     _started(FakeEngine(), tmp_path)
 
-    assert synced == [False, True]
+    assert synced[:2] == [
+        False,
+        True,
+    ]  # the cache key's file, then its directory; the egress key follows
 
 
 def test_stale_temporary_key_files_are_swept_at_start(tmp_path: Path) -> None:
@@ -2195,7 +2201,7 @@ def test_a_network_that_cannot_be_deleted_keeps_its_subnet(tmp_path: Path) -> No
     name = launcher._open_network("task", "t1", "w1", None, 0)
     _intercept(engine, lambda m, p, b: m == "DELETE", (500, {"message": "busy"}))
 
-    launcher._close_network(name)
+    launcher.close_network(name)
 
     assert launcher._subnets == {name: "10.207.0.0/29"}
 
@@ -2304,3 +2310,196 @@ def _until(condition: Any, seconds: float = 5.0) -> None:
     while not condition():
         assert time.monotonic() < deadline, "the condition was never met"
         time.sleep(0.01)
+
+
+def test_a_build_reaches_its_hosts_through_the_egress_proxy_only(tmp_path: Path) -> None:
+    """The build network gets the `egress` service; the proxy URL carries the build's grant."""
+    engine = FakeEngine()
+    launcher = _started(engine, tmp_path, built=False)
+    connected: dict[str, Any] = {}
+    original = engine._network
+
+    def spy(method: str, name: str, action: str | None, body: Any) -> tuple[int, Any]:
+        """Record what is attached to which network.
+
+        Parameters
+        ----------
+        method
+            The HTTP method.
+        name
+            The network.
+        action
+            ``connect`` and the like.
+        body
+            The request body.
+
+        Returns
+        -------
+        tuple
+            The fake engine's answer.
+        """
+        if action == "connect":
+            connected[name] = body
+        return original(method, name, action, body)
+
+    engine._network = spy  # ty: ignore[invalid-assignment]
+    subnets: list[str] = []
+    allocate = launcher._allocate_subnet
+
+    def remember(name: str) -> str:
+        """Record the subnet the build network gets.
+
+        Parameters
+        ----------
+        name
+            The network.
+
+        Returns
+        -------
+        str
+            The subnet.
+        """
+        subnets.append(allocate(name))
+        return subnets[-1]
+
+    launcher._allocate_subnet = remember  # ty: ignore[invalid-assignment]
+
+    launcher.build(_build(), lambda line: None)
+
+    (spec,) = engine.created("build")
+    proxy = next(v for v in spec["Env"] if v.startswith("HTTPS_PROXY="))
+    token = proxy.removeprefix("HTTPS_PROXY=http://lakana:").removesuffix("@egress:3128")
+    key = read_key(tmp_path / "egress.key")
+    assert key is not None
+    grant = verify(key, token, time.time())
+    assert grant is not None
+    assert (grant.purpose, grant.targets) == ("build", frozenset({("pypi.org", 443)}))
+    assert grant.network == ipaddress.ip_network(subnets[-1])
+    assert time.time() + 30 < grant.expires <= time.time() + 30 + 61
+    assert connected["lakana-build-b1"] == {
+        "Container": "c-egress",
+        "EndpointConfig": {"Aliases": ["egress"]},
+    }
+
+
+def test_a_build_without_the_egress_service_says_so_and_has_no_way_out(tmp_path: Path) -> None:
+    """An offline build (wheels in the repository) still works; the log says why others fail."""
+    engine = FakeEngine(services={"server": "c-server"})
+    launcher = _started(engine, tmp_path, built=False)
+    emitted: list[dict[str, object]] = []
+
+    launcher.build(_build(), emitted.append)
+
+    (spec,) = engine.created("build")
+    assert not any(v.startswith("HTTPS_PROXY=") for v in spec["Env"])
+    assert b"the egress service is not running" in _logs(emitted)
+    assert b"docker compose up -d egress" in _logs(emitted)
+
+
+def test_the_launcher_writes_a_new_egress_key_at_every_start(tmp_path: Path) -> None:
+    """No token from before a restart stays valid: the resting /29s were forgotten with it."""
+    launcher = _started(FakeEngine(), tmp_path)
+    key = read_key(tmp_path / "egress.key")
+    _, proxy = launcher.open_build_network("b1", "w1", [("pypi.org", 443)], 60)
+    assert key is not None and proxy is not None
+    token = proxy.split(":", 2)[2].split("@")[0]
+    assert verify(key, token, time.time()) is not None
+
+    Launcher(launcher.settings, FakeEngine()).start()
+
+    fresh = read_key(tmp_path / "egress.key")
+    assert fresh is not None and fresh != key
+    assert verify(fresh, token, time.time()) is None
+    assert stat.S_IMODE((tmp_path / "egress.key").stat().st_mode) == 0o640
+
+
+def test_a_network_is_closed_by_its_public_name(tmp_path: Path) -> None:
+    """`close_network` is what a caller of `open_build_network` uses afterwards."""
+    engine = FakeEngine()
+    launcher = _started(engine, tmp_path)
+    network, proxy = launcher.open_build_network("b9", "w1", [("pypi.org", 443)], 60)
+
+    assert proxy is not None
+    launcher.close_network(network)
+    assert network not in engine.networks
+
+
+def test_a_launcher_that_cannot_write_the_egress_key_says_where(tmp_path: Path) -> None:
+    """The message names the path and the volume to mount."""
+    blocked = tmp_path / "file"
+    blocked.write_text("")
+
+    with pytest.raises(StartError, match="egress-key volume"):
+        _started(FakeEngine(), tmp_path, egress_key=blocked / "egress.key")
+
+
+def test_a_build_network_needs_a_started_launcher(tmp_path: Path) -> None:
+    """Without the key there is no token to give."""
+    launcher = Launcher(settings(tmp_path), FakeEngine())
+
+    with pytest.raises(RuntimeError, match="start"):
+        launcher.open_build_network("b1", "w1", [("pypi.org", 443)], 60)
+
+
+def test_a_build_subnet_rests_until_its_token_has_expired(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A token stays valid after its build ends: its /29 goes to no other network meanwhile.
+
+    Parameters
+    ----------
+    tmp_path
+        The state directory.
+    monkeypatch
+        Moves the launcher's clock past the token's expiry.
+    """
+    from lakana_worker.launcher import service
+
+    engine = FakeEngine()
+    launcher = _started(engine, tmp_path)
+    first, proxy = launcher.open_build_network("b1", "w1", [("pypi.org", 443)], 60)
+    key = read_key(tmp_path / "egress.key")
+    assert proxy is not None and key is not None
+    grant = verify(key, proxy.split(":", 2)[2].split("@")[0], time.time())
+    assert grant is not None
+    launcher.close_network(first)
+
+    second, _ = launcher.open_build_network("b2", "w1", [("pypi.org", 443)], 60)
+    assert launcher._subnets[second] != str(grant.network)
+    launcher.close_network(second)
+    task = launcher._open_network("task", "t1", "w1", None, 0)
+    assert launcher._subnets[task] != str(grant.network)
+    launcher.close_network(task)
+
+    later = grant.expires + 61
+    monkeypatch.setattr(
+        service, "time", types.SimpleNamespace(time=lambda: later, monotonic=time.monotonic)
+    )
+    third, _ = launcher.open_build_network("b3", "w1", [("pypi.org", 443)], 60)
+    assert launcher._subnets[third] == str(grant.network)
+
+
+def test_a_build_whose_token_would_be_too_long_is_refused_and_leaves_no_network(
+    tmp_path: Path,
+) -> None:
+    """32 long host names fit the request but not a token: a refusal, nothing left behind."""
+    engine = FakeEngine()
+    launcher = _started(engine, tmp_path)
+    hosts = [(f"{'a' * 60}.{'b' * 60}.{'c' * 60}.h{n}.example.org", 443) for n in range(32)]
+
+    with pytest.raises(Refused, match="too long"):
+        launcher.open_build_network("b1", "w1", hosts, 60)
+    assert not [n for n in engine.networks if n.startswith("lakana-build")]
+
+
+def test_resting_subnets_count_against_the_network_cap(tmp_path: Path) -> None:
+    """The cap trips, naming the resting subnets, before the address range runs out."""
+    engine = FakeEngine()
+    launcher = _started(engine, tmp_path, network_range="10.207.0.0/26")
+    assert launcher._max_networks == 6
+    for n in range(6):
+        network, _ = launcher.open_build_network(f"b{n}", "w1", [("pypi.org", 443)], 60)
+        launcher.close_network(network)
+
+    with pytest.raises(EngineError, match="6 resting"):
+        launcher.open_build_network("b9", "w1", [("pypi.org", 443)], 60)

@@ -129,8 +129,10 @@ def station_scores(readings: pl.DataFrame, stations: pl.DataFrame) -> pl.DataFra
 in a comment, pinned to the version of the CLI that wrote the file. Delete `dependencies = []`
 and remove the `# ` in front of the `dependencies` line. `lakana` and every other package come
 from the public package index: `uv lock` and the worker's first build of the project's
-environment need a network connection to it (the worker uses `LAKANA_RUN__HTTPS_PROXY` if you set
-one, see [Operator settings](../reference/python-assets.md#operator-settings)). With the line uncommented, the file reads:
+environment need a network connection to it (a worker with the docker runner reaches it through
+the `egress` service, see [Run Python tasks in containers](run-python-tasks-in-containers.md#package-indexes-and-proxies);
+one with the local runner uses `LAKANA_RUN__HTTPS_PROXY` if you set one, see
+[Operator settings](../reference/python-assets.md#operator-settings)). With the line uncommented, the file reads:
 
 ```toml
 [project]
@@ -579,6 +581,21 @@ catalog — is refused with 403 "Environment 'prod' is protected: only runs of t
 project version may write. See `lakana run`.", even when the caller's grants allow the write (a caller
 without them gets the ordinary 403 or 404 first). Reads, grants, policies,
 secrets, repositories, deployments and table maintenance are unaffected.
+
+A protected environment runs Python assets only on workers that run tasks in containers
+(`LAKANA_RUN__RUNNER=docker`, the Compose bundle's default). A worker with the local runner fails
+such a task at once with "environment 'prod' is protected, and this worker runs Python tasks
+without isolation (LAKANA_RUN__RUNNER=local). …" (failure code `no_runtime`); give every worker that
+takes pipeline work the docker runner before you protect an environment with Python assets.
+This is also the security condition, not only a matter of where tasks run: a task on the local
+runner, of any environment, runs as the worker's own user and can read the worker's environment,
+which holds the database URL (`LAKANA_DATABASE__URL`) and the master key
+(`LAKANA_SECRETS__MASTER_KEY`). With those it could write to a protected environment and read every
+secret directly, and protection would mean nothing. Local
+mode runs tasks without containers, so it cannot run the Python assets of a protected environment.
+Protection is read when a task's attempt is prepared: an attempt already under way on a local-runner
+worker runs to its end. SQL assets are not affected. See
+[Run Python tasks in containers](run-python-tasks-in-containers.md).
 
 For an incident, a holder of `MANAGE_ENVIRONMENT` can make exactly one write anyway:
 

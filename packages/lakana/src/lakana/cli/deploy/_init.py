@@ -14,12 +14,24 @@ import lakana
 from lakana.cli._state import CliError
 
 IMAGE_REPOSITORY = "ghcr.io/lakana-labs/lakana"
+TASK_IMAGE_SUFFIX = "-task"
+"""The task images' repository is the Lakana image's with this suffix, same tag."""
 TEMPLATE_NAME = "compose.yaml"
 WORKER_MEMORY = "4g"
 """Default hard memory limit of each worker container (`mem_limit`, no swap). The worker reads
 its cgroup's limit and stops itself at 90 percent of it, so it fails with a message before the
 kernel kills the container."""
 _ENV_COMMENTS = {
+    "LAKANA_TASK_IMAGE": "Task images, one per Python: this name plus -py3.11 ... -py3.14.",
+    "LAKANA_RUNNER": (
+        "docker: each Python task runs in a container of its own (isolated); local: as the "
+        "worker's own processes (not isolated)."
+    ),
+    "LAKANA_DOCKER_SOCKET": "The Docker socket the launcher service mounts.",
+    "LAKANA_EGRESS_UPSTREAM_PROXY": (
+        "http://[user:password@]host:port of the proxy your network sends https through; empty "
+        "for none."
+    ),
     "LAKANA_WORKER_MEMORY": (
         "Memory limit of each worker container; the worker stops itself at 90% of it "
         "(it is a limit per replica: LAKANA_WORKERS + LAKANA_WORKERS_INTERACTIVE + "
@@ -74,7 +86,39 @@ def default_image(version: str) -> str:
     return f"{IMAGE_REPOSITORY}:{version}"
 
 
-def generate_env(*, image: str, bind: str, port: int, workers: int) -> dict[str, str]:
+def task_image_for(image: str) -> str:
+    """Name the task images that belong to a Lakana image.
+
+    Parameters
+    ----------
+    image
+        ``<repository>:<tag>``.
+
+    Returns
+    -------
+    str
+        ``<repository>-task:<tag>``; the launcher appends ``-py3.X``.
+
+    Raises
+    ------
+    CliError
+        For an image without a tag (a digest, or none), whose task images cannot be named; the
+        hint says to pass `--task-image` (exit 2).
+    """
+    repository, _, tag = image.rpartition(":")
+    if not repository or "/" in tag or "@" in image:
+        raise CliError(
+            f"Cannot tell the task image that goes with {image}",
+            hint=(
+                "pass --task-image with the task image built from the same release, without -py3.X"
+            ),
+        )
+    return f"{repository}{TASK_IMAGE_SUFFIX}:{tag}"
+
+
+def generate_env(
+    *, image: str, task_image: str, bind: str, port: int, workers: int
+) -> dict[str, str]:
     """Generate every `.env` value, with fresh secrets.
 
     Only URL-, YAML- and interpolation-safe alphabets are used.
@@ -83,6 +127,8 @@ def generate_env(*, image: str, bind: str, port: int, workers: int) -> dict[str,
     ----------
     image
         The Lakana image reference.
+    task_image
+        The task images' reference without ``-py3.X``.
     bind
         Host address the server port is published on.
     port
@@ -97,6 +143,10 @@ def generate_env(*, image: str, bind: str, port: int, workers: int) -> dict[str,
     """
     return {
         "LAKANA_IMAGE": image,
+        "LAKANA_TASK_IMAGE": task_image,
+        "LAKANA_RUNNER": "docker",
+        "LAKANA_DOCKER_SOCKET": "/var/run/docker.sock",
+        "LAKANA_EGRESS_UPSTREAM_PROXY": "",
         "LAKANA_BIND": bind,
         "LAKANA_PORT": str(port),
         "LAKANA_WORKERS": str(workers),

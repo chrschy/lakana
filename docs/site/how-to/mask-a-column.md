@@ -315,11 +315,14 @@ encryption, and it does not cover the following.
 - **People who can change masks.** The administrators who may create and revoke masks may take them
   away. An administrator is masked too, if a mask names them: nothing is exempt from the masks that
   apply to a person. A compromised administrator account is not a case Lakana defends against.
-- **Python tasks.** A Python task runs as the worker's operating system user, with the task's own
-  token as its only limit. Anyone who may deploy Python code can therefore read whatever the worker
-  can read, including the files of every table and the credentials the worker holds, and masks do not
-  apply to that. One Lakana instance is one trust domain: deploy Python code only from people you would
-  trust with the stored data, or run one instance per client.
+- **Python tasks under the local runner.** With `LAKANA_RUN__RUNNER=local`, and in local mode, a Python
+  task runs as the worker's operating system user, with the task's own token as its only limit. Anyone
+  who may deploy Python code can therefore read whatever the worker can read, including the files of
+  every table and the credentials the worker holds, and masks do not apply to that. One Lakana instance
+  is one trust domain: deploy Python code only from people you would trust with the stored data, or run
+  one instance per client. With the docker runner (the Compose bundle's default) a task runs in a
+  container without the worker's credentials, and its token is its limit
+  ([Run Python tasks in containers](run-python-tasks-in-containers.md)).
 - **Anyone no mask names.** See the start of this guide: a mask is added per person or per group.
 
 Row filters (`lakana row-filter`) work the same way for rows: they hide the rows that fail a condition.
