@@ -2092,7 +2092,38 @@ class PackageIndexOut(BaseModel):
     updated_at: datetime
 
 
-ConnectionSecretValues = Annotated[dict[str, SecretStr], BeforeValidator(_check_secret_values)]
+def _check_connection_secret_values(value: object) -> object:
+    """Refuse `secret_values` that is not a flat text-to-text object, naming no key.
+
+    As `_check_secret_values`, with an example that fits every kind of connection.
+
+    Parameters
+    ----------
+    value
+        What the client sent as `secret_values`.
+
+    Returns
+    -------
+    object
+        `value`, unchanged, when every value is a string.
+
+    Raises
+    ------
+    pydantic_core.PydanticCustomError
+        If `value` is not an object or any of its values is not a string.
+    """
+    if not isinstance(value, dict) or not all(isinstance(item, str) for item in value.values()):
+        raise PydanticCustomError(
+            "secret_values",
+            "secret_values must be an object whose entries are all text, such as "
+            '{"password": "..."}; send each entry as a string.',
+        )
+    return value
+
+
+ConnectionSecretValues = Annotated[
+    dict[str, SecretStr], BeforeValidator(_check_connection_secret_values)
+]
 """New values of a connection's secret; never echoed, a bad shape refused without repeating it."""
 
 _CONNECTION_KIND = Field(

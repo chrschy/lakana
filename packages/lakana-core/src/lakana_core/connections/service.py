@@ -50,6 +50,7 @@ from lakana_core.errors import (
     ConflictError,
     LakanaError,
     NotFoundError,
+    PermissionDenied,
     ValidationError,
 )
 from lakana_core.identifiers import shown
@@ -203,6 +204,33 @@ def _changed(part: str, before: Mapping[str, Any], after: Mapping[str, Any]) -> 
     return sorted(
         f"{part}.{key}" for key in set(before) | set(after) if before.get(key) != after.get(key)
     )
+
+
+_TASK_REFUSED = (
+    "a task cannot list or show connections; it reads the connections its asset declares when "
+    "it runs"
+)
+
+
+def _refuse_task(p: PrincipalRef) -> None:
+    """Refuse a principal acting with a task token, bound to a run or not.
+
+    `READ_ENVIRONMENT` is an action a task token carries, but a task must not see the hosts,
+    users, secret names or declaring assets of the environment's connections: it learns its own
+    only through the fetch at run time. The refusal names no connection.
+
+    Parameters
+    ----------
+    p
+        The acting principal.
+
+    Raises
+    ------
+    PermissionDenied
+        If `p` acts with a task token.
+    """
+    if p.task_scope is not None:
+        raise PermissionDenied(_TASK_REFUSED)
 
 
 class ConnectionService:
@@ -517,12 +545,14 @@ class ConnectionService:
         Raises
         ------
         PermissionDenied
-            Without `READ_ENVIRONMENT` on the environment.
+            Without `READ_ENVIRONMENT` on the environment, or for a task token
+            (`_refuse_task`).
         NotFoundError
             If the environment does not exist.
         ValidationError
             If `limit` is below 1 or `cursor` is not one this server issued for this list.
         """
+        _refuse_task(p)
         self._authz.authorize(p, Action.READ_ENVIRONMENT, Securable.environment_scope(environment))
         env = self._environment(environment)
         page = newest_first(
@@ -558,10 +588,12 @@ class ConnectionService:
         Raises
         ------
         PermissionDenied
-            Without `READ_ENVIRONMENT` on the environment.
+            Without `READ_ENVIRONMENT` on the environment, or for a task token
+            (`_refuse_task`).
         NotFoundError
             If the environment or the connection does not exist.
         """
+        _refuse_task(p)
         self._authz.authorize(p, Action.READ_ENVIRONMENT, Securable.environment_scope(environment))
         env = self._environment(environment)
         return self._view(self._find(env, name), env)

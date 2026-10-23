@@ -458,3 +458,27 @@ def test_delete_asks_unless_yes_and_prints_the_409_unchanged(tmp_path: Path) -> 
     )
     assert deleted.exit_code == 0, deleted.output
     assert "Deleted connection crm-db in prod" in deleted.stdout
+
+
+def test_a_kind_this_command_line_does_not_know_says_to_upgrade(tmp_path: Path) -> None:
+    """A newer server may hold a kind this release does not know; `update` says what to do."""
+    api = FakeApi()
+    api.on("GET", f"{_BASE}/queue", json={**_CONNECTION, "name": "queue", "kind": "kafka"})
+
+    result = invoke(
+        make_state(tmp_path, api),
+        "connection",
+        "update",
+        "queue",
+        "--env",
+        "prod",
+        "--host",
+        "q.example.com",
+    )
+
+    assert result.exit_code == 2
+    assert (
+        "connection queue is of kind kafka, which this lakana command line does not know; "
+        "upgrade lakana to change it (the server is newer)" in result.output
+    )
+    assert [r.method for r in api.requests] == ["GET"]

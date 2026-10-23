@@ -136,8 +136,8 @@ def list_connections(
     """List the connections of an environment.
 
     Lists one page of connections, newest first, with the assets that declare each. Needs
-    `READ_ENVIRONMENT` in the environment. Answers 404 when the environment does not exist and
-    422 for a cursor this list did not issue.
+    `READ_ENVIRONMENT` in the environment; a task token is refused with 403. Answers 404 when
+    the environment does not exist and 422 for a cursor this list did not issue.
 
     Parameters
     ----------
@@ -173,9 +173,9 @@ def get_connection(
     """Show a connection.
 
     Shows its address, settings (a CA certificate as its SHA-256 fingerprint), the name of its
-    secret and the assets that declare it. Needs `READ_ENVIRONMENT` in the environment.
-    Answers 404 when the environment or the connection does not exist; the answer names no
-    other connection.
+    secret and the assets that declare it. Needs `READ_ENVIRONMENT` in the environment; a task
+    token is refused with 403, naming no connection. Answers 404 when the environment or the
+    connection does not exist; the answer names no other connection.
 
     Parameters
     ----------

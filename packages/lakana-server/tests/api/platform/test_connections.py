@@ -28,6 +28,7 @@ from lakana_core.models import (
     Repository,
     RepositoryKind,
 )
+from tests.api.platform.test_artifacts_delete import _task_headers
 from tests.conftest import AUTH_HEADER
 from tests.server_test_helpers import create_environment
 
@@ -714,3 +715,44 @@ def test_audit_kind_connection(client: TestClient, client_as: ClientAs) -> None:
     )
     assert unknown.status_code == 422
     assert unknown.json()["detail"] == "kind must be connection"
+
+
+def test_a_task_token_may_not_list_or_show_connections(
+    client: TestClient, client_as: ClientAs
+) -> None:
+    """Bound or not, a task token gets 403 naming no connection; a person still reads.
+
+    A task learns its own connections only through the fetch at run time.
+    """
+    admin = client_as("admin")
+    created = admin.post(
+        "/api/v1/environments/dev/connections",
+        json={**_PG, "secret_values": {"password": _VALUE}},
+    )
+    assert created.status_code == 201, created.text
+    reader = _As(client, _token(client, "dev-viewer", "VIEWER", "dev"))
+
+    for kind, header in _task_headers(client).items():
+        task = _As(client, header)
+        for response in (
+            task.get("/api/v1/environments/dev/connections"),
+            task.get("/api/v1/environments/dev/connections/crm-db"),
+            task.get("/api/v1/environments/dev/connections/missing"),
+        ):
+            assert response.status_code == 403, (kind, response.text)
+            assert "crm-db" not in response.text
+            assert "db.example.com" not in response.text
+    listed = reader.get("/api/v1/environments/dev/connections")
+    assert listed.status_code == 200
+    assert [item["name"] for item in listed.json()["items"]] == ["crm-db"]
+
+
+def test_a_badly_shaped_secret_values_names_a_connection_key(client_as: ClientAs) -> None:
+    """The shape error of `secret_values` shows a neutral example, not an s3 setting."""
+    response = client_as("data_engineer").post(
+        _BASE, json={**_PG, "secret_values": {"password": 1}}
+    )
+    assert response.status_code == 422
+    text = response.text
+    assert '{\\"password\\": \\"...\\"}' in text
+    assert "access_key_id" not in text

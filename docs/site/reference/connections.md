@@ -67,6 +67,10 @@ What each setting means, and its default:
 | Create, change and delete a connection | `MANAGE_CONNECTION` on the environment | `ADMIN`, `DATA_ENGINEER` |
 | List and show connections | `READ_ENVIRONMENT` on the environment | every role on it |
 
+A task cannot list or show connections, whatever its token's rights: a request with a task token
+is refused (403) without naming any connection. A task reads only the connections its asset
+declares, when it runs.
+
 A connection's secret is given one of three ways, and who may give it depends on the way:
 
 | How | Needs |
@@ -268,9 +272,10 @@ every `CONNECTION_*` event.
 |---|---|
 | ``connection names are lower-case letters, digits and '-', starting with a letter, at most 63`` | Choose a name that follows the rule. |
 | `` environment `prod` already has a connection `crm-db`; change it with `lakana connection update crm-db --env prod` `` | Change the one that exists, or choose another name. |
-| ``a secret `crm-db-connection` already exists in `prod`; bind it with --secret crm-db-connection or remove it first`` | Name that secret with `--secret`, or revoke it first. |
+| ``a secret `crm-db-connection` already exists in `prod`; bind it with --secret crm-db-connection or remove it first`` | Unless that secret is still bound to this connection, both ways need an administrator: `lakana secret bind crm-db-connection --env prod --connection crm-db`, or `lakana secret revoke crm-db-connection --env prod`. Without an administrator, a data engineer can instead choose another name: new values always create a secret `<connection name>-connection`, so a connection of another name gets a secret name that is free. |
 | ``give either --secret or --password-stdin/--values-stdin, not both`` | Give the secret one way. |
 | ``environment `prod` has no connection `crm-db`; `lakana connection list --env prod` lists them`` | Check the name and the environment. |
+| ``a task cannot list or show connections; it reads the connections its asset declares when it runs`` | A task token was used. Read connections with your own token. |
 | ``connection `crm-db` is used by `analytics: customers` in `prod`; deploy a version without it first.`` | Remove the connection from the asset's `@asset(connections=[...])`, deploy, and delete again. |
 | ``Secret 'crm-pw' of environment 'prod' is not bound to connection 'crm-db'. Ask someone who may manage secrets in 'prod' to bind it to this connection: lakana secret bind crm-pw --env prod --connection crm-db (the bind also makes it the secret the connection uses)`` | An administrator runs the command; nothing else is needed. Or give the connection new values with `--password-stdin`. |
 | ``This change of connection 'crm-db' (its address, TLS, CA certificate or how it sends its secret) could send secret 'crm-db-connection' of environment 'prod' somewhere new. ...`` | Give new values in the same command (`--password-stdin` or `--values-stdin`), or ask an administrator to make the change. |

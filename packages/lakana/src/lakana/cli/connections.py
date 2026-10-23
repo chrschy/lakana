@@ -210,7 +210,7 @@ _VALUES_STDIN = Annotated[
 ]
 
 
-def _refuse_foreign(kind: str, given: Mapping[str, object]) -> None:
+def _refuse_foreign(kind: str, given: Mapping[str, object], name: str) -> None:
     """Refuse an option the kind does not take, naming the kind's options.
 
     Parameters
@@ -219,13 +219,21 @@ def _refuse_foreign(kind: str, given: Mapping[str, object]) -> None:
         The connection's kind.
     given
         The options given, by name, in the order they are declared.
+    name
+        The connection's name, for the message about a kind this release does not know.
 
     Raises
     ------
     CliError
-        For the first option the kind does not take (exit 2).
+        For a kind a newer server has and this command line does not know, or for the first
+        option the kind does not take (exit 2).
     """
-    allowed = KIND_OPTIONS[kind]
+    allowed = KIND_OPTIONS.get(kind)
+    if allowed is None:
+        raise CliError(
+            f"connection {_output.inline(name)} is of kind {_output.inline(kind)}, which this "
+            "lakana command line does not know; upgrade lakana to change it (the server is newer)"
+        )
     for option in given:
         if option not in allowed:
             raise CliError(
@@ -517,7 +525,7 @@ def create(
             "--values-stdin": values_stdin,
         }
     )
-    _refuse_foreign(kind.value, given)
+    _refuse_foreign(kind.value, given, name)
     if sum(option in given for option in SECRET_OPTIONS) > 1:
         raise CliError("Pass only one of --secret, --password-stdin or --values-stdin")
     state = state_of(ctx)
@@ -748,7 +756,7 @@ def update(
     environment = resolve_environment(state, env)
     client = state.client()
     current = client.connections.get(environment, name)
-    _refuse_foreign(current.kind, given)
+    _refuse_foreign(current.kind, given, name)
     address, settings = _parts(given)
     values = _secret_values(
         current.kind,
