@@ -152,7 +152,7 @@ from lakana_core.storage.resolver import StorageResolver
 from lakana_worker.attempt_sweep import AttemptSweeper
 from lakana_worker.deploy_sweep import DeploySweeper
 from lakana_worker.index_credentials import IndexAccess
-from lakana_worker.launcher_client import LogSinkFailed
+from lakana_worker.launcher_client import LauncherClient, LogSinkFailed
 from lakana_worker.poller import WorkerPool, poll_once
 from lakana_worker.python_support import PythonSupport
 from lakana_worker.python_tasks import KeeperStop, PythonRuntime
@@ -160,6 +160,7 @@ from lakana_worker.runners import (
     MAX_ERROR_MESSAGE_CHARS,
     MAX_TASK_OUTPUT_BYTES,
     CodeUnpackFailed,
+    DockerRunner,
     LocalProcessRunner,
     PythonTask,
     RunOutcome,
@@ -304,11 +305,14 @@ class FakeRunner:
         Every task it was given.
     threads
         The thread each `run` was called from.
+    isolated
+        Whether it stands in for a container runner (`Runner.isolated`).
     """
 
     script: Script
     tasks: list[PythonTask] = field(default_factory=list)
     threads: list[threading.Thread] = field(default_factory=list)
+    isolated: bool = False
 
     def run(
         self, task: PythonTask, on_log: Callable[[bytes], None], stop: StopSignal
@@ -465,7 +469,7 @@ class PyWorld:
         PythonRuntime
             The runtime.
         """
-        runner = FakeRunner(script)
+        runner = FakeRunner(script, isolated=overrides.get("environments") is not None)
         self.runners.append(runner)
         options: dict[str, object] = {
             "support": PythonSupport(server_url="http://server:8000", uv="/usr/local/bin/uv"),
@@ -2390,12 +2394,17 @@ class RealProcess:
         Python appended to the script's head; it stands in for `lakana.runner`.
     on_output
         Called with each piece of output the runner forwards, in the supervisor thread.
+    tasks
+        Every task it was given.
+    isolated
+        `False`, as `LocalProcessRunner`'s (`Runner.isolated`).
     """
 
     py: PyWorld
     body: str
     on_output: Callable[[bytes], None] = field(default=lambda _data: None)
     tasks: list[PythonTask] = field(default_factory=list)
+    isolated: bool = False
 
     def __post_init__(self) -> None:
         """Build a venv whose interpreter is this one and whose site-packages has the module."""
@@ -7041,3 +7050,140 @@ def test_requires_python_is_checked_against_the_python_the_project_names(py: PyW
         "lakana.yaml names" in message
     )
     assert environments.calls == []
+
+
+def _protect(py: PyWorld, environment: str) -> None:
+    """Mark an environment protected, as `lakana env protect` does.
+
+    Parameters
+    ----------
+    py
+        The world.
+    environment
+        Its name.
+    """
+    with py.world.session() as session:
+        row = session.execute(
+            select(Environment).where(Environment.name == environment)
+        ).scalar_one()
+        row.is_protected = True
+        session.commit()
+
+
+def test_a_protected_environment_refuses_python_tasks_on_the_local_runner(py: PyWorld) -> None:
+    """The spec: a protected environment refuses Python tasks on a local-runner worker."""
+    py.deploy()
+    engine = py.engine(_forged)
+    claimed = py.claim_python(engine)
+    _protect(py, "dev")
+
+    run_claimed(engine, claimed)
+
+    message = _attempts(py.world, claimed.task_run_id)[0].error_message
+    assert message == (
+        "environment 'dev' is protected, and this worker runs Python tasks without isolation "
+        "(LAKANA_RUN__RUNNER=local). Run the task on a worker with LAKANA_RUN__RUNNER=docker; "
+        'the how-to "Run Python tasks in containers" says how.'
+    )
+    task = _task(py.world, claimed.asset)
+    assert task.status is TaskStatus.FAILED
+    assert task.failure_code == "no_runtime"
+    assert py.runner.tasks == []
+
+
+def test_a_protected_environment_runs_python_tasks_in_containers(py: PyWorld) -> None:
+    """With DockerRunner the same task reaches its runner."""
+    py.deploy()
+    engine = py.engine(_writer(py.world), environments=FakeEnvironments())
+    claimed = py.claim_python(engine)
+    _protect(py, "dev")
+
+    run_claimed(engine, claimed)
+
+    assert len(py.runner.tasks) == 1
+
+
+def _docker_runner() -> DockerRunner:
+    """Build a `DockerRunner` that never reaches a launcher.
+
+    Returns
+    -------
+    DockerRunner
+        The runner.
+    """
+    return DockerRunner(LauncherClient(Path("l.sock")), owner="w", memory_mb=64, cpus=1, pids=16)
+
+
+def test_a_runtime_is_isolated_exactly_when_its_runner_runs_containers(py: PyWorld) -> None:
+    """`isolated` follows the runner: the docker one is, the local one is not."""
+    docker = py.runtime(_forged, runner=_docker_runner(), environments=FakeEnvironments())
+    local = py.runtime(_forged, runner=LocalProcessRunner(kill_grace=0.2))
+
+    assert docker.isolated is True
+    assert local.isolated is False
+
+
+def test_a_container_runner_without_environments_is_refused(py: PyWorld) -> None:
+    """A container runner needs the launcher's environments: no silent local builds."""
+    with pytest.raises(ValueError, match="runs tasks in containers but has no environments"):
+        py.runtime(_forged, runner=_docker_runner())
+
+
+def test_a_local_runner_with_environments_is_refused(py: PyWorld) -> None:
+    """The local runner with the launcher's environments would look isolated and not be."""
+    with pytest.raises(ValueError, match="runs tasks without containers but has environments"):
+        py.runtime(
+            _forged, runner=LocalProcessRunner(kill_grace=0.2), environments=FakeEnvironments()
+        )
+
+
+def test_a_retried_attempt_of_a_protected_environment_is_refused_on_the_local_runner(
+    py: PyWorld,
+) -> None:
+    """Protected between two attempts: the retry is refused before any code runs."""
+
+    def broken(
+        settings: VenvSettings,
+        sha: str,
+        project: Path,
+        on_log: Callable[[bytes], None],
+        indexes: IndexResolver | None = None,
+    ) -> VenvLease:
+        raise VenvBuildError("environment build failed: uv exited with status 2")
+
+    engine = py.engine(_forged, acquire_venv=broken)
+    run_claimed(engine, py.claim_python(engine))
+    assert _task(py.world, "gold.scores").status is TaskStatus.PENDING
+    _protect(py, "dev")
+
+    engine = py.engine(_writer(py.world))
+    second = _next_attempt(py)
+    run_claimed(engine, second)
+
+    task = _task(py.world, "gold.scores")
+    assert (task.status, task.attempt) == (TaskStatus.FAILED, 2)
+    assert task.failure_code == "no_runtime"
+    assert task.error_message is not None and "environment 'dev' is protected" in task.error_message
+    assert py.runner.tasks == []
+
+
+def test_a_python_task_with_checks_of_a_protected_environment_is_refused_on_the_local_runner(
+    py: PyWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Checks change nothing: refused before the task runs, so nothing is stamped or checked."""
+    _with_checks(py, _NO_ROWS)
+    stamps = _stamps(monkeypatch)
+    engine = py.engine(_writer(py.world, rows=2))
+    claimed = py.claim_python(engine)
+    assert claimed.has_checks
+    _protect(py, "dev")
+
+    run_claimed(engine, claimed)
+
+    task = _task(py.world, "gold.scores")
+    assert task.status is TaskStatus.FAILED
+    assert task.failure_code == "no_runtime"
+    assert py.runner.tasks == []
+    assert stamps == []
+    with py.world.session() as session:
+        assert results_of_task(session, claimed.task_run_id) == []

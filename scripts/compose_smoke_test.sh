@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
 # Compose team bundle end to end: init → up → create/append/query →
 # project init, commit, register and deploy → run, including one Python
-# asset (the worker's uv builds its venv in a private cache) and one artifact, stored
+# asset (the launcher builds its environment in a build container and runs it in a task
+# container) and one artifact, stored
 # by one task and read by the next → restart
 # (idempotence) → query again → a worker per
-# kind of work, the default worker stopped (the deploy, the canary and venv checks and the
+# kind of work, the default worker stopped (the deploy, the canary and container checks and the
 # run again, now on `worker-pipeline`) → down -v.
+#
+# TASK_IMAGE names the task images without -py3.X (default: IMAGE's repository with -task, same
+# tag). Those of 3.11 (the launcher's start-up probes) and of the image's Python are pulled
+# (a failed pull fails the run), or built from this checkout when the tag is local (CI's
+# lakana-task:ci).
 #
 # Two sequences are the documentation's own commands, sourced from docs/examples (the page shows
 # their regions): a second environment with the bundle's storage secret
@@ -16,7 +22,8 @@
 # built here by scripts/build_wheelhouse.sh (the only step that asks a package index). Its lakana
 # wheel must have the version of IMAGE; both are built from the same checkout.
 set -euo pipefail
-IMAGE=${1:?usage: compose_smoke_test.sh IMAGE}
+IMAGE=${1:?usage: compose_smoke_test.sh IMAGE [TASK_IMAGE]}
+TASK_IMAGE=${2:-${IMAGE%:*}-task:${IMAGE##*:}}
 here=$(cd "$(dirname "$0")" && pwd)
 # A unique project name per run: every bundle
 # `bundle init` writes uses the fixed Compose project `lakana` (compose.yaml's
@@ -42,12 +49,25 @@ cleanup() {
   if [ -d "$copy" ]; then chmod -R u+w "$copy" || true; rm -rf "${copy:?}" || true; fi
   if [ $status -ne 0 ]; then (cd "$bundle" && docker compose logs --no-color) || true; fi
   (cd "$bundle" && docker compose down -v --remove-orphans) >/dev/null 2>&1 || true
+  # The launcher's environment and cache volumes are not the bundle's own: `down -v` leaves them.
+  docker volume ls -q --filter "label=lakana.launcher.stack=$project_name" | xargs -r docker volume rm >/dev/null 2>&1 || true
   rm -rf "$work"
   exit $status
 }
 trap cleanup EXIT
 # The wheels must be for the image's interpreter, so ask the image which one it has.
 python=$(docker run --rm "$IMAGE" python -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+# The task images. A published one (a reference with a registry or namespace) is pulled, and a
+# failed pull ends the run: the release smoke must run on the images it published. Only a local
+# tag (CI's lakana-task:ci) is built from this checkout when it is missing.
+for version in 3.11 "$python"; do
+  reference="$TASK_IMAGE-py$version"
+  if docker image inspect "$reference" >/dev/null 2>&1; then continue; fi
+  case "$TASK_IMAGE" in
+    */*) docker pull "$reference" ;;
+    *) docker build -f "$here/../Dockerfile.task" --build-arg "PYTHON=$version" -t "$reference" "$here/.." ;;
+  esac
+done
 wheelhouse=${LAKANA_WHEELHOUSE:-}
 if [ -z "$wheelhouse" ]; then
   wheelhouse="$work/wheelhouse"
@@ -64,7 +84,7 @@ if [ "$image_version" != "$wheel_version" ]; then
   echo "the wheel directory holds lakana $wheel_version, the image $IMAGE has $image_version: build both from the same checkout" >&2
   exit 1
 fi
-lakana bundle init "$bundle" --image "$IMAGE" --port "$port"
+lakana bundle init "$bundle" --image "$IMAGE" --task-image "$TASK_IMAGE" --port "$port"
 # The name goes in the bundle's .env, as the guide tells an operator to do, not in the shell:
 # the documented backup and restore commands must find the volumes through Compose alone.
 echo "COMPOSE_PROJECT_NAME=$project_name" >> "$bundle/.env"
@@ -135,15 +155,15 @@ if ls /tmp/lakana-canary-* >/dev/null 2>&1; then echo "source repo config execut
 lakana --profile team run demo --env dev
 out=$(lakana --profile team --output json sql "SELECT id, greeting FROM bronze.example")
 python3 -c 'import json,sys; assert json.loads(sys.argv[1]) == [{"id":1,"greeting":"hello"}], sys.argv[1]' "$out"
-# The same run built the Python asset, in a venv the worker (uid 10001) built with the
-# image's uv, in a cache directory only it can use.
+# The same run built the Python asset's environment in a build container and ran the asset in
+# a task container; the worker holds no Docker socket.
 out=$(lakana --profile team --output json sql "SELECT id, doubled FROM silver.doubled")
 python3 -c 'import json,sys; assert json.loads(sys.argv[1]) == [{"id":1,"doubled":2}], sys.argv[1]' "$out"
-docker compose exec -T worker uv --version >/dev/null
 cache=/home/lakana/.cache/lakana-worker
 mode=$(docker compose exec -T worker stat -c '%u %a' "$cache")
 if [ "$mode" != "10001 700" ]; then echo "worker cache is '$mode', expected '10001 700'" >&2; exit 1; fi
-docker compose exec -T worker sh -c "ls -d $cache/venvs/*/ >/dev/null"
+docker compose exec -T worker sh -c 'test ! -e /var/run/docker.sock'
+docker volume ls -q --filter "label=lakana.launcher.stack=$project_name" | grep -- '-env-' >/dev/null
 # The same run stored version 1 of an artifact and scored with it; the bytes went
 # through the REST API into the bundle's object storage.
 out=$(lakana --profile team --output json sql "SELECT id, doubled FROM gold.by_model")
@@ -241,8 +261,8 @@ if ls /tmp/lakana-canary-* >/dev/null 2>&1; then echo "source repo config execut
 lakana --profile team run demo --env dev
 out=$(lakana --profile team --output json sql "SELECT id, doubled FROM silver.doubled")
 python3 -c 'import json,sys; assert json.loads(sys.argv[1]) == [{"id":1,"doubled":2}], sys.argv[1]' "$out"
-docker compose exec -T worker-pipeline uv --version >/dev/null
 mode=$(docker compose exec -T worker-pipeline stat -c '%u %a' "$cache")
 if [ "$mode" != "10001 700" ]; then echo "worker-pipeline cache is '$mode', expected '10001 700'" >&2; exit 1; fi
-docker compose exec -T worker-pipeline sh -c "ls -d $cache/venvs/*/ >/dev/null"
+docker compose exec -T worker-pipeline sh -c 'test ! -e /var/run/docker.sock'
+docker volume ls -q --filter "label=lakana.launcher.stack=$project_name" | grep -- '-env-' >/dev/null
 echo "compose smoke test: OK"

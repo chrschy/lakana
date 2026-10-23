@@ -36,13 +36,15 @@ import stat
 import struct
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import quote
 
+from lakana_worker.launcher.egress import PORT as EGRESS_PORT
+from lakana_worker.launcher.egress_token import mint, rotate_key
 from lakana_worker.launcher.engine import API_VERSION, Engine, EngineError
 from lakana_worker.launcher.requests import (
     DEADLINE_MARGIN,
@@ -59,6 +61,7 @@ from lakana_worker.launcher.requests import (
     StatusRequest,
     StopRequest,
     build_container_spec,
+    build_targets,
     cache_volume,
     container_name,
     environment_volume,
@@ -91,6 +94,8 @@ _WAIT_MARGIN = 60.0
 """Seconds past a run's timeout and grace that the wait for its container may last."""
 _SUBNET_TRIES = 8
 """How many subnets are tried when Docker says one overlaps an address pool of its own."""
+_REST_MARGIN = 60
+"""Seconds past its last token's expiry that a build's subnet stays out of use."""
 _CACHE_MAX_AGE = 14 * 86400
 """Seconds after which an idle shared cache is removed; the next build fills a new one."""
 _MAX_FRAME_PIECE = 1 << 20
@@ -359,8 +364,11 @@ class Launcher:
         self._max_networks = self._pool.num_addresses // 8 * 3 // 4
         self._subnets: dict[str, str] = {}
         self._used_subnets: set[str] = set()
+        self._resting: dict[str, float] = {}
+        self._token_expiry: dict[str, int] = {}
         self._reserved_mb = 0
         self._key: bytes | None = None
+        self._egress_key: bytes | None = None
         self._reaper_stop = threading.Event()
 
     # --- start-up -----------------------------------------------------------------------
@@ -429,6 +437,16 @@ class Launcher:
         )
         (self.settings.state_dir / "environments").mkdir(mode=0o700, parents=True, exist_ok=True)
         self._key = self._load_cache_key()
+        try:
+            # A new key at every start: no token of an earlier launcher stays valid, so the
+            # subnets it kept resting (in its memory only) are safe to hand out again.
+            self._egress_key = rotate_key(self.settings.egress_key)
+        except OSError as exc:
+            raise StartError(
+                f"cannot write the egress proxy's key {self.settings.egress_key} "
+                f"({exc.strerror or type(exc).__name__}); mount the egress-key volume into the "
+                "launcher, writable (see compose.yaml)."
+            ) from None
         self._check_ingestion_roots()
 
     def _check_isolated_network(self, version: str) -> None:
@@ -468,7 +486,7 @@ class Launcher:
                     f"running; Docker Engine {MIN_ENGINE_MAJOR} or later is needed."
                 )
         finally:
-            self._close_network(name)
+            self.close_network(name)
 
     def _run_probe(self, name: str, spec: dict[str, Any]) -> tuple[int | None, str]:
         """Create, start and wait for a probe container, then remove it.
@@ -870,7 +888,7 @@ class Launcher:
                     name, spec, live, request.limits.timeout_seconds, emit, stdin=request.stdin
                 )
             finally:
-                self._close_network(network)
+                self.close_network(network)
         finally:
             self.forget(name, live)
 
@@ -996,20 +1014,35 @@ class Launcher:
                     deadline=None if request.no_build else deadline,
                 )
             )
-            network = self._open_network("build", request.build, request.owner, None, deadline)
+            # Pull first: the token's time starts now and must not be spent on a pull.
+            self._ensure_image(self.settings.images[request.python])
+            network, proxy = self.open_build_network(
+                request.build,
+                request.owner,
+                build_targets(request),
+                request.limits.timeout_seconds,
+            )
+            if proxy is None:
+                emit(
+                    {
+                        "log": base64.b64encode(
+                            b"lakana: the egress service is not running, so this build reaches "
+                            b"no package index; start it (docker compose up -d egress)\n"
+                        ).decode("ascii")
+                    }
+                )
             spec = build_container_spec(
                 request,
                 self.settings,
                 no_new_privileges=self.no_new_privileges,
-                proxy_url=None,
+                proxy_url=proxy,
                 cache_key=self._cache_key,
                 deadline=deadline,
             )
-            self._ensure_image(spec["Image"])
             result = self._supervise(name, spec, live, request.limits.timeout_seconds, emit)
         finally:
             if network is not None:
-                self._close_network(network)
+                self.close_network(network)
             if not request.no_build:
                 # A build that may run package code had a cache of its own: nothing of it stays.
                 self._remove_volume(cache)
@@ -1434,7 +1467,7 @@ class Launcher:
             removed += 1
         for network in networks:
             if network.get("Name") not in live:
-                self._close_network(str(network["Name"]))
+                self.close_network(str(network["Name"]))
         return removed
 
     def _list(self, path: str, query: dict[str, str], what: str) -> list[dict[str, Any]]:
@@ -1502,7 +1535,7 @@ class Launcher:
         try:
             for network in self._list("/networks", {"filters": filters}, "networks"):
                 if _expired(network.get("Labels"), moment):
-                    self._close_network(str(network["Name"]))
+                    self.close_network(str(network["Name"]))
         except EngineError as exc:
             logger.error("Could not list networks to reap: %s", exc)
         self._reap_caches(moment)
@@ -1641,9 +1674,86 @@ class Launcher:
                 if status != 200:
                     raise EngineError(f"Docker could not attach {service[0]}: {_message(body)}")
             except EngineError:
-                self._close_network(name)
+                self.close_network(name)
                 raise
         return name
+
+    def _running(self, service: str) -> bool:
+        """Say whether a Compose service of this stack is running.
+
+        Parameters
+        ----------
+        service
+            The service.
+
+        Returns
+        -------
+        bool
+            Whether a container of it runs.
+        """
+        try:
+            self._service_container(service)
+        except EngineError:
+            return False
+        return True
+
+    def open_build_network(
+        self, build: str, owner: str, targets: Sequence[tuple[str, int]], seconds: int
+    ) -> tuple[str, str | None]:
+        """Create a build's network with the egress proxy as its only way out.
+
+        The token binds the build's host:port pairs to the network's own subnet and to the
+        build's time plus a minute: copied into another container, it is refused.
+
+        Parameters
+        ----------
+        build
+            The build's id.
+        owner
+            The worker.
+        targets
+            The host and port pairs the build may reach (`requests.build_targets`).
+        seconds
+            The build's timeout.
+
+        Returns
+        -------
+        tuple
+            The network, and the proxy URL with the build's token; `None` when the egress
+            service is not running (the build then reaches nothing).
+
+        Raises
+        ------
+        EngineError
+            If Docker refuses the network or cannot attach the proxy; nothing is left behind.
+        Refused
+            If the pairs do not fit in a token; nothing is left behind.
+        RuntimeError
+            If the launcher has not started, so it has no egress key.
+        """
+        if self._egress_key is None:
+            raise RuntimeError("the egress key is only available after start()")
+        egress = self._running(self.settings.egress_service)
+        service = (self.settings.egress_service, "egress") if egress else None
+        network = self._open_network("build", build, owner, service, _deadline(seconds))
+        if not egress:
+            return network, None
+        expires = int(time.time()) + seconds + 60
+        with self._lock:
+            subnet = self._subnets[network]
+            self._token_expiry[network] = expires
+        try:
+            token = mint(
+                self._egress_key,
+                targets,
+                expires,
+                purpose="build",
+                network=ipaddress.ip_network(subnet),
+            )
+        except ValueError as exc:
+            self.close_network(network)
+            raise Refused(f"hosts: {exc}") from None
+        return network, f"http://lakana:{token}@egress:{EGRESS_PORT}"
 
     def _create_network(self, name: str, kind: str, ident: str, owner: str, deadline: int) -> None:
         """Create a network on a /29 of the launcher's own range.
@@ -1702,15 +1812,19 @@ class Launcher:
             If as many networks as the bound allows are in use, or the range is used up.
         """
         with self._lock:
-            if len(self._subnets) >= self._max_networks:
+            now = time.time()
+            self._resting = {k: v for k, v in self._resting.items() if v > now}
+            if len(self._subnets) + len(self._resting) >= self._max_networks:
                 raise EngineError(
-                    f"too many task networks in use ({len(self._subnets)} of "
-                    f"{self._max_networks}); wait for runs to end, or enlarge "
+                    "too many task networks in use "
+                    f"({len(self._subnets) + len(self._resting)} of {self._max_networks}: "
+                    f"{len(self._subnets)} running, {len(self._resting)} resting until the "
+                    "egress tokens of ended builds expire); wait for runs to end, or enlarge "
                     "LAKANA_LAUNCHER__NETWORK_RANGE"
                 )
             for candidate in self._pool.subnets(new_prefix=29):
                 text = str(candidate)
-                if text not in self._used_subnets:
+                if text not in self._used_subnets and text not in self._resting:
                     self._used_subnets.add(text)
                     self._subnets[name] = text
                     return text
@@ -1729,8 +1843,13 @@ class Launcher:
         """
         with self._lock:
             subnet = self._subnets.pop(name, None)
+            expiry = self._token_expiry.pop(name, None)
             if subnet is not None:
                 self._used_subnets.discard(subnet)
+                if expiry is not None:
+                    # A token bound to this subnet is valid until `expiry`: no other network gets
+                    # the subnet before then, so a leaked token finds no client there.
+                    self._resting[subnet] = expiry + _REST_MARGIN
 
     def _recover_subnets(self) -> None:
         """Mark the subnets of networks that survived the start-up removal as in use."""
@@ -1782,7 +1901,7 @@ class Launcher:
             )
         return str(body[0]["Id"])
 
-    def _close_network(self, name: str) -> None:
+    def close_network(self, name: str) -> None:
         """Detach everything from a network and remove it.
 
         Parameters

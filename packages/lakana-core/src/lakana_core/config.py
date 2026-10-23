@@ -673,13 +673,22 @@ class RunConfig(BaseModel):
         Raises
         ------
         ValueError
-            If `runner` is ``docker`` and `https_proxy` or `ca_bundle` is set.
+            If `runner` is ``docker`` and `https_proxy` or `ca_bundle` is set, or `index_url` is
+            a plain ``http://`` URL (the egress proxy tunnels https only).
         """
         if self.runner == "docker" and self.https_proxy is not None:
             raise ValueError(
                 "LAKANA_RUN__HTTPS_PROXY applies to builds of the local runner; with "
                 "LAKANA_RUN__RUNNER=docker builds reach the package indexes through the egress "
                 "service: set LAKANA_EGRESS__UPSTREAM_PROXY there, and unset this one."
+            )
+        index = self.index_url.get_secret_value() if self.index_url is not None else ""
+        if self.runner == "docker" and urlsplit(index).scheme.lower() == "http":
+            raise ValueError(
+                "LAKANA_RUN__INDEX_URL is a plain http:// URL; with LAKANA_RUN__RUNNER=docker "
+                "builds reach package indexes only over https, through the egress proxy. Serve "
+                "the index over https and write https:// in LAKANA_RUN__INDEX_URL, or keep "
+                "LAKANA_RUN__RUNNER=local for this index."
             )
         if self.runner == "docker" and self.ca_bundle is not None:
             raise ValueError(

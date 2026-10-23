@@ -44,6 +44,7 @@ nav:
       - how-to/upgrade-to-artifacts.md
       - how-to/manage-secrets.md
       - how-to/private-package-index.md
+      - how-to/run-python-tasks-in-containers.md
       - how-to/models-with-scikit-learn.md
       - how-to/inspect-and-download-artifact-versions.md
       - how-to/limit-artifact-versions.md

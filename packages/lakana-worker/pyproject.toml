@@ -29,6 +29,7 @@ dynamic = ["version", "dependencies"]
 [project.scripts]
 lakana-worker = "lakana_worker.command:cli"
 lakana-launcher = "lakana_worker.launcher.__main__:main"
+lakana-egress = "lakana_worker.launcher.egress:main"
 
 [tool.uv.sources]
 lakana-core = { workspace = true }

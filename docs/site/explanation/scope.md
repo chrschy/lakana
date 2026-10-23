@@ -44,20 +44,20 @@ PostgreSQL, so that a small team gets them in one install instead of assembling 
 | Area | What Lakana covers |
 |---|---|
 | Analytics | SQL assets, incremental tables, lineage, governed queries |
-| Data modelling | Medallion layers and Kimball-lite star schemas, merge and history write modes, translated metadata, measures as metadata (milestone M8d, before v1.0.0, #249) |
+| Data modelling | Medallion layers and Kimball-lite star schemas, the history write mode (`merge` comes with ingestion in M6), translated metadata, measures as metadata (milestone M8d, before v1.0.0, #249) |
 | Data science | Python assets, reproducible environments, exploration through the SDK (including from your own notebook) |
 | ML | Training and batch scoring as assets, versioned model artifacts, experiment tracking, a feature store |
-| Operations | Runs, schedules, retries, audit, secrets, access policies, table and environment retention (0.17.0, #87), deploys from CI without a stored secret (0.18.0, #15), health checks and stable log codes (0.18.0, #205, #207), queries on DuckDB 2.0 with a hardened sandbox (0.19.0, #96) |
+| Operations | Runs, schedules, retries, audit, secrets, access policies, table and environment retention (0.17.0, #87), deploys from CI without a stored secret (0.18.0, #15), health checks and stable log codes (0.18.0, #205, #207), queries on DuckDB 2.0 with a hardened sandbox (0.19.0, #96), each Python task in a container of its own (0.20.0, #38) |
 
 How the larger pieces are meant to work:
 
 - **Ingestion.** A data source is a Python asset in git. Helpers in `lakana[assets]` cover files
-  (CSV, Parquet and JSON from a URL or object storage, and spreadsheet files), SQL databases (PostgreSQL,
-  other open source databases, SQLite) and JSON REST APIs. More databases and SFTP follow after v1.0.0. For a
+  (S3, GCS, Azure, HTTPS and directories), SQL databases (PostgreSQL, SQLite and MariaDB) and
+  REST APIs, and a load can replace, append or merge. More databases and SFTP follow after v1.0.0. For a
   quick start, `lakana load <file> <table>` loads a local file without writing code; it stays as a
   convenience for exploration and tests. From M6 an administrator can register a source's address
-  and credentials once under a name (a named connection, #85), and a Python asset or
-  `lakana load` uses the name; connections are managed through the CLI and the API, and in the
+  and credentials once under a name in an environment (a named connection, #85); a Python asset
+  declares the connections it uses, and an ingestion task reaches only those (#308); connections are managed through the CLI and the API, and in the
   web interface once that exists. The platform does not run connectors of its own: a connection
   is a named address and secret, and the asset's helper does the reading. Configuring a
   recurring load without writing an asset (no-code loads, #86) is an idea for after v1.0.0
@@ -66,8 +66,8 @@ How the larger pieces are meant to work:
   (bronze, silver, gold) and Kimball-lite star schemas, with wide tables allowed where a star is
   too much. Model metadata sits in the asset header (#250), labels and descriptions can be
   translated with a main language (#251), and layer rules are opt-in first and enforced later
-  (#252). The write modes `merge` (upsert) and `history` (SCD type 2) build tables whose rows
-  change (#253), and a template and a guide start a new team (#254). A measure is metadata on a
+  (#252). The write mode `history` (SCD type 2) builds tables whose rows
+  change (#253); `merge` (upsert) comes earlier, with ingestion in M6, and a template and a guide start a new team (#254). A measure is metadata on a
   column, not a computed metric (#255). All of it comes before v1.0.0 (epic #249).
 - **Data quality.** A check is a SQL file that must return no rows. It either blocks (the table is
   set back to what it was before the run, and what reads it is not built) or only warns, and its
@@ -117,8 +117,10 @@ How the larger pieces are meant to work:
   that lost power or its network, which is expected to free the role within about a lease (`lakana scheduler
   status` shows who holds it). Every wait
   shows its reason (M5c3b).
-- **Task isolation.** The default runner executes tasks as local processes and is not a sandbox.
-  A Docker runner, one container per task, comes before the public beta (M7b).
+- **Task isolation (shipped in 0.20.0).** Local mode runs tasks as processes of the worker; the
+  Compose bundle runs each in a container of its own by default (`DockerRunner`, M7b), started by
+  a launcher that alone holds the Docker socket. This isolates projects but shares the host's
+  kernel. A protected environment runs Python tasks only in containers.
 
 ## Out of scope, by decision
 

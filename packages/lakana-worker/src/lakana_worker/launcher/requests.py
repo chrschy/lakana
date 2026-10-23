@@ -1242,6 +1242,35 @@ def uv_index_value(request: BuildRequest) -> str | None:
     return " ".join(entries) or None
 
 
+def build_targets(request: BuildRequest) -> list[tuple[str, int]]:
+    """List the host:port pairs a build's egress token grants.
+
+    Port 443 of every host the worker named, then the port an index URL names explicitly: an
+    https index on another port is reachable only on that port, and only when its URL reaches
+    the launcher (a credential's, or the operator's index). The proxy tunnels with CONNECT only,
+    so a plain http index adds nothing.
+
+    Parameters
+    ----------
+    request
+        The build.
+
+    Returns
+    -------
+    list of tuple
+        Distinct pairs, in that order.
+    """
+    pairs = [(host, 443) for host in request.hosts]
+    urls = [index.url for index in request.indexes]
+    if request.operator_index:
+        urls.append(request.operator_index)
+    for url in urls:
+        parts = urlsplit(url)
+        if parts.scheme == "https" and parts.hostname and parts.port:
+            pairs.append((parts.hostname.lower(), parts.port))
+    return list(dict.fromkeys(pairs))
+
+
 def build_container_spec(
     request: BuildRequest,
     settings: LauncherSettings,

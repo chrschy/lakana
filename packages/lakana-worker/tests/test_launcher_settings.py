@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
 
+from lakana_worker.launcher import egress
 from lakana_worker.launcher.settings import (
     KNOWN_SETTINGS,
     LauncherSettings,
@@ -390,3 +392,87 @@ def test_a_blank_former_variable_is_ignored_and_a_set_one_says_to_remove_it() ->
     assert load_settings(blank) == load_settings(_BASE)
     with pytest.raises(SettingsError, match=r"TASK_USER is not a setting .*remove it"):
         load_settings({**_BASE, "LAKANA_LAUNCHER__TASK_USER": "0:0"})
+
+
+_REPO = Path(__file__).resolve().parents[3]
+"""The repository root: ``packages/lakana-worker/tests`` is three levels below it."""
+_COMPOSE = _REPO / "packages" / "lakana" / "src" / "lakana" / "cli" / "deploy" / "compose.yaml"
+
+
+def test_the_repository_root_holds_the_bundle_template() -> None:
+    """A moved test or template fails here, by name, not as a confusing read error."""
+    assert (_REPO / "pyproject.toml").is_file() and (_REPO / "Dockerfile").is_file(), (
+        f"{_REPO} is not the repository root; fix _REPO in {Path(__file__).name}"
+    )
+    assert _COMPOSE.is_file(), (
+        f"the Compose bundle's template is not at {_COMPOSE.relative_to(_REPO)}; point "
+        f"_COMPOSE in {Path(__file__).name} at lakana's compose.yaml"
+    )
+
+
+_VARIABLE = re.compile(r"\$\{(\w+)(?::([-?])([^}]*))?\}")
+
+
+def _bundle_environment(service: str, values: dict[str, str]) -> dict[str, str]:
+    """Read a service's environment from the Compose bundle, interpolated as Compose would.
+
+    Parameters
+    ----------
+    service
+        The service.
+    values
+        The `.env` values and `COMPOSE_PROJECT_NAME`; a missing one takes its default.
+
+    Returns
+    -------
+    dict
+        Variable to value.
+    """
+    yaml = pytest.importorskip("yaml")
+    if not _COMPOSE.is_file():
+        pytest.fail(f"no Compose template at {_COMPOSE}: see the test of the repository root")
+    environment = yaml.safe_load(_COMPOSE.read_text(encoding="utf-8"))["services"][service][
+        "environment"
+    ]
+
+    def value(match: re.Match[str]) -> str:
+        """Resolve one reference.
+
+        Parameters
+        ----------
+        match
+            ``${NAME}``, ``${NAME:-default}`` or ``${NAME:?message}``.
+
+        Returns
+        -------
+        str
+            The value.
+        """
+        name, kind, rest = match.groups()
+        if values.get(name):
+            return values[name]
+        assert kind == "-", f"{name} is required by the bundle"
+        return rest
+
+    return {key: _VARIABLE.sub(value, str(text)) for key, text in environment.items()}
+
+
+def test_the_bundle_gives_the_launcher_and_the_proxy_settings_they_accept() -> None:
+    """Every variable the bundle sets is a setting, and its value passes the check."""
+    values = {
+        "COMPOSE_PROJECT_NAME": "lakana",
+        "LAKANA_TASK_IMAGE": "ghcr.io/lakana-labs/lakana-task:0.20.0",
+        "LAKANA_EGRESS_UPSTREAM_PROXY": "",
+    }
+
+    settings = load_settings(_bundle_environment("launcher", values))
+    proxy = egress.load_settings(_bundle_environment("egress", values))
+
+    assert settings.stack == "lakana"
+    assert settings.work_volume == "lakana-task-work"
+    assert settings.images == {
+        version: f"ghcr.io/lakana-labs/lakana-task:0.20.0-py{version}"
+        for version in ("3.11", "3.12", "3.13", "3.14")
+    }
+    assert proxy.upstream is None
+    assert proxy.key == settings.egress_key

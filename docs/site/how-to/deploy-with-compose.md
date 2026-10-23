@@ -8,7 +8,9 @@ This is the "team" deployment path; for a single user on their own laptop, see l
 
 ## Prerequisites
 
-- **Docker Engine** with **Compose ≥ 2.24** (`docker compose version`).
+- **Docker Engine 28 or later** with **Compose ≥ 2.24** (`docker compose version`). The bundle
+  runs each Python task in a container of its own, which needs Engine 28; the `launcher` service
+  stops at start with a message on an older one.
 - `pip install lakana` — the `lakana` CLI generates the bundle and is also the client you use
   against it afterwards. Lakana is pre-beta: the API and the data layout may change between 0.x
   releases.
@@ -97,6 +99,13 @@ development or local build of the CLI (a version `hatch-vcs` derives as a dev sn
 tagged release) has no matching published image, so `--image` is required for it; a release
 build defaults to `ghcr.io/lakana-labs/lakana:<its own version>`.
 
+**`--task-image`.** The task images, one per Python (`<reference>-py3.11` to `-py3.14`), default
+to the Lakana image's repository with `-task` and the same tag:
+`ghcr.io/lakana-labs/lakana:0.20.0` gives `ghcr.io/lakana-labs/lakana-task:0.20.0`, written to
+`.env` as `LAKANA_TASK_IMAGE`. An `--image` without a tag (pinned by digest) has no such
+default, and `init` asks for `--task-image` (exit 2). Give it without `-py3.X`, ending in a tag
+and in lower case; anything else is refused with the reason.
+
 ### Secrets settings
 
 The two variables, with their defaults, are in
@@ -118,7 +127,6 @@ x-lakana-env: &lakana-env
 
 ## The services
 
-| Service | Image | Role | Starts after |
 Each service, its image, its role and what it starts after, is in
 [The services](../reference/compose-bundle.md#the-services).
 The server and every worker connect to `postgres` directly, and should keep doing so if you point
@@ -130,6 +138,17 @@ unix socket (harmless: both ends are on one machine), and on a PostgreSQL host t
 only the keepalive settings decide, because `tcp_user_timeout` has no effect there. PostgreSQL
 before version 12 refuses `tcp_user_timeout`; the warning in the log of the worker or server then
 names it.
+
+### `launcher` and `egress`
+
+The `launcher` service is the only one that holds the Docker socket. The worker asks it, over a
+Unix socket in a volume only the two share, to start each Python task and each environment build
+in a container of its own; it has no network, no capabilities and a read-only filesystem. `egress`
+is the only way out of a build container: it lets a build reach the hosts of the package indexes
+its project may use and nothing else. If your network sends https through a proxy, set
+`LAKANA_EGRESS_UPSTREAM_PROXY` in `.env`. Docker Engine 28 or later is required; the launcher
+stops at start with a message on an older one. `LAKANA_DOCKER_SOCKET` in `.env` is the socket it
+mounts (`/var/run/docker.sock`; Docker installed as a snap uses the same path).
 
 ### `setup`
 
@@ -153,12 +172,28 @@ options decide where the secret is sent. Options an operator set there are repla
 
 ### Python assets
 
-The worker runs Python assets as subprocesses that talk to the server over REST, so it needs the
-server's address: the bundle sets `LAKANA_RUN__SERVER_URL=http://server:8000` on the `worker`
-service (not on the server). The image ships `uv`, which builds one venv per `uv.lock` and `pyproject.toml` pair; the venvs
-live in the named volume `worker-cache`, mounted at `/home/lakana/.cache/lakana-worker`, shared by
-all worker replicas and kept across restarts. `docker compose down -v` removes it; the next task
-rebuilds what it needs.
+Each Python task runs in a container of its own (`LAKANA_RUN__RUNNER=docker`, set by
+`LAKANA_RUNNER` in `.env`): its code and environment read-only, a private scratch directory, the
+server as the only thing it can reach, and its own memory (`LAKANA_RUN__TASK_MEMORY`, 2 GB), CPU
+(1) and process (256) limits. Environments are built once per `uv.lock`, `pyproject.toml`, Python
+and set of package indexes, in volumes the launcher names `<project>-env-…`. What that isolates
+and what it does not, its settings and its messages are in
+[Run Python tasks in containers](run-python-tasks-in-containers.md); what a project's Python code
+can and cannot do is in [Python assets](projects.md#python-assets).
+
+`LAKANA_RUNNER=local` changes only where tasks run: as the worker's own processes, without
+isolation. `launcher` and `egress` still start, so Docker Engine 28, the Docker socket and
+`LAKANA_TASK_IMAGE` are still needed (the launcher's start-up checks pull the 3.11 task image), and
+the workers still wait for a healthy launcher. To run without them, remove both services and the
+workers' `launcher` entry under `depends_on` from your `compose.yaml` by hand.
+
+A task talks to the server over REST, so the worker needs the server's address: the bundle sets
+`LAKANA_RUN__SERVER_URL=http://server:8000` on the `worker` service (not on the server). The
+worker keeps its task directories in the `task-work` volume, named `<project>-task-work`, from
+which the launcher mounts each task's code and scratch directory. With `LAKANA_RUNNER=local` the
+image's `uv` builds one venv per `uv.lock` and `pyproject.toml` pair in the named volume
+`worker-cache`, mounted at `/home/lakana/.cache/lakana-worker`, shared by all worker replicas and
+kept across restarts. `docker compose down -v` removes both; the next task rebuilds what it needs.
 
 The volume does not clean itself completely. The workers remove the directory a task leaves
 behind when a worker is killed mid-task (`LAKANA_RUN__SWEEP_INTERVAL`, default every hour; the same
@@ -174,15 +209,17 @@ of it at once, stop the workers and run
 
 The cache directory must be private to the worker: owned by uid 10001 and mode `0700`, or every
 Python task fails with "not private". The image creates it that way and a new named volume
-inherits that, so the bundle needs no setup. The image creates only that directory; each worker
-creates `attempts/` inside it when it starts (several workers can start together on one new
-volume without clashing), and logs a warning, and fails Python tasks, if `attempts` is a link or
-not private. If you replace the volume with a bind mount or set
+inherits that, so the bundle needs no setup. Its `attempts/` is the `task-work` volume, which
+takes the same owner and mode from the launcher's mount, made before any worker starts; a worker
+logs a warning, and fails Python tasks, if `attempts` is a link or not private. If you replace the volume with a bind mount or set
 `LAKANA_RUN__VENV_CACHE` yourself, create the directory first with
 `chown 10001:10001 DIR && chmod 0700 DIR`.
 
-The venv build downloads packages: the worker needs outbound HTTPS to the hosts the project's
-`uv.lock` names (PyPI by default), or `LAKANA_RUN__INDEX_URL`, `LAKANA_RUN__HTTPS_PROXY`,
+The environment build downloads packages. With the docker runner a build reaches the hosts the
+project's `uv.lock` names (PyPI by default) through `egress` only, and `LAKANA_RUN__HTTPS_PROXY`
+and `LAKANA_RUN__CA_BUNDLE` are refused (set `LAKANA_EGRESS_UPSTREAM_PROXY` in `.env` for a proxy;
+an index signed by a private certificate authority needs `LAKANA_RUNNER=local`). With the local
+runner the worker needs outbound HTTPS to those hosts, or `LAKANA_RUN__INDEX_URL`, `LAKANA_RUN__HTTPS_PROXY`,
 `LAKANA_RUN__NO_PROXY` and `LAKANA_RUN__CA_BUNDLE` set on the `worker` service by hand (same rules
 as the `LAKANA_GIT__*` settings below; put a credential in the URL's `user:token@` part: a query string is refused). Without network access a Python task fails at its
 environment build, and the task's log has uv's error. Whether a worker can run Python assets is
@@ -641,6 +678,10 @@ default.
   very fast query can still reach the container's limit first. A task has no cause field of its
   own; the cause is on its query run. A task is retried if it has attempts left (`retries + 1` in
   all), so one bad query cannot stop workers for ever. A query is not retried.
+- **Task containers.** A Python task's container has its own limit, `LAKANA_RUN__TASK_MEMORY`
+  (2 GB by default), outside the worker's. A task over it ends with "this task was ended because
+  it used more than its container's memory limit" and is retried while it has attempts left.
+  Budget the host for the workers' limits plus one task's limit per worker.
 
 To change it, edit one line in `.env` and run `docker compose up -d`: set `LAKANA_WORKER_MEMORY`
 to, for example, `8g`. A bundle made by an older version has no such line and uses 4 GB. The limit
@@ -859,6 +900,22 @@ Two things to check before editing `.env`:
    to merge in. Apply any structural `compose.yaml` difference to your own bundle by hand;
    `init` never writes into a directory that already has a bundle. The final `lakana profile
    remove` cleans up the scratch profile this check saved.
+
+3. **A bundle made before the release with task containers** needs four `.env` lines and the new
+   `compose.yaml` (compare as above):
+
+   <!-- not tested: four .env lines; test_deploy_init.py checks that init writes them -->
+   ```text
+   LAKANA_TASK_IMAGE=ghcr.io/lakana-labs/lakana-task:<new version>
+   LAKANA_RUNNER=docker
+   LAKANA_DOCKER_SOCKET=/var/run/docker.sock
+   LAKANA_EGRESS_UPSTREAM_PROXY=
+   ```
+
+   Without `LAKANA_TASK_IMAGE`, `docker compose up` stops with "set LAKANA_TASK_IMAGE in .env,
+   see the upgrade notes". `LAKANA_RUNNER=local` keeps tasks in the worker's own processes, but
+   the launcher still starts and needs all four lines and Docker Engine 28
+   ([Python assets](#python-assets)).
 
 ### Limits that start to apply after you upgrade
 
@@ -1403,13 +1460,26 @@ docker compose down -v
 then delete the bundle directory. `down -v` removes the named volumes (`pgdata`, `seaweed`),
 so this discards the catalog and all stored data — there is no undo short of a backup.
 
+`down -v` leaves what the launcher made: its environment and cache volumes, and any task or
+build container (with its network) that was still running when it stopped. These commands remove
+them, containers first (use your project name if it is not `lakana`):
+
+<!-- not tested: needs a running bundle; scripts/compose_smoke_test.sh runs the volume command at its end -->
+```bash
+docker ps -aq --filter "label=lakana.launcher.stack=lakana" | xargs -r docker rm -f -v
+docker network ls -q --filter "label=lakana.launcher.stack=lakana" | xargs -r docker network rm
+docker volume ls -q --filter "label=lakana.launcher.stack=lakana" | xargs -r docker volume rm
+```
+
 ## The image
 
 `${LAKANA_IMAGE}` is one image (`Dockerfile`, repo root) that runs the server, the worker, and
 `setup`, differing only in the command Compose passes each:
 
-- **Python 3.14** (`python:3.14-slim`). A project with Python assets must admit it in
-  `requires-python`; the worker's virtual environments use this interpreter.
+- **Python 3.14** (`python:3.14-slim`). With the docker runner, the bundle's default, Python
+  tasks run on the task images instead (`LAKANA_TASK_IMAGE`, one per Python from 3.11 to 3.14).
+  With `LAKANA_RUNNER=local` a project with Python assets must admit 3.14 in `requires-python`;
+  the worker's virtual environments use this interpreter.
 - **Runs as uid 10001** (`groupadd`/`useradd --system --uid 10001`), never root, with
   `HOME=/home/lakana`.
 - **Ships `uv`** (`/usr/local/bin/uv`, MIT OR Apache-2.0), copied from the pinned
@@ -1459,6 +1529,10 @@ Details and limits (SSH is unaffected): [Git network settings](../reference/netw
 
 The bundle's known gaps (SeaweedFS's internal APIs, a venv build that a shutdown does not interrupt) are in
 [Known gaps of the Compose bundle](../explanation/compose-known-gaps.md).
+
+Task containers share the host's kernel: they isolate projects from each other and from the
+worker, they are not a sandbox for hostile code. The rest of what they do not cover is in
+[Run Python tasks in containers](run-python-tasks-in-containers.md#what-it-does-not).
 
 ## See also
 

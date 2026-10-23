@@ -1023,7 +1023,7 @@ def test_the_compose_smoke_test_starts_the_worker_kinds_after_its_restart() -> N
     lowered = after.split("set_env LAKANA_WORKERS 0\n", 1)[1]
     commands = [line for line in lowered.splitlines() if line.startswith("docker compose up")]
     assert commands[0] == "docker compose up -d"
-    for check in ("lakana-canary-", "uv --version", "stat -c", "$cache/venvs/"):
+    for check in ("lakana-canary-", "stat -c", "test ! -e /var/run/docker.sock"):
         assert any(check in line and "worker-pipeline" in line for line in after.splitlines()), (
             check
         )
@@ -1041,6 +1041,80 @@ def test_the_compose_smoke_test_builds_its_wheels_for_the_image_s_python() -> No
         'python=$(docker run --rm "$IMAGE" python -c '
         "'import sys; print(\"%d.%d\" % sys.version_info[:2])')"
     ]
+
+
+def test_the_compose_smoke_job_builds_a_task_image_and_hands_it_to_the_script() -> None:
+    """CI's bundle runs Python tasks in containers, from a task image built from this checkout."""
+    steps = _jobs("ci.yml")["compose-smoke"]["steps"]
+    commands = [c for s in steps for c in _commands(s)]
+
+    assert "docker build -f Dockerfile.task --build-arg PYTHON=3.14 -t lakana-task:ci-py3.14 ." in (
+        commands
+    )
+    assert "uv run --locked bash scripts/compose_smoke_test.sh lakana:ci lakana-task:ci" in commands
+
+
+def test_the_release_compose_smoke_job_uses_the_published_task_images() -> None:
+    """The release's own task images, which `publish-task-images` pushed before it."""
+    job = _jobs("release.yml")["compose-smoke-release"]
+    commands = [c for s in job["steps"] for c in _commands(s)]
+
+    assert "publish-task-images" in job["needs"]
+    assert (
+        'uv run --locked bash scripts/compose_smoke_test.sh "ghcr.io/lakana-labs/lakana:'
+        '${{ steps.version.outputs.version }}" "ghcr.io/lakana-labs/lakana-task:'
+        '${{ steps.version.outputs.version }}"'
+    ) in commands
+
+
+def test_the_compose_smoke_test_has_the_task_images_the_launcher_needs() -> None:
+    """The image's Python for the asset, and 3.11, the image the launcher's start-up probes use.
+
+    A local tag (CI's ``lakana-task:ci``) cannot be pulled, so the script builds what is missing.
+    """
+    script = (ROOT / "scripts" / "compose_smoke_test.sh").read_text()
+
+    assert "TASK_IMAGE=${2:-${IMAGE%:*}-task:${IMAGE##*:}}" in script
+    assert 'for version in 3.11 "$python"; do' in script
+    assert '--build-arg "PYTHON=$version"' in script
+    assert '--task-image "$TASK_IMAGE"' in script
+
+
+def test_the_compose_smoke_test_builds_only_a_local_task_image_and_pulls_a_published_one() -> None:
+    """The release smoke must run on the published task images: a failed pull fails it.
+
+    A reference with a registry or namespace (a ``/``) is pulled, and a pull error stops the
+    script (``set -e``); only a local tag (CI's ``lakana-task:ci``) is built from the checkout.
+    """
+    script = (ROOT / "scripts" / "compose_smoke_test.sh").read_text()
+    loop = script.split('for version in 3.11 "$python"; do', 1)[1].split("\ndone\n", 1)[0]
+
+    assert '*/*) docker pull "$reference" ;;' in loop
+    assert '*) docker build -f "$here/../Dockerfile.task"' in loop
+    assert "|| docker" not in loop and "&& ! docker pull" not in loop
+    assert "2>&1" not in loop.split('docker pull "$reference"', 1)[1].split(";;", 1)[0]
+
+
+def test_the_release_compose_smoke_job_has_time_for_the_task_images() -> None:
+    """It pulls two task images and builds an environment as well: 30 minutes, as in CI."""
+    assert _jobs("release.yml")["compose-smoke-release"]["timeout-minutes"] == 30
+
+
+def test_the_compose_smoke_test_proves_the_task_ran_in_a_container_and_cleans_up() -> None:
+    """The worker holds no Docker socket, an environment volume was built, and it is removed.
+
+    ``down -v`` does not know the launcher's volumes, so the cleanup removes them by label.
+    """
+    script = (ROOT / "scripts" / "compose_smoke_test.sh").read_text()
+    cleanup = script.split("cleanup() {", 1)[1].split("\n}\n", 1)[0]
+    listing = 'docker volume ls -q --filter "label=lakana.launcher.stack=$project_name"'
+
+    assert f"{listing} | xargs -r docker volume rm" in cleanup
+    assert cleanup.index("down -v") < cleanup.index(listing)
+    for service in ("worker", "worker-pipeline"):
+        assert f"docker compose exec -T {service} sh -c 'test ! -e /var/run/docker.sock'" in script
+    assert script.count(f"{listing} | grep -- '-env-' >/dev/null") == 2
+    assert "$cache/venvs/" not in script
 
 
 POLARS_STEP = "Unit tests on the oldest supported Polars"
