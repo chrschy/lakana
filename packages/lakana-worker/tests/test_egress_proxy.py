@@ -29,6 +29,29 @@ from lakana_worker.launcher.egress import (
 from lakana_worker.launcher.egress_token import ensure_key, mint, rotate_key
 
 LOOPBACK = ipaddress.ip_network("127.0.0.0/8")
+_HEADER = "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\n"
+_GOOD = "eth1\t0800CF0A\t00000000\t0001\t0\t0\t0\tF8FFFFFF\n"
+_GOOD6 = (
+    "fd000000000000000000000000000000 40 00000000000000000000000000000000 00 "
+    "00000000000000000000000000000000 00000100 00000001 00000000 00000001 eth0\n"
+)
+
+
+@pytest.fixture(autouse=True)
+def _no_host_routing_table(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make every proxy of this module behave as on a host without ``/proc`` (macOS).
+
+    A test that needs attached networks writes its own tables; none reads the host's.
+
+    Parameters
+    ----------
+    tmp_path
+        Where no table is.
+    monkeypatch
+        Points the default tables there.
+    """
+    monkeypatch.setattr(egress, "_ROUTE", tmp_path / "no-route")
+    monkeypatch.setattr(egress, "_ROUTE6", tmp_path / "no-ipv6-route")
 
 
 class _Echo(socketserver.BaseRequestHandler):
@@ -122,7 +145,7 @@ def index() -> Iterator[int]:
 
 
 def _proxy(tmp_path: Path, **changes: object) -> EgressServer:
-    """Start a proxy on loopback with a key under `tmp_path`.
+    """Start a proxy on loopback with a key and routing tables of its own under `tmp_path`.
 
     Parameters
     ----------
@@ -137,10 +160,14 @@ def _proxy(tmp_path: Path, **changes: object) -> EgressServer:
         The running proxy.
     """
     ensure_key(tmp_path / "egress.key")
+    route = tmp_path / "proxy-route"
+    route.write_text(_HEADER + _GOOD, encoding="ascii")  # attached: 10.207.0.8/29 only
     values: dict[str, object] = {
         "key": tmp_path / "egress.key",
         "listen": ("127.0.0.1", 0),
         "reachable": frozenset({LOOPBACK}),
+        "route": route,
+        "route6": tmp_path / "proxy-no-ipv6-route",
     }
     values.update(changes)
     server = EgressServer(EgressSettings(**values))  # ty: ignore[invalid-argument-type]
@@ -557,14 +584,6 @@ def test_a_connected_network_is_read_from_the_routing_table(tmp_path: Path) -> N
     assert connected_networks(route, tmp_path / "missing6") == frozenset(
         {ipaddress.ip_network("172.18.0.0/16"), ipaddress.ip_network("10.207.0.8/29")}
     )
-
-
-_HEADER = "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\n"
-_GOOD = "eth1\t0800CF0A\t00000000\t0001\t0\t0\t0\tF8FFFFFF\n"
-_GOOD6 = (
-    "fd000000000000000000000000000000 40 00000000000000000000000000000000 00 "
-    "00000000000000000000000000000000 00000100 00000001 00000000 00000001 eth0\n"
-)
 
 
 @pytest.mark.parametrize(
@@ -1164,3 +1183,18 @@ def test_main_serves_quietly_with_a_key(
 
     assert "listens on" in caplog.text
     assert "No key at" not in caplog.text
+
+
+def test_a_refused_build_is_told_what_to_do(proxy: Running) -> None:
+    """The 403 says how to make an index reachable, including one on another port than 443."""
+    answer, connection = _connect(proxy.port, "pkgs.example.org:8443", proxy.token())
+    body = connection.recv(4096).decode()
+    connection.close()
+
+    assert answer.split()[1] == b"403"
+    assert "pkgs.example.org:8443 is not a destination this build may reach" in body
+    assert "lakana index add" in body
+    assert "LAKANA_RUN__INDEX_URL" in body
+    assert "443" in body.split("reach", 1)[1]
+    assert "credential" in body
+    assert "#301" in body

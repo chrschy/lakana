@@ -1131,12 +1131,25 @@ def test_a_task_image_the_launcher_cannot_extend_is_refused(
     assert not (tmp_path / "b" / ".env").exists()
 
 
-def test_the_launcher_is_healthy_only_while_it_listens(tmp_path: Path, released: None) -> None:
+def test_the_launcher_is_healthy_only_while_it_listens(
+    tmp_path: Path, released: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The healthcheck connects: a socket left in the volume by an earlier launcher is refused.
 
     The socket volume outlives `docker compose down`, so a check that the file exists would call
     a launcher that is still starting, or failing, healthy.
+
+    Parameters
+    ----------
+    tmp_path
+        The bundle and the socket's directory.
+    released
+        A released version of the bundle.
+    monkeypatch
+        Works in `tmp_path`, so the socket is bound by the short relative name ``h.sock``: an
+        absolute path under macOS's temporary directory exceeds its 104-byte socket path limit.
     """
+    monkeypatch.chdir(tmp_path)
     test = _services(tmp_path)["launcher"]["healthcheck"]["test"]
     assert test[:5] == ["CMD", *_BASE_PYTHON, "-c"]
     code = test[5].replace("/run/lakana-launcher/launcher.sock", "h.sock")
@@ -1157,10 +1170,10 @@ def test_the_launcher_is_healthy_only_while_it_listens(tmp_path: Path, released:
 
     assert not healthy()  # no socket yet
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as stale:
-        stale.bind(str(tmp_path / "h.sock"))
+        stale.bind("h.sock")
     assert not healthy()  # a stale socket: nobody listens
     (tmp_path / "h.sock").unlink()
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as live:
-        live.bind(str(tmp_path / "h.sock"))
+        live.bind("h.sock")
         live.listen(1)
         assert healthy()

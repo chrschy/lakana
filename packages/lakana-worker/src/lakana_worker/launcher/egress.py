@@ -72,8 +72,10 @@ _PHRASES = {
 }
 _HINTS = {
     "build": (
-        "register the index (lakana index add) or set LAKANA_RUN__INDEX_URL; an index on another "
-        "port than 443 must name it in its URL"
+        "register the index (lakana index add) or set LAKANA_RUN__INDEX_URL. A registered "
+        "index on another port than 443 is reachable only with a credential (its URL then "
+        "reaches the launcher); without one, give it a credential or serve it on port 443 "
+        "(issue #301)"
     ),
 }
 """What a refused client of each purpose can do about it."""
@@ -119,8 +121,8 @@ class EgressSettings:
     max_connections: int = 256
     head_seconds: float = _HEAD_SECONDS
     reachable: frozenset[Network] = frozenset()
-    route: Path = _ROUTE
-    route6: Path = _ROUTE6
+    route: Path = field(default_factory=lambda: _ROUTE)
+    route6: Path = field(default_factory=lambda: _ROUTE6)
 
 
 def _port(text: str) -> int | None:
