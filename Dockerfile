@@ -37,7 +37,11 @@ ENV TMPDIR=/var/tmp/lakana \
 # and the second would fail with "mkdir: file exists" - the worker makes `attempts` itself), the
 # launcher's socket directory
 # (its group is the worker's; set-group-id keeps the socket and token in that group, sticky stops
-# the worker from renaming or deleting them), the launcher's own state and the egress proxy's key.
+# the worker from renaming or deleting them), the launcher's own state, the egress proxy's key
+# (set-group-id: the key the launcher writes as root belongs to group 10001, which the proxy runs
+# in) and the mount point of the task work volume in the launcher, whose first mount gives the
+# fresh volume the owner and mode the worker needs of its attempt directory (the worker's own
+# mount point is inside its cache volume, where nothing may be created).
 RUN groupadd --system --gid 10001 lakana \
  && useradd --system --uid 10001 --gid lakana --no-create-home --home-dir /home/lakana --shell /usr/sbin/nologin lakana \
  && mkdir -p /var/tmp/lakana /home/lakana/.cache/lakana-worker \
@@ -46,7 +50,8 @@ RUN groupadd --system --gid 10001 lakana \
  && install -d -o 0 -g 10001 -m 0770 /run/lakana-launcher \
  && chmod 3770 /run/lakana-launcher \
  && install -d -o 0 -g 0 -m 0700 /var/lib/lakana-launcher \
- && install -d -o 0 -g 10001 -m 2750 /run/lakana-egress
+ && install -d -o 0 -g 10001 -m 2750 /run/lakana-egress \
+ && install -d -o 10001 -g 10001 -m 0700 /var/lib/lakana-task-work
 # git and ssh fetch repositories for deploys; runtime packages only.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git openssh-client \
@@ -62,6 +67,9 @@ COPY --from=builder /usr/bin/tini /usr/bin/tini
 # imports only the standard library) with the base interpreter, `-I` (no environment, no user
 # site) and `-S` (no site at all). The bundle's `launcher` service sets this as its command:
 # launcher command: /usr/local/bin/python -I -S -c "import sys; sys.path.insert(0, '/opt/lakana-launcher'); from lakana_worker.launcher.__main__ import main; main()"
+# The egress proxy reads the key that signs every build's egress and needs only the standard
+# library too; the bundle's `egress` service runs it from the same copy:
+# egress command: /usr/local/bin/python -I -S -c "import sys; sys.path.insert(0, '/opt/lakana-launcher'); from lakana_worker.launcher.egress import main; main()"
 COPY --from=builder /opt/lakana/lib/python3.14/site-packages/lakana_worker/launcher/ /opt/lakana-launcher/lakana_worker/launcher/
 RUN touch /opt/lakana-launcher/lakana_worker/__init__.py \
  && chmod -R go-w /opt/lakana-launcher

@@ -57,12 +57,17 @@ def test_loading_the_launcher_package_loads_nothing_of_the_worker() -> None:
 
 
 def test_the_launcher_starts_without_site_packages_and_loads_only_the_standard_library() -> None:
-    """`python -I -S` has no `.pth` files and no installed packages: the launcher still imports."""
+    """`python -I -S` has no `.pth` files and no installed packages: the launcher still imports.
+
+    So does the egress proxy, which the bundle runs the same way (`lakana-egress` would start it
+    on the venv, where every `.pth` file runs next to the key that signs builds' egress).
+    """
     source = str(_PACKAGE.parent.parent)
     code = (
         "import sys, sysconfig\n"
         f"sys.path.insert(0, {source!r})\n"
         "import lakana_worker.launcher.__main__, lakana_worker.launcher.server\n"
+        "import lakana_worker.launcher.egress\n"
         "stdlib = sysconfig.get_paths()['stdlib']\n"
         "odd = sorted(\n"
         "    name for name, module in sys.modules.items()\n"

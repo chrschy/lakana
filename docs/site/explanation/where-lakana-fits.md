@@ -50,9 +50,11 @@ does. What it adds is the part that keeps several people, and production, safe:
 - **One machine per query.** Each query runs on DuckDB on one worker, and a worker runs one query
   at a time. You scale by adding workers; spreading one query across machines is out of scope by
   decision ([Scope](scope.md#out-of-scope-by-decision)). There is no streaming either.
-- **Python tasks are not sandboxed yet.** They run as processes of the worker, so whoever may
-  deploy Python code can read what the worker reads. A runner that puts each task in a container
-  is planned before the public beta ([why](python-assets.md#isolation-one-instance-is-one-trust-domain)).
+- **Python tasks are isolated, not sandboxed.** The Compose bundle runs each task in a container
+  of its own, which keeps projects apart from each other and from the worker, but shares the
+  host's kernel: it is no sandbox for hostile code. Local mode runs tasks as processes of the
+  worker, so there whoever may deploy Python code can read what the worker reads
+  ([why](python-assets.md#isolation-one-instance-is-one-trust-domain)).
 - **Not ready for production data.** Lakana is pre-beta: the API and the data layout may still
   change between releases ([Upgrade policy](upgrades.md)).
 

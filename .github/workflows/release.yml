@@ -350,7 +350,7 @@ jobs:
   compose-smoke-release:
     needs: [release-please, publish-image, publish-task-images]
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     permissions: {contents: read, packages: read}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
@@ -364,7 +364,7 @@ jobs:
         run: echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
         env: {TAG: "${{ needs.release-please.outputs.tag }}"}
       - run: |
-          uv run --locked bash scripts/compose_smoke_test.sh "ghcr.io/lakana-labs/lakana:${{ steps.version.outputs.version }}"
+          uv run --locked bash scripts/compose_smoke_test.sh "ghcr.io/lakana-labs/lakana:${{ steps.version.outputs.version }}" "ghcr.io/lakana-labs/lakana-task:${{ steps.version.outputs.version }}"
 
   sbom:
     needs: release-please

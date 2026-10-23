@@ -195,13 +195,16 @@ handling, and `docs/security/threat-model.md` for the local-mode threat row.
 `lakana bundle init` (`lakana.cli.deploy`) generates a Docker Compose bundle for a small team
 sharing one instance, instead of the one-machine, no-Docker topology local mode runs.
 Where local mode is one SQLite file and a `file://` lake supervised as two OS processes by
-the CLI itself, team mode is seven Compose services, plus two optional ones (`worker-interactive` and `worker-pipeline`, no replica until `.env` says so), each in its own container, built from
+the CLI itself, team mode is nine Compose services (with `launcher` and `egress`, the Python
+task containers' launcher and the builds' egress proxy), plus two optional ones (`worker-interactive` and `worker-pipeline`, no replica until `.env` says so), each in its own container, built from
 one image (`Dockerfile`, repo root — the same image runs the server, every worker, and the
 one-shot setup job, differing only in the command):
 
 ```
 postgres  ──(healthy)──▶ migrate ──(completed)──▶ server ──(healthy)──▶ setup
 seaweedfs ──(healthy)──▶ bucket  ─────────────────(completed)──────────▶ setup
+launcher  ──(healthy)──▶ egress
+launcher  ──(healthy)──▶ worker, worker-interactive, worker-pipeline
                           migrate ──(completed)──▶ worker (× LAKANA_WORKERS)
                           migrate ──(completed)──▶ worker-interactive (× LAKANA_WORKERS_INTERACTIVE, 0)
                           migrate ──(completed)──▶ worker-pipeline (× LAKANA_WORKERS_PIPELINE, 0)
@@ -225,7 +228,8 @@ mode's own `init`-adjacent bootstrap — refuses to overwrite a bundle that alre
 since doing so would silently rotate the secrets master key. See `docs/site/how-to/deploy-with-compose.md`
 for the full reference and `docs/agent/security.md`/`docs/security/threat-model.md` for the
 security posture this topology implies (no host ports for Postgres/SeaweedFS, `.env` as the
-root of trust, non-root uid 10001, TLS from an operator's reverse proxy).
+root of trust, non-root uid 10001 except the `launcher`, which holds the Docker socket, TLS from
+an operator's reverse proxy).
 
 **Worker shutdown (M5c1 and M5c3b):** on `SIGTERM` (tini, PID 1, forwards it at once) the
 worker stops claiming, finishes the item it is running and returns, and a running *task run* is

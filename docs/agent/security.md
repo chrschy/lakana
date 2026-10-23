@@ -1012,6 +1012,41 @@ access-controlled on the server; `read_only=True` seals it (0400/0500) for a tas
   index, and the hosts of those indexes for the egress proxy. Credentials are decrypted only when
   a build runs, never for an environment the launcher reports complete; the build's output is
   redacted for every form of every credential before it reaches the task log.
+- **A build's only way out is the egress proxy** (`launcher/egress.py`, `lakana-egress`,
+  standard library; Squid and tinyproxy are GPL). The launcher attaches the `egress` service to
+  each build network and puts a token in the build's `HTTPS_PROXY` (`egress_token.mint`):
+  HMAC-SHA256 with `egress.key` (32 random bytes, hex, mode 0640, in the `egress-key` volume the
+  proxy mounts read-only) over a purpose (`build`), the build network's /29, exact host:port
+  pairs (`requests.build_targets`: 443 of every host, plus a port an index URL names) and an
+  expiry (the build's timeout and a minute, counted after the image pull). The proxy keeps no
+  state and knows nothing of builds: it tunnels `CONNECT host:port` only when the token
+  verifies, the client's address is in the token's network (a token copied into another
+  container is refused), and the pair is in the token; host matching is exact on one spelling
+  (lower case, no trailing dot, no IPv6 literal, no leading-zero port). Directly it never
+  connects to loopback, link-local (cloud metadata), multicast, unspecified, reserved or known
+  metadata addresses, nor to a network its own container is attached to (read from
+  `/proc/net/route`: the Compose network and every build network; a table it cannot read means
+  no direct connection at all, 503, and so does any line it cannot parse or an IPv6 table that
+  exists but cannot be read; a missing IPv6 table means IPv6 is off), resolving once and
+  connecting to a checked address (no DNS rebinding); other private addresses stay reachable,
+  because a company index often is one. The head must arrive whole within 10 s and 16 KiB,
+  strictly CRLF, one `Proxy-Authorization`, at most 64 lines; at most 256 connections (503
+  beyond, then closed without a thread); a tunnel ends idle after 5 minutes and at the token's
+  expiry. A released build's /29 rests until its token's expiry plus a minute before any network
+  gets it again, running and resting networks counting together against the network cap. The
+  rest lives in the launcher's memory, so every launcher start writes a new `egress.key`
+  (`egress_token.rotate_key`, replaced in one step): no token from before the restart is valid.
+  The proxy needs no restart: it compares the key file's inode, modification time and size at
+  each connection and reads it again when they change; a failed read is not remembered, so the
+  next connection tries again. `mint` refuses a token longer than `verify` accepts (the launcher
+  answers the build with a refusal). With the docker runner an `http://`
+  `LAKANA_RUN__INDEX_URL` is refused at worker start (`RunConfig`): the proxy tunnels https
+  only. `LAKANA_EGRESS__UPSTREAM_PROXY` chains a company proxy, which then resolves and
+  decides. M6 is meant to give ingestion tasks tokens of another purpose through the same proxy.
+  In the Compose bundle the proxy runs as uid and gid 10001 with the base interpreter
+  (`python -I -S`, standard library only) and reads `/run/lakana-egress/egress.key` (0640,
+  root:10001, in a set-group-id directory 2750 root:10001) from the `egress-key` volume, which
+  only `launcher` (writes) and `egress` (read-only) mount.
 - **Incident response.** When an environment may be poisoned (a malicious dependency or vendored
   package was deployed) or a worker may be compromised:
   1. Stop the workers (`docker compose stop worker`), so nothing builds or runs meanwhile.
@@ -4673,8 +4708,13 @@ matter for an operator deciding where to run it:
   plaintext. Anyone who can read it can decrypt every stored secret, reach the catalog
   database directly, and authenticate as the instance's original admin. See "Revoking the
   bootstrap credential" in `docs/site/how-to/deploy-with-compose.md`.
-- **The image runs non-root**, uid 10001 (`Dockerfile`), for the server, every worker, and
-  `setup` alike.
+- **The image runs non-root**, uid 10001 (`Dockerfile`), for the server, every worker,
+  `setup` and `egress` alike. The one exception is `launcher`, the only service that mounts the
+  Docker socket (root on the host): `user: "0:0"` only to open the socket, whose group varies by
+  host, with `network_mode: none`, `cap_drop: [ALL]`, a read-only filesystem, and the base
+  interpreter (`python -I -S`, standard library only) for its command and its healthcheck, so no
+  `.pth` file of a dependency runs next to the socket. The workers reach it through the
+  `launcher-socket` volume and never mount the Docker socket; `test_deploy_init.py` pins both.
 - **The server binds to `127.0.0.1` by default.** `lakana bundle init`'s `--bind` defaults to
   loopback; exposing it on the network (a specific address, or the `0.0.0.0`/`::` wildcard)
   triggers a plain-HTTP warning, since Lakana itself does not terminate TLS.

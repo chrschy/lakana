@@ -57,13 +57,15 @@ def _validate_public_url(url: str) -> None:
         raise CliError(f"--public-url must be an absolute http:// or https:// URL, got {url!r}")
 
 
-def _validate_image(image: str) -> None:
-    """Require `--image` to use only characters safe in `.env` and Compose.
+def _validate_image(image: str, option: str = "--image") -> None:
+    """Require an image option to use only characters safe in `.env` and Compose.
 
     Parameters
     ----------
     image
-        The raw `--image` value.
+        The raw value.
+    option
+        The option's name, for the message.
 
     Raises
     ------
@@ -73,7 +75,41 @@ def _validate_image(image: str) -> None:
         of which would corrupt `.env` or the generated Compose file.
     """
     if not _IMAGE_RE.fullmatch(image):
-        raise CliError(f"--image contains unsafe characters, got {image!r}")
+        raise CliError(f"{option} contains unsafe characters, got {image!r}")
+
+
+_PYTHON_SUFFIX = re.compile(r"-py3\.\d+\Z")
+
+
+def _validate_task_image(image: str) -> None:
+    """Require `--task-image` to be a reference the launcher can extend with ``-py3.X``.
+
+    Parameters
+    ----------
+    image
+        The raw `--task-image` value.
+
+    Raises
+    ------
+    CliError
+        If it has unsafe characters, has no tag or a digest, already ends in ``-py3.X``, or has
+        upper-case letters, which Docker refuses in a repository and the launcher in a task
+        image (exit 2).
+    """
+    _validate_image(image, "--task-image")
+    repository, _, tag = image.rpartition(":")
+    if not repository or "/" in tag or "@" in image:
+        raise CliError(
+            f"--task-image must end in a tag, not a digest, got {image!r}",
+            hint="the launcher appends -py3.11 ... -py3.14 to the tag, e.g. lakana-task:0.20.0",
+        )
+    if found := _PYTHON_SUFFIX.search(tag):
+        raise CliError(
+            f"--task-image names all four task images, so give it without {found.group()}",
+            hint=f"--task-image {image[: -len(found.group())]}",
+        )
+    if image != image.lower():
+        raise CliError(f"--task-image must be lower-case, got {image!r}")
 
 
 @dataclass(frozen=True)
@@ -148,6 +184,10 @@ def init(
     image: Annotated[
         str | None, typer.Option("--image", help="Override the Lakana image reference.")
     ] = None,
+    task_image: Annotated[
+        str | None,
+        typer.Option("--task-image", help="Override the task images' reference (without -py3.X)."),
+    ] = None,
 ) -> None:
     """Generate compose.yaml and .env for a team deployment, and save a profile.
 
@@ -171,14 +211,20 @@ def init(
     image
         The Lakana image; defaults to the release image matching this CLI's
         version.
+    task_image
+        The task images' reference without ``-py3.X`` (the launcher appends one per Python);
+        defaults to the Lakana image's repository with ``-task`` and the same tag
+        (`task_image_for`).
 
     Raises
     ------
     CliError
-        If `--workers`, `--port`, `--image`, `--bind` or `--public-url` are
-        invalid (exit 2); if a bundle already exists at `directory` (exit
-        2, checked before the profile-name check so the refusal shown is
-        always the relevant one); if a profile of the target name already
+        If `--workers`, `--port`, `--image`, `--task-image`, `--bind` or
+        `--public-url` are invalid (exit 2); if `--image` has no tag and no
+        `--task-image` is given (exit 2, `task_image_for`); if a bundle
+        already exists at `directory` (exit 2, checked before the
+        profile-name check so the refusal shown is always the relevant
+        one); if a profile of the target name already
         exists (exit 2); if this CLI is a dev/local build and no `--image`
         was given (exit 2, `default_image`); or if writing the bundle
         fails (exit 3 for a filesystem error naming the path,
@@ -191,6 +237,8 @@ def init(
         raise CliError("--port must be between 1 and 65535")
     if image is not None:
         _validate_image(image)
+    if task_image is not None:
+        _validate_task_image(task_image)
     parsed_bind = _parse_bind(bind)
     if public_url is not None:
         _validate_public_url(public_url)
@@ -213,12 +261,19 @@ def init(
         )
 
     resolved_image = image or _init.default_image(_init._cli_version())
+    resolved_task = task_image or _init.task_image_for(resolved_image)
     # Bracketed for any IPv6 address: Compose's short port syntax
     # `${LAKANA_BIND}:${LAKANA_PORT}:8000` can't parse a bare `::1`, only `[::1]`.
     # Docker's `host_ip` must be an IP literal, so `localhost` becomes `127.0.0.1`
     # rather than the bare word.
     env_bind = "127.0.0.1" if bind == "localhost" else parsed_bind.host
-    env = _init.generate_env(image=resolved_image, bind=env_bind, port=port, workers=workers)
+    env = _init.generate_env(
+        image=resolved_image,
+        task_image=resolved_task,
+        bind=env_bind,
+        port=port,
+        workers=workers,
+    )
 
     created_directory = not directory.exists()
     _init.write_bundle(directory, env)

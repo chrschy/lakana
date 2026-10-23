@@ -5,6 +5,7 @@ DuckDB's extension cache, tini as PID 1, and locked third-party versions.
 """
 
 import re
+import shlex
 from pathlib import Path
 
 import yaml
@@ -182,6 +183,69 @@ def test_the_image_carries_an_isolated_copy_of_the_launcher_and_the_command_to_r
     assert " -S " in _LAUNCHER_COMMAND and " -I " in _LAUNCHER_COMMAND
 
 
+_EGRESS_COMMAND = (
+    "/usr/local/bin/python -I -S -c \"import sys; sys.path.insert(0, '/opt/lakana-launcher'); "
+    'from lakana_worker.launcher.egress import main; main()"'
+)
+
+
+def _service(name: str) -> dict:
+    """Return one service of the Compose bundle.
+
+    Parameters
+    ----------
+    name
+        The service.
+
+    Returns
+    -------
+    dict
+        Its definition.
+    """
+    return yaml.safe_load(_COMPOSE.read_text(encoding="utf-8"))["services"][name]
+
+
+def test_the_bundle_runs_the_launcher_and_the_proxy_with_the_commands_the_image_names() -> None:
+    """The image and the bundle agree: both services start on the isolated copy, `-I -S`.
+
+    The egress proxy reads the key that signs every build's egress, so no `.pth` file of a
+    dependency may run in it either; it needs only the standard library, like the launcher.
+    """
+    text = _DOCKERFILE.read_text(encoding="utf-8")
+
+    assert f"# egress command: {_EGRESS_COMMAND}" in text
+    assert _service("launcher")["command"] == shlex.split(_LAUNCHER_COMMAND)
+    assert _service("egress")["command"] == shlex.split(_EGRESS_COMMAND)
+
+
+def test_the_egress_key_is_readable_by_the_proxy_and_by_no_other_user_of_the_image() -> None:
+    """The key directory is 2750 root:10001 and the proxy runs as 10001:10001.
+
+    The launcher (root) writes the key 0640; the set-group-id directory gives it group 10001, so
+    the proxy reads it through its group and nobody else through the file's mode. The workers
+    share that group, so they must not mount the volume (`test_deploy_init.py` pins who does).
+    """
+    text = " ".join(_final_stage())
+
+    assert "install -d -o 0 -g 10001 -m 2750 /run/lakana-egress" in text
+    assert _service("egress")["user"] == "10001:10001"
+    assert "USER 10001:10001" in _final_stage()
+
+
+def test_the_image_gives_the_task_work_volume_the_workers_owner_and_mode() -> None:
+    """The launcher's mount of `task-work` is the first, so the fresh volume takes this directory.
+
+    The workers' mount point lies inside the shared `worker-cache` volume, where the image may
+    create nothing, so the owner (uid 10001) and mode (0700) the worker requires of its attempt
+    directory come from the launcher's mount point instead.
+    """
+    text = " ".join(_final_stage())
+
+    assert "install -d -o 10001 -g 10001 -m 0700 /var/lib/lakana-task-work" in text
+    assert "task-work:/var/lib/lakana-task-work" in _service("launcher")["volumes"]
+    assert _service("worker")["depends_on"]["launcher"] == {"condition": "service_healthy"}
+
+
 def test_the_image_creates_nothing_below_the_mount_point_of_a_shared_volume() -> None:
     """Docker copies the image's content into a new named volume at its first mount.
 
@@ -199,7 +263,7 @@ def test_the_image_creates_nothing_below_the_mount_point_of_a_shared_volume() ->
     assert "/home/lakana/.cache/lakana-worker" in created
 
 
-_SHARED_VOLUMES = ("worker-cache",)
+_SHARED_VOLUMES = ("worker-cache", "launcher-socket", "task-work")
 """Named volumes that more than one container mounts (checked against `compose.yaml`)."""
 
 

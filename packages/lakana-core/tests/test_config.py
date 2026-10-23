@@ -1197,3 +1197,20 @@ def test_a_private_ca_with_the_docker_runner_is_refused_with_the_way_out() -> No
     assert "/etc/ssl/corp.pem" not in text
     assert RunConfig(runner="local", ca_bundle=Path("/etc/ssl/corp.pem")).ca_bundle is not None
     assert RunConfig(runner="local", https_proxy=SecretStr("http://proxy:3128")).https_proxy
+
+
+def test_an_http_index_with_the_docker_runner_is_refused_with_the_way_out() -> None:
+    """Builds reach indexes only over https through the egress proxy: the message says so."""
+    with pytest.raises(pydantic.ValidationError) as caught:
+        RunConfig(runner="docker", index_url=SecretStr("http://u:secret@mirror.corp:8080/simple"))
+    text = str(caught.value)
+    assert "LAKANA_RUN__INDEX_URL" in text
+    assert "https" in text
+    assert "egress" in text
+    assert "LAKANA_RUN__RUNNER=local" in text
+    assert "secret" not in text
+    assert "mirror.corp" not in text
+    assert RunConfig(runner="docker", index_url=SecretStr("https://mirror.corp/simple")).index_url
+    assert RunConfig(runner="local", index_url=SecretStr("http://mirror.corp/simple")).index_url
+    with pytest.raises(pydantic.ValidationError, match="LAKANA_RUN__INDEX_URL"):
+        RunConfig(runner="docker", index_url=SecretStr("HTTP://mirror.corp/simple"))

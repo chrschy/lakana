@@ -25,6 +25,7 @@ from lakana_worker.launcher.requests import (
     StatusRequest,
     StopRequest,
     build_container_spec,
+    build_targets,
     cache_volume,
     environment_volume,
     network_spec,
@@ -894,3 +895,52 @@ def test_every_spec_overrides_the_entrypoint_with_its_own_command() -> None:
         assert spec["Entrypoint"][0].startswith("/")
     assert specs[0]["Entrypoint"] == ["/env/bin/python", "-P", "-m", "lakana.runner"]
     assert specs[1]["Entrypoint"] == ["/usr/local/bin/python", "-I", "/opt/lakana-task/build.py"]
+
+
+def test_a_build_may_reach_port_443_of_its_hosts_and_the_ports_its_index_urls_name() -> None:
+    """The token's pairs: port 443 of every host, and an explicit port where a URL names one."""
+    build = parse_request(
+        _raw(
+            _with(
+                BUILD,
+                indexes=[
+                    {
+                        "url": "https://pkgs.example.org:8443/simple",
+                        "username": "u",
+                        "password": "p",
+                    }
+                ],
+                operator_index="https://u:p@mirror.example.org:9443/simple",
+                hosts=["pkgs.example.org", "mirror.example.org", "pypi.org"],
+            )
+        ),
+        token=TOKEN,
+        settings=SETTINGS,
+    )
+    assert isinstance(build, BuildRequest)
+
+    assert build_targets(build) == [
+        ("pkgs.example.org", 443),
+        ("mirror.example.org", 443),
+        ("pypi.org", 443),
+        ("pkgs.example.org", 8443),
+        ("mirror.example.org", 9443),
+    ]
+
+
+def test_a_plain_http_operator_index_adds_no_port() -> None:
+    """The proxy tunnels only (CONNECT): an http index is not reachable through it."""
+    build = parse_request(
+        _raw(
+            _with(
+                BUILD,
+                operator_index="http://mirror.example.org:8080/simple",
+                hosts=["pkgs.example.org", "mirror.example.org"],
+            )
+        ),
+        token=TOKEN,
+        settings=SETTINGS,
+    )
+    assert isinstance(build, BuildRequest)
+
+    assert build_targets(build) == [("pkgs.example.org", 443), ("mirror.example.org", 443)]

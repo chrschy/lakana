@@ -117,6 +117,61 @@ services:
       migrate: {condition: service_completed_successfully}
     restart: unless-stopped
 
+  # The only service that holds the Docker socket, which is root on the host. It starts each
+  # Python task and each environment build in a container of its own, from one narrow request
+  # the worker sends over a Unix socket in the launcher-socket volume. No network, no
+  # capabilities, a read-only filesystem; root only to open the socket, whose group varies by host.
+  # It runs on the image's base interpreter (-I -S, standard library only) from its own copy of
+  # its code, so no `.pth` file of a dependency runs next to the socket; so does its healthcheck.
+  launcher:
+    image: ${LAKANA_IMAGE}
+    command: ["/usr/local/bin/python", "-I", "-S", "-c", "import sys; sys.path.insert(0, '/opt/lakana-launcher'); from lakana_worker.launcher.__main__ import main; main()"]
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    user: "0:0"
+    environment:
+      LAKANA_LAUNCHER__STACK: ${COMPOSE_PROJECT_NAME}
+      LAKANA_LAUNCHER__IMAGES: '{"3.11": "${LAKANA_TASK_IMAGE:?set LAKANA_TASK_IMAGE in .env, see the upgrade notes}-py3.11", "3.12": "${LAKANA_TASK_IMAGE}-py3.12", "3.13": "${LAKANA_TASK_IMAGE}-py3.13", "3.14": "${LAKANA_TASK_IMAGE}-py3.14"}'
+    volumes:
+      - ${LAKANA_DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+      - launcher-socket:/run/lakana-launcher
+      - launcher-state:/var/lib/lakana-launcher
+      - egress-key:/run/lakana-egress
+      # Mounted here only so that this first mount gives the fresh volume the owner and mode of
+      # the image's directory (uid 10001, 0700), which the workers need; root without
+      # capabilities cannot enter it. The launcher mounts it into task containers by name.
+      - task-work:/var/lib/lakana-task-work
+    # Healthy while the launcher listens: a connection, not the file, which an earlier launcher
+    # leaves in the volume. The launcher closes a connection that sends nothing without a log line.
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/python", "-I", "-S", "-c", "import socket; s = socket.socket(socket.AF_UNIX); s.settimeout(2); s.connect('/run/lakana-launcher/launcher.sock'); s.close()"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  # Builds reach package indexes only through this proxy, and only the hosts the launcher signed
+  # for each build. It is on the default network and joins each build's own network. It reads
+  # the launcher's key (0640, group 10001) read-only, in group 10001, on the base interpreter.
+  egress:
+    image: ${LAKANA_IMAGE}
+    command: ["/usr/local/bin/python", "-I", "-S", "-c", "import sys; sys.path.insert(0, '/opt/lakana-launcher'); from lakana_worker.launcher.egress import main; main()"]
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    environment:
+      LAKANA_EGRESS__UPSTREAM_PROXY: ${LAKANA_EGRESS_UPSTREAM_PROXY:-}
+    volumes: ["egress-key:/run/lakana-egress:ro"]
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/python", "-I", "-S", "-c", "import socket; socket.create_connection(('127.0.0.1', 3128), timeout=2).close()"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    depends_on:
+      launcher: {condition: service_healthy}
+    restart: unless-stopped
+
   worker: &worker
     image: ${LAKANA_IMAGE}
     command: ["lakana-worker"]
@@ -130,6 +185,9 @@ services:
     # task) before the kernel would kill the container; `restart` brings either back.
     # LAKANA_WORKERS + LAKANA_WORKERS_INTERACTIVE + LAKANA_WORKERS_PIPELINE, times this, must fit
     # the host. The default lets a bundle whose .env predates the value start.
+    # Python tasks run in containers of their own, outside this limit, each with
+    # LAKANA_RUN__TASK_MEMORY (2 GB by default): the host needs the workers' total plus that much
+    # per task running at once (one per worker).
     mem_limit: ${LAKANA_WORKER_MEMORY:-4g}
     memswap_limit: ${LAKANA_WORKER_MEMORY:-4g}
     environment: &worker-env
@@ -137,11 +195,18 @@ services:
       LAKANA_REPO_ROOTS: '["/repos"]'
       # Python assets: a task's subprocess talks to the server over REST.
       LAKANA_RUN__SERVER_URL: http://server:8000
+      # docker: each Python task in a container of its own, started by `launcher`; local: as
+      # this container's own processes, without isolation (launcher and egress still start).
+      LAKANA_RUN__RUNNER: ${LAKANA_RUNNER:-docker}
     volumes:
       - ./repos:/repos:ro
       # Venvs, kept across restarts and shared by the replicas. The image creates the directory
       # owned by the `lakana` user with mode 0700; the worker refuses a cache that is not private.
       - worker-cache:/home/lakana/.cache/lakana-worker
+      # The launcher's socket and token; the worker never holds the Docker socket itself.
+      - launcher-socket:/run/lakana-launcher
+      # Attempt directories: the launcher mounts a task's code and scratch from here.
+      - task-work:/home/lakana/.cache/lakana-worker/attempts
     # The worker serves no HTTP. `lakana-worker healthcheck` asks the database whether the worker
     # of this container wrote its heartbeat within LAKANA_RUN__LEASE_SECONDS, which it does only
     # while it reaches the database; it gives up after 3 s. Not `disable: true`: older Compose v2
@@ -156,6 +221,7 @@ services:
       replicas: ${LAKANA_WORKERS}
     depends_on:
       migrate: {condition: service_completed_successfully}
+      launcher: {condition: service_healthy}
       # Makes `docker compose up --wait` itself block until `setup` exits and
       # fail if it exits non-zero -- the same mechanism `server` uses for
       # `migrate` above. Without a real dependent, `--wait` reports a
@@ -223,3 +289,9 @@ volumes:
   pgdata:
   seaweed:
   worker-cache:
+  launcher-socket:
+  launcher-state:
+  egress-key:
+  task-work:
+    # Named after the project: the launcher mounts it by name into task containers.
+    name: ${COMPOSE_PROJECT_NAME}-task-work
