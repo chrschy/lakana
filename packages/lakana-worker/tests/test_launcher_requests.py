@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 from lakana_worker.launcher.requests import (
+    BUILD_DOWNLOADS,
     LABEL_OWNER,
     LABEL_STACK,
     MAX_REQUEST_BYTES,
@@ -607,6 +608,8 @@ def test_the_build_spec_mounts_only_code_environment_and_cache() -> None:
         in spec["Env"]
     )
     assert "LAKANA_BUILD_NO_BUILD=1" in spec["Env"]
+    assert f"UV_CONCURRENT_DOWNLOADS={BUILD_DOWNLOADS}" in spec["Env"]
+    assert BUILD_DOWNLOADS * 2 <= 32, "#302: uv's downloads fit well within one build's cap"
     assert not any(v.startswith(("HTTPS_PROXY=", "https_proxy=")) for v in spec["Env"])
     assert host["NetworkMode"] == "lakana-build-b0f3c9a1e"
     with_proxy = build_container_spec(

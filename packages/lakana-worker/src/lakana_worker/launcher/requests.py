@@ -28,6 +28,10 @@ MAX_STDIN_BYTES = 256 * 1024
 MAX_INDEXES = 16
 MAX_TARGETS = 32
 """The most host:port pairs one build may reach."""
+BUILD_DOWNLOADS = 16
+"""uv's parallel downloads in a build (`UV_CONCURRENT_DOWNLOADS`, 50 by default): half the egress
+proxy's default cap of 32 connections per build network, which leaves room for the connections
+uv keeps open to an index's other host and for a build backend's own."""
 MAX_ROOTS = 16
 MAX_CREDENTIAL_CHARS = 4096
 MAX_URL_CHARS = 2048
@@ -1370,6 +1374,7 @@ def build_container_spec(
         "UV_PYTHON_DOWNLOADS=never",
         "UV_CACHE_DIR=/uv-cache",
         "UV_NO_PROGRESS=1",
+        f"UV_CONCURRENT_DOWNLOADS={BUILD_DOWNLOADS}",
         f"LAKANA_BUILD_NO_BUILD={1 if request.no_build else 0}",
         f"LAKANA_BUILD_MAX_BYTES={request.max_bytes}",
         f"LAKANA_BUILD_SRC={source}",

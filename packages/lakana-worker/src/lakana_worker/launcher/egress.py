@@ -21,8 +21,13 @@ makes no direct connection. The launcher writes a new key at every start; the pr
 file again whenever its inode, time or size changes, so it needs no restart.
 
 Limits: a request head must arrive whole within 10 seconds and 16 KiB; at most
-`LAKANA_EGRESS__MAX_CONNECTIONS` connections at once (256); a tunnel ends after five idle minutes
-and when its token expires. Standard library only, like the launcher.
+`LAKANA_EGRESS__MAX_CONNECTIONS` connections at once (256), and at most
+`LAKANA_EGRESS__MAX_CONNECTIONS_PER_NETWORK` (32) from one client network, so one build cannot
+take the connections another build needs (#302); a tunnel ends after five idle minutes and when
+its token expires. A client network is the attached network the client's address is in (a
+build's /29, read from the routing table), or the address alone when no attached network holds
+it; it is known before the request head, so a build that never sends one is held to its cap too.
+Standard library only, like the launcher.
 """
 
 from __future__ import annotations
@@ -50,7 +55,9 @@ logger = logging.getLogger("lakana_worker.launcher.egress")
 
 PORT = 3128
 PREFIX = "LAKANA_EGRESS__"
-_NAMES = frozenset({"KEY", "LISTEN", "UPSTREAM_PROXY", "MAX_CONNECTIONS"})
+_NAMES = frozenset(
+    {"KEY", "LISTEN", "UPSTREAM_PROXY", "MAX_CONNECTIONS", "MAX_CONNECTIONS_PER_NETWORK"}
+)
 _MAX_HEAD = 16384
 _MAX_HEADERS = 64
 _HEAD_SECONDS = 10.0
@@ -59,6 +66,9 @@ _IDLE_SECONDS = 300.0
 _LINGER_SECONDS = 1.0
 _SPARE_THREADS = 64
 """Threads beyond `max_connections` that may answer 503 before connections are just closed."""
+_SPARE_PER_NETWORK = 4
+"""Threads beyond its cap that one client network may hold to be told 503; past them, its
+connections are closed at once, so a flood from one build cannot take the threads of others."""
 _ROUTE = Path("/proc/net/route")
 _ROUTE6 = Path("/proc/net/ipv6_route")
 _PHRASES = {
@@ -105,6 +115,9 @@ class EgressSettings:
         A proxy to tunnel through, ``http://[user:password@]host:port``; left out of `repr`.
     max_connections
         Most connections at once.
+    max_connections_per_network
+        Most connections at once from one client network (one build); `max_connections` when
+        lower.
     head_seconds
         How long a client may take to send its request head.
     reachable
@@ -118,6 +131,7 @@ class EgressSettings:
     listen: tuple[str, int] = ("0.0.0.0", PORT)  # nosec B104 -- it serves the build networks
     upstream: str | None = field(default=None, repr=False)
     max_connections: int = 256
+    max_connections_per_network: int = 32
     head_seconds: float = _HEAD_SECONDS
     reachable: frozenset[Network] = frozenset()
     route: Path = field(default_factory=lambda: _ROUTE)
@@ -212,14 +226,23 @@ def load_settings(environ: Mapping[str, str]) -> EgressSettings:
             or parts.fragment
         ):
             raise SettingsError(rule)
-    connections = get("MAX_CONNECTIONS") or "256"
+    connections = get("MAX_CONNECTIONS") or str(defaults.max_connections)
     if not connections.isdigit() or not 1 <= int(connections) <= 4096:
         raise SettingsError(f"{PREFIX}MAX_CONNECTIONS must be a whole number from 1 to 4096.")
+    per_network = get("MAX_CONNECTIONS_PER_NETWORK") or str(
+        min(defaults.max_connections_per_network, int(connections))
+    )
+    if not per_network.isdigit() or not 1 <= int(per_network) <= int(connections):
+        raise SettingsError(
+            f"{PREFIX}MAX_CONNECTIONS_PER_NETWORK must be a whole number from 1 to "
+            f"{PREFIX}MAX_CONNECTIONS ({connections}): the connections one build may hold at once."
+        )
     return EgressSettings(
         key=Path(get("KEY") or str(defaults.key)),
         listen=listen,
         upstream=upstream,
         max_connections=int(connections),
+        max_connections_per_network=int(per_network),
     )
 
 
@@ -515,18 +538,31 @@ class _Handler(socketserver.BaseRequestHandler):
                 drained += len(data)
 
     def handle(self) -> None:
-        """Serve the connection within the connection limit; never let an error escape."""
-        if not self.proxy.slots.acquire(blocking=False):
-            self._answer(503, "the egress proxy is busy; try again")
+        """Serve the connection within its network's and the total limit; never raise."""
+        network = self.proxy.network_of(self.request, self.client_address)
+        if not self.proxy.enter(network):
+            cap = self.proxy.per_network
+            self._answer(
+                503,
+                f"this client's network already holds {cap} connections to the egress proxy, "
+                "the most one build may hold at once (LAKANA_EGRESS__MAX_CONNECTIONS_PER_NETWORK"
+                "); try again when one of them has ended",
+            )
             return
         try:
-            self._serve()
-        except _Refused as refused:
-            self._answer(refused.status, refused.reason, refused.extra)
-        except OSError:
-            return
+            if not self.proxy.slots.acquire(blocking=False):
+                self._answer(503, "the egress proxy is busy; try again")
+                return
+            try:
+                self._serve()
+            except _Refused as refused:
+                self._answer(refused.status, refused.reason, refused.extra)
+            except OSError:
+                return
+            finally:
+                self.proxy.slots.release()
         finally:
-            self.proxy.slots.release()
+            self.proxy.leave(network)
 
     def _serve(self) -> None:
         """Read the head, check the token, the client, the host and the port, then tunnel.
@@ -609,6 +645,23 @@ class _Handler(socketserver.BaseRequestHandler):
         return grant
 
 
+def _drop(counts: dict[Network, int], network: Network) -> None:
+    """Count one fewer for a network, forgetting it at zero.
+
+    Parameters
+    ----------
+    counts
+        Counts by client network; the caller holds their lock.
+    network
+        The network.
+    """
+    left = counts.get(network, 0) - 1
+    if left > 0:
+        counts[network] = left
+    else:
+        counts.pop(network, None)
+
+
 def _parse(head: bytes) -> tuple[str, int, str | None]:
     """Read a CONNECT head strictly: anything two parsers could read differently is refused.
 
@@ -669,11 +722,116 @@ class EgressServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 
     def __init__(self, settings: EgressSettings) -> None:
         self.settings = settings
+        self.per_network = min(settings.max_connections_per_network, settings.max_connections)
         self.slots = threading.BoundedSemaphore(settings.max_connections)
         self.threads = threading.BoundedSemaphore(settings.max_connections + _SPARE_THREADS)
         self._key: tuple[tuple[int, int, int], bytes | None] = ((-1, -1, -1), None)
         self._key_lock = threading.Lock()
+        self._count_lock = threading.Lock()
+        self._threads_by: dict[Network, int] = {}
+        self._slots_by: dict[Network, int] = {}
+        self._network_of: dict[object, Network] = {}
         super().__init__(settings.listen, _Handler)
+
+    def client_network(self, host: str) -> Network:
+        """Name the client network a connection counts against.
+
+        Parameters
+        ----------
+        host
+            The client's address.
+
+        Returns
+        -------
+        IPv4Network or IPv6Network
+            The most specific attached network that holds the address (a build's /29); the
+            address alone when none does or the routing table cannot be read.
+        """
+        address = ipaddress.ip_address(host)
+        if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+            address = address.ipv4_mapped
+        connected = connected_networks(self.settings.route, self.settings.route6) or frozenset()
+        found = [n for n in connected if n.version == address.version and address in n]
+        return max(found, key=lambda n: n.prefixlen) if found else ipaddress.ip_network(address)
+
+    def network_of(self, request: object, client_address: object) -> Network:
+        """Return the client network `process_request` counted a connection's thread against.
+
+        Parameters
+        ----------
+        request
+            The connection.
+        client_address
+            Its peer, for a connection served without `process_request`.
+
+        Returns
+        -------
+        IPv4Network or IPv6Network
+            Its client network.
+        """
+        with self._count_lock:
+            found = self._network_of.get(request)
+        if found is not None:
+            return found
+        return self.client_network(str(cast("tuple[str, int]", client_address)[0]))
+
+    def enter(self, network: Network) -> bool:
+        """Take one of a client network's connection slots.
+
+        Parameters
+        ----------
+        network
+            The client network.
+
+        Returns
+        -------
+        bool
+            `False` when it holds `per_network` already.
+        """
+        with self._count_lock:
+            held = self._slots_by.get(network, 0)
+            if held >= self.per_network:
+                return False
+            self._slots_by[network] = held + 1
+        return True
+
+    def leave(self, network: Network) -> None:
+        """Give back one of a client network's connection slots.
+
+        Parameters
+        ----------
+        network
+            The client network.
+        """
+        with self._count_lock:
+            _drop(self._slots_by, network)
+
+    def slots_held(self) -> int:
+        """Count the connections the client networks hold.
+
+        Returns
+        -------
+        int
+            How many connections are being served now.
+        """
+        with self._count_lock:
+            return sum(self._slots_by.values())
+
+    def threads_of(self, network: Network) -> int:
+        """Count the threads serving or answering one client network's connections.
+
+        Parameters
+        ----------
+        network
+            The client network.
+
+        Returns
+        -------
+        int
+            At most `per_network` plus `_SPARE_PER_NETWORK`.
+        """
+        with self._count_lock:
+            return self._threads_by.get(network, 0)
 
     def process_request(
         self, request: socket.socket | tuple[bytes, socket.socket], client_address: object
@@ -681,7 +839,8 @@ class EgressServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         """Serve a connection on a thread of its own, or close it when too many threads run.
 
         Past `max_connections`, a few more threads answer 503; beyond those a flood of
-        connections is closed at once rather than given a thread each.
+        connections is closed at once rather than given a thread each. The same holds for one
+        client network past its cap, before any other network's threads are touched.
 
         Parameters
         ----------
@@ -690,14 +849,41 @@ class EgressServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         client_address
             Its peer.
         """
+        network = self.client_network(str(cast("tuple[str, int]", client_address)[0]))
+        with self._count_lock:
+            busy = self._threads_by.get(network, 0)
+            if busy >= self.per_network + _SPARE_PER_NETWORK:
+                network_full = True
+            else:
+                network_full = False
+                self._threads_by[network] = busy + 1
+                self._network_of[request] = network
+        if network_full:
+            self.shutdown_request(request)
+            return
         if not self.threads.acquire(blocking=False):
+            self._forget(request)
             self.shutdown_request(request)
             return
         try:
             super().process_request(request, client_address)
         except BaseException:
             self.threads.release()
+            self._forget(request)
             raise
+
+    def _forget(self, request: object) -> None:
+        """Give back a connection's thread ticket of its client network.
+
+        Parameters
+        ----------
+        request
+            The connection.
+        """
+        with self._count_lock:
+            network = self._network_of.pop(request, None)
+            if network is not None:
+                _drop(self._threads_by, network)
 
     def process_request_thread(
         self, request: socket.socket | tuple[bytes, socket.socket], client_address: object
@@ -715,6 +901,7 @@ class EgressServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
             super().process_request_thread(request, client_address)
         finally:
             self.threads.release()
+            self._forget(request)
 
     def handle_error(self, request: object, client_address: object) -> None:
         """Log an unexpected error of one connection briefly; the proxy goes on.

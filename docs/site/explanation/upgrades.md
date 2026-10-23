@@ -143,6 +143,15 @@ build requests (`build takes exactly the fields ...`), and the task fails until 
 upgraded. The shared build caches get new names, so the first build of each environment after
 the upgrade downloads its packages again.
 
+### One build holds at most 32 connections of the egress proxy
+
+`egress` lets one build hold at most 32 connections at once
+(`LAKANA_EGRESS__MAX_CONNECTIONS_PER_NETWORK`), so a build cannot take the connections other
+builds need; a build past it gets a `503` that names the setting. Builds now download at most
+16 packages at once (uv's own default is 50), which stays within it. A build whose own code opens
+many connections may need the setting raised under `egress` in `compose.yaml`; see
+[The egress proxy](../how-to/run-python-tasks-in-containers.md#the-egress-proxy).
+
 ## Notes for 0.20.0
 
 ### Python tasks run in containers in the Compose bundle

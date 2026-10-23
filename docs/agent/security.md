@@ -1050,7 +1050,13 @@ access-controlled on the server; `read_only=True` seals it (0400/0500) for a tas
   connecting to a checked address (no DNS rebinding); other private addresses stay reachable,
   because a company index often is one. The head must arrive whole within 10 s and 16 KiB,
   strictly CRLF, one `Proxy-Authorization`, at most 64 lines; at most 256 connections (503
-  beyond, then closed without a thread); a tunnel ends idle after 5 minutes and at the token's
+  beyond, then closed without a thread), and at most 32 from one client network
+  (`LAKANA_EGRESS__MAX_CONNECTIONS_PER_NETWORK`, #302): the most specific attached network that
+  holds the client's address (a build's /29), or the address alone, counted from the accept,
+  before the head, so idle connections count; past the cap 503 naming it, and past the cap and
+  four answering threads the network's connections are closed at once (`process_request`), so a
+  flood takes only its own threads. Builds set `UV_CONCURRENT_DOWNLOADS=16`
+  (`requests.BUILD_DOWNLOADS`) to stay within it; a tunnel ends idle after 5 minutes and at the token's
   expiry. A released build's /29 rests until its token's expiry plus a minute before any network
   gets it again, running and resting networks counting together against the network cap. The
   rest lives in the launcher's memory, so every launcher start writes a new `egress.key`
@@ -1170,7 +1176,7 @@ start) authenticates a worker, compared with `hmac.compare_digest`.
   networks the proxy is attached to (a company index often is one; operator ranges are #303);
   with `LAKANA_EGRESS__UPSTREAM_PROXY` the proxy makes no address check of its own, the upstream
   proxy resolves and decides; a tunnel whose writes block can outlive its token's expiry by up to
-  the 300 s idle timeout; one build can hold all `LAKANA_EGRESS__MAX_CONNECTIONS` slots (#302).
+  the 300 s idle timeout.
 
 ## The artifact store (M5c2b)
 

@@ -375,7 +375,9 @@ not protect against. Each is accepted.
     #303). With `LAKANA_EGRESS__UPSTREAM_PROXY` the proxy makes no address check of its own: the
     upstream proxy resolves and decides, and the token still limits the host:port pairs. A
     tunnel whose writes block can outlive its token's expiry by up to the 300-second idle
-    timeout. One build can hold all `LAKANA_EGRESS__MAX_CONNECTIONS` (256) slots (#302). A build
+    timeout. One build holds at most `LAKANA_EGRESS__MAX_CONNECTIONS_PER_NETWORK` (32) of the
+    proxy's `LAKANA_EGRESS__MAX_CONNECTIONS` (256), so it takes at most its share; enough builds
+    at their cap together (eight with the defaults) still fill the proxy. A build
     trusts only public certificate authorities, so a private-CA index needs the local runner
     (#292).
 12. **Protection is read once per attempt.** A protected environment refuses a Python task on a

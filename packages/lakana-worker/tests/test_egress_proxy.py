@@ -491,6 +491,152 @@ def test_a_full_proxy_says_it_is_busy(tmp_path: Path, index: int) -> None:
         server.server_close()
 
 
+def _from(address: str, port: int) -> socket.socket:
+    """Open a connection to the proxy from a loopback address of the test's choice.
+
+    Parameters
+    ----------
+    address
+        The client's address, in ``127.0.0.0/8``.
+    port
+        The proxy's port.
+
+    Returns
+    -------
+    socket.socket
+        The connection; nothing is sent on it.
+    """
+    connection = socket.socket()
+    connection.settimeout(5)
+    connection.bind((address, 0))
+    connection.connect(("127.0.0.1", port))
+    return connection
+
+
+def _connect_from(address: str, port: int, target: str, token: str) -> tuple[bytes, bytes]:
+    """Send a CONNECT from a loopback address and read the answer.
+
+    Parameters
+    ----------
+    address
+        The client's address.
+    port
+        The proxy's port.
+    target
+        ``host:port``.
+    token
+        The token.
+
+    Returns
+    -------
+    tuple
+        The status code and the first bytes of the body (empty for a tunnel).
+    """
+    credential = base64.b64encode(f"lakana:{token}".encode()).decode()
+    with _from(address, port) as connection:
+        connection.sendall(
+            f"CONNECT {target} HTTP/1.1\r\nProxy-Authorization: Basic {credential}\r\n\r\n".encode()
+        )
+        head = _head(connection)
+        status = head.split(b"\r\n", 1)[0].split()[1]
+        body = b"" if status == b"200" else connection.recv(4096)
+    return status, body
+
+
+def _held(server: EgressServer, count: int, address: str) -> list[socket.socket]:
+    """Open `count` connections from one address that send nothing, and wait until each is held.
+
+    Parameters
+    ----------
+    server
+        The proxy.
+    count
+        How many.
+    address
+        The client's address.
+
+    Returns
+    -------
+    list
+        The open connections.
+    """
+    before = server.slots_held()
+    connections = [_from(address, server.server_address[1]) for _ in range(count)]
+    deadline = time.monotonic() + 5
+    while server.slots_held() < before + count:
+        assert time.monotonic() < deadline, "the proxy never took the connections"
+        time.sleep(0.01)
+    return connections
+
+
+def test_one_build_holding_its_cap_cannot_starve_another(tmp_path: Path, index: int) -> None:
+    """#302: a network at its cap gets 503 naming the cause; another network still gets through."""
+    server = _proxy(tmp_path, max_connections=8, max_connections_per_network=3, head_seconds=30.0)
+    token = Running(server.server_address[1], index, ensure_key(tmp_path / "egress.key")).token()
+    port = server.server_address[1]
+    try:
+        idle = _held(server, 3, "127.0.0.2")
+        try:
+            status, body = _connect_from("127.0.0.2", port, f"localhost:{index}", token)
+            other, _ = _connect_from("127.0.0.3", port, f"localhost:{index}", token)
+        finally:
+            for connection in idle:
+                connection.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert status == b"503"
+    assert b"already holds 3 connections" in body
+    assert b"LAKANA_EGRESS__MAX_CONNECTIONS_PER_NETWORK" in body
+    assert other == b"200"
+
+
+def test_the_cap_counts_every_client_of_one_attached_network_together(
+    tmp_path: Path, index: int
+) -> None:
+    """#302: the cap belongs to the build's network, not to one address in it."""
+    route = tmp_path / "loopback-route"
+    route.write_text(_HEADER + "lo\t0000007F\t00000000\t0001\t0\t0\t0\tFCFFFFFF\n")  # /30
+    server = _proxy(tmp_path, max_connections_per_network=2, head_seconds=30.0, route=route)
+    token = Running(server.server_address[1], index, ensure_key(tmp_path / "egress.key")).token()
+    port = server.server_address[1]
+    try:
+        idle = _held(server, 2, "127.0.0.2")
+        try:
+            same, _ = _connect_from("127.0.0.3", port, f"localhost:{index}", token)
+            outside, _ = _connect_from("127.0.0.5", port, f"localhost:{index}", token)
+        finally:
+            for connection in idle:
+                connection.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert (same, outside) == (b"503", b"200")
+
+
+def test_a_flood_from_one_network_takes_only_its_own_threads(tmp_path: Path, index: int) -> None:
+    """#302: past its cap and a few answers, a network's connections are closed without a thread."""
+    server = _proxy(tmp_path, max_connections=8, max_connections_per_network=2, head_seconds=30.0)
+    token = Running(server.server_address[1], index, ensure_key(tmp_path / "egress.key")).token()
+    port = server.server_address[1]
+    try:
+        flood = [_from("127.0.0.2", port) for _ in range(40)]
+        try:
+            time.sleep(0.3)
+            assert server.threads_of(ipaddress.ip_network("127.0.0.2/32")) <= 2 + 4
+            other, _ = _connect_from("127.0.0.3", port, f"localhost:{index}", token)
+        finally:
+            for connection in flood:
+                connection.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert other == b"200"
+
+
 def test_a_flood_beyond_the_spare_threads_is_closed_without_a_thread(tmp_path: Path) -> None:
     """When every thread is taken, a new connection is closed at once."""
     server = _proxy(tmp_path, max_connections=1)
@@ -757,6 +903,21 @@ def test_an_upstream_refusal_is_a_bad_gateway(tmp_path: Path) -> None:
         ({"LAKANA_EGRESS__LISTEN": "3128"}, "LAKANA_EGRESS__LISTEN"),
         ({"LAKANA_EGRESS__LISTEN": "0.0.0.0:70000"}, "LAKANA_EGRESS__LISTEN"),
         ({"LAKANA_EGRESS__MAX_CONNECTIONS": "0"}, "LAKANA_EGRESS__MAX_CONNECTIONS"),
+        (
+            {"LAKANA_EGRESS__MAX_CONNECTIONS_PER_NETWORK": "0"},
+            "LAKANA_EGRESS__MAX_CONNECTIONS_PER_NETWORK",
+        ),
+        (
+            {"LAKANA_EGRESS__MAX_CONNECTIONS_PER_NETWORK": "x"},
+            "LAKANA_EGRESS__MAX_CONNECTIONS_PER_NETWORK",
+        ),
+        (
+            {
+                "LAKANA_EGRESS__MAX_CONNECTIONS": "16",
+                "LAKANA_EGRESS__MAX_CONNECTIONS_PER_NETWORK": "17",
+            },
+            "LAKANA_EGRESS__MAX_CONNECTIONS_PER_NETWORK",
+        ),
         ({"LAKANA_EGRESS__PORTS": "443"}, "LAKANA_EGRESS__PORTS"),
     ],
 )
@@ -783,6 +944,13 @@ def test_the_defaults_work_and_the_upstream_credential_stays_out_of_repr() -> No
     assert settings.upstream == "http://u:pw@proxy:8080"
     assert "pw" not in repr(settings)
     assert settings.reachable == frozenset()
+    assert (settings.max_connections, settings.max_connections_per_network) == (256, 32)
+    assert (
+        load_settings(
+            {"LAKANA_EGRESS__MAX_CONNECTIONS_PER_NETWORK": "64"}
+        ).max_connections_per_network
+        == 64
+    )
 
 
 def test_an_unreachable_destination_is_a_bad_gateway(proxy: Running) -> None:
