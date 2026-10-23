@@ -182,7 +182,8 @@ are not given out again until a minute after its egress token expires.
 
 **Ingestion roots.** The launcher refuses `/`, a directory under or holding `/run`, `/var/run`,
 `/var/lib/docker`, `/var/lib/containerd`, `/var/snap/docker`, `/proc`, `/sys`, `/dev`, `/etc`,
-`/root` or `/boot`, and the Docker socket's or its own socket's directory. At start it looks at each root from inside a container and refuses
+`/root` or `/boot`, and the Docker socket's or its own socket's directory. At start it looks at each root
+from inside a container and refuses
 requests for a root that holds a socket, a pipe, a device or a system mount. Docker follows a link
 on the host when it mounts a root, which the launcher cannot see, so three rules are yours to keep:
 a root is not a symbolic link; neither the root nor any of its parent directories is writable by
@@ -226,6 +227,7 @@ If a project may have deployed a malicious dependency or package, or a worker ma
 | `Docker Engine 28 or later is needed` (launcher log) | The engine cannot keep a task's network away from the host. | Upgrade Docker. |
 | `LAKANA_LAUNCHER__NO_NEW_PRIVILEGES is on, but this Docker cannot ...` (launcher log) | Snap Docker refuses the option. | Set it to `auto`. |
 | `The group of the Docker socket (...) is a group that task or build containers run in` (launcher log) | The Docker group's id is 10002 or 10003. | Give the Docker group another id on the host. |
+| `The Docker socket ... is writable by everyone` (launcher log) | The socket's mode lets any local user control Docker. | Restrict it to the docker group on the host: `chmod 660`, owned by root:docker. |
 | `this task was ended because it used more than its container's memory limit` | The task used more than `LAKANA_RUN__TASK_MEMORY`. | Read less in the task, or raise the setting. |
 | `... is not a destination this build may reach` (in uv's error), `Refused a build connection ... not in its token.` (egress log) | The build tried a host or port that is not one of its indexes. | Register the index (`lakana index add`), or set `LAKANA_RUN__INDEX_URL`; for another port than 443, see [Package indexes and proxies](#package-indexes-and-proxies). |
 | `python: must be one of "3.11", "3.12", "3.13", "3.14" ...` | The version has no task image, or lacks quotes. | Write one of the four, in quotes. |
