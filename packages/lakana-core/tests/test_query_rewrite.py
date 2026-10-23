@@ -521,6 +521,58 @@ def test_rewrite_aliases_an_unaliased_read_by_the_table_name() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("clause", "sql"),
+    [
+        ("PIVOT", "SELECT * FROM gold.sales PIVOT (sum(id) FOR region IN ('eu', 'us'))"),
+        ("UNPIVOT", "SELECT * FROM gold.sales UNPIVOT (v FOR k IN (a, b))"),
+        ("TABLESAMPLE", "SELECT * FROM gold.sales TABLESAMPLE RESERVOIR (1 ROWS)"),
+        ("JOIN", "SELECT * FROM (gold.sales JOIN gold.other ON TRUE)"),
+    ],
+)
+def test_rewrite_keeps_what_follows_a_table_reference(clause: str, sql: str) -> None:
+    """A clause sqlglot attaches to the table node survives its replacement (#280)."""
+    sources = {"gold.sales": _parquet("a.parquet"), "gold.other": _parquet("b.parquet")}
+
+    rewritten = rewrite_query(sql, sources)
+
+    assert clause in rewritten.sql
+    if clause == "JOIN":
+        assert _cte_alias("gold.other") + " AS other" in rewritten.sql
+
+
+@pytest.mark.parametrize(
+    ("sql", "named"),
+    [
+        ("SELECT * FROM gold.sales AT (VERSION => 1)", "AT (...)"),
+        ("SELECT * FROM ONLY gold.sales", "ONLY"),
+        ("SELECT * FROM gold.sales WITH ORDINALITY", "WITH ORDINALITY"),
+        ("SELECT * FROM gold.sales WITH (NOLOCK)", "a table hint"),
+    ],
+)
+def test_rewrite_refuses_a_table_clause_it_cannot_keep(sql: str, named: str) -> None:
+    """A clause on a table reference the rewrite cannot carry over is refused, never dropped."""
+    with pytest.raises(ValidationError) as caught:
+        rewrite_query(sql, {"gold.sales": _parquet("a.parquet")})
+
+    assert named in str(caught.value)
+    assert "'gold.sales'" in str(caught.value)
+
+
+def test_every_argument_of_a_table_reference_is_kept_or_refused_by_name() -> None:
+    """A table argument a later sqlglot adds fails here, so it is classified, not dropped."""
+    classified = {
+        "this",
+        "db",
+        "catalog",
+        "alias",
+        *query_rewrite._KEPT_TABLE_ARGS,
+        *query_rewrite._REFUSED_TABLE_CLAUSES,
+    }
+
+    assert set(exp.Table.arg_types) == classified
+
+
 def test_rewrite_keeps_the_quoting_of_the_table_name_it_uses_as_alias() -> None:
     """A table written with quotes keeps them, so `"Orders".id` still matches."""
     rewritten = rewrite_query(

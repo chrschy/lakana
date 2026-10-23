@@ -2128,6 +2128,65 @@ def _cte_alias(dotted: str) -> str:
     return "__lakana_" + re.sub(r"\W", "_", dotted) + "_" + digest
 
 
+_KEPT_TABLE_ARGS = frozenset({"joins", "pivots", "sample"})
+"""`exp.Table` args `rewrite_query` moves from a replaced table reference onto its replacement.
+
+The replacement is itself an `exp.Table` (the generated CTE's name), so each of these attaches
+to it exactly as it attached to the catalog name: a standard `PIVOT (...)`/`UNPIVOT (...)`, a
+`TABLESAMPLE`, and the `JOIN` of a parenthesized join (`FROM (gold.a JOIN gold.b ON ...)`, which
+sqlglot parses onto `a`'s own node). The policies are applied inside the CTE, so each of them
+reads the filtered, masked rows. Dropping them returned wrong results with no error (#280).
+"""
+
+_REFUSED_TABLE_CLAUSES = {
+    "laterals": "LATERAL VIEW",
+    "hints": "a table hint",
+    "system_time": "FOR SYSTEM_TIME",
+    "version": "a version clause",
+    "format": "a format clause",
+    "pattern": "a file pattern",
+    "ordinality": "WITH ORDINALITY",
+    "when": "AT (...)",
+    "only": "ONLY",
+    "partition": "PARTITION (...)",
+    "changes": "CHANGES (...)",
+    "rows_from": "ROWS FROM (...)",
+    "indexed": "INDEXED BY",
+}
+"""`exp.Table` args `rewrite_query` refuses on a catalog table, each with the name a refusal gives.
+
+None has a meaning on the generated read, and dropping one would silently change the result (a
+time-travel `AT (VERSION => 1)` would read the current rows). An argument in neither this nor
+`_KEPT_TABLE_ARGS` is refused under its own key; a test fails when sqlglot adds one.
+"""
+
+
+def _carry_table_clauses(table: exp.Table, replacement: exp.Table, dotted: str) -> None:
+    """Move the clauses attached to a catalog table reference onto the read that replaces it.
+
+    Parameters
+    ----------
+    table
+        The reference as the caller wrote it.
+    replacement
+        The reference to the generated read, modified in place.
+    dotted
+        The table's dotted name, for the refusal.
+
+    Raises
+    ------
+    ValidationError
+        If the reference carries a clause outside `_KEPT_TABLE_ARGS` and the naming args.
+    """
+    present = {key for key, value in table.args.items() if value not in (None, False, [])}
+    refused = sorted(present - _SAFE_TABLE_ARGS - _KEPT_TABLE_ARGS)
+    if refused:
+        names = ", ".join(_REFUSED_TABLE_CLAUSES.get(key, key) for key in refused)
+        raise ValidationError(f"{dotted!r} can't be read with {names}; remove it from the query.")
+    for key in sorted(present & _KEPT_TABLE_ARGS):
+        replacement.set(key, table.args[key])
+
+
 @_fail_closed
 def rewrite_query(
     sql: str, sources: Mapping[str, TableSource], dialect: str = "duckdb"
@@ -2229,6 +2288,7 @@ def rewrite_query(
             # fails in the database instead of binding to the wrong table.
             replacement.set("alias", exp.TableAlias(this=table.this.copy()))
             named.append((_qualifier_key(table), table))
+        _carry_table_clauses(table, replacement, dotted)
         table.replace(replacement)
     _drop_schema_from_qualified_columns(scopes, named)
     if not ctes:

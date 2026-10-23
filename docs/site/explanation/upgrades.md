@@ -167,6 +167,17 @@ builds need; a build past it gets a `503` that names the setting. Builds now dow
 many connections may need the setting raised under `egress` in `compose.yaml`; see
 [The egress proxy](../how-to/run-python-tasks-in-containers.md#the-egress-proxy).
 
+### A standard PIVOT pivots
+
+`SELECT * FROM gold.sales PIVOT (sum(amount) FOR region IN ('eu', 'us'))` and the standard
+`UNPIVOT (...)` now return pivoted rows; before, Lakana dropped the clause and returned the
+table's rows unchanged, with no error. The same held for a `TABLESAMPLE` after a table name and
+for the second table of a join written in parentheses (`FROM (gold.a JOIN gold.b ON ...)`). A
+query, view or asset that used one of these returns different rows after the upgrade. A clause
+Lakana cannot apply to a table (`AT (...)`, `ONLY`, `WITH ORDINALITY`, a table hint) is now
+refused instead of dropped; see
+[Clauses after a table name](../reference/sql-in-queries.md#clauses-after-a-table-name).
+
 ## Notes for 0.20.0
 
 ### Python tasks run in containers in the Compose bundle

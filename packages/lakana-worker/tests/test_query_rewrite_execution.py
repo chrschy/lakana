@@ -1168,3 +1168,124 @@ def test_a_column_mask_holds_for_a_read_inside_a_bare_values_list(tmp_path: Path
     rows = _fetch(rewrite_query(sql, {"gold.customers": source}))
 
     assert rows == [("***", 2)]
+
+
+def _sales(
+    tmp_path: Path, row_filters: tuple[str, ...] = (), column_masks: dict[str, str] | None = None
+) -> TableSource:
+    """Write a small sales file and describe it as a source.
+
+    Parameters
+    ----------
+    tmp_path
+        Directory to write into.
+    row_filters
+        The source's row filters.
+    column_masks
+        The source's column masks.
+
+    Returns
+    -------
+    TableSource
+        A parquet source with the columns `id`, `region` and `amount`.
+    """
+    path = tmp_path / "sales.parquet"
+    pq.write_table(
+        pa.table(
+            {"id": [1, 2, 3, 4], "region": ["eu", "us", "eu", "us"], "amount": [10, 20, 30, 40]}
+        ),
+        path,
+    )
+    return TableSource(
+        urls=[str(path)],
+        file_format="parquet",
+        columns={"id": "BIGINT", "region": "VARCHAR", "amount": "BIGINT"},
+        row_filters=row_filters,
+        column_masks=column_masks or {},
+    )
+
+
+_PIVOT = "SELECT * FROM gold.sales PIVOT (sum(amount) FOR region IN ('eu', 'us'))"
+
+
+def test_a_standard_pivot_returns_pivoted_rows(tmp_path: Path) -> None:
+    """`FROM t PIVOT (...)` pivots the rows instead of returning the table as stored (#280)."""
+    rows = _run(_PIVOT, {"gold.sales": _sales(tmp_path)})
+
+    assert rows == [(1, 10, None), (2, None, 20), (3, 30, None), (4, None, 40)]
+
+
+def test_a_standard_unpivot_returns_unpivoted_rows(tmp_path: Path) -> None:
+    """`FROM t UNPIVOT (...)` unpivots the rows (#280)."""
+    rows = _run(
+        "SELECT region, k, v FROM gold.sales AS s UNPIVOT (v FOR k IN (id, amount))",
+        {"gold.sales": _sales(tmp_path)},
+    )
+
+    assert len(rows) == 8
+    assert ("eu", "amount", 30) in rows
+    assert ("us", "id", 4) in rows
+
+
+def test_a_standard_pivot_applies_the_filter_and_the_mask_before_pivoting(
+    tmp_path: Path,
+) -> None:
+    """The pivot reads the filtered, masked rows: a hidden row or a masked amount never shows."""
+    source = _sales(tmp_path, row_filters=("region = 'eu'",), column_masks={"amount": "NULL"})
+
+    rows = _run(_PIVOT, {"gold.sales": source})
+
+    assert rows == [(1, None, None), (3, None, None)]
+
+
+def test_a_masked_column_used_as_the_pivot_value_stays_masked(tmp_path: Path) -> None:
+    """Pivoting on a masked column sees only the mask, so the real values match no column."""
+    source = _sales(tmp_path, column_masks={"region": "'hidden'"})
+
+    real = _run(_PIVOT, {"gold.sales": source})
+    masked = _run(
+        "SELECT * FROM gold.sales PIVOT (sum(amount) FOR region IN ('hidden'))",
+        {"gold.sales": source},
+    )
+
+    assert real == [(1, None, None), (2, None, None), (3, None, None), (4, None, None)]
+    assert masked == [(1, 10), (2, 20), (3, 30), (4, 40)]
+
+
+def test_a_standard_unpivot_of_a_masked_column_shows_only_the_mask(tmp_path: Path) -> None:
+    """Unpivoting a masked column yields the mask's value; the stored amounts never appear."""
+    source = _sales(tmp_path, column_masks={"amount": "0"})
+
+    rows = _run(
+        "SELECT k, v FROM gold.sales UNPIVOT (v FOR k IN (id, amount)) WHERE k = 'amount'",
+        {"gold.sales": source},
+    )
+
+    assert rows == [("amount", 0)] * 4
+
+
+def test_a_parenthesized_join_keeps_its_second_table(tmp_path: Path) -> None:
+    """`FROM (a JOIN b ON ...)` reads both tables; the rewrite used to drop the join."""
+    sources = {"gold.sales": _sales(tmp_path), "gold.orders": _parquet(str(_orders(tmp_path)))}
+
+    rows = _run(
+        "SELECT s.id, o.note FROM (gold.sales AS s JOIN gold.orders AS o ON s.id = o.id)", sources
+    )
+
+    assert rows == [(1, "a"), (2, "b"), (3, "c")]
+
+
+def test_a_table_sample_is_kept(tmp_path: Path) -> None:
+    """`TABLESAMPLE` on a table still samples; the rewrite used to drop it."""
+    rows = _run(
+        "SELECT * FROM gold.sales TABLESAMPLE RESERVOIR (1 ROWS)", {"gold.sales": _sales(tmp_path)}
+    )
+
+    assert len(rows) == 1
+
+
+def test_an_alias_with_column_names_renames_the_columns(tmp_path: Path) -> None:
+    """`AS s(a, b, c)` keeps its column names through the rewrite."""
+    rows = _run("SELECT s.c FROM gold.sales AS s(a, b, c)", {"gold.sales": _sales(tmp_path)})
+
+    assert rows == [(10,), (20,), (30,), (40,)]
