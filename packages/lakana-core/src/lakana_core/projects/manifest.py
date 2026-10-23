@@ -8,6 +8,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
+from lakana_core.connections.kinds import NAME
 from lakana_core.identifiers import NOTIFY_FORMATS
 from lakana_core.projects.asset_model import DEFAULT_DECIMALS, MAX_KEEP_VERSIONS
 from lakana_core.projects.dag import ProjectGraph
@@ -22,7 +23,7 @@ from lakana_core.projects.run_policy import RunCaps, resolve_run_policy
 if TYPE_CHECKING:
     from lakana_core.projects.checks import ParsedCheck
 
-MANIFEST_VERSION = 6
+MANIFEST_VERSION = 7
 """Bumped when the manifest's shape changes. Version 2 adds `kind` per asset and
 `lock_sha256`; a version-1 manifest is read as all-SQL. Version 3 adds `output`,
 `keep_versions` and `input_kinds` per Python asset; versions 1 and 2 are read as all-table.
@@ -35,6 +36,9 @@ without `checks`" stays a damaged manifest. A project with checks and no jobs st
 Version 6 is written only when a job declares `notify` in the environment the manifest is built
 for, so that a worker of an earlier release refuses a manifest whose notifications it would
 never send; any other project keeps its version.
+Version 7 is written only when an asset declares connections (`CONNECTIONS_VERSION`), so that a
+worker of an earlier release refuses it; every Python entry carries `connections`, empty if need
+be, and a version 7 manifest always carries a `checks` list, as versions 5 and 6 do.
 The `decimals` key is optional and read with a default (`entry_decimals`), so it needed
 no bump: an entry without it means ``float``. The `package_indexes` key is optional in
 the same way: a manifest without it uses no registered package index. The `python` key is
@@ -52,6 +56,11 @@ JOBS_VERSION = 5
 
 NOTIFY_VERSION = 6
 """The version of a manifest in which a job notifies."""
+
+CONNECTIONS_VERSION = 7
+"""The version of a manifest in which an asset declares connections (and, from the next pull
+request, uses `write: append` or `merge` in the new spelling); a worker of an earlier release
+refuses it instead of running the asset without its connections."""
 
 _SHA256 = re.compile(r"\A[0-9a-f]{64}\Z")
 
@@ -136,6 +145,7 @@ def _entry(asset: ParsedAsset, caps: RunCaps, artifacts: frozenset[str]) -> dict
         entry["output"] = asset.output
         entry["keep_versions"] = asset.keep_versions if asset.output == "artifact" else None
         entry["decimals"] = asset.decimals
+        entry["connections"] = list(asset.connections)
         entry["input_kinds"] = {
             parameter: "artifact" if table in artifacts else "table"
             for parameter, table in asset.inputs
@@ -162,7 +172,7 @@ def _unset_notify(job: JobConfig) -> set[str]:
     return set() if job.notify is not None else {"notify"}
 
 
-def _version(config: ResolvedProjectConfig, *, has_checks: bool) -> int:
+def _version(config: ResolvedProjectConfig, *, has_checks: bool, uses_connections: bool) -> int:
     """Pick the lowest manifest version that carries everything the project declares.
 
     Parameters
@@ -171,13 +181,18 @@ def _version(config: ResolvedProjectConfig, *, has_checks: bool) -> int:
         `lakana.yaml` resolved for the target environment.
     has_checks
         Whether the project has checks.
+    uses_connections
+        Whether an asset declares a connection.
 
     Returns
     -------
     int
-        `NOTIFY_VERSION` when a job notifies, else `JOBS_VERSION` with jobs, `CHECKS_VERSION`
-        with checks, `VERSION_WITHOUT_CHECKS` otherwise.
+        `CONNECTIONS_VERSION` when an asset declares a connection, else `NOTIFY_VERSION` when a
+        job notifies, `JOBS_VERSION` with jobs, `CHECKS_VERSION` with checks,
+        `VERSION_WITHOUT_CHECKS` otherwise.
     """
+    if uses_connections:
+        return CONNECTIONS_VERSION
     if any(job.notify is not None for job in config.jobs.values()):
         return NOTIFY_VERSION
     if config.jobs:
@@ -219,7 +234,8 @@ def build_manifest(
         recorded so that a project version shows what it depends on.
     checks
         The validated checks; the manifest has a `checks` list, sorted by name, and version
-        `CHECKS_VERSION` (`JOBS_VERSION` with jobs), only when there are any.
+        `CHECKS_VERSION` (`JOBS_VERSION` with jobs), only when there are any. A manifest with
+        jobs or connections carries the list even when it is empty.
     python
         `lakana.yaml`'s `python:`; recorded as `python` only when set, so a project without it
         keeps its manifest.
@@ -231,8 +247,13 @@ def build_manifest(
     """
     caps = caps or RunCaps()
     known = artifacts | {asset.table for asset in assets if asset.output == "artifact"}
+    version = _version(
+        config,
+        has_checks=bool(checks),
+        uses_connections=any(asset.connections for asset in assets),
+    )
     manifest: dict[str, Any] = {
-        "version": _version(config, has_checks=bool(checks)),
+        "version": version,
         "assets": [_entry(asset, caps, known) for asset in sorted(assets, key=lambda a: a.table)],
         "edges": [list(edge) for edge in graph.edges],
         "external_inputs": list(graph.external_inputs),
@@ -250,7 +271,7 @@ def build_manifest(
         manifest["python"] = python
     if package_indexes:
         manifest["package_indexes"] = sorted(package_indexes)
-    if checks or config.jobs:
+    if checks or config.jobs or version == CONNECTIONS_VERSION:
         manifest["checks"] = [
             {
                 "name": check.name,
@@ -553,6 +574,35 @@ def entry_decimals(entry: object) -> str:
     """
     value = entry.get("decimals") if isinstance(entry, Mapping) else None
     return "exact" if asset_kind(entry) == "python" and value == "exact" else DEFAULT_DECIMALS
+
+
+def entry_connections(entry: object) -> tuple[str, ...]:
+    """Read the connections a Python asset declares from a stored manifest entry.
+
+    Parameters
+    ----------
+    entry
+        One element of `manifest_json["assets"]`; untrusted.
+
+    Returns
+    -------
+    tuple of str
+        The names; empty for an entry that is not a Python asset, one deployed before
+        connections, and one whose value is not a list of valid connection names (logged once
+        per such entry, without its content).
+    """
+    if asset_kind(entry) != "python" or not isinstance(entry, Mapping):
+        return ()
+    raw = entry.get("connections")
+    if raw is None:
+        return ()
+    if isinstance(raw, list) and all(isinstance(name, str) and NAME.match(name) for name in raw):
+        return tuple(raw)
+    logger.warning(
+        "A stored deploy manifest has an asset entry whose connections cannot be read; it is "
+        "read as declaring none. Deploy the repository again to replace it."
+    )
+    return ()
 
 
 def entry_input_kinds(entry: object) -> dict[str, str]:

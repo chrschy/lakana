@@ -18,6 +18,10 @@ DECIMALS_MODES = ("float", "exact")
 """The values of the decorator's `decimals`; `lakana.assets.DECIMALS_MODES` is the same (a
 parity test pins both). Here for the same reason as `MAX_KEEP_VERSIONS`."""
 
+MAX_CONNECTIONS = 16
+"""The most connections one asset declares: each takes a relay port of the task.
+`lakana.assets.MAX_CONNECTIONS` is the same (a parity test pins both)."""
+
 DEFAULT_DECIMALS = "float"
 """What an asset without the option, and a manifest entry without the key, means."""
 
@@ -60,6 +64,8 @@ class ParsedAsset:
         An artifact asset's retention (live versions to keep); `None` keeps all.
     decimals
         ``float`` or ``exact``: how a SQL decimal reaches a Python asset's function.
+    connections
+        The connections of the environment a Python asset declares, in the order given.
     """
 
     table: str
@@ -77,3 +83,4 @@ class ParsedAsset:
     output: str = "table"
     keep_versions: int | None = None
     decimals: str = DEFAULT_DECIMALS
+    connections: tuple[str, ...] = ()

@@ -10,6 +10,7 @@ calls it with one `polars.DataFrame` per declared input. An asset returns a
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,6 +26,12 @@ MAX_KEEP_VERSIONS = 2**31 - 1
 
 DECIMALS_MODES = ("float", "exact")
 """The values of `decimals`; deploy accepts the same two (a parity test pins both)."""
+
+CONNECTION_NAME = re.compile(r"\A[a-z][a-z0-9-]{0,62}\Z")
+"""A connection's name; deploy checks the same pattern (a parity test pins both)."""
+
+MAX_CONNECTIONS = 16
+"""The most connections one asset declares; deploy refuses more (a parity test pins both)."""
 
 _PARENTHESES = "write @asset(...) with parentheses"
 _NO_OUTPUT_DIR = (
@@ -104,6 +111,8 @@ class AssetSpec:
         ``float`` (the default): a SQL ``DECIMAL`` column of an input arrives as
         ``Float64`` (values beyond 2**53, or with more than about 15 significant digits, are
         rounded). ``exact``: it arrives as ``Decimal``, as stored.
+    connections
+        Names of connections of the environment the asset reads through `lakana.ingest`.
     """
 
     inputs: dict[str, str]
@@ -118,6 +127,49 @@ class AssetSpec:
     output: str = "table"
     keep_versions: int | None = None
     decimals: str = "float"
+    connections: tuple[str, ...] = ()
+
+
+def _check_connections(connections: object) -> tuple[str, ...]:
+    """Read the decorator's `connections` with the rules deploy applies.
+
+    Parameters
+    ----------
+    connections
+        The decorator's argument; `None` declares none.
+
+    Returns
+    -------
+    tuple of str
+        The names, in the order given.
+
+    Raises
+    ------
+    ValueError
+        For a value that is not a list or tuple of strings, a name that breaks
+        `CONNECTION_NAME`, a name listed twice, or more than `MAX_CONNECTIONS` names.
+    """
+    if connections is None:
+        return ()
+    if not isinstance(connections, (list, tuple)) or not all(
+        isinstance(name, str) for name in connections
+    ):
+        raise ValueError("connections must be a list of strings")
+    names = tuple(connections)
+    if len(names) > MAX_CONNECTIONS:
+        raise ValueError(f"an asset declares at most {MAX_CONNECTIONS} connections")
+    seen: set[str] = set()
+    for name in names:
+        if not CONNECTION_NAME.match(name):
+            shown = ascii(name)[1:-1][:200]
+            raise ValueError(
+                "connection names are lower-case letters, digits and '-', starting with a "
+                f"letter, at most 63; got '{shown}'"
+            )
+        if name in seen:
+            raise ValueError(f"connection `{name}` is listed twice")
+        seen.add(name)
+    return names
 
 
 def _check_keep_versions(keep_versions: object) -> None:
@@ -166,6 +218,7 @@ def asset(
     output: str = "table",
     keep_versions: int | None = None,
     decimals: str = "float",
+    connections: Iterable[str] = (),
 ) -> Callable[[F], F]:
     """Declare a Python asset; returns the function unchanged with its metadata attached.
 
@@ -211,6 +264,10 @@ def asset(
         must not round. A float holds about 15 significant digits, so with ``float`` a value
         beyond 2**53 or with more digits arrives rounded, without an error: use ``exact`` for a
         decimal identifier or a wide sum. What the function returns is stored as it is.
+    connections
+        Names of connections of the environment the asset reads through `lakana.ingest`;
+        each must exist when you deploy. At most 16, each lower-case letters, digits and
+        ``-``, starting with a letter.
 
     Returns
     -------
@@ -225,8 +282,9 @@ def asset(
         For an `output` other than ``table`` or ``artifact``, a `materialize`
         other than ``table``, `materialize` or `columns` on an artifact asset,
         and a `keep_versions` that is not an integer from 1 to 2147483647 or
-        that is given without ``output="artifact"``, and a `decimals` other than
-        ``float`` or ``exact``.
+        that is given without ``output="artifact"``, a `decimals` other than
+        ``float`` or ``exact``, and a `connections` that is not a list of valid,
+        distinct names or holds more than 16.
     """
     if function is not None:
         raise TypeError(_PARENTHESES)
@@ -258,6 +316,7 @@ def asset(
         raise ValueError("incremental Python assets are not supported yet (#23)")
     elif materialize not in (None, "table"):
         raise ValueError(f"a Python asset supports only 'table', got {materialize!r}")
+    declared = _check_connections(connections)
     spec = AssetSpec(
         inputs=dict(inputs) if inputs is not None else {},
         description=description,
@@ -271,6 +330,7 @@ def asset(
         output=output,
         keep_versions=keep_versions,
         decimals=decimals,
+        connections=declared,
     )
 
     def decorate(target: F) -> F:

@@ -49,7 +49,7 @@ from lakana_core.models import (
 )
 from lakana_core.projects.checks import check_issues, checks_listing, parse_checks
 from lakana_core.projects.dag import build_graph, validate_project
-from lakana_core.projects.deploys import DeployService
+from lakana_core.projects.deploys import DeclaredConnections, DeployService, connection_issues
 from lakana_core.projects.diff import diff_manifests
 from lakana_core.projects.discovery import discover
 from lakana_core.projects.issues import ProjectIssue, ProjectValidationError
@@ -66,7 +66,7 @@ from lakana_core.projects.lockfile import (
 from lakana_core.projects.manifest import build_manifest, manifest_tables
 from lakana_core.projects.package_indexes import registered_indexes
 from lakana_core.projects.package_sources import KnownSources, RegisteredIndex
-from lakana_core.projects.parse import parse_assets
+from lakana_core.projects.parse import ParsedAsset, parse_assets
 from lakana_core.projects.project_config import normalize_source, parse_project_config
 from lakana_core.projects.run_policy import RunCaps, run_policy_issues
 from lakana_core.secrets.crypto import decrypt_secret_row
@@ -324,6 +324,42 @@ def _credential_issues(
         except IndexCredentialError as exc:
             issues.append(ProjectIssue(LOCK_FILE, None, str(exc)))
     return issues
+
+
+def _connection_issues(
+    session: Session,
+    environment_id: uuid.UUID,
+    environment_name: str,
+    assets: Sequence[ParsedAsset],
+) -> list[ProjectIssue]:
+    """Check that every connection an asset declares exists in the environment.
+
+    Read without a lock: the record reads them again ``FOR SHARE`` in its own transaction
+    (`DeployService.record_deploy`), which is what orders a deploy against a delete.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    environment_id
+        The deploy's environment, as a value (a commit expires the row).
+    environment_name
+        The deploy's environment name.
+    assets
+        The parsed assets.
+
+    Returns
+    -------
+    list of ProjectIssue
+        One issue per missing connection, at the declaring asset's decorator line, with the
+        command that creates it.
+    """
+    declared = [
+        DeclaredConnections(asset.table, asset.path, asset.block_line, asset.connections)
+        for asset in assets
+        if asset.connections
+    ]
+    return connection_issues(session, environment_id, environment_name, declared, lock=False)
 
 
 def _describe(exc: LakanaError | GitError) -> str:
@@ -723,6 +759,7 @@ def _deploy(
                 else []
             )
             + _credential_issues(session, key_provider, environment_id, environment_name, used)
+            + _connection_issues(session, environment_id, environment_name, assets)
             + service.validate_against_environment(
                 principal, environment_name, repository_id, assets, graph
             )

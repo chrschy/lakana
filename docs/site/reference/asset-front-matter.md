@@ -40,6 +40,11 @@ it: `DELETE` is not allowed, also not inside a CTE or subquery.`` A query may no
 `getvariable` either, and a `PIVOT` must list the values of its `ON` column
 (`ON region IN ('eu', 'us')`).
 
+Some keys exist only as arguments of a Python asset's `@asset(...)` decorator: `output`,
+`keep_versions`, `decimals` and `connections`. In a SQL block each fails the deploy with
+``` `connections` applies only to a Python asset, not to a SQL file; declare the asset in a `.py` file with `@asset(connections=["crm-db"])`, or remove `connections` from this block ```
+(the key and the example change with the key). See [Python assets](python-assets.md).
+
 Unknown keys are errors. YAML anchors, aliases, `<<` merge keys and duplicate keys are refused
 (the error names the file and line); `evolve_schema` and `column_docs` must be real booleans, not
 quoted strings or numbers. `evolve_schema` that changes a column's type (other than widening it)
