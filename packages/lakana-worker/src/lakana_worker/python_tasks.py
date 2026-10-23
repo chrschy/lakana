@@ -723,6 +723,36 @@ class PythonRuntime:
     caches: CacheKeeper | None = None
     environments: DockerEnvironments | None = None
 
+    def __post_init__(self) -> None:
+        """Refuse a runner and environments that disagree about isolation.
+
+        Raises
+        ------
+        ValueError
+            For a container runner without environments, or the local runner with them.
+        """
+        if self.runner.isolated and self.environments is None:
+            raise ValueError(
+                "the Python runtime's runner runs tasks in containers but has no environments; "
+                "pass the launcher's DockerEnvironments with a DockerRunner"
+            )
+        if not self.runner.isolated and self.environments is not None:
+            raise ValueError(
+                "the Python runtime's runner runs tasks without containers but has environments; "
+                "use a DockerRunner with DockerEnvironments, or no environments"
+            )
+
+    @property
+    def isolated(self) -> bool:
+        """Whether each task runs in a container of its own (`LAKANA_RUN__RUNNER=docker`).
+
+        Returns
+        -------
+        bool
+            The runner's `isolated`; `__post_init__` keeps `environments` in step with it.
+        """
+        return self.runner.isolated
+
     def maintain(self) -> None:
         """Sweep leftover attempt directories and deploy checkouts, and measure the caches."""
         if self.sweeper is not None:
@@ -1233,7 +1263,7 @@ class PythonRuntime:
                 "the run or its project version no longer exists",
                 FailureCode.NOT_FOUND,
             )
-        if env.is_protected and self.environments is None:
+        if env.is_protected and not self.isolated:
             raise TaskFailure(
                 FailureKind.PERMANENT,
                 _PROTECTED.format(environment=env.name),
