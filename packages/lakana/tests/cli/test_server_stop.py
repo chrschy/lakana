@@ -393,8 +393,9 @@ def test_a_recorded_owner_that_is_gone_is_not_signalled(
     result = _stop(tmp_path, tmp_path / "data")
 
     assert result.exit_code == 2
-    assert str(proc.pid) in result.output and "is gone" in result.output
-    assert "Ctrl-C" in result.output
+    output = " ".join(result.output.split())  # a long data directory path wraps the message
+    assert str(proc.pid) in output and "is gone" in output
+    assert "Ctrl-C" in output
     assert proc.poll() is None
 
 
@@ -432,20 +433,29 @@ def test_a_refused_signal_is_reported_with_the_next_step(
     assert "Ctrl-C" in output
 
 
+@pytest.mark.parametrize("padding", range(0, 120, 8))
 def test_a_live_instance_without_a_lock_owner_is_refused(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, padding: int
 ) -> None:
-    """No lock, but the pidfile's instance answers its health check: an older lakana."""
-    root = prepare_data_dir(tmp_path / "data")
+    """No lock, but the pidfile's instance answers its health check: an older lakana.
+
+    The message names the data directory, and the terminal wraps it at a fixed width, so where
+    the line breaks depends on how long the path is. The test runner's temporary directory
+    changes in length between runs (`pytest-9` and `pytest-10`, worker names), which broke the
+    assertion on some runs only; `padding` walks the line break through the whole message.
+    """
+    data_dir = tmp_path / ("d" * padding) / "data"
+    root = prepare_data_dir(data_dir)
     write_pidfile(root.server_pid, os.getpid(), 8765)
     monkeypatch.setattr(server, "_probe_health", lambda url: True)
 
-    result = _stop(tmp_path, tmp_path / "data")
+    result = _stop(tmp_path, data_dir)
 
+    output = " ".join(result.output.split())
     assert result.exit_code == 2
-    assert "http://127.0.0.1:8765" in result.output
-    assert "did not record which process to stop" in result.output
-    assert "Ctrl-C" in result.output
+    assert "http://127.0.0.1:8765" in output
+    assert "did not record which process to stop" in output
+    assert "Ctrl-C" in output
 
 
 def test_record_lock_owner_does_nothing_on_windows(
