@@ -21,8 +21,8 @@ the signature are in the same guide.
 
 ## Bind a secret to its use
 
-A secret has one use: the credential of one package index, of one repository, or its
-environment's own work (storage and webhooks). Lakana refuses it for anything else, so
+A secret has one use: the credential of one package index, of one repository, of one
+connection of its environment, or its environment's own work (storage and webhooks). Lakana refuses it for anything else, so
 someone who may register package indexes cannot send another secret to a host of their choice.
 Under the current runner, someone who also holds `DEPLOY` and `RUN` reads what the worker reads
 anyway, so binding protects against an index manager redirecting a secret, not against code that
@@ -118,7 +118,7 @@ The listing shows, for each secret:
 | `name`, `environment` | Which secret it is. |
 | `format_version` | `2` is the current format. `1` is the original one, from before the format was recorded; Lakana refuses it unless `LAKANA_SECRETS__ACCEPT_FORMAT_1` is on (see below). |
 | `key_id` | Which key provider and which key wrapped the secret's data key: `env:` and 16 characters for a master key from `LAKANA_SECRETS__MASTER_KEY`, or just `env` for a secret stored in the original format. It does not reveal the key. |
-| `use`, `use_target` | What the secret is bound to: `package_index`, `repository` or `environment`, and the name of the index or repository. Both are empty when it is unbound. `use_target` is also empty for `environment`, and for an index or repository that was removed; `use` then still names the kind. |
+| `use`, `use_target` | What the secret is bound to: `package_index`, `repository`, `connection` or `environment`, and the name of the index, repository or connection. Both are empty when it is unbound. `use_target` is also empty for `environment`, and for an index or repository that was removed; `use` then still names the kind. A connection's secret lives in the connection's environment; deleting the connection, or clearing its secret, leaves the secret unbound. |
 | `created_by`, `created_at` | Who created it and when. |
 
 ## Secrets stored in the old format

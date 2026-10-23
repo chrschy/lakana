@@ -1,11 +1,11 @@
 """What a secret may be used for, and the refusal when it is asked for anything else.
 
-A secret has a use: a package index or a repository (by id), or its environment (storage,
-webhooks and, later, tasks). An unbound secret serves its environment only. The four places
-that decrypt a secret (`StorageResolver`, `lakana_worker.deploy`,
-`lakana_worker.index_credentials`, `lakana_worker.notify`) call `require_use` first, so a
-holder of `MANAGE_PACKAGE_INDEX` or `MANAGE_REPOSITORY` who names another secret cannot send
-it to a host of their choice.
+A secret has a use: a package index, a repository or a connection of its environment (by id),
+or its environment (storage, webhooks and, later, tasks). An unbound secret serves its
+environment only. The places that decrypt a secret (`StorageResolver`, `lakana_worker.deploy`,
+`lakana_worker.index_credentials`, `lakana_worker.notify`, and a task's fetch of a connection)
+call `require_use` first, so a holder of `MANAGE_PACKAGE_INDEX`, `MANAGE_REPOSITORY` or
+`MANAGE_CONNECTION` who names another secret cannot send it to a host of their choice.
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ from lakana_core.errors import NotFoundError, PermissionDenied, ValidationError
 from lakana_core.identifiers import shown
 from lakana_core.models import (
     AuditEventType,
+    Connection,
     Environment,
     JobVersion,
     NotificationDelivery,
@@ -36,10 +37,31 @@ from lakana_core.models import (
     SecretUseKind,
 )
 
-_NOUNS = {SecretUseKind.PACKAGE_INDEX: "package index", SecretUseKind.REPOSITORY: "repository"}
-_OPTIONS = {SecretUseKind.PACKAGE_INDEX: "--index", SecretUseKind.REPOSITORY: "--repository"}
+_NOUNS = {
+    SecretUseKind.PACKAGE_INDEX: "package index",
+    SecretUseKind.REPOSITORY: "repository",
+    SecretUseKind.CONNECTION: "connection",
+}
+_OPTIONS = {
+    SecretUseKind.PACKAGE_INDEX: "--index",
+    SecretUseKind.REPOSITORY: "--repository",
+    SecretUseKind.CONNECTION: "--connection",
+}
 _ENVIRONMENT_USE = "its environment (storage and webhooks)"
-_GROUPS = {SecretUseKind.PACKAGE_INDEX: "index", SecretUseKind.REPOSITORY: "repo"}
+_GROUPS = {
+    SecretUseKind.PACKAGE_INDEX: "index",
+    SecretUseKind.REPOSITORY: "repo",
+    SecretUseKind.CONNECTION: "connection",
+}
+_LISTINGS = {
+    SecretUseKind.PACKAGE_INDEX: "lakana index list",
+    SecretUseKind.REPOSITORY: "lakana repo list",
+}
+_MODELS: dict[SecretUseKind, type[PackageIndex] | type[Repository] | type[Connection]] = {
+    SecretUseKind.PACKAGE_INDEX: PackageIndex,
+    SecretUseKind.REPOSITORY: Repository,
+    SecretUseKind.CONNECTION: Connection,
+}
 
 
 def plain(name: str) -> str:
@@ -91,13 +113,13 @@ class SecretUse:
     kind
         What kind of use.
     target_id
-        The package index's or repository's id; `None` for the environment.
+        The package index's, repository's or connection's id; `None` for the environment.
     target_name
         Its name, for messages and the command; `None` for the environment.
     target_url
         The URL the secret goes to, as the request leaves the entry (the new URL of an update,
-        the URL of an entry being created); recorded when the secret is bound. It plays no part
-        in equality.
+        the URL of an entry being created); recorded when the secret is bound. `None` for a
+        connection, whose address its own audit events record. It plays no part in equality.
     """
 
     kind: SecretUseKind
@@ -156,6 +178,22 @@ class SecretUse:
         return cls(SecretUseKind.REPOSITORY, row.id, row.name, url or row.url)
 
     @classmethod
+    def connection(cls, row: Connection) -> SecretUse:
+        """Name the use "credential of this connection".
+
+        Parameters
+        ----------
+        row
+            The connection.
+
+        Returns
+        -------
+        SecretUse
+            The use (no URL: a connection's address is recorded on its own audit events).
+        """
+        return cls(SecretUseKind.CONNECTION, row.id, row.name)
+
+    @classmethod
     def environment(cls) -> SecretUse:
         """Name the use "its own environment".
 
@@ -172,7 +210,8 @@ class SecretUse:
         Returns
         -------
         str
-            ``--index <name>``, ``--repository <name>`` or ``--own-env``.
+            ``--index <name>``, ``--repository <name>``, ``--connection <name>`` or
+            ``--own-env``.
         """
         if self.kind is SecretUseKind.ENVIRONMENT:
             return "--own-env"
@@ -184,7 +223,8 @@ class SecretUse:
         Returns
         -------
         str
-            ``package index 'corp'``, ``repository 'analytics'`` or the environment's words.
+            ``package index 'corp'``, ``repository 'analytics'``, ``connection 'crm-db'`` or the
+            environment's words.
         """
         if self.kind is SecretUseKind.ENVIRONMENT:
             return _ENVIRONMENT_USE
@@ -193,27 +233,26 @@ class SecretUse:
 
 def target_row(
     session: Session, kind: SecretUseKind, target_id: uuid.UUID | None
-) -> PackageIndex | Repository | None:
-    """Look up the package index or repository a binding points at.
+) -> PackageIndex | Repository | Connection | None:
+    """Look up the package index, repository or connection a binding points at.
 
     Parameters
     ----------
     session
         Database session.
     kind
-        `PACKAGE_INDEX` or `REPOSITORY`; the environment has no row.
+        `PACKAGE_INDEX`, `REPOSITORY` or `CONNECTION`; the environment has no row.
     target_id
         The bound id.
 
     Returns
     -------
-    PackageIndex | Repository | None
+    PackageIndex | Repository | Connection | None
         The row, or `None` when `target_id` is unset or names a row that was removed.
     """
     if target_id is None or kind is SecretUseKind.ENVIRONMENT:
         return None
-    model = PackageIndex if kind is SecretUseKind.PACKAGE_INDEX else Repository
-    return session.get(model, target_id)
+    return session.get(_MODELS[kind], target_id)
 
 
 def describe_use(session: Session, kind: SecretUseKind | None, target_id: uuid.UUID | None) -> str:
@@ -268,22 +307,29 @@ def bind_command(environment: str, name: str, use: SecretUse) -> str:
 
 
 def own_secret_steps(environment: str, use: SecretUse) -> str:
-    """Write the two commands that give an index or repository a secret of its own.
+    """Write the commands that give an index, repository or connection a secret of its own.
 
     Parameters
     ----------
     environment
         The environment the secret lives in.
     use
-        The index or repository, with its name.
+        The index, repository or connection, with its name.
 
     Returns
     -------
     str
-        ``lakana secret create NEW ... --values-stdin``, then the ``update`` that names it, each
-        in backticks, quoted for a shell.
+        For an index or repository ``lakana secret create NEW ... --values-stdin``, then the
+        ``update`` that names it; for a connection its ``update`` with ``--password-stdin``,
+        which creates a secret born bound to it (or sets the one it has again). Each in
+        backticks, quoted for a shell.
     """
     name = shlex.quote(plain(use.target_name or ""))
+    if use.kind is SecretUseKind.CONNECTION:
+        return (
+            f"`lakana connection update {name} --env {shlex.quote(plain(environment))} "
+            "--password-stdin` (or --values-stdin)"
+        )
     return (
         f"`lakana secret create NEW --env {shlex.quote(plain(environment))} {use.option()} "
         f"--values-stdin`, then `lakana {_GROUPS[use.kind]} update {name} --credential-secret NEW`"
@@ -401,7 +447,13 @@ def record_binding(
     secret.use_kind, secret.use_target_id = use.kind, use.target_id
 
 
-def resolve_use(session: Session, kind: SecretUseKind, target: str | None) -> SecretUse:
+def resolve_use(
+    session: Session,
+    kind: SecretUseKind,
+    target: str | None,
+    *,
+    environment_id: uuid.UUID | None = None,
+) -> SecretUse:
     """Turn a use as a caller names it into a `SecretUse`.
 
     Parameters
@@ -411,7 +463,10 @@ def resolve_use(session: Session, kind: SecretUseKind, target: str | None) -> Se
     kind
         The kind of use.
     target
-        The index's or repository's name; `None` for the environment.
+        The index's, repository's or connection's name; `None` for the environment.
+    environment_id
+        The secret's own environment, where a connection is looked up: a connection's secret
+        lives in the connection's environment. Indexes and repositories ignore it.
 
     Returns
     -------
@@ -420,10 +475,12 @@ def resolve_use(session: Session, kind: SecretUseKind, target: str | None) -> Se
 
     Raises
     ------
+    ValueError
+        If a connection is asked for without `environment_id`, which is a bug of the caller.
     ValidationError
-        If the environment use is given a name, or an index or repository use none.
+        If the environment use is given a name, or another use none.
     NotFoundError
-        If no index or repository has that name.
+        If no index or repository has that name, or the environment no such connection.
     """
     if kind is SecretUseKind.ENVIRONMENT:
         if target is not None:
@@ -433,7 +490,9 @@ def resolve_use(session: Session, kind: SecretUseKind, target: str | None) -> Se
             )
         return SecretUse.environment()
     noun = _NOUNS[kind]
-    listing = "lakana index list" if kind is SecretUseKind.PACKAGE_INDEX else "lakana repo list"
+    if kind is SecretUseKind.CONNECTION:
+        return _resolve_connection(session, target, environment_id)
+    listing = _LISTINGS[kind]
     if not target:
         raise ValidationError(f"Name the {noun} the secret is for; `{listing}` shows them.")
     model = PackageIndex if kind is SecretUseKind.PACKAGE_INDEX else Repository
@@ -443,6 +502,54 @@ def resolve_use(session: Session, kind: SecretUseKind, target: str | None) -> Se
             f"No {noun} named '{plain(target)}'; `{listing}` shows the registered ones."
         )
     return SecretUse(kind, row.id, row.name, row.url)
+
+
+def _resolve_connection(
+    session: Session, target: str | None, environment_id: uuid.UUID | None
+) -> SecretUse:
+    """Find the connection a secret of one environment is for.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    target
+        The connection's name.
+    environment_id
+        The secret's environment.
+
+    Returns
+    -------
+    SecretUse
+        The use, with the connection's id.
+
+    Raises
+    ------
+    ValueError
+        If `environment_id` is missing.
+    ValidationError
+        If no name is given.
+    NotFoundError
+        If the environment has no connection of that name.
+    """
+    if environment_id is None:
+        raise ValueError("A connection use needs the environment its secret lives in.")
+    environment = session.get(Environment, environment_id)
+    env_name = shlex.quote(plain(environment.name if environment is not None else ""))
+    listing = f"lakana connection list --env {env_name}"
+    if not target:
+        raise ValidationError(f"Name the connection the secret is for; `{listing}` shows them.")
+    row = session.execute(
+        select(Connection).where(
+            Connection.environment_id == environment_id, Connection.name == target
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise NotFoundError(
+            f"No connection named '{plain(target)}' in environment '{plain(env_name)}'; "
+            f"`{listing}` shows them."
+        )
+    return SecretUse.connection(row)
 
 
 def record_refusal(
@@ -511,27 +618,31 @@ def used_by_its_environment(session: Session, environment: Environment, name: st
     return False
 
 
-_SHORT = {SecretUseKind.PACKAGE_INDEX: "index", SecretUseKind.REPOSITORY: "repository"}
+_SHORT = {
+    SecretUseKind.PACKAGE_INDEX: "index",
+    SecretUseKind.REPOSITORY: "repository",
+    SecretUseKind.CONNECTION: "connection",
+}
 
 
-_Row = TypeVar("_Row", PackageIndex, Repository)
+_Row = TypeVar("_Row", PackageIndex, Repository, Connection)
 
 
 def lock_row(session: Session, model: type[_Row], row_id: uuid.UUID) -> _Row | None:
-    """Lock an index's or repository's row and read it afresh, until the transaction ends.
+    """Lock an index's, repository's or connection's row and read it afresh, until the end.
 
     Parameters
     ----------
     session
         Database session.
     model
-        `PackageIndex` or `Repository`.
+        `PackageIndex`, `Repository` or `Connection`.
     row_id
         The row's id.
 
     Returns
     -------
-    PackageIndex | Repository | None
+    PackageIndex | Repository | Connection | None
         The row as committed now, or `None` when it was removed.
     """
     return session.execute(
@@ -542,32 +653,50 @@ def lock_row(session: Session, model: type[_Row], row_id: uuid.UUID) -> _Row | N
     ).scalar_one_or_none()
 
 
-def lock_entry(session: Session, use: SecretUse) -> SecretUse:
-    """Lock the index or repository row a binding points at, until the transaction ends.
+def lock_entry(session: Session, use: SecretUse, environment: Environment) -> SecretUse:
+    """Lock the index, repository or connection row a binding points at, until the end.
 
-    Everything that binds a secret to an entry, names a secret for it or moves its URL takes
-    this lock first (and the secret rows after it), so those steps run one after the other
-    and the second one sees what the first committed.
+    Everything that binds a secret to an entry, names a secret for it or moves its URL (or a
+    connection's address) takes this lock first (and the secret rows after it), so those steps
+    run one after the other and the second one sees what the first committed.
 
     Parameters
     ----------
     session
         Database session.
     use
-        The index or repository; the environment has no row and nothing is locked.
+        The index, repository or connection; the environment has no row and nothing is locked.
+    environment
+        The secret's environment. A connection must belong to it: a secret is never bound to
+        a connection of another environment.
 
     Returns
     -------
     SecretUse
-        `use` with the URL the row has under the lock, which is the URL the secret goes to;
-        `use` itself for the environment.
+        `use` with the URL the row has under the lock, which is the URL the secret goes to
+        (`None` for a connection); `use` itself for the environment.
 
     Raises
     ------
     NotFoundError
         If the row has been removed.
+    ValidationError
+        If the connection belongs to another environment.
     """
     if use.target_id is None:
+        return use
+    if use.kind is SecretUseKind.CONNECTION:
+        connection = lock_row(session, Connection, use.target_id)
+        if connection is None:
+            raise NotFoundError("The connection was removed by someone else; look again.")
+        if connection.environment_id != environment.id:
+            owner = session.get(Environment, connection.environment_id)
+            raise ValidationError(
+                f"Connection '{plain(connection.name)}' belongs to environment "
+                f"'{plain(owner.name if owner is not None else '')}', not to "
+                f"'{plain(environment.name)}': a secret serves a connection of its own "
+                "environment only."
+            )
         return use
     if use.kind is SecretUseKind.PACKAGE_INDEX:
         found = lock_row(session, PackageIndex, use.target_id)
@@ -586,8 +715,9 @@ def bind_or_require_named_secrets(
     name: str,
     use: SecretUse,
     registered: bool,
+    environment_id: uuid.UUID | None = None,
 ) -> None:
-    """Make every active secret called `name` serve this index or repository, or refuse.
+    """Make every active secret called `name` serve this index, repository or connection.
 
     A secret already bound to `use` passes. An unbound secret binds to `use` (audited, with
     the actor) when `p` may manage secrets in its environment, and the environment does not use
@@ -611,6 +741,10 @@ def bind_or_require_named_secrets(
     registered
         Whether `use` exists in the database; on a create it does not, and the refusal then
         sends the caller to register it without a credential first.
+    environment_id
+        Only the secrets of this environment are considered, when given: a connection's secret
+        lives in the connection's environment. Indexes and repositories pass nothing and look
+        at every environment.
 
     Raises
     ------
@@ -618,10 +752,11 @@ def bind_or_require_named_secrets(
         If a secret of that name cannot serve `use`; the message names the cause and the
         next step, and the exception carries the environment scope and the reason.
     """
+    query = select(Secret, Environment).join(Environment, Environment.id == Secret.environment_id)
+    if environment_id is not None:
+        query = query.where(Secret.environment_id == environment_id)
     rows = session.execute(
-        select(Secret, Environment)
-        .join(Environment, Environment.id == Secret.environment_id)
-        .where(Secret.name == name, Secret.revoked_at.is_(None))
+        query.where(Secret.name == name, Secret.revoked_at.is_(None))
         .order_by(Environment.name)
         .with_for_update(of=Secret)
         .execution_options(populate_existing=True)
@@ -685,12 +820,14 @@ def bind_or_require_named_secrets(
 def require_secret_management_for_url_change(
     session: Session, authz: AuthorizationService, p: PrincipalRef, use: SecretUse
 ) -> None:
-    """Refuse to move an index or repository to another URL without the right.
+    """Refuse to move an index, repository or connection somewhere new without the right.
 
     The URL is where a bound secret goes: changing it changes the secret's use as surely as
-    binding it elsewhere would. The check does not look at the credential the entry names
-    now, because clearing that name leaves the secret bound and would free the URL. The bound
-    secrets are locked, so a bind that runs at the same time waits and then sees the outcome.
+    binding it elsewhere would. For a connection, the address and how the secret is sent
+    (`lakana_core.connections.kinds.moves_secret`) count the same. The check does not look at
+    the credential the entry names now, because clearing that name leaves the secret bound and
+    would free the URL. The bound secrets are locked, so a bind that runs at the same time
+    waits and then sees the outcome.
 
     Parameters
     ----------
@@ -722,18 +859,32 @@ def require_secret_management_for_url_change(
     ).all()
     for secret_name, environment in rows:
         scope = Securable.environment_scope(environment)
-        if not authz.permits(p, Action.MANAGE_SECRET, scope):
-            raise SecretBindingRefused(
-                f"Changing the URL of {use.wanted()} would send secret '{plain(secret_name)}' of "
-                f"environment '{plain(environment)}' to another host. That needs the right to "
-                f"manage secrets in '{plain(environment)}' (the ADMIN role). Ask someone who may "
-                f"manage secrets in '{plain(environment)}' to change the URL, or to bind the "
-                f"secret elsewhere first: lakana secret bind {shlex.quote(plain(secret_name))} "
-                f"--env {shlex.quote(plain(environment))} (with --index NAME, --repository NAME or "
-                "--own-env)",
-                scope,
-                "url_moves_bound_secret",
+        if authz.permits(p, Action.MANAGE_SECRET, scope):
+            continue
+        secret, env = plain(secret_name), plain(environment)
+        bind = (
+            f"lakana secret bind {shlex.quote(secret)} --env {shlex.quote(env)} (with --index "
+            "NAME, --repository NAME, --connection NAME or --own-env)"
+        )
+        if use.kind is SecretUseKind.CONNECTION:
+            name = shlex.quote(plain(use.target_name or ""))
+            message = (
+                f"This change of {use.wanted()} (its address, TLS, CA certificate or how it sends "
+                f"its secret) could send secret '{secret}' of environment '{env}' somewhere new. "
+                f"That needs the right to manage secrets in '{env}' (the ADMIN role). Give the "
+                "connection a new secret in the same change instead (`lakana connection update "
+                f"{name} --env {shlex.quote(env)} ... --password-stdin`, or --values-stdin), or "
+                f"ask someone who may manage secrets in '{env}' to make the change, or to bind "
+                f"the secret elsewhere first: {bind}"
             )
+        else:
+            message = (
+                f"Changing the URL of {use.wanted()} would send secret '{secret}' of environment "
+                f"'{env}' to another host. That needs the right to manage secrets in '{env}' (the "
+                f"ADMIN role). Ask someone who may manage secrets in '{env}' to change the URL, "
+                f"or to bind the secret elsewhere first: {bind}"
+            )
+        raise SecretBindingRefused(message, scope, "url_moves_bound_secret")
 
 
 def require_secret_management_for_storage_change(

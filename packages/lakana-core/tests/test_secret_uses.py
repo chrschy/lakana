@@ -10,7 +10,10 @@ import pytest
 from sqlalchemy.orm import Session
 
 from lakana_core.auth import PrincipalRef
+from lakana_core.connections.kinds import ConnectionKind
+from lakana_core.errors import NotFoundError
 from lakana_core.models import (
+    Connection,
     Environment,
     PackageIndex,
     Repository,
@@ -373,3 +376,118 @@ def test_the_approved_options_drop_user_information_from_the_endpoint() -> None:
 def test_the_approved_options_without_an_endpoint_hold_the_region_only() -> None:
     assert approved_storage_options({"s3.region": "eu", "s3.secret": "x"}) == {"s3.region": "eu"}
     assert approved_storage_options({}) == {}
+
+
+def _connection(
+    session: Session, environment: Environment, principal: PrincipalRef, name: str = "crm-db"
+) -> Connection:
+    """Insert a connection row.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    environment
+        Its environment.
+    principal
+        Its creator.
+    name
+        Its name.
+
+    Returns
+    -------
+    Connection
+        The row.
+    """
+    row = Connection(
+        id=uuid.uuid4(),
+        environment_id=environment.id,
+        name=name,
+        kind=ConnectionKind.POSTGRESQL,
+        address={"host": "db.example.com", "port": 5432, "database": "crm"},
+        settings={"user": "reader", "tls": "verify-full"},
+        created_by=principal.id,
+    )
+    session.add(row)
+    session.commit()
+    return row
+
+
+def test_a_connection_use_names_its_option_and_itself() -> None:
+    """`--connection <name>` selects it; a message calls it `connection '<name>'`."""
+    row = Connection(id=uuid.uuid4(), name="crm-db")
+
+    use = SecretUse.connection(row)
+
+    assert (use.kind, use.target_id, use.target_name, use.target_url) == (
+        SecretUseKind.CONNECTION,
+        row.id,
+        "crm-db",
+        None,
+    )
+    assert use.option() == "--connection crm-db"
+    assert use.wanted() == "connection 'crm-db'"
+
+
+def test_a_connection_secret_serves_its_connection_and_nothing_else(
+    session: Session, principal: PrincipalRef
+) -> None:
+    """A connection secret serves no index, and an index secret no connection.
+
+    Each refusal holds the command that moves it.
+    """
+    env = _environment(session)
+    corp, crm = _index(session, "corp"), _connection(session, env, principal)
+    for_crm = _secret(session, env, principal, "crm-pw", SecretUseKind.CONNECTION, crm.id)
+    for_corp = _secret(session, env, principal, "corp-pw", SecretUseKind.PACKAGE_INDEX, corp.id)
+
+    require_use(session, for_crm, SecretUse.connection(crm), environment_name="prod")
+    with pytest.raises(SecretUseRefused) as caught:
+        require_use(session, for_crm, SecretUse.package_index(corp), environment_name="prod")
+    assert "is bound to connection 'crm-db', not to package index 'corp'" in str(caught.value)
+    assert bind_command("prod", "crm-pw", SecretUse.package_index(corp)) in str(caught.value)
+
+    with pytest.raises(SecretUseRefused) as caught:
+        require_use(session, for_corp, SecretUse.connection(crm), environment_name="prod")
+    assert str(caught.value) == (
+        "Secret 'corp-pw' of environment 'prod' is bound to package index 'corp', not to "
+        "connection 'crm-db', so Lakana does not use it there. Give connection 'crm-db' a "
+        "secret of its own: `lakana connection update crm-db --env prod --password-stdin` (or "
+        "--values-stdin). Moving this secret instead breaks package index 'corp': "
+        + bind_command("prod", "corp-pw", SecretUse.connection(crm))
+    )
+    with pytest.raises(SecretUseRefused, match="not to its environment"):
+        require_use(session, for_crm, SecretUse.environment(), environment_name="prod")
+
+
+def test_a_removed_connection_is_named_as_removed(
+    session: Session, principal: PrincipalRef
+) -> None:
+    """`describe_use` and `target_row` read a connection like an index."""
+    env = _environment(session)
+    crm = _connection(session, env, principal)
+    secret = _secret(session, env, principal, "crm-pw", SecretUseKind.CONNECTION, crm.id)
+
+    assert target_row(session, SecretUseKind.CONNECTION, crm.id) is crm
+    assert describe_use(session, secret.use_kind, secret.use_target_id) == "connection 'crm-db'"
+    session.delete(crm)
+    session.commit()
+    assert describe_use(session, secret.use_kind, secret.use_target_id) == (
+        "a connection that was removed"
+    )
+
+
+def test_resolve_use_finds_a_connection_in_the_given_environment_only(
+    session: Session, principal: PrincipalRef
+) -> None:
+    """A connection name means nothing without its environment."""
+    prod, dev = _environment(session, "prod"), _environment(session, "dev")
+    crm = _connection(session, prod, principal)
+
+    assert resolve_use(
+        session, SecretUseKind.CONNECTION, "crm-db", environment_id=prod.id
+    ) == SecretUse.connection(crm)
+    with pytest.raises(NotFoundError, match="lakana connection list --env dev"):
+        resolve_use(session, SecretUseKind.CONNECTION, "crm-db", environment_id=dev.id)
+    with pytest.raises(ValueError, match="needs the environment"):
+        resolve_use(session, SecretUseKind.CONNECTION, "crm-db")

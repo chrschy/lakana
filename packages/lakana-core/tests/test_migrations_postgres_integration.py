@@ -2388,3 +2388,122 @@ def test_0048_on_postgres() -> None:
         for table, names in wanted.items():
             assert not names & {c["name"] for c in inspector.get_columns(table)}
         engine.dispose()
+
+
+def test_0049_on_postgres() -> None:
+    """0049 adds the connection tables, the secret use and `source_kind`, and drops them down."""
+    revision_0048 = "f1a2b3c4d5e6"
+    revision_0049 = "a7c3e9f1b2d4"
+    now = datetime.now(UTC)
+
+    def secret(
+        conn: sqlalchemy.Connection, kind: str | None, target: uuid.UUID | None
+    ) -> uuid.UUID:
+        """Insert one secret with the given use, foreign keys off.
+
+        Parameters
+        ----------
+        conn
+            An open connection in a transaction.
+        kind
+            The `use_kind`, or `None`.
+        target
+            The `use_target_id`, or `None`.
+
+        Returns
+        -------
+        uuid.UUID
+            The new secret's id.
+        """
+        row_id = uuid.uuid4()
+        conn.execute(sqlalchemy.text("SET LOCAL session_replication_role = replica"))
+        conn.execute(
+            sqlalchemy.text(
+                "INSERT INTO secrets (id, environment_id, name, ciphertext, nonce, "
+                "wrapped_data_key, format_version, key_id, created_by, created_at, use_kind, "
+                "use_target_id) VALUES (:id, :env, :name, '\\x00', '\\x00', '\\x00', 2, 'env', "
+                ":who, :now, :kind, :target)"
+            ),
+            {
+                "id": row_id,
+                "env": uuid.uuid4(),
+                "name": str(row_id),
+                "who": uuid.uuid4(),
+                "now": now,
+                "kind": kind,
+                "target": target,
+            },
+        )
+        return row_id
+
+    with PostgresContainer("postgres:16", driver="pg8000") as pg:
+        url = pg.get_connection_url()
+        migrate.upgrade(url, revision_0048)
+        engine = sqlalchemy.create_engine(url)
+        edge = uuid.uuid4()
+        with engine.begin() as conn:
+            conn.execute(sqlalchemy.text("SET LOCAL session_replication_role = replica"))
+            conn.execute(
+                sqlalchemy.text(
+                    "INSERT INTO lineage_edges (id, environment_id, source_table_id, source_name,"
+                    " target_table_id, target_name, created_at) VALUES (:id, :env, :s, 'a.b',"
+                    " :t, 'c.d', :now)"
+                ),
+                {"id": edge, "env": uuid.uuid4(), "s": uuid.uuid4(), "t": uuid.uuid4(), "now": now},
+            )
+
+        migrate.upgrade(url, revision_0049)
+        assert _alembic_version(engine) == revision_0049
+        inspector = sqlalchemy.inspect(engine)
+        assert {"connections", "connection_tests"} <= set(inspector.get_table_names())
+        assert {
+            c["name"]: tuple(c["column_names"])
+            for c in inspector.get_unique_constraints("connections")
+        } == {"uq_connections_environment_name": ("environment_id", "name")}
+        assert {
+            (tuple(fk["constrained_columns"]), fk["referred_table"], fk["options"].get("ondelete"))
+            for fk in inspector.get_foreign_keys("connections")
+        } == {
+            (("environment_id",), "environments", "CASCADE"),
+            (("secret_id",), "secrets", "SET NULL"),
+            (("created_by",), "principals", None),
+        }
+        assert {
+            (tuple(fk["constrained_columns"]), fk["referred_table"], fk["options"].get("ondelete"))
+            for fk in inspector.get_foreign_keys("connection_tests")
+        } == {
+            (("connection_id",), "connections", "CASCADE"),
+            (("environment_id",), "environments", "CASCADE"),
+            (("requested_by",), "principals", None),
+        }
+        target = uuid.uuid4()
+        with engine.begin() as conn:
+            kind = conn.execute(
+                sqlalchemy.text("SELECT source_kind FROM lineage_edges WHERE id = :id"),
+                {"id": edge},
+            ).scalar_one()
+            bound = secret(conn, "CONNECTION", target)
+        assert kind == "table"
+        with (
+            pytest.raises(DBAPIError, match="ck_secrets_use_consistent"),
+            engine.begin() as conn,
+        ):
+            secret(conn, "CONNECTION", None)
+
+        migrate.downgrade(url, revision_0048)
+        assert _alembic_version(engine) == revision_0048
+        inspector = sqlalchemy.inspect(engine)
+        assert not {"connections", "connection_tests"} & set(inspector.get_table_names())
+        assert "source_kind" not in {c["name"] for c in inspector.get_columns("lineage_edges")}
+        with engine.begin() as conn:
+            use = conn.execute(
+                sqlalchemy.text("SELECT use_kind, use_target_id FROM secrets WHERE id = :id"),
+                {"id": bound},
+            ).one()
+        assert tuple(use) == (None, None)
+        with (
+            pytest.raises(DBAPIError, match="ck_secrets_use_consistent"),
+            engine.begin() as conn,
+        ):
+            secret(conn, "CONNECTION", target)
+        engine.dispose()

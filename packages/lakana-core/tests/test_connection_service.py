@@ -1,0 +1,1228 @@
+"""`ConnectionService`: who may create, change and delete a connection, and its secret (S1)."""
+
+from __future__ import annotations
+
+import base64
+import inspect
+import json
+import logging
+import uuid
+from collections.abc import Mapping
+from dataclasses import dataclass
+from types import MappingProxyType
+from typing import Any
+
+import pytest
+from core_test_helpers import deploy_manifest
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from lakana_core.audit.authorization import AuditingAuthorization
+from lakana_core.audit.denial_limiter import DenialAuditLimiter
+from lakana_core.auth import AllowAllAuthorization, PrincipalRef, SecurableKind
+from lakana_core.connections.kinds import ConnectionKind
+from lakana_core.connections.service import (
+    ConnectionService,
+    ConnectionView,
+    missing_connections,
+)
+from lakana_core.errors import (
+    AlreadyExistsError,
+    ConflictError,
+    NotFoundError,
+    PermissionDenied,
+    ValidationError,
+)
+from lakana_core.grants.authorization import GrantAuthorization
+from lakana_core.grants.roles import Role
+from lakana_core.grants.service import GrantService
+from lakana_core.models import (
+    AuditEvent,
+    AuditEventType,
+    Connection,
+    Environment,
+    Principal,
+    PrincipalType,
+    Secret,
+    SecretUseKind,
+)
+from lakana_core.projects.package_indexes import PackageIndexService
+from lakana_core.secrets.crypto import decrypt_secret_row
+from lakana_core.secrets.keys import EnvKeyProvider
+from lakana_core.secrets.service import SecretService
+from lakana_core.secrets.uses import SecretUse, resolve_use
+
+_KEYS = EnvKeyProvider(base64.b64encode(b"7" * 32).decode())
+_PG = {"host": "db.example.com", "database": "crm"}
+_SETTINGS: Mapping[str, Any] = MappingProxyType({"user": "reader"})
+_VALUES: Mapping[str, str] = MappingProxyType({"password": "s3cr3t-value"})
+
+
+def _principal(session: Session, name: str) -> PrincipalRef:
+    """Persist a principal.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    name
+        Its name.
+
+    Returns
+    -------
+    PrincipalRef
+        A reference to it.
+    """
+    ref = PrincipalRef(id=uuid.uuid4(), name=name, type=PrincipalType.USER)
+    session.add(Principal(id=ref.id, type=ref.type, name=name, is_active=True))
+    session.commit()
+    return ref
+
+
+@dataclass
+class World:
+    """Two environments, a principal per role that matters here, and helpers to look around.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    admin
+        `ADMIN` on the instance.
+    data_engineer
+        `DATA_ENGINEER` on `prod` and `dev`.
+    analyst
+        `ANALYST` on `prod`.
+    """
+
+    session: Session
+    admin: PrincipalRef
+    data_engineer: PrincipalRef
+    analyst: PrincipalRef
+
+    def authz(self) -> AuditingAuthorization:
+        """Build the authorization the server uses: real grants, denials audited.
+
+        Returns
+        -------
+        AuditingAuthorization
+            The service.
+        """
+        return AuditingAuthorization(
+            GrantAuthorization(self.session), self.session, DenialAuditLimiter(10_000)
+        )
+
+    def connections(self) -> ConnectionService:
+        """Build the service under test.
+
+        Returns
+        -------
+        ConnectionService
+            The service.
+        """
+        return ConnectionService(self.session, self.authz(), _KEYS)
+
+    def secrets(self) -> SecretService:
+        """Build the secret service on the same grants.
+
+        Returns
+        -------
+        SecretService
+            The service.
+        """
+        return SecretService(self.session, self.authz(), _KEYS)
+
+    def make_secret(
+        self, environment: str, name: str, values: dict[str, str], use: SecretUse | None = None
+    ) -> Secret:
+        """Create a secret as the administrator.
+
+        Parameters
+        ----------
+        environment
+            Its environment.
+        name
+            Its name.
+        values
+            Its values.
+        use
+            What it is bound to; unbound when `None`.
+
+        Returns
+        -------
+        Secret
+            The row.
+        """
+        return self.secrets().create(
+            self.admin, environment=environment, name=name, values=values, use=use
+        )
+
+    def secret(self, environment: str, name: str) -> Secret:
+        """Read a secret afresh.
+
+        Parameters
+        ----------
+        environment
+            Its environment.
+        name
+            Its name.
+
+        Returns
+        -------
+        Secret
+            The row as committed.
+        """
+        self.session.expire_all()
+        return self.session.execute(
+            select(Secret)
+            .join(Environment, Environment.id == Secret.environment_id)
+            .where(Environment.name == environment, Secret.name == name)
+        ).scalar_one()
+
+    def values(self, environment: str, name: str) -> dict[str, str]:
+        """Decrypt a secret, as the run-time fetch will.
+
+        Parameters
+        ----------
+        environment
+            Its environment.
+        name
+            Its name.
+
+        Returns
+        -------
+        dict of str to str
+            Its values.
+        """
+        return decrypt_secret_row(
+            self.secret(environment, name), _KEYS, environment_name=environment
+        )
+
+    def connection(self, environment: str, name: str) -> Connection | None:
+        """Read a connection afresh.
+
+        Parameters
+        ----------
+        environment
+            Its environment.
+        name
+            Its name.
+
+        Returns
+        -------
+        Connection or None
+            The row, or `None` when there is none.
+        """
+        self.session.expire_all()
+        return self.session.execute(
+            select(Connection)
+            .join(Environment, Environment.id == Connection.environment_id)
+            .where(Environment.name == environment, Connection.name == name)
+        ).scalar_one_or_none()
+
+    def connection_id(self, environment: str, name: str) -> uuid.UUID:
+        """Read a connection's id.
+
+        Parameters
+        ----------
+        environment
+            Its environment.
+        name
+            Its name.
+
+        Returns
+        -------
+        uuid.UUID
+            The id.
+        """
+        row = self.connection(environment, name)
+        assert row is not None
+        return row.id
+
+    def events(self, event_type: AuditEventType | None = None) -> list[AuditEvent]:
+        """Read the audit events in the order they were written.
+
+        Parameters
+        ----------
+        event_type
+            Only events of this type, when given.
+
+        Returns
+        -------
+        list of AuditEvent
+            The events.
+        """
+        self.session.expire_all()
+        query = select(AuditEvent).order_by(AuditEvent.occurred_at)
+        if event_type is not None:
+            query = query.where(AuditEvent.event_type == event_type)
+        return list(self.session.execute(query).scalars())
+
+    def audit_types(self) -> list[str]:
+        """Name the audit events in the order they were written.
+
+        Returns
+        -------
+        list of str
+            Their types.
+        """
+        return [event.event_type.value for event in self.events()]
+
+    def audit_details_text(self) -> str:
+        """Write every audit event's detail as one JSON text.
+
+        Returns
+        -------
+        str
+            The details.
+        """
+        return json.dumps([event.detail for event in self.events()])
+
+    def denial_reasons(self) -> list[str | None]:
+        """List the reasons of the recorded `AUTHORIZATION_DENIED` events.
+
+        Returns
+        -------
+        list
+            ``detail["reason"]`` of each, `None` where the grant check refused.
+        """
+        return [
+            event.detail.get("reason") for event in self.events(AuditEventType.AUTHORIZATION_DENIED)
+        ]
+
+    def deploy_manifest(
+        self, environment: str, repository: str, assets: dict[str, list[str]]
+    ) -> None:
+        """Make a project version whose assets declare connections the current one.
+
+        Parameters
+        ----------
+        environment
+            The environment.
+        repository
+            The repository.
+        assets
+            Asset to the connections it declares.
+        """
+        deploy_manifest(self.session, environment, repository, assets)
+
+    def postgres(
+        self,
+        p: PrincipalRef,
+        name: str = "crm-db",
+        *,
+        settings: Mapping[str, Any] = _SETTINGS,
+        secret: str | None = None,
+        secret_values: Mapping[str, str] | None = _VALUES,
+    ) -> ConnectionView:
+        """Create a PostgreSQL connection in `prod`, by default with its own new secret.
+
+        Parameters
+        ----------
+        p
+            Who creates it.
+        name
+            Its name.
+        settings
+            Its settings.
+        secret
+            The name of an existing secret to use.
+        secret_values
+            Values for a new secret; `None` for none.
+
+        Returns
+        -------
+        ConnectionView
+            The view.
+        """
+        return self.connections().create(
+            p,
+            "prod",
+            name=name,
+            kind=ConnectionKind.POSTGRESQL,
+            address=dict(_PG),
+            settings=settings,
+            secret=secret,
+            secret_values=secret_values,
+        )
+
+
+@pytest.fixture
+def world(session: Session) -> World:
+    """Build the world.
+
+    Parameters
+    ----------
+    session
+        Database session.
+
+    Returns
+    -------
+    World
+        The world.
+    """
+    for name in ("dev", "prod"):
+        session.add(Environment(id=uuid.uuid4(), name=name, storage_root=f"file:///srv/{name}"))
+    session.commit()
+    admin = _principal(session, "admin")
+    data_engineer = _principal(session, "dana")
+    analyst = _principal(session, "alice")
+    grants = GrantService(session, AllowAllAuthorization())
+    grants.grant(admin, principal="admin", role=Role.ADMIN, kind=SecurableKind.INSTANCE)
+    for environment in ("prod", "dev"):
+        grants.grant(
+            admin,
+            principal="dana",
+            role=Role.DATA_ENGINEER,
+            kind=SecurableKind.ENVIRONMENT,
+            environment=environment,
+        )
+    grants.grant(
+        admin,
+        principal="alice",
+        role=Role.ANALYST,
+        kind=SecurableKind.ENVIRONMENT,
+        environment="prod",
+    )
+    return World(session, admin, data_engineer, analyst)
+
+
+def test_a_data_engineer_creates_a_connection_and_its_secret(world: World) -> None:
+    """MANAGE_CONNECTION alone creates the connection and a new secret born bound to it (S1)."""
+    view = world.connections().create(
+        world.data_engineer,
+        "prod",
+        name="crm-db",
+        kind=ConnectionKind.POSTGRESQL,
+        address={"host": "db.example.com", "database": "crm"},
+        settings={"user": "reader"},
+        secret_values={"password": "s3cr3t-value"},
+    )
+
+    assert view.secret == "crm-db-connection"
+    assert (view.name, view.kind, view.address, view.created_by) == (
+        "crm-db",
+        ConnectionKind.POSTGRESQL,
+        {"host": "db.example.com", "port": 5432, "database": "crm"},
+        "dana",
+    )
+    assert view.declared_by == []
+    secret = world.secret("prod", "crm-db-connection")
+    assert (secret.use_kind, secret.use_target_id) == (
+        SecretUseKind.CONNECTION,
+        world.connection_id("prod", "crm-db"),
+    )
+    row = world.connection("prod", "crm-db")
+    assert row is not None and row.secret_id == secret.id
+    assert world.values("prod", "crm-db-connection") == {"password": "s3cr3t-value"}
+    events = world.audit_types()
+    assert events[-3:] == ["SECRET_CREATED", "SECRET_BOUND", "CONNECTION_CREATED"]
+    created = world.events(AuditEventType.CONNECTION_CREATED)[-1]
+    assert created.detail == {
+        "name": "crm-db",
+        "kind": "postgresql",
+        "address": {"host": "db.example.com", "port": 5432, "database": "crm"},
+        "secret": "crm-db-connection",
+    }
+    assert created.securable_environment == "prod"
+    assert "s3cr3t-value" not in world.audit_details_text()
+
+
+def test_a_taken_secret_name_is_a_conflict_naming_secret(world: World) -> None:
+    """A secret already called `<name>-connection` makes create a 409 that names --secret."""
+    world.make_secret("prod", "crm-db-connection", {"password": "other"})
+
+    with pytest.raises(AlreadyExistsError) as caught:
+        world.postgres(world.data_engineer)
+
+    assert str(caught.value) == (
+        "a secret `crm-db-connection` already exists in `prod`; bind it with "
+        "--secret crm-db-connection or remove it first"
+    )
+    assert world.connection("prod", "crm-db") is None
+    assert world.secret("prod", "crm-db-connection").use_kind is None
+
+
+def test_a_taken_connection_name_is_a_conflict(world: World) -> None:
+    """A second connection of the same name in one environment is a 409 with the update command."""
+    world.postgres(world.data_engineer, secret_values=None)
+
+    with pytest.raises(AlreadyExistsError) as caught:
+        world.postgres(world.data_engineer, secret_values=None)
+
+    assert str(caught.value) == (
+        "environment `prod` already has a connection `crm-db`; change it with "
+        "`lakana connection update crm-db --env prod`"
+    )
+    world.connections().create(
+        world.data_engineer,
+        "dev",
+        name="crm-db",
+        kind=ConnectionKind.POSTGRESQL,
+        address=dict(_PG),
+        settings={"user": "reader"},
+    )
+    assert world.connection("dev", "crm-db") is not None
+
+
+@pytest.mark.parametrize("name", ["CRM", "1db", "crm_db", "a" * 64, "", "crm\x00db"])
+def test_a_name_outside_the_rule_is_refused(world: World, name: str) -> None:
+    """Names are lower-case letters, digits and '-', starting with a letter, at most 63.
+
+    Parameters
+    ----------
+    world
+        The world.
+    name
+        A name the rule refuses.
+    """
+    with pytest.raises(ValidationError) as caught:
+        world.postgres(world.data_engineer, name=name)
+
+    assert str(caught.value) == (
+        "connection names are lower-case letters, digits and '-', starting with a letter, at "
+        "most 63"
+    )
+
+
+def test_a_secret_and_secret_values_together_are_refused(world: World) -> None:
+    """At most one way to give the secret."""
+    with pytest.raises(ValidationError) as caught:
+        world.postgres(world.data_engineer, secret="crm-pw")
+
+    assert str(caught.value) == "give either --secret or --password-stdin/--values-stdin, not both"
+
+
+def test_an_analyst_cannot_create_but_can_read(world: World) -> None:
+    """READ_ENVIRONMENT lists and shows; create, update, delete need MANAGE_CONNECTION."""
+    world.postgres(world.admin)
+    service = world.connections()
+
+    assert [view.name for view in service.list(world.analyst, "prod").items] == ["crm-db"]
+    shown = service.get(world.analyst, "prod", "crm-db")
+    assert (shown.name, shown.secret) == ("crm-db", "crm-db-connection")
+    with pytest.raises(PermissionDenied):
+        world.postgres(world.analyst, name="other")
+    with pytest.raises(PermissionDenied):
+        service.update(world.analyst, "prod", "crm-db", settings={"user": "writer"})
+    with pytest.raises(PermissionDenied):
+        service.delete(world.analyst, "prod", "crm-db")
+    with pytest.raises(PermissionDenied):
+        service.get(world.analyst, "dev", "crm-db")
+
+    denials = world.events(AuditEventType.AUTHORIZATION_DENIED)
+    assert [event.detail["action"] for event in denials] == [
+        "MANAGE_CONNECTION",
+        "MANAGE_CONNECTION",
+        "MANAGE_CONNECTION",
+        "READ_ENVIRONMENT",
+    ]
+    assert world.connection("prod", "other") is None
+    row = world.connection("prod", "crm-db")
+    assert row is not None and row.settings == {"user": "reader", "tls": "verify-full"}
+
+
+def test_an_unknown_environment_or_connection_is_not_found(world: World) -> None:
+    """A 404 names the listing command and nothing else."""
+    service = world.connections()
+
+    with pytest.raises(NotFoundError) as caught:
+        service.get(world.admin, "prod", "nope")
+    assert str(caught.value) == (
+        "environment `prod` has no connection `nope`; `lakana connection list --env prod` "
+        "lists them"
+    )
+    with pytest.raises(NotFoundError):
+        service.get(world.admin, "prod", "not\x00a-name")
+    with pytest.raises(NotFoundError, match="No environment named 'qa'"):
+        service.list(world.admin, "qa")
+
+
+def test_naming_an_unbound_secret_needs_manage_secret(world: World) -> None:
+    """S1: --secret of an unbound secret binds only for a MANAGE_SECRET holder.
+
+    A data engineer is refused with `lakana secret bind <name> --env prod --connection crm-db`.
+    """
+    world.make_secret("prod", "crm-pw", {"password": "pw"})
+
+    with pytest.raises(PermissionDenied) as caught:
+        world.postgres(world.data_engineer, secret="crm-pw", secret_values=None)
+
+    assert "lakana secret bind crm-pw --env prod --connection crm-db" in str(caught.value)
+    assert str(caught.value).startswith(
+        "Secret 'crm-pw' of environment 'prod' is not bound to connection 'crm-db'."
+    )
+    assert world.connection("prod", "crm-db") is None
+    assert world.secret("prod", "crm-pw").use_kind is None
+    assert world.denial_reasons()[-1] == "secret_not_bound_to_entry"
+
+    view = world.postgres(world.admin, secret="crm-pw", secret_values=None)
+
+    assert view.secret == "crm-pw"
+    secret = world.secret("prod", "crm-pw")
+    assert (secret.use_kind, secret.use_target_id) == (
+        SecretUseKind.CONNECTION,
+        world.connection_id("prod", "crm-db"),
+    )
+    bound = world.events(AuditEventType.SECRET_BOUND)[-1]
+    assert (bound.principal_id, bound.detail["use"], bound.detail["target"]) == (
+        world.admin.id,
+        "connection",
+        "crm-db",
+    )
+
+
+def test_a_secret_of_that_name_in_another_environment_is_neither_found_nor_bound(
+    world: World,
+) -> None:
+    """A connection's secret lives in its own environment; another one's is never touched."""
+    world.make_secret("dev", "shared", {"password": "dev-pw"})
+
+    with pytest.raises(NotFoundError) as caught:
+        world.postgres(world.admin, secret="shared", secret_values=None)
+    assert str(caught.value) == (
+        "environment `prod` has no secret `shared`; `lakana secret list --env prod` lists them"
+    )
+
+    world.make_secret("prod", "shared", {"password": "prod-pw"})
+    world.postgres(world.admin, secret="shared", secret_values=None)
+
+    assert world.secret("prod", "shared").use_kind is SecretUseKind.CONNECTION
+    assert world.secret("dev", "shared").use_kind is None
+
+
+def test_a_secret_bound_elsewhere_is_refused_to_everyone_without_manage_secret(
+    world: World,
+) -> None:
+    """S1: a secret bound to an index cannot be named by a data engineer.
+
+    Nor by an administrator: moving it takes an explicit `lakana secret bind`.
+    """
+    index = PackageIndexService(world.session, world.authz()).create(
+        world.admin, name="corp", url="https://corp.example.org/simple"
+    )
+    world.make_secret("prod", "corp-pw", {"password": "pw"}, SecretUse.package_index(index))
+
+    for who in (world.data_engineer, world.admin):
+        with pytest.raises(PermissionDenied) as caught:
+            world.postgres(who, secret="corp-pw", secret_values=None)
+        assert "is bound to package index 'corp', not to connection 'crm-db'" in str(caught.value)
+        assert "lakana secret bind corp-pw --env prod --connection crm-db" in str(caught.value)
+
+    assert world.denial_reasons()[-2:] == ["secret_bound_elsewhere", "secret_bound_elsewhere"]
+    assert world.connection("prod", "crm-db") is None
+    secret = world.secret("prod", "corp-pw")
+    assert (secret.use_kind, secret.use_target_id) == (SecretUseKind.PACKAGE_INDEX, index.id)
+
+
+def test_a_secret_its_environment_uses_is_refused(world: World) -> None:
+    """The storage secret is never offered to a connection."""
+    world.make_secret("prod", "s3", {"password": "pw"})
+    env = world.session.execute(select(Environment).where(Environment.name == "prod")).scalar_one()
+    env.storage_secret_ref = "s3"
+    world.session.commit()
+
+    with pytest.raises(PermissionDenied, match="serves its environment"):
+        world.postgres(world.admin, secret="s3", secret_values=None)
+    assert world.denial_reasons()[-1] == "secret_used_by_environment"
+
+
+def test_keeping_the_bound_secret_needs_only_manage_connection(world: World) -> None:
+    """Naming the secret already bound to this connection passes for a data engineer."""
+    world.postgres(world.data_engineer)
+    service = world.connections()
+
+    view = service.update(
+        world.data_engineer,
+        "prod",
+        "crm-db",
+        secret="crm-db-connection",
+        settings={"user": "writer"},
+    )
+    assert (view.secret, view.settings["user"]) == ("crm-db-connection", "writer")
+
+    row = world.connection("prod", "crm-db")
+    assert row is not None
+    world.make_secret("prod", "new-pw", {"password": "new"}, SecretUse.connection(row))
+    view = service.update(world.data_engineer, "prod", "crm-db", secret="new-pw")
+
+    assert view.secret == "new-pw"
+    assert world.secret("prod", "new-pw").use_kind is SecretUseKind.CONNECTION
+    # A connection has one bound secret: the one it named before is let go, so it can never
+    # be named again without the right to manage secrets.
+    assert world.secret("prod", "crm-db-connection").use_kind is None
+    with pytest.raises(PermissionDenied):
+        service.update(world.data_engineer, "prod", "crm-db", secret="crm-db-connection")
+
+
+_MOVES: list[tuple[ConnectionKind, dict[str, Any], dict[str, Any], dict[str, str], str, Any]] = [
+    (ConnectionKind.POSTGRESQL, _PG, {"user": "r"}, {"password": "p"}, "address", {"host": "x.io"}),
+    (ConnectionKind.POSTGRESQL, _PG, {"user": "r"}, {"password": "p"}, "address", {"port": 6543}),
+    (
+        ConnectionKind.POSTGRESQL,
+        _PG,
+        {"user": "r"},
+        {"password": "p"},
+        "settings",
+        {"tls": "disable"},
+    ),
+    (ConnectionKind.POSTGRESQL, _PG, {"user": "r"}, {"password": "p"}, "settings", "ca"),
+    (
+        ConnectionKind.HTTP,
+        {"base_url": "https://api.example.com/v1"},
+        {"auth": "bearer"},
+        {"token": "t"},
+        "address",
+        {"base_url": "https://evil.example.net/v1"},
+    ),
+    (
+        ConnectionKind.HTTP,
+        {"base_url": "https://api.example.com/v1"},
+        {"auth": "api_key", "api_key_name": "X-Key"},
+        {"api_key": "k"},
+        "settings",
+        {"api_key_in": "query"},
+    ),
+    (
+        ConnectionKind.HTTP,
+        {"base_url": "https://api.example.com/v1"},
+        {"auth": "oauth2", "client_id": "c", "token_url": "https://id.example.com/token"},
+        {"client_secret": "s"},
+        "settings",
+        {"token_url": "https://evil.example.net/token"},
+    ),
+    (
+        ConnectionKind.S3,
+        {"bucket": "raw-data", "region": "eu-west-1"},
+        {"access_key_id": "AKIA"},
+        {"secret_access_key": "s"},
+        "address",
+        {"endpoint": "https://evil.example.net"},
+    ),
+    (
+        ConnectionKind.S3,
+        {"bucket": "raw-data", "region": "eu-west-1"},
+        {"access_key_id": "AKIA"},
+        {"secret_access_key": "s"},
+        "address",
+        {"bucket": "other-data"},
+    ),
+    (
+        ConnectionKind.AZURE,
+        {"account": "corpdata", "container": "exports"},
+        {},
+        {"account_key": "k"},
+        "address",
+        {"account": "evilcorp"},
+    ),
+]
+
+
+@pytest.mark.parametrize(("kind", "address", "settings", "values", "part", "change"), _MOVES)
+def test_an_address_change_of_a_connection_with_a_secret_needs_manage_secret(
+    world: World,
+    test_ca_pem: str,
+    kind: ConnectionKind,
+    address: dict[str, Any],
+    settings: dict[str, Any],
+    values: dict[str, str],
+    part: str,
+    change: dict[str, Any] | str,
+) -> None:
+    """S1: moving the address of a connection with a secret is refused for a data engineer.
+
+    Moving host, port, base_url, endpoint, token_url, bucket or account (or weakening how the
+    secret is sent) needs new secret values in the same request; an admin may.
+
+    Parameters
+    ----------
+    world
+        The world.
+    test_ca_pem
+        A CA certificate.
+    kind
+        The connection's kind.
+    address
+        Its address.
+    settings
+        Its settings.
+    values
+        Its secret's values.
+    part
+        ``address`` or ``settings``: what the update changes.
+    change
+        The change.
+    """
+    changes = {"ca_certificate": test_ca_pem} if change == "ca" else change
+    assert isinstance(changes, dict)
+    moving: dict[str, Any] = {
+        "address": changes if part == "address" else None,
+        "settings": changes if part == "settings" else None,
+    }
+    service = world.connections()
+    service.create(
+        world.data_engineer,
+        "prod",
+        name="src",
+        kind=kind,
+        address=address,
+        settings=settings,
+        secret_values=values,
+    )
+    before = world.connection("prod", "src")
+    assert before is not None
+    stored = (dict(before.address), dict(before.settings))
+
+    with pytest.raises(PermissionDenied) as caught:
+        service.update(
+            world.data_engineer,
+            "prod",
+            "src",
+            address=moving["address"],
+            settings=moving["settings"],
+        )
+
+    assert str(caught.value) == (
+        "This change of connection 'src' (its address, TLS, CA certificate or how it sends its "
+        "secret) could send secret 'src-connection' of environment 'prod' somewhere new. That "
+        "needs the right to manage secrets in 'prod' (the ADMIN role). Give the connection a new "
+        "secret in the same change instead (`lakana connection update src --env prod ... "
+        "--password-stdin`, or --values-stdin), or ask someone who may manage secrets in 'prod' "
+        "to make the change, or to bind the secret elsewhere first: lakana secret bind "
+        "src-connection --env prod (with --index NAME, --repository NAME, --connection NAME or "
+        "--own-env)"
+    )
+    assert world.denial_reasons()[-1] == "url_moves_bound_secret"
+    after = world.connection("prod", "src")
+    assert after is not None and (after.address, after.settings) == stored
+
+    view = service.update(
+        world.admin, "prod", "src", address=moving["address"], settings=moving["settings"]
+    )
+    for key, value in changes.items():
+        if key != "ca_certificate":
+            assert getattr(view, part)[key] == value
+
+
+def test_a_change_that_moves_nothing_needs_no_manage_secret(world: World) -> None:
+    """The database or the user go nowhere new; a connection without a secret moves freely."""
+    world.postgres(world.data_engineer)
+    service = world.connections()
+
+    view = service.update(
+        world.data_engineer,
+        "prod",
+        "crm-db",
+        address={"database": "crm2"},
+        settings={"user": "other"},
+    )
+    assert (view.address["database"], view.settings["user"]) == ("crm2", "other")
+
+    world.postgres(world.data_engineer, name="plain", secret_values=None)
+    moved = service.update(world.data_engineer, "prod", "plain", address={"host": "x.example.org"})
+    assert moved.address["host"] == "x.example.org"
+
+
+def test_new_values_on_update_rotate_the_bound_secret(world: World) -> None:
+    """--password-stdin on update rotates the connection's own secret (SECRET_ROTATED).
+
+    So the address may move in the same request.
+    """
+    world.postgres(world.data_engineer)
+    before = world.secret("prod", "crm-db-connection").id
+
+    view = world.connections().update(
+        world.data_engineer,
+        "prod",
+        "crm-db",
+        address={"host": "new.example.com"},
+        secret_values={"password": "rotated-value"},
+    )
+
+    assert (view.address["host"], view.secret) == ("new.example.com", "crm-db-connection")
+    assert world.secret("prod", "crm-db-connection").id == before
+    assert world.values("prod", "crm-db-connection") == {"password": "rotated-value"}
+    assert world.audit_types()[-2:] == ["SECRET_ROTATED", "CONNECTION_UPDATED"]
+    updated = world.events(AuditEventType.CONNECTION_UPDATED)[-1]
+    assert updated.detail == {
+        "name": "crm-db",
+        "changed": ["address.host", "secret"],
+        "address": {"host": "new.example.com", "port": 5432, "database": "crm"},
+        "secret": "crm-db-connection",
+    }
+    assert "rotated-value" not in world.audit_details_text()
+
+
+def test_new_values_never_rotate_a_secret_that_was_moved_elsewhere(world: World) -> None:
+    """A secret an administrator bound elsewhere is no longer the connection's to rotate."""
+    world.postgres(world.data_engineer)
+    index = PackageIndexService(world.session, world.authz()).create(
+        world.admin, name="corp", url="https://corp.example.org/simple"
+    )
+    moved = world.secret("prod", "crm-db-connection")
+    world.secrets().bind(world.admin, moved.id, SecretUse.package_index(index))
+
+    with pytest.raises(AlreadyExistsError, match="a secret `crm-db-connection` already exists"):
+        world.connections().update(
+            world.data_engineer, "prod", "crm-db", secret_values={"password": "mine"}
+        )
+
+    assert world.values("prod", "crm-db-connection") == {"password": "s3cr3t-value"}
+    assert world.secret("prod", "crm-db-connection").use_kind is SecretUseKind.PACKAGE_INDEX
+
+
+def test_new_values_give_a_connection_without_a_secret_its_own(world: World) -> None:
+    """Values on update create `<name>-connection`, born bound, as on create."""
+    world.postgres(world.data_engineer, secret_values=None)
+
+    view = world.connections().update(
+        world.data_engineer, "prod", "crm-db", secret_values={"password": "first"}
+    )
+
+    assert view.secret == "crm-db-connection"
+    assert world.secret("prod", "crm-db-connection").use_kind is SecretUseKind.CONNECTION
+    assert world.values("prod", "crm-db-connection") == {"password": "first"}
+
+
+def test_the_secret_values_are_checked_for_the_kind(world: World) -> None:
+    """A key the kind does not take is refused before anything is stored."""
+    with pytest.raises(ValidationError, match="token is not a secret key of kind postgresql"):
+        world.postgres(world.data_engineer, secret_values={"token": "t"})
+    assert world.connection("prod", "crm-db") is None
+    with pytest.raises(ValidationError, match="kind directory takes no secret"):
+        world.connections().create(
+            world.admin,
+            "prod",
+            name="exports",
+            kind=ConnectionKind.DIRECTORY,
+            address={"root": "shared", "path": "exports"},
+            settings={},
+            secret="anything",
+        )
+
+
+def test_name_and_kind_are_immutable(world: World) -> None:
+    """ConnectionUpdate carries neither; the service has no way to change them."""
+    parameters = set(inspect.signature(ConnectionService.update).parameters)
+
+    assert parameters == {
+        "self",
+        "p",
+        "environment",
+        "name",
+        "address",
+        "settings",
+        "secret",
+        "secret_values",
+        "clear",
+    }
+    world.postgres(world.data_engineer, secret_values=None)
+    with pytest.raises(ValidationError, match=r"address\.kind is not a field"):
+        world.connections().update(world.data_engineer, "prod", "crm-db", address={"kind": "http"})
+    row = world.connection("prod", "crm-db")
+    assert row is not None and (row.name, row.kind) == ("crm-db", ConnectionKind.POSTGRESQL)
+
+
+def test_clear_removes_a_setting_and_the_secret(world: World, test_ca_pem: str) -> None:
+    """clear=["ca_certificate"] drops the setting; clear=["secret"] leaves the secret unbound."""
+    world.postgres(world.data_engineer, settings={"user": "r", "ca_certificate": test_ca_pem})
+    service = world.connections()
+
+    view = service.update(world.data_engineer, "prod", "crm-db", clear=["secret"])
+
+    assert view.secret is None
+    secret = world.secret("prod", "crm-db-connection")
+    assert (secret.use_kind, secret.use_target_id, secret.revoked_at) == (None, None, None)
+    unbound = world.events(AuditEventType.SECRET_BOUND)[-1]
+    assert (unbound.detail["use"], unbound.detail["previous"]) == (None, "connection")
+
+    view = service.update(world.data_engineer, "prod", "crm-db", clear=["ca_certificate"])
+
+    assert "ca_certificate" not in view.settings
+    row = world.connection("prod", "crm-db")
+    assert row is not None and "ca_certificate" not in row.settings and row.secret_id is None
+    with pytest.raises(ValidationError, match="nothing to clear called `nope`"):
+        service.update(world.data_engineer, "prod", "crm-db", clear=["nope"])
+    with pytest.raises(ValidationError, match="Nothing to change"):
+        service.update(world.data_engineer, "prod", "crm-db")
+
+
+def test_a_null_value_removes_a_key(world: World, test_ca_pem: str) -> None:
+    """A key given as None is removed, as JSON null is in a PATCH."""
+    world.postgres(world.admin, settings={"user": "r", "ca_certificate": test_ca_pem})
+
+    view = world.connections().update(
+        world.admin, "prod", "crm-db", settings={"ca_certificate": None}
+    )
+
+    assert "ca_certificate" not in view.settings
+
+
+def test_http_addresses_are_refused_at_create_and_update(world: World) -> None:
+    """S3: an http:// base_url or endpoint is a 422 naming the field, both ways."""
+    service = world.connections()
+
+    with pytest.raises(ValidationError, match=r"address\.base_url"):
+        service.create(
+            world.data_engineer,
+            "prod",
+            name="api",
+            kind=ConnectionKind.HTTP,
+            address={"base_url": "http://api.example.com"},
+            settings={},
+        )
+    with pytest.raises(ValidationError, match=r"address\.endpoint"):
+        service.create(
+            world.data_engineer,
+            "prod",
+            name="lake",
+            kind=ConnectionKind.S3,
+            address={"bucket": "raw-data", "region": "eu-west-1", "endpoint": "http://s3.local"},
+            settings={"access_key_id": "AKIA"},
+        )
+    assert world.connection("prod", "api") is None
+    service.create(
+        world.data_engineer,
+        "prod",
+        name="api",
+        kind=ConnectionKind.HTTP,
+        address={"base_url": "https://api.example.com"},
+        settings={},
+    )
+    with pytest.raises(ValidationError, match=r"address\.base_url"):
+        service.update(
+            world.data_engineer, "prod", "api", address={"base_url": "http://api.example.com"}
+        )
+    row = world.connection("prod", "api")
+    assert row is not None and row.address == {"base_url": "https://api.example.com"}
+
+
+def test_no_response_or_audit_row_holds_a_secret_value(
+    world: World,
+    caplog: pytest.LogCaptureFixture,
+    capfd: pytest.CaptureFixture[str],
+    test_ca_pem: str,
+) -> None:
+    """create, update, get, list and the audit rows never contain the value or the CA text.
+
+    Parameters
+    ----------
+    world
+        The world.
+    caplog
+        Captures log records.
+    capfd
+        Captures the process's output.
+    test_ca_pem
+        A CA certificate.
+    """
+    caplog.set_level(logging.DEBUG)
+    service = world.connections()
+    body = test_ca_pem.splitlines()[1]
+    views = [
+        world.postgres(world.admin, settings={"user": "r", "ca_certificate": test_ca_pem}),
+        service.update(world.admin, "prod", "crm-db", secret_values={"password": "second-value"}),
+        service.get(world.admin, "prod", "crm-db"),
+        *service.list(world.admin, "prod").items,
+    ]
+
+    for view in views:
+        assert view.settings["ca_certificate"].startswith("sha256:")
+        for text in (repr(view), str(view)):
+            for leaked in ("s3cr3t-value", "second-value", body):
+                assert leaked not in text
+    out, err = capfd.readouterr()
+    for text in (world.audit_details_text(), caplog.text, out, err):
+        for leaked in ("s3cr3t-value", "second-value", body):
+            assert leaked not in text
+
+
+def test_delete_is_refused_while_a_deployed_version_declares_it(world: World) -> None:
+    """Delete is a 409 naming the first declaring asset; after a deploy without it, it succeeds.
+
+    "connection `crm-db` is used by `analytics: customers` in `prod`; deploy a version without
+    it first."
+    """
+    world.postgres(world.data_engineer)
+    service = world.connections()
+    world.deploy_manifest("prod", "analytics", {"customers": ["crm-db"], "orders": []})
+    world.deploy_manifest("dev", "analytics", {"customers": []})
+
+    assert service.get(world.analyst, "prod", "crm-db").declared_by == [("analytics", "customers")]
+    with pytest.raises(ConflictError) as caught:
+        service.delete(world.data_engineer, "prod", "crm-db")
+    assert str(caught.value) == (
+        "connection `crm-db` is used by `analytics: customers` in `prod`; deploy a version "
+        "without it first."
+    )
+
+    world.deploy_manifest("prod", "billing", {"invoices": ["crm-db"], "payments": ["crm-db"]})
+    with pytest.raises(ConflictError) as caught:
+        service.delete(world.data_engineer, "prod", "crm-db")
+    assert str(caught.value) == (
+        "connection `crm-db` is used by `analytics: customers` and 2 more in `prod`; deploy a "
+        "version without it first."
+    )
+    assert world.connection("prod", "crm-db") is not None
+
+    world.deploy_manifest("prod", "analytics", {"customers": []})
+    world.deploy_manifest("prod", "billing", {"invoices": []})
+    service.delete(world.data_engineer, "prod", "crm-db")
+
+    assert world.connection("prod", "crm-db") is None
+    secret = world.secret("prod", "crm-db-connection")
+    assert (secret.use_kind, secret.use_target_id) == (None, None)
+    assert world.audit_types()[-2:] == ["SECRET_BOUND", "CONNECTION_DELETED"]
+    assert world.events(AuditEventType.CONNECTION_DELETED)[-1].detail == {
+        "name": "crm-db",
+        "kind": "postgresql",
+    }
+
+
+def test_declared_by_reads_an_unusual_manifest_without_failing(world: World) -> None:
+    """Entries that are not Python assets or whose connections are malformed declare nothing."""
+    world.postgres(world.admin, secret_values=None)
+    version = deploy_manifest(world.session, "prod", "analytics", {"customers": ["crm-db"]})
+    version.manifest_json = {
+        "assets": [
+            "junk",
+            {"table": "a", "kind": "sql", "connections": ["crm-db"]},
+            {"table": "b", "kind": "python", "connections": "crm-db"},
+            {"table": "c", "kind": "python", "connections": [1, None]},
+            {"table": 7, "kind": "python", "connections": ["crm-db"]},
+            {"table": "d", "kind": "python", "connections": ["crm-db"]},
+        ]
+    }
+    world.session.commit()
+
+    env_id = world.session.execute(
+        select(Environment.id).where(Environment.name == "prod")
+    ).scalar_one()
+    assert world.connections().declared_by(env_id, "crm-db") == [("analytics", "d")]
+
+
+def test_list_is_paged(world: World) -> None:
+    """`limit` and `cursor` follow "Paginated list endpoints"."""
+    for name in ("first", "second", "third"):
+        world.postgres(world.data_engineer, name=name, secret_values=None)
+    world.connections().create(
+        world.data_engineer,
+        "dev",
+        name="elsewhere",
+        kind=ConnectionKind.POSTGRESQL,
+        address=dict(_PG),
+        settings={"user": "r"},
+    )
+    service = world.connections()
+
+    page = service.list(world.analyst, "prod", limit=2)
+    assert [view.name for view in page.items] == ["third", "second"]
+    assert page.next_cursor is not None
+    rest = service.list(world.analyst, "prod", limit=2, cursor=page.next_cursor)
+    assert [view.name for view in rest.items] == ["first"]
+    assert rest.next_cursor is None
+    with pytest.raises(ValidationError):
+        service.list(world.analyst, "prod", limit=0)
+    with pytest.raises(ValidationError):
+        service.list(world.analyst, "prod", cursor="not-a-cursor")
+
+
+def test_missing_connections_names_what_an_environment_lacks(world: World) -> None:
+    """In the order given; the lock is a no-op on SQLite and changes nothing here."""
+    world.postgres(world.admin, secret_values=None)
+    env_id = world.session.execute(
+        select(Environment.id).where(Environment.name == "prod")
+    ).scalar_one()
+
+    for lock in (False, True):
+        assert missing_connections(
+            world.session, env_id, ["zeta", "crm-db", "alpha"], lock=lock
+        ) == ["zeta", "alpha"]
+    assert missing_connections(world.session, env_id, [], lock=True) == []
+
+
+def test_a_secret_manager_binds_a_secret_to_a_connection_of_its_own_environment_only(
+    world: World,
+) -> None:
+    """`lakana secret bind --connection` finds the connection in the secret's environment."""
+    world.postgres(world.admin, secret_values=None)
+    secret = world.make_secret("dev", "pw", {"password": "p"})
+    service = world.secrets()
+
+    with pytest.raises(NotFoundError) as caught:
+        service.use_from_names(world.admin, "dev", SecretUseKind.CONNECTION, "crm-db")
+    assert str(caught.value) == (
+        "No connection named 'crm-db' in environment 'dev'; `lakana connection list --env dev` "
+        "shows them."
+    )
+    prod_row = world.connection("prod", "crm-db")
+    assert prod_row is not None
+    with pytest.raises(ValidationError, match="belongs to environment 'prod'"):
+        service.bind(world.admin, secret.id, SecretUse.connection(prod_row))
+    assert world.secret("dev", "pw").use_kind is None
+
+    use = service.use_from_names(world.admin, "prod", SecretUseKind.CONNECTION, "crm-db")
+    prod_secret = world.make_secret("prod", "pw", {"password": "p"}, use)
+    assert (prod_secret.use_kind, prod_secret.use_target_id) == (
+        SecretUseKind.CONNECTION,
+        prod_row.id,
+    )
+    assert service.use_target_name(prod_secret) == "crm-db"
+    assert service.use_target_url(prod_secret) == "db.example.com:5432"
+    with pytest.raises(ValidationError, match="Name the connection"):
+        resolve_use(
+            world.session, SecretUseKind.CONNECTION, None, environment_id=prod_row.environment_id
+        )
+
+
+def test_new_values_let_go_of_any_other_secret_bound_to_the_connection(world: World) -> None:
+    """After a rotation only the rotated secret is bound, so an old one cannot be kept again."""
+    world.postgres(world.data_engineer)
+    row = world.connection("prod", "crm-db")
+    assert row is not None
+    world.make_secret("prod", "old-pw", {"password": "old"}, SecretUse.connection(row))
+
+    world.connections().update(
+        world.data_engineer,
+        "prod",
+        "crm-db",
+        address={"host": "new.example.com"},
+        secret_values={"password": "rotated"},
+    )
+
+    assert world.secret("prod", "old-pw").use_kind is None
+    assert world.secret("prod", "crm-db-connection").use_kind is SecretUseKind.CONNECTION
+    with pytest.raises(PermissionDenied):
+        world.connections().update(world.data_engineer, "prod", "crm-db", secret="old-pw")
+
+
+def test_a_revoked_secret_cannot_be_named(world: World) -> None:
+    """A revoked secret is not found, for an administrator too."""
+    secret = world.make_secret("prod", "gone-pw", {"password": "p"})
+    world.secrets().revoke(world.admin, secret.id)
+
+    with pytest.raises(NotFoundError, match="has no secret `gone-pw`"):
+        world.postgres(world.admin, secret="gone-pw", secret_values=None)
+    assert world.connection("prod", "crm-db") is None
+
+
+def test_settings_that_take_no_secret_need_the_secret_cleared(world: World) -> None:
+    """An http connection moved to auth none cannot keep a secret it would never send."""
+    service = world.connections()
+    service.create(
+        world.admin,
+        "prod",
+        name="api",
+        kind=ConnectionKind.HTTP,
+        address={"base_url": "https://api.example.com"},
+        settings={"auth": "bearer"},
+        secret_values={"token": "t0ken-value"},
+    )
+
+    with pytest.raises(ValidationError, match="would use a secret its settings do not take"):
+        service.update(world.admin, "prod", "api", settings={"auth": "none"})
+    row = world.connection("prod", "api")
+    assert row is not None and row.settings == {"auth": "bearer"}
+
+    view = service.update(world.admin, "prod", "api", settings={"auth": "none"}, clear=["secret"])
+    assert (view.settings, view.secret) == ({"auth": "none"}, None)

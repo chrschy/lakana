@@ -25,6 +25,12 @@ from lakana_core.models.audit_event import AuditEvent, AuditEventType
 from lakana_core.models.lineage_edge import LineageEdge
 from lakana_core.models.repository import Repository, RepositoryKind
 from lakana_core.models.package_index import PackageIndex
+from lakana_core.models.connection import (
+    Connection,
+    ConnectionTest,
+    ConnectionTestOutcome,
+    ConnectionTestState,
+)
 from lakana_core.models.deploy import (
     DeployKind,
     DeployRun,
@@ -67,6 +73,10 @@ __all__ = [
     "CiTrustRule",
     "ColumnDescription",
     "ColumnMask",
+    "Connection",
+    "ConnectionTest",
+    "ConnectionTestOutcome",
+    "ConnectionTestState",
     "DeployKind",
     "DeployRun",
     "DeployStatus",

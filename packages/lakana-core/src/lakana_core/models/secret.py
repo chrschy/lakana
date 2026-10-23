@@ -30,6 +30,8 @@ class SecretUseKind(enum.StrEnum):
     PACKAGE_INDEX = "package_index"
     REPOSITORY = "repository"
     ENVIRONMENT = "environment"
+    CONNECTION = "connection"
+    """A connection of its environment."""
 
 
 class Secret(Base):
@@ -54,10 +56,11 @@ class Secret(Base):
     `name` is unique per `environment_id`, not globally — two different
     environments may each have a secret of the same name.
 
-    `use_kind` and `use_target_id` say what the secret is for: a package index or a
-    repository (by id), or its environment (storage, webhooks, tasks). A binding to an
-    index or repository that is later deleted keeps pointing at the gone id, so it never
-    becomes unbound by itself (`lakana_core.secrets.uses`).
+    `use_kind` and `use_target_id` say what the secret is for: a package index, a
+    repository or a connection of its environment (by id), or its environment (storage,
+    webhooks, tasks). A binding to an index or repository that is later deleted keeps
+    pointing at the gone id, so it never becomes unbound by itself; deleting a connection
+    unbinds its secrets (`lakana_core.connections.service`).
 
     Soft-deleted on revoke (`revoked_by`/`revoked_at`), matching every
     other model's convention: the encrypted blob is harmless at rest
@@ -71,7 +74,8 @@ class Secret(Base):
         CheckConstraint(
             "(use_kind IS NULL AND use_target_id IS NULL)"
             " OR (use_kind IS NOT NULL AND use_kind = 'ENVIRONMENT' AND use_target_id IS NULL)"
-            " OR (use_kind IS NOT NULL AND use_kind IN ('PACKAGE_INDEX', 'REPOSITORY')"
+            " OR (use_kind IS NOT NULL"
+            " AND use_kind IN ('PACKAGE_INDEX', 'REPOSITORY', 'CONNECTION')"
             " AND use_target_id IS NOT NULL)",
             name="use_consistent",
         ),

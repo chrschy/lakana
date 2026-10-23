@@ -218,7 +218,8 @@ _URL_REFUSAL = (
     "Changing the URL of {use} would send secret '{secret}' of environment 'prod' to another "
     "host. That needs the right to manage secrets in 'prod' (the ADMIN role). Ask someone who "
     "may manage secrets in 'prod' to change the URL, or to bind the secret elsewhere first: "
-    "lakana secret bind {secret} --env prod (with --index NAME, --repository NAME or --own-env)"
+    "lakana secret bind {secret} --env prod (with --index NAME, --repository NAME, "
+    "--connection NAME or --own-env)"
 )
 
 

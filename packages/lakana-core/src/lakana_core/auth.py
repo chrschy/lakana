@@ -305,6 +305,10 @@ class Action(enum.StrEnum):
     MANAGE_SECRET = "MANAGE_SECRET"  # nosec B105 -- an Action enum label, not a credential
     """Create, list, rotate, or revoke a secret, or reference one by name in
     an environment's storage config. Environment-scoped."""
+    MANAGE_CONNECTION = "MANAGE_CONNECTION"
+    """Create, change, delete or test a connection of an environment. Environment-scoped;
+    reading connections is `READ_ENVIRONMENT`. Not a task-token action: a task fetches a
+    connection by its bound token's own binding, never by a grant."""
     READ_AUDIT_LOG = "READ_AUDIT_LOG"
     """Read the audit log. Instance-scoped — a security-review/compliance
     function reserved for organization-wide admins, not delegated

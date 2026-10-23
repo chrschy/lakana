@@ -45,6 +45,7 @@ from lakana_core.errors import AlreadyExistsError, PermissionDenied
 from lakana_core.identifiers import NamespacePath, TableRef
 from lakana_core.models import (
     Environment,
+    EnvironmentDeployment,
     JobVersion,
     Namespace,
     Repository,
@@ -567,11 +568,12 @@ PRE_M5A_ACTIONS = frozenset(action.value for action in Action) - {
     "MANAGE_REPOSITORY",
     "RUN",
     "MANAGE_PACKAGE_INDEX",
+    "MANAGE_CONNECTION",
 }
 """Every `Action` value the release before write runs (0.4.x) knows: write runs added
 `MAINTAIN_TABLE`,
 projects `DEPLOY` and `MANAGE_REPOSITORY`, the run engine `RUN`, package indexes
-`MANAGE_PACKAGE_INDEX`."""
+`MANAGE_PACKAGE_INDEX`, connections `MANAGE_CONNECTION`."""
 
 _PreM5aAction = enum.Enum("_PreM5aAction", {value: value for value in sorted(PRE_M5A_ACTIONS)})
 
@@ -1124,3 +1126,72 @@ LEGACY_SECRET = EncryptedSecret(
     format_version=1,
     key_id="env",
 )
+
+
+def deploy_manifest(
+    session: Session, environment: str, repository: str, assets: Mapping[str, Sequence[str]]
+) -> JobVersion:
+    """Make a project version whose Python assets declare connections the current one.
+
+    Stores a `JobVersion` whose manifest has one Python entry per asset, each with its
+    `connections`, and points the environment's deployment of the repository at it. The
+    repository is registered on first use.
+
+    Parameters
+    ----------
+    session
+        Database session; committed.
+    environment
+        The environment's name; it must exist.
+    repository
+        The repository's name.
+    assets
+        Asset (table) name to the connections it declares.
+
+    Returns
+    -------
+    JobVersion
+        The new current version.
+    """
+    env_id = session.execute(
+        select(Environment.id).where(Environment.name == environment)
+    ).scalar_one()
+    repo = session.execute(
+        select(Repository).where(Repository.name == repository)
+    ).scalar_one_or_none()
+    if repo is None:
+        repo = Repository(
+            id=uuid.uuid4(),
+            name=repository,
+            kind=RepositoryKind.HTTPS,
+            url=f"https://git.example.org/{repository}.git",
+        )
+        session.add(repo)
+        session.flush()
+    version = JobVersion(
+        id=uuid.uuid4(),
+        repository_id=repo.id,
+        environment_id=env_id,
+        commit_sha=uuid.uuid4().hex + "00000000",
+        manifest_json={
+            "assets": [
+                {"table": table, "kind": "python", "connections": list(names)}
+                for table, names in assets.items()
+            ]
+        },
+        code_uri="file:///code.tar.gz",
+        code_sha256="0" * 64,
+    )
+    session.add(version)
+    session.flush()
+    pointer = session.get(EnvironmentDeployment, (env_id, repo.id))
+    if pointer is None:
+        session.add(
+            EnvironmentDeployment(
+                environment_id=env_id, repository_id=repo.id, current_job_version_id=version.id
+            )
+        )
+    else:
+        pointer.current_job_version_id = version.id
+    session.commit()
+    return version

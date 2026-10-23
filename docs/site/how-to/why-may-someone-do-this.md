@@ -31,6 +31,7 @@ What alice may do on environment dev:
 │ SUBMIT_QUERY       │ yes     │ role ANALYST on environment dev │
 │ MANAGE_ENVIRONMENT │ no      │                                 │
 │ MANAGE_SECRET      │ no      │                                 │
+│ MANAGE_CONNECTION  │ no      │                                 │
 │ DEPLOY             │ no      │                                 │
 │ RUN                │ no      │                                 │
 └────────────────────┴─────────┴─────────────────────────────────┘

@@ -2,7 +2,9 @@
 
 from itertools import pairwise
 
-from lakana_core.auth import Action
+from lakana_core.auth import Action, SecurableKind
+from lakana_core.grants.authorization import TASK_TOKEN_ACTIONS
+from lakana_core.grants.explain import ACTIONS_AT
 from lakana_core.grants.roles import ROLE_ACTIONS, Role
 
 
@@ -41,12 +43,22 @@ def test_data_scientist_can_write_but_not_manage_namespaces_or_drop_tables() -> 
     assert added == {Action.CREATE_TABLE, Action.WRITE_TABLE}
 
 
-def test_data_engineer_adds_namespace_ddl_and_drop_table() -> None:
-    """data_engineer is data_scientist plus namespace lifecycle and DROP_TABLE."""
+def test_data_engineer_adds_namespace_ddl_drop_table_and_connections() -> None:
+    """data_engineer is data_scientist plus namespace lifecycle, DROP_TABLE and connections."""
     added = ROLE_ACTIONS[Role.DATA_ENGINEER] - ROLE_ACTIONS[Role.DATA_SCIENTIST]
     assert added == {
         Action.CREATE_NAMESPACE,
         Action.MANAGE_NAMESPACE,
         Action.DROP_NAMESPACE,
         Action.DROP_TABLE,
+        Action.MANAGE_CONNECTION,
     }
+
+
+def test_manage_connection_is_for_data_engineers_and_admins_and_never_a_task() -> None:
+    """Connections are managed by people; a task fetches one by its token's binding, not a grant."""
+    assert Action.MANAGE_CONNECTION in ROLE_ACTIONS[Role.DATA_ENGINEER]
+    assert Action.MANAGE_CONNECTION in ROLE_ACTIONS[Role.ADMIN]
+    assert Action.MANAGE_CONNECTION not in ROLE_ACTIONS[Role.DATA_SCIENTIST]
+    assert Action.MANAGE_CONNECTION not in TASK_TOKEN_ACTIONS
+    assert Action.MANAGE_CONNECTION in ACTIONS_AT[SecurableKind.ENVIRONMENT]

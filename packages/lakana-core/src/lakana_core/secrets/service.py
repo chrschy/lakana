@@ -21,11 +21,13 @@ from sqlalchemy.orm import Session
 
 from lakana_core.audit.service import AuditService
 from lakana_core.auth import Action, AuthorizationService, PrincipalRef, Securable
+from lakana_core.connections.endpoints import endpoints
 from lakana_core.errors import AlreadyExistsError, NotFoundError, ValidationError
 from lakana_core.identifiers import shown
 from lakana_core.models import (
     LIVE_ENVIRONMENT,
     AuditEventType,
+    Connection,
     Environment,
     Secret,
     SecretUseKind,
@@ -41,6 +43,155 @@ from lakana_core.secrets.uses import (
     target_row,
     used_by_its_environment,
 )
+
+
+def insert_secret(
+    session: Session,
+    key_provider: KeyProvider,
+    p: PrincipalRef,
+    environment: Environment,
+    *,
+    name: str,
+    values: dict[str, str],
+    use: SecretUse | None,
+) -> Secret:
+    """Encrypt and add a new secret, born bound to `use`; no authorization, no commit.
+
+    The caller has authorized, holds the lock of the entry `use` names (if any), and commits.
+    Adds `SECRET_CREATED`, and `SECRET_BOUND` when `use` is given.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    key_provider
+        Wraps the secret's fresh data key.
+    p
+        The acting principal, recorded as the creator.
+    environment
+        The secret's environment.
+    name
+        The secret's name, unique in the environment (the database refuses a second one when
+        the caller commits).
+    values
+        The plaintext values.
+    use
+        What the secret is for; `None` leaves it unbound.
+
+    Returns
+    -------
+    Secret
+        The pending row.
+
+    Raises
+    ------
+    ValidationError
+        If `use` is an index, repository or connection and the environment itself uses a
+        secret of this name, for storage or webhooks.
+    LakanaError
+        If no usable secrets master key is configured.
+    """
+    if (
+        use is not None
+        and use.kind is not SecretUseKind.ENVIRONMENT
+        and used_by_its_environment(session, environment, name)
+    ):
+        raise ValidationError(
+            f"Environment '{shown(environment.name)}' uses the name '{shown(name)}' for its "
+            f"storage or a webhook, so a secret of that name cannot be created for "
+            f"{use.wanted()}. Create it with --own-env, or give the {_noun(use)} a secret under "
+            "another name."
+        )
+    secret_id = uuid.uuid4()
+    encrypted = encrypt_secret_values(
+        values, key_provider, SecretBinding(secret_id, environment.id, name)
+    )
+    secret = Secret(
+        id=secret_id,
+        environment_id=environment.id,
+        name=name,
+        ciphertext=encrypted.ciphertext,
+        nonce=encrypted.nonce,
+        wrapped_data_key=encrypted.wrapped_data_key,
+        format_version=encrypted.format_version,
+        key_id=encrypted.key_id,
+        created_by=p.id,
+        created_at=datetime.now(UTC),
+    )
+    scope = Securable.environment_scope(environment.name)
+    AuditService(session).record(
+        p.id,
+        AuditEventType.SECRET_CREATED,
+        securable=scope,
+        detail={"name": name, "use": use.kind.value if use is not None else None},
+    )
+    if use is not None:
+        record_binding(session, p, secret, scope, use)
+    session.add(secret)
+    return secret
+
+
+def rotate_values(
+    session: Session,
+    key_provider: KeyProvider,
+    p: PrincipalRef,
+    secret: Secret,
+    values: dict[str, str],
+) -> None:
+    """Encrypt new values into a secret under a fresh data key; no authorization, no commit.
+
+    The caller has authorized and commits. Adds `SECRET_ROTATED`.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    key_provider
+        Wraps the fresh data key.
+    p
+        The acting principal.
+    secret
+        The secret, active.
+    values
+        The new plaintext values.
+
+    Raises
+    ------
+    LakanaError
+        If no usable secrets master key is configured.
+    """
+    env = session.get(Environment, secret.environment_id)
+    assert env is not None  # nosec B101 -- environment_id is a non-nullable FK with ON DELETE CASCADE
+    encrypted = encrypt_secret_values(
+        values, key_provider, SecretBinding(secret.id, secret.environment_id, secret.name)
+    )
+    AuditService(session).record(
+        p.id,
+        AuditEventType.SECRET_ROTATED,
+        securable=Securable.environment_scope(env.name),
+        detail={"name": secret.name},
+    )
+    secret.ciphertext = encrypted.ciphertext
+    secret.nonce = encrypted.nonce
+    secret.wrapped_data_key = encrypted.wrapped_data_key
+    secret.format_version = encrypted.format_version
+    secret.key_id = encrypted.key_id
+
+
+def _noun(use: SecretUse) -> str:
+    """Name the kind of entry a use is, for a message.
+
+    Parameters
+    ----------
+    use
+        An index, repository or connection use.
+
+    Returns
+    -------
+    str
+        ``connection`` for a connection, else ``index or repository``.
+    """
+    return "connection" if use.kind is SecretUseKind.CONNECTION else "index or repository"
 
 
 class SecretService:
@@ -157,47 +308,17 @@ class SecretService:
             If the acting principal may not manage secrets in this
             environment.
         ValidationError
-            If `use` is an index or repository and the environment itself uses a secret of
-            this name, for storage or webhooks.
+            If `use` is an index, repository or connection and the environment itself uses a
+            secret of this name, for storage or webhooks, or `use` is a connection of another
+            environment.
         """
         self._authz.authorize(p, Action.MANAGE_SECRET, Securable.environment_scope(environment))
         env = self._get_environment(environment)
         if use is not None:
-            use = lock_entry(self._session, use)
-            if use.kind is not SecretUseKind.ENVIRONMENT and used_by_its_environment(
-                self._session, env, name
-            ):
-                raise ValidationError(
-                    f"Environment '{shown(environment)}' uses the name '{shown(name)}' for its "
-                    f"storage or a webhook, so a secret of that name cannot be created for "
-                    f"{use.wanted()}. Create it with --own-env, or give the index or repository "
-                    "a secret under another name."
-                )
-        secret_id = uuid.uuid4()
-        encrypted = encrypt_secret_values(
-            values, self._key_provider, SecretBinding(secret_id, env.id, name)
+            use = lock_entry(self._session, use, env)
+        secret = insert_secret(
+            self._session, self._key_provider, p, env, name=name, values=values, use=use
         )
-        secret = Secret(
-            id=secret_id,
-            environment_id=env.id,
-            name=name,
-            ciphertext=encrypted.ciphertext,
-            nonce=encrypted.nonce,
-            wrapped_data_key=encrypted.wrapped_data_key,
-            format_version=encrypted.format_version,
-            key_id=encrypted.key_id,
-            created_by=p.id,
-            created_at=datetime.now(UTC),
-        )
-        AuditService(self._session).record(
-            p.id,
-            AuditEventType.SECRET_CREATED,
-            securable=Securable.environment_scope(environment),
-            detail={"name": name, "use": use.kind.value if use is not None else None},
-        )
-        if use is not None:
-            record_binding(self._session, p, secret, Securable.environment_scope(environment), use)
-        self._session.add(secret)
         try:
             self._session.commit()
         except IntegrityError as exc:
@@ -232,8 +353,9 @@ class SecretService:
         NotFoundError
             If no secret has that id.
         ValidationError
-            If the secret has been revoked, or is the environment's storage secret and `use`
-            is an index or a repository.
+            If the secret has been revoked, is the environment's storage secret and `use` is
+            an index, a repository or a connection, or `use` is a connection of another
+            environment.
         PermissionDenied
             If the acting principal may not manage secrets in the secret's environment.
         """
@@ -243,7 +365,7 @@ class SecretService:
         scope = Securable.environment_scope(env.name)
         self._authz.authorize(p, Action.MANAGE_SECRET, scope)
         # The entry first and the secret second, the order every naming and URL change takes too.
-        use = lock_entry(self._session, use)
+        use = lock_entry(self._session, use, env)
         self._session.refresh(secret, with_for_update=True)
         if secret.revoked_at is not None:
             raise ValidationError(f"Secret {secret_id} has been revoked and cannot be bound.")
@@ -263,7 +385,8 @@ class SecretService:
         """Turn a use as a caller names it into a `SecretUse`, after checking the right.
 
         The right is checked first, so a caller who may not manage secrets learns nothing
-        about which indexes or repositories exist.
+        about which indexes, repositories or connections exist. A connection is looked up in
+        `environment`, the secret's own.
 
         Parameters
         ----------
@@ -274,7 +397,7 @@ class SecretService:
         kind
             The kind of use.
         target
-            The index's or repository's name; `None` for the environment.
+            The index's, repository's or connection's name; `None` for the environment.
 
         Returns
         -------
@@ -286,15 +409,19 @@ class SecretService:
         PermissionDenied
             If `p` may not manage secrets in `environment`.
         NotFoundError
-            If no index or repository has that name.
+            If the environment does not exist, no index or repository has that name, or the
+            environment has no such connection.
         ValidationError
             If the environment use is given a name, or an index or repository use none.
         """
         self._authz.authorize(p, Action.MANAGE_SECRET, Securable.environment_scope(environment))
-        return resolve_use(self._session, kind, target)
+        environment_id = (
+            self._get_environment(environment).id if kind is SecretUseKind.CONNECTION else None
+        )
+        return resolve_use(self._session, kind, target, environment_id=environment_id)
 
     def use_target_name(self, secret: Secret) -> str | None:
-        """Name the index or repository a secret is bound to, for a listing.
+        """Name the index, repository or connection a secret is bound to, for a listing.
 
         Parameters
         ----------
@@ -313,7 +440,7 @@ class SecretService:
         return row.name if row is not None else None
 
     def use_target_url(self, secret: Secret) -> str | None:
-        """Give the URL of the index or repository a secret is bound to.
+        """Give where the index, repository or connection a secret is bound to sends it.
 
         Parameters
         ----------
@@ -323,12 +450,17 @@ class SecretService:
         Returns
         -------
         str or None
-            The URL, which is where the secret goes; `None` for an unbound secret, the
-            environment use, or a target that was removed.
+            The URL of an index or repository; for a connection, which has no URL, the
+            ``host:port`` of its first endpoint, or its name for a connection read from a
+            mount; never a secret. `None` for an unbound secret, the environment use, or a
+            target that was removed.
         """
         if secret.use_kind is None:
             return None
         row = target_row(self._session, secret.use_kind, secret.use_target_id)
+        if isinstance(row, Connection):
+            found = endpoints(row.kind, row.address, row.settings)
+            return f"{found[0].host}:{found[0].port}" if found else row.name
         return row.url if row is not None else None
 
     def list_for_environment(self, p: PrincipalRef, environment: str) -> list[Secret]:
@@ -409,20 +541,7 @@ class SecretService:
         self._authz.authorize(p, Action.MANAGE_SECRET, Securable.environment_scope(env.name))
         if secret.revoked_at is not None:
             raise ValidationError(f"Secret {secret_id} has been revoked and cannot be rotated.")
-        encrypted = encrypt_secret_values(
-            values, self._key_provider, SecretBinding(secret.id, secret.environment_id, secret.name)
-        )
-        AuditService(self._session).record(
-            p.id,
-            AuditEventType.SECRET_ROTATED,
-            securable=Securable.environment_scope(env.name),
-            detail={"name": secret.name},
-        )
-        secret.ciphertext = encrypted.ciphertext
-        secret.nonce = encrypted.nonce
-        secret.wrapped_data_key = encrypted.wrapped_data_key
-        secret.format_version = encrypted.format_version
-        secret.key_id = encrypted.key_id
+        rotate_values(self._session, self._key_provider, p, secret, values)
         self._session.commit()
         return secret
 

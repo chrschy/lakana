@@ -73,6 +73,9 @@ SHOWN_FIELDS: frozenset[str] = frozenset(
         # who and what
         "action",
         "actor",
+        # a connection's address: hosts, ports, URLs, buckets, roots and paths, never a secret
+        # value or its CA certificate (`lakana_core.connections.service` writes neither)
+        "address",
         "artifact",
         "artifact_id",
         "asset_scope",
@@ -121,6 +124,8 @@ SHOWN_FIELDS: frozenset[str] = frozenset(
         "rule_ids",
         "run_as",
         "run_id",
+        # the name of the secret a connection uses, never a value
+        "secret",
         "sha",
         "storage_root",
         "subject",

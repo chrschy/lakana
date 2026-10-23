@@ -29,6 +29,7 @@ _DATA_ENGINEER_ACTIONS = _DATA_SCIENTIST_ACTIONS | {
     Action.MANAGE_NAMESPACE,
     Action.DROP_NAMESPACE,
     Action.DROP_TABLE,
+    Action.MANAGE_CONNECTION,
 }
 
 ROLE_ACTIONS: dict[Role, frozenset[Action]] = {
@@ -51,4 +52,9 @@ or drop namespaces, nor drop tables — those stay a `data_engineer`/
 governance action. ML engineers are covered by the same role; if their
 needs diverge from data scientists' in practice, that is a one-line
 addition here, not a redesign.
+
+`data_engineer` also manages the connections of an environment (`MANAGE_CONNECTION`): it may
+give a connection a new secret or keep the one bound to it, but naming any other secret, or
+moving the address of a connection that has one, also needs `MANAGE_SECRET`, which only `admin`
+carries.
 """
