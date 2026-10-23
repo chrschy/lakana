@@ -45,7 +45,8 @@ limits lie is in [Python assets: what they are for and how far they are trusted]
   connection cannot be deleted. An asset without `connections` deploys as before. A project
   version in which an asset declares connections has manifest version 7, so a worker of an
   earlier release refuses its runs instead of running the asset without them: upgrade the
-  workers first.
+  workers first. The kinds of connection and the commands that manage them are in
+  [Connections](connections.md).
 - **Output.** The function returns a `polars.DataFrame`. It replaces the asset's table in one
   snapshot. Zero rows are fine. With `output="artifact"` it returns a `pathlib.Path` inside
   `lakana.output_dir()` instead, and each run stores a new version of the artifact (see the

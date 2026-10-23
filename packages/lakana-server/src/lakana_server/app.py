@@ -32,6 +32,7 @@ from lakana_server.api.platform.audit_events import router as audit_events_route
 from lakana_server.api.platform.ci_oidc import router as ci_oidc_router
 from lakana_server.api.platform.ci_trust_rules import router as ci_trust_rules_router
 from lakana_server.api.platform.column_masks import router as column_masks_router
+from lakana_server.api.platform.connections import router as connections_router
 from lakana_server.api.platform.deploys import router as deploys_router
 from lakana_server.api.platform.environments import router as environments_router
 from lakana_server.api.platform.grants import router as grants_router
@@ -85,6 +86,7 @@ ROUTERS = (
     row_filters_router,
     column_masks_router,
     secrets_router,
+    connections_router,
     repositories_router,
     package_indexes_router,
     deploys_router,

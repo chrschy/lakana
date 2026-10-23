@@ -35,6 +35,7 @@ from lakana.resources.audit_events import AuditEvents
 from lakana.resources.checks import Checks
 from lakana.resources.ci_trust_rules import CiTrustRules, exchange_id_token
 from lakana.resources.column_masks import ColumnMasks
+from lakana.resources.connections import Connections
 from lakana.resources.deploys import Deployments, Deploys, OrphanTables, ProjectVersions
 from lakana.resources.environments import Environments
 from lakana.resources.grants import Grants
@@ -105,6 +106,7 @@ class Client:
         self.row_filters = RowFilters(self._transport)
         self.column_masks = ColumnMasks(self._transport)
         self.secrets = Secrets(self._transport)
+        self.connections = Connections(self._transport)
         self.repositories = Repositories(self._transport)
         self.package_indexes = PackageIndexes(self._transport)
         self.ci_trust_rules = CiTrustRules(self._transport)

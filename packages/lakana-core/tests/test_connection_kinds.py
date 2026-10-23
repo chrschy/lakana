@@ -102,7 +102,7 @@ def test_settings_come_back_with_defaults_and_without_nones() -> None:
 def test_a_kind_given_as_its_value_is_the_kind() -> None:
     """The REST value ``s3`` behaves as `ConnectionKind.S3`: the endpoint is still filled."""
     address, _ = validate_connection(
-        "s3",  # ty: ignore[invalid-argument-type]
+        "s3",
         {"bucket": "raw-data", "region": "eu-central-1"},
         {"access_key_id": "a"},
     )
@@ -112,7 +112,7 @@ def test_a_kind_given_as_its_value_is_the_kind() -> None:
 def test_an_unknown_kind_is_a_validation_error() -> None:
     """A kind Lakana does not know is refused naming the kinds it does."""
     with pytest.raises(ValidationError, match="postgresql, mariadb"):
-        validate_connection("oracle", {}, {})  # ty: ignore[invalid-argument-type]
+        validate_connection("oracle", {}, {})
 
 
 INVALID: list[tuple[ConnectionKind, dict[str, Any], dict[str, Any], str]] = [
@@ -658,3 +658,45 @@ def test_takes_secret_follows_the_kind_and_the_http_auth(
         Whether it takes a secret.
     """
     assert takes_secret(kind, settings) is takes
+
+
+def test_the_cli_single_keys_match_core() -> None:
+    """`lakana connection … --password-stdin` stores stdin under the key core expects.
+
+    The command line holds its own copy of `single_secret_key`'s table, so that it asks the
+    server nothing to learn the key; this keeps the two equal for every kind and `auth`.
+    """
+    from lakana.cli import connections as cli
+
+    auths = ("none", "bearer", "basic", "api_key", "oauth2")
+    for kind in ConnectionKind:
+        for auth in auths if kind is ConnectionKind.HTTP else ("none",):
+            settings = {"auth": auth} if kind is ConnectionKind.HTTP else {}
+            assert cli.single_key(kind.value, auth) == single_secret_key(kind, settings), (
+                kind,
+                auth,
+            )
+
+
+def test_the_cli_options_of_each_kind_are_its_fields() -> None:
+    """Each kind's command-line options are exactly its address and settings fields.
+
+    Plus the three secret options for a kind that can take a secret, and none for one that
+    cannot. A field added in core without its option (or the reverse) fails here.
+    """
+    from lakana.cli import connections as cli
+    from lakana_core.connections.kinds import _MODELS
+
+    assert set(cli.KIND_OPTIONS) == {kind.value for kind in ConnectionKind}
+    for kind, (address_model, settings_model) in _MODELS.items():
+        options = cli.KIND_OPTIONS[kind.value]
+        fields = {
+            cli.OPTION_FIELDS[option] for option in options if option not in cli.SECRET_OPTIONS
+        }
+        expected = {("address", name) for name in address_model.model_fields} | {
+            ("settings", name) for name in settings_model.model_fields
+        }
+        assert fields == expected, kind
+        secretless = kind in (ConnectionKind.SQLITE_FILE, ConnectionKind.DIRECTORY)
+        assert set(cli.SECRET_OPTIONS) <= set(options) or secretless, kind
+        assert not (secretless and set(cli.SECRET_OPTIONS) & set(options)), kind

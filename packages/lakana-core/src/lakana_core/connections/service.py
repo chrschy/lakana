@@ -389,7 +389,7 @@ class ConnectionService:
         environment: str,
         *,
         name: str,
-        kind: ConnectionKind,
+        kind: ConnectionKind | str,
         address: Mapping[str, Any],
         settings: Mapping[str, Any],
         secret: str | None = None,
@@ -406,7 +406,8 @@ class ConnectionService:
         name
             The connection's name.
         kind
-            Its kind.
+            Its kind, a member or its REST value; any other text is a `ValidationError`, judged
+            after the right.
         address
             Its address.
         settings

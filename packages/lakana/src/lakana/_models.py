@@ -1494,6 +1494,77 @@ class PackageIndex:
 
 
 @dataclass(frozen=True)
+class DeclaringAsset:
+    """An asset whose deployed version declares a connection.
+
+    Parameters
+    ----------
+    repository
+        The repository's name.
+    asset
+        The asset's name.
+    """
+
+    repository: str
+    asset: str
+
+
+@dataclass(frozen=True)
+class Connection:
+    """A connection of an environment. Carries its secret's name, never a value.
+
+    Parameters
+    ----------
+    name
+        Its name.
+    kind
+        Its kind: ``postgresql``, ``mariadb``, ``sqlite-file``, ``http``, ``s3``, ``gcs``,
+        ``azure``, ``directory`` or ``tcp``.
+    address
+        Where the source is, with defaults filled in.
+    settings
+        How to reach it, with defaults filled in; a CA certificate as its SHA-256
+        fingerprints.
+    secret
+        The name of the secret it uses, or `None`.
+    declared_by
+        The assets whose deployed version declares it.
+    created_by
+        The name of the principal who created it.
+    created_at
+        When it was created.
+    updated_at
+        When it was last changed.
+    """
+
+    name: str
+    kind: str
+    address: dict
+    settings: dict
+    secret: str | None
+    declared_by: list[DeclaringAsset]
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
+class ConnectionPage:
+    """One page of an environment's connections, newest first.
+
+    Parameters
+    ----------
+    items
+        The connections of this page.
+    next_cursor
+        Pass back as `cursor=` to fetch the next page; `None` on the last page.
+    """
+
+    items: list[Connection]
+    next_cursor: str | None
+
+
+@dataclass(frozen=True)
 class DeployAccepted:
     """A queued deploy run.
 

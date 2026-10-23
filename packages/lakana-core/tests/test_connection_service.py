@@ -574,6 +574,26 @@ def test_naming_an_unbound_secret_needs_manage_secret(world: World) -> None:
     )
 
 
+def test_the_refusal_says_the_bind_makes_it_the_connections_secret(world: World) -> None:
+    """The advice of S1 for a connection: one `lakana secret bind`, nothing after it.
+
+    An administrator's bind makes the secret the one the connection uses, so the refusal
+    says so instead of leaving the reader to look for a second step.
+    """
+    world.make_secret("prod", "crm-pw", {"password": "pw"})
+    world.postgres(world.data_engineer, secret_values=None)
+
+    with pytest.raises(PermissionDenied) as caught:
+        world.connections().update(world.data_engineer, "prod", "crm-db", secret="crm-pw")
+
+    assert str(caught.value) == (
+        "Secret 'crm-pw' of environment 'prod' is not bound to connection 'crm-db'. Ask "
+        "someone who may manage secrets in 'prod' to bind it to this connection: lakana secret "
+        "bind crm-pw --env prod --connection crm-db (the bind also makes it the secret the "
+        "connection uses)"
+    )
+
+
 def test_a_secret_of_that_name_in_another_environment_is_neither_found_nor_bound(
     world: World,
 ) -> None:

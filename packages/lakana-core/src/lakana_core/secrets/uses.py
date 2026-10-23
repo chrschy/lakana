@@ -969,16 +969,23 @@ def bind_or_require_named_secrets(
                 "secret_bound_elsewhere",
             )
         this = "this" if registered else "the"
+        # An administrator's bind makes the secret the one the connection uses: say there is
+        # no second step.
+        one_step = (
+            " (the bind also makes it the secret the connection uses)"
+            if use.kind is SecretUseKind.CONNECTION
+            else ""
+        )
         if current is None:
             advice = (
                 f"{first} someone who may manage secrets in '{env_name}' to bind it to "
-                f"{this} {short}: {command}"
+                f"{this} {short}: {command}{one_step}"
             )
         else:
             advice = (
                 f"{first} someone who may manage secrets in '{env_name}' to give {this} {short} "
                 f"a secret of its own: {steps}. Moving this secret instead breaks {described}: "
-                f"{command}"
+                f"{command}{one_step}"
             )
         raise SecretBindingRefused(f"{who} {cause}. {advice}", scope, reason)
 

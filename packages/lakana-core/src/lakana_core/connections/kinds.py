@@ -971,7 +971,7 @@ def _json_size(values: Mapping[str, Any]) -> int:
 
 
 def validate_connection(
-    kind: ConnectionKind, address: Mapping[str, Any], settings: Mapping[str, Any]
+    kind: ConnectionKind | str, address: Mapping[str, Any], settings: Mapping[str, Any]
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Check a connection's address and settings for its kind.
 

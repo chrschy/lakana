@@ -464,7 +464,7 @@ def test_audit_list_rejects_a_bad_timestamp_and_cursor_with_all(tmp_path: Path) 
 
 
 def test_secret_bind_sends_exactly_one_use(tmp_path: Path) -> None:
-    """`lakana secret bind` takes exactly one of the three use options."""
+    """`lakana secret bind` takes exactly one of the four use options."""
     secret = {
         "id": "s1",
         "name": "pypi",
@@ -507,10 +507,10 @@ def test_secret_bind_sends_exactly_one_use(tmp_path: Path) -> None:
         "--own-env",
     )
     assert both.exit_code == 2
-    assert "Pass only one of --index, --repository or --own-env" in both.output
+    assert "Pass only one of --index, --repository, --connection or --own-env" in both.output
     neither = invoke(make_state(tmp_path, api), "secret", "bind", "pypi", "--env", "dev")
     assert neither.exit_code == 2
-    assert "Pass exactly one of --index, --repository or --own-env" in neither.output
+    assert "Pass exactly one of --index, --repository, --connection or --own-env" in neither.output
 
 
 def test_secret_create_with_a_use_sends_it(tmp_path: Path) -> None:
@@ -598,7 +598,7 @@ def test_secret_create_refuses_two_uses(tmp_path: Path) -> None:
     )
 
     assert result.exit_code == 2
-    assert "Pass only one of --index, --repository or --own-env" in result.output
+    assert "Pass only one of --index, --repository, --connection or --own-env" in result.output
     assert api.requests == []
 
 
@@ -626,3 +626,108 @@ def test_secret_bind_prints_a_long_url_whole(tmp_path: Path) -> None:
 
     assert result.exit_code == 0, result.stderr
     assert url in result.stdout
+
+
+def test_secret_bind_to_a_connection(tmp_path: Path) -> None:
+    """`--connection CONN` sends the use `connection` and says what the secret now serves."""
+    secret = {
+        "id": "s1",
+        "name": "crm-db-connection",
+        "environment": "prod",
+        "created_by": "a1",
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "format_version": 2,
+        "key_id": "env",
+        "use": "connection",
+        "use_target": "crm-db",
+        "use_target_url": "db.example.com:5432",
+    }
+    api = FakeApi()
+    api.on("PUT", "/api/v1/environments/prod/secrets/crm-db-connection/use", json=secret)
+
+    result = invoke(
+        make_state(tmp_path, api),
+        "secret",
+        "bind",
+        "crm-db-connection",
+        "--env",
+        "prod",
+        "--connection",
+        "crm-db",
+    )
+
+    assert result.exit_code == 0, result.output
+    (sent,) = [r for r in api.requests if r.method == "PUT"]
+    assert json.loads(sent.content) == {"kind": "connection", "target": "crm-db"}
+    assert (
+        "Bound secret crm-db-connection in prod to connection crm-db (db.example.com:5432); "
+        "it is now the secret the connection uses" in result.stdout
+    )
+    both = invoke(
+        make_state(tmp_path, api),
+        "secret",
+        "bind",
+        "x",
+        "--env",
+        "prod",
+        "--connection",
+        "crm-db",
+        "--index",
+        "corp",
+    )
+    assert both.exit_code == 2
+    assert "Pass only one of --index, --repository, --connection or --own-env" in both.output
+
+
+def test_audit_list_by_kind(tmp_path: Path) -> None:
+    """`--kind connection` sends `kind=connection`; another kind is refused before a request."""
+    api = FakeApi()
+    api.on("GET", "/api/v1/audit-events", json={"items": [], "next_cursor": None})
+
+    result = invoke(make_state(tmp_path, api), "audit", "list", "--kind", "connection")
+    everything = invoke(make_state(tmp_path, api), "audit", "list", "--kind", "connection", "--all")
+    other = invoke(make_state(tmp_path, api), "audit", "list", "--kind", "secret")
+
+    assert result.exit_code == 0, result.output
+    assert everything.exit_code == 0, everything.output
+    assert [r.url.params.get("kind") for r in api.requests] == ["connection", "connection"]
+    assert other.exit_code == 2
+    assert "connection" in other.output
+
+
+def test_secret_create_bound_to_a_connection(tmp_path: Path) -> None:
+    """`secret create --connection CONN` creates the secret bound to that connection."""
+    secret = {
+        "id": "s1",
+        "name": "crm-pw",
+        "environment": "prod",
+        "created_by": "a1",
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "format_version": 2,
+        "key_id": "env",
+        "use": "connection",
+        "use_target": "crm-db",
+        "use_target_url": "db.example.com:5432",
+    }
+    api = FakeApi()
+    api.on("POST", "/api/v1/environments/prod/secrets", status=201, json=secret)
+
+    result = invoke(
+        make_state(tmp_path, api),
+        "secret",
+        "create",
+        "crm-pw",
+        "--env",
+        "prod",
+        "--value",
+        "password=pw",
+        "--connection",
+        "crm-db",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(api.requests[-1].content)["use"] == {"kind": "connection", "target": "crm-db"}
+    assert (
+        "Created secret crm-pw in prod, bound to connection crm-db (db.example.com:5432)"
+        in result.stdout
+    )

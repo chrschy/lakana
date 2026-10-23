@@ -6,7 +6,15 @@ import uuid
 from datetime import date, datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StrictBool, model_validator
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    SecretStr,
+    StrictBool,
+    model_validator,
+)
 from pydantic_core import PydanticCustomError
 
 from lakana_core.auth import Action, SecurableKind
@@ -19,6 +27,7 @@ from lakana_core.catalog.maintenance import (
 )
 from lakana_core.catalog.orphaned_locations import DEFAULT_OLDER_THAN_DAYS
 from lakana_core.catalog.writes import MAX_SOURCE_NAME, MAX_SOURCE_VERSIONS
+from lakana_core.connections.kinds import ConnectionKind
 from lakana_core.grants.roles import Role
 from lakana_core.models import AuditEventType
 
@@ -1693,14 +1702,14 @@ class SecretBind(BaseModel):
     Parameters
     ----------
     kind
-        ``package_index``, ``repository`` or ``environment``.
+        ``package_index``, ``repository``, ``connection`` or ``environment``.
     target
-        The index's or repository's name; absent or null for the environment.
+        The index's, repository's or connection's name; absent or null for the environment.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    kind: Literal["package_index", "repository", "environment"]
+    kind: Literal["package_index", "repository", "connection", "environment"]
     target: str | None = None
 
 
@@ -2081,6 +2090,144 @@ class PackageIndexOut(BaseModel):
     created_by: uuid.UUID | None
     created_at: datetime
     updated_at: datetime
+
+
+ConnectionSecretValues = Annotated[dict[str, SecretStr], BeforeValidator(_check_secret_values)]
+"""New values of a connection's secret; never echoed, a bad shape refused without repeating it."""
+
+_CONNECTION_KIND = Field(
+    description="The kind of source.",
+    json_schema_extra={"enum": [kind.value for kind in ConnectionKind]},
+)
+
+
+class ConnectionCreate(BaseModel):
+    """Request body for creating a connection.
+
+    `kind`, `address` and `settings` are judged by the service after the right is checked, so a
+    caller without `MANAGE_CONNECTION` learns nothing from a 422.
+
+    Parameters
+    ----------
+    name
+        Lower-case letters, digits and ``-``, starting with a letter, at most 63; unique in
+        the environment. Never changes.
+    kind
+        ``postgresql``, ``mariadb``, ``sqlite-file``, ``http``, ``s3``, ``gcs``, ``azure``,
+        ``directory`` or ``tcp``. Never changes.
+    address
+        Where the source is, by kind (``host``, ``port``, ``database``; ``base_url``; ...).
+    settings
+        How to reach it, by kind (``user``, ``tls``, ``ca_certificate``; ``auth``; ...).
+    secret
+        The name of an existing secret of the environment to use.
+    secret_values
+        Values of a new secret ``<name>-connection``, born bound to the connection. Never
+        echoed. At most one of `secret` and `secret_values`.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    kind: str = _CONNECTION_KIND
+    address: dict[str, Any]
+    settings: dict[str, Any] = Field(default_factory=dict)
+    secret: str | None = None
+    secret_values: ConnectionSecretValues | None = None
+
+
+class ConnectionUpdate(BaseModel):
+    """Request body for changing a connection; only what is given changes.
+
+    Parameters
+    ----------
+    address
+        Address keys to change; a key set to `null` is removed.
+    settings
+        Settings keys to change; a key set to `null` is removed.
+    secret
+        The name of a secret of the environment to use instead.
+    secret_values
+        New values: they set the connection's own secret again, or create
+        ``<name>-connection`` when it has none. Never echoed.
+    clear
+        ``secret`` (stop using the secret and unbind it) and settings keys to remove.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    address: dict[str, Any] | None = None
+    settings: dict[str, Any] | None = None
+    secret: str | None = None
+    secret_values: ConnectionSecretValues | None = None
+    clear: list[str] = Field(default_factory=list)
+
+
+class DeclaringAssetOut(BaseModel):
+    """An asset whose deployed version declares a connection.
+
+    Parameters
+    ----------
+    repository
+        The repository's name.
+    asset
+        The asset's name.
+    """
+
+    repository: str
+    asset: str
+
+
+class ConnectionOut(BaseModel):
+    """Response body for a connection. Carries its secret's name, never a value.
+
+    Parameters
+    ----------
+    name
+        Its name.
+    kind
+        Its kind.
+    address
+        Its address, with defaults filled in.
+    settings
+        Its settings, with defaults filled in; a ``ca_certificate`` is shown as its SHA-256
+        fingerprints (``sha256:<hex>``), never as the certificate.
+    secret
+        The name of the secret it uses, or `null`.
+    declared_by
+        The assets whose deployed version declares it; a delete is refused while any does.
+    created_by
+        The name of the principal who created it.
+    created_at
+        When it was created.
+    updated_at
+        When it was last changed.
+    """
+
+    name: str
+    kind: str
+    address: dict[str, Any]
+    settings: dict[str, Any]
+    secret: str | None
+    declared_by: list[DeclaringAssetOut]
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class ConnectionPage(BaseModel):
+    """One page of an environment's connections, newest first.
+
+    Parameters
+    ----------
+    items
+        The connections of this page.
+    next_cursor
+        Pass back as `?cursor=` to fetch the next page; `null` on the last page.
+    """
+
+    items: list[ConnectionOut]
+    next_cursor: str | None
 
 
 class DeployCreate(BaseModel):

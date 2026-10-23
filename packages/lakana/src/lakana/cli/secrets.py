@@ -31,13 +31,17 @@ _INDEX = Annotated[str | None, typer.Option("--index", help="Bind it to this pac
 _REPOSITORY = Annotated[
     str | None, typer.Option("--repository", help="Bind it to this repository.")
 ]
+_CONNECTION = Annotated[
+    str | None,
+    typer.Option("--connection", help="Bind it to this connection; it becomes the secret it uses."),
+]
 _OWN_ENV = Annotated[
     bool, typer.Option("--own-env", help="Bind it to its environment: storage and webhooks.")
 ]
 
 
 def chosen_use(
-    index: str | None, repository: str | None, own_env: bool
+    index: str | None, repository: str | None, own_env: bool, connection: str | None = None
 ) -> tuple[str, str | None] | None:
     """Read the use the options name.
 
@@ -49,6 +53,8 @@ def chosen_use(
         A repository's name.
     own_env
         Whether the environment was named.
+    connection
+        A connection's name.
 
     Returns
     -------
@@ -66,12 +72,13 @@ def chosen_use(
         for kind, target, given in (
             ("package_index", index, index is not None),
             ("repository", repository, repository is not None),
+            ("connection", connection, connection is not None),
             ("environment", None, own_env),
         )
         if given
     ]
     if len(chosen) > 1:
-        raise CliError("Pass only one of --index, --repository or --own-env")
+        raise CliError("Pass only one of --index, --repository, --connection or --own-env")
     return chosen[0] if chosen else None
 
 
@@ -117,18 +124,23 @@ def _use_text(kind: str, target: str | None, url: str | None) -> str:
     Parameters
     ----------
     kind
-        ``package_index``, ``repository`` or ``environment``.
+        ``package_index``, ``repository``, ``connection`` or ``environment``.
     target
-        The index's or repository's name.
+        The index's, repository's or connection's name.
     url
-        Its URL as the server holds it; the person who binds sees where the secret goes.
+        Its URL as the server holds it (a connection's first ``host:port``); the person who
+        binds sees where the secret goes.
 
     Returns
     -------
     str
         For example ``package index corp (https://pkgs.example.org/simple)``.
     """
-    noun = {"package_index": "package index", "repository": "repository"}.get(kind)
+    noun = {
+        "package_index": "package index",
+        "repository": "repository",
+        "connection": "connection",
+    }.get(kind)
     if noun is None:
         return "its environment"
     where = f" ({_output.inline(url, limit=_WHOLE)})" if url else ""
@@ -144,12 +156,15 @@ def create(
     values_stdin: _STDIN = False,
     index: _INDEX = None,
     repository: _REPOSITORY = None,
+    connection: _CONNECTION = None,
     own_env: _OWN_ENV = False,
 ) -> None:
     """Create secret NAME; its values can never be read back.
 
-    Name its use with `--index`, `--repository` or `--own-env` to bind it as it is created;
-    that needs the right to manage secrets, as `secret bind` does.
+    Name its use with `--index`, `--repository`, `--connection` or `--own-env` to bind it as it
+    is created; that needs the right to manage secrets, as `secret bind` does. A connection's
+    own secret is usually created with the connection (`lakana connection create ...
+    --password-stdin`).
 
     Parameters
     ----------
@@ -167,11 +182,13 @@ def create(
         A package index's name.
     repository
         A repository's name.
+    connection
+        A connection's name.
     own_env
         Bind it to its environment.
     """
     state = state_of(ctx)
-    use = chosen_use(index, repository, own_env)
+    use = chosen_use(index, repository, own_env, connection)
     values = read_values(value, values_stdin)
     environment = resolve_environment(state, env)
     kind, target = use if use is not None else (None, None)
@@ -258,9 +275,13 @@ def bind(
     env: _ENV = None,
     index: _INDEX = None,
     repository: _REPOSITORY = None,
+    connection: _CONNECTION = None,
     own_env: _OWN_ENV = False,
 ) -> None:
     """Bind secret NAME to the one use it may serve; needs the right to manage secrets.
+
+    Bound to a connection with `--connection`, the secret becomes the one the connection uses,
+    in the same step; any other secret of that connection is unbound.
 
     Parameters
     ----------
@@ -274,22 +295,26 @@ def bind(
         A package index's name.
     repository
         A repository's name.
+    connection
+        A connection's name.
     own_env
         Bind it to its environment instead.
 
     Raises
     ------
     CliError
-        Unless exactly one of the three options is given (exit 2).
+        Unless exactly one of the four options is given (exit 2).
     """
-    chosen = chosen_use(index, repository, own_env)
+    chosen = chosen_use(index, repository, own_env, connection)
     if chosen is None:
-        raise CliError("Pass exactly one of --index, --repository or --own-env")
+        raise CliError("Pass exactly one of --index, --repository, --connection or --own-env")
     kind, target = chosen
     state = state_of(ctx)
     environment = resolve_environment(state, env)
     secret = state.client().secrets.bind(environment, name, kind, target)
     what = _use_text(kind, target, secret.use_target_url)
+    if kind == "connection":
+        what += "; it is now the secret the connection uses"
     _output.done(
         state,
         f"Bound secret {_output.inline(name)} in {_output.inline(environment)} to {what}",

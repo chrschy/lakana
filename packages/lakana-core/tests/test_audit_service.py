@@ -216,6 +216,42 @@ def test_query_filters_by_event_type(session: Session) -> None:
     assert [e.event_type for e in results] == [AuditEventType.GRANT_CREATED]
 
 
+def test_query_filters_by_kind_connection(session: Session) -> None:
+    """`kind="connection"` returns every CONNECTION_* event and nothing else, newest first."""
+    admin = _add_principal(session, "admin")
+    service = AuditService(session, AllowAllAuthorization())
+    service.record(admin.id, AuditEventType.CONNECTION_CREATED, commit=True)
+    service.record(admin.id, AuditEventType.SECRET_BOUND, commit=True)
+    service.record(admin.id, AuditEventType.CONNECTION_UPDATED, commit=True)
+    service.record(admin.id, AuditEventType.CONNECTION_DELETED, commit=True)
+
+    results = service.query(admin, kind="connection").items
+
+    assert [e.event_type for e in results] == [
+        AuditEventType.CONNECTION_DELETED,
+        AuditEventType.CONNECTION_UPDATED,
+        AuditEventType.CONNECTION_CREATED,
+    ]
+    combined = service.query(
+        admin, kind="connection", event_type=AuditEventType.CONNECTION_UPDATED
+    ).items
+    assert [e.event_type for e in combined] == [AuditEventType.CONNECTION_UPDATED]
+
+
+def test_query_refuses_an_unknown_kind_or_a_type_outside_the_kind(session: Session) -> None:
+    """The one kind today is `connection`; an event type of another kind cannot match it."""
+    admin = _add_principal(session, "admin")
+    service = AuditService(session, AllowAllAuthorization())
+
+    with pytest.raises(ValidationError, match=r"^kind must be connection$"):
+        service.query(admin, kind="secret")
+    with pytest.raises(ValidationError) as caught:
+        service.query(admin, kind="connection", event_type=AuditEventType.SECRET_BOUND)
+    assert str(caught.value) == (
+        "event_type SECRET_BOUND is not of kind connection; leave out one of the two filters"
+    )
+
+
 def test_query_filters_by_environment(session: Session) -> None:
     """Only events whose securable_environment matches come back."""
     admin = _add_principal(session, "admin")

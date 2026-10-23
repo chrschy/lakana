@@ -1246,7 +1246,7 @@ Usage: `lakana secret create [OPTIONS] {name}`
 
 Create secret NAME; its values can never be read back.
 
-Name its use with `--index`, `--repository` or `--own-env` to bind it as it is created; that needs the right to manage secrets, as `secret bind` does.
+Name its use with `--index`, `--repository`, `--connection` or `--own-env` to bind it as it is created; that needs the right to manage secrets, as `secret bind` does. A connection's own secret is usually created with the connection (`lakana connection create ... --password-stdin`).
 
 | Name | Type | Default | Description |
 |---|---|---|---|
@@ -1256,6 +1256,7 @@ Name its use with `--index`, `--repository` or `--own-env` to bind it as it is c
 | `--values-stdin` | flag | off | Read a JSON object of values from stdin. |
 | `--index` | text | none | Bind it to this package index. |
 | `--repository` | text | none | Bind it to this repository. |
+| `--connection` | text | none | Bind it to this connection; it becomes the secret it uses. |
 | `--own-env` | flag | off | Bind it to its environment: storage and webhooks. |
 
 ### `lakana secret list`
@@ -1291,12 +1292,15 @@ Usage: `lakana secret bind [OPTIONS] {name}`
 
 Bind secret NAME to the one use it may serve; needs the right to manage secrets.
 
+Bound to a connection with `--connection`, the secret becomes the one the connection uses, in the same step; any other secret of that connection is unbound.
+
 | Name | Type | Default | Description |
 |---|---|---|---|
 | `NAME` | text | required |  |
 | `--env` | text | none | Environment (default: the profile's). |
 | `--index` | text | none | Bind it to this package index. |
 | `--repository` | text | none | Bind it to this repository. |
+| `--connection` | text | none | Bind it to this connection; it becomes the secret it uses. |
 | `--own-env` | flag | off | Bind it to its environment: storage and webhooks. |
 
 ### `lakana secret revoke`
@@ -1304,6 +1308,129 @@ Bind secret NAME to the one use it may serve; needs the right to manage secrets.
 Usage: `lakana secret revoke [OPTIONS] {name}`
 
 Revoke secret NAME.
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `NAME` | text | required |  |
+| `--env` | text | none | Environment (default: the profile's). |
+| `--yes` | flag | off | Don't ask for confirmation. |
+
+## `lakana connection`
+
+Usage: `lakana connection [OPTIONS] COMMAND [ARGS]...`
+
+Manage connections: the databases, file stores and APIs assets read from.
+
+### `lakana connection create`
+
+Usage: `lakana connection create [OPTIONS] {name}`
+
+Create connection NAME of kind --kind; needs the right to manage connections.
+
+Give the kind's address and settings options, and its secret one of three ways: `--password-stdin` (stdin becomes the password, token or key the kind takes), `--values-stdin` (a JSON object of several keys), both of which create a secret NAME-connection that only this connection uses; or `--secret` with an existing secret. The values are never shown again. A connection that needs no secret takes none.
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `NAME` | text | required |  |
+| `--kind` | one of `postgresql`, `mariadb`, `sqlite-file`, `http`, `s3`, `gcs`, `azure`, `directory`, `tcp` | required | The kind of source. |
+| `--env` | text | none | Environment (default: the profile's). |
+| `--host` | text | none | postgresql, mariadb, tcp: host name. |
+| `--port` | whole number | none | postgresql (5432), mariadb (3306), tcp (required): port. |
+| `--database` | text | none | postgresql, mariadb: database name. |
+| `--url` | text | none | http: base URL, such as https://api.example.com/v1. |
+| `--bucket` | text | none | s3, gcs: bucket. |
+| `--region` | text | none | s3: region. |
+| `--endpoint` | text | none | s3: https URL (default: https://s3.<region>.amazonaws.com). |
+| `--account` | text | none | azure: storage account. |
+| `--container` | text | none | azure: container. |
+| `--root` | text | none | sqlite-file, directory: the worker's ingestion root name. |
+| `--path` | text | none | sqlite-file, directory: relative path in the root. |
+| `--user` | text | none | postgresql, mariadb: user name. |
+| `--tls` | text | none | postgresql, mariadb: verify-full (default), require or disable. |
+| `--ca-file` | path | none | postgresql, mariadb, http: PEM file of your CA certificates. |
+| `--auth` | text | none | http: none (default), bearer, basic, api_key or oauth2. |
+| `--username` | text | none | http (basic): user name. |
+| `--api-key-name` | text | none | http (api_key): header or parameter name. |
+| `--api-key-in` | text | none | http (api_key): header (default) or query. |
+| `--client-id` | text | none | http (oauth2): client id. |
+| `--token-url` | text | none | http (oauth2): https URL of the token endpoint. |
+| `--scope` | text | none | http (oauth2): scope. |
+| `--access-key-id` | text | none | s3: access key id. |
+| `--prefix` | text | none | s3, gcs, azure: only objects under this prefix. |
+| `--secret` | text | none | Use this existing secret of the environment. |
+| `--password-stdin` | flag | off | Read the secret from stdin: the password, token or key the kind takes. |
+| `--values-stdin` | flag | off | Read the secret's keys as a JSON object from stdin. |
+
+### `lakana connection list`
+
+Usage: `lakana connection list [OPTIONS]`
+
+List the connections of an environment, newest first.
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `--env` | text | none | Environment (default: the profile's). |
+
+### `lakana connection show`
+
+Usage: `lakana connection show [OPTIONS] {name}`
+
+Show connection NAME: its address, settings, secret's name and the assets that declare it.
+
+A CA certificate shows as its SHA-256 fingerprint; a secret's values never show.
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `NAME` | text | required |  |
+| `--env` | text | none | Environment (default: the profile's). |
+
+### `lakana connection update`
+
+Usage: `lakana connection update [OPTIONS] {name}`
+
+Change connection NAME; only the options given change. Its name and kind never change.
+
+`--password-stdin` or `--values-stdin` sets the connection's own secret again (or creates NAME-connection when it has none). A change that could send its secret somewhere new (the address, a weaker --tls, another --ca-file, another --auth or --api-key-in) also needs the right to manage secrets, unless it gives new values in the same command.
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `NAME` | text | required |  |
+| `--env` | text | none | Environment (default: the profile's). |
+| `--host` | text | none | postgresql, mariadb, tcp: host name. |
+| `--port` | whole number | none | postgresql (5432), mariadb (3306), tcp (required): port. |
+| `--database` | text | none | postgresql, mariadb: database name. |
+| `--url` | text | none | http: base URL, such as https://api.example.com/v1. |
+| `--bucket` | text | none | s3, gcs: bucket. |
+| `--region` | text | none | s3: region. |
+| `--endpoint` | text | none | s3: https URL (default: https://s3.<region>.amazonaws.com). |
+| `--account` | text | none | azure: storage account. |
+| `--container` | text | none | azure: container. |
+| `--root` | text | none | sqlite-file, directory: the worker's ingestion root name. |
+| `--path` | text | none | sqlite-file, directory: relative path in the root. |
+| `--user` | text | none | postgresql, mariadb: user name. |
+| `--tls` | text | none | postgresql, mariadb: verify-full (default), require or disable. |
+| `--ca-file` | path | none | postgresql, mariadb, http: PEM file of your CA certificates. |
+| `--auth` | text | none | http: none (default), bearer, basic, api_key or oauth2. |
+| `--username` | text | none | http (basic): user name. |
+| `--api-key-name` | text | none | http (api_key): header or parameter name. |
+| `--api-key-in` | text | none | http (api_key): header (default) or query. |
+| `--client-id` | text | none | http (oauth2): client id. |
+| `--token-url` | text | none | http (oauth2): https URL of the token endpoint. |
+| `--scope` | text | none | http (oauth2): scope. |
+| `--access-key-id` | text | none | s3: access key id. |
+| `--prefix` | text | none | s3, gcs, azure: only objects under this prefix. |
+| `--secret` | text | none | Use this existing secret of the environment. |
+| `--password-stdin` | flag | off | Read the secret from stdin: the password, token or key the kind takes. |
+| `--values-stdin` | flag | off | Read the secret's keys as a JSON object from stdin. |
+| `--clear` | text, repeatable | none | Remove 'secret' (unbinds it) or a setting, such as ca_certificate. |
+
+### `lakana connection delete`
+
+Usage: `lakana connection delete [OPTIONS] {name}`
+
+Delete connection NAME; refused while a deployed project version declares it.
+
+Its secret stays in the environment, unbound.
 
 | Name | Type | Default | Description |
 |---|---|---|---|
@@ -1865,6 +1992,7 @@ List audit events, newest first.
 | Name | Type | Default | Description |
 |---|---|---|---|
 | `--event-type` | text | none | e.g. GRANT_CREATED |
+| `--kind` | one of `connection` | none | Only events of this kind: connection is every CONNECTION_*. |
 | `--env` | text | none | Only this environment. |
 | `--principal-id` | text | none | Only this principal's events. |
 | `--since` | text | none | ISO 8601; UTC if no offset. |

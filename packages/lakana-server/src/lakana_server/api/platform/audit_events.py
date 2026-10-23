@@ -153,6 +153,11 @@ def _to_out(event: ShownAuditEvent) -> AuditEventOut:
 @router.get("", response_model=AuditEventPage, responses=errors(403, 503))
 def list_audit_events(
     event_type: AuditEventType | None = None,
+    kind: str | None = Query(
+        default=None,
+        max_length=64,
+        description="Only events of this kind: `connection` is every CONNECTION_* type.",
+    ),
     environment: str | None = None,
     principal_id: uuid.UUID | None = None,
     since: datetime | None = None,
@@ -167,13 +172,17 @@ def list_audit_events(
     Lists one page of audit events, newest first, with optional filters. The cursor of the
     next page is in the `X-Next-Cursor` response header. Needs `READ_AUDIT_LOG` on the
     instance. Another principal's query text and column values are hidden unless the caller
-    also has `READ_QUERY_TEXT`. Answers 422 for a malformed cursor, and 503 when the read
+    also has `READ_QUERY_TEXT`. Answers 422 for a malformed cursor, a `kind` other than
+    `connection`, or an `event_type` that is not of `kind`, and 503 when the read
     had to be recorded in the audit log and could not be; no events are returned then.
 
     Parameters
     ----------
     event_type
         Only return events of this type, if given.
+    kind
+        Only return events of this kind, if given: ``connection`` is every ``CONNECTION_*``
+        type. Combines with the other filters; with `event_type`, the type must be of the kind.
     environment
         Only return events whose securable environment matches, if given.
     principal_id
@@ -203,7 +212,8 @@ def list_audit_events(
     PermissionDenied
         If `p` may not read the audit log.
     ValidationError
-        If `cursor` is malformed; mapped to 422.
+        If `cursor` is malformed, `kind` is not a kind, or `event_type` is not of `kind`;
+        mapped to 422.
     lakana_core.errors.AuditUnavailableError
         If the read had to be recorded in the audit log and could not be; mapped to 503 with
         `Retry-After`, and no event is returned.
@@ -220,6 +230,7 @@ def list_audit_events(
     page = audit.query(
         p,
         event_type=event_type,
+        kind=kind,
         environment=environment,
         principal_id=principal_id,
         since=since,

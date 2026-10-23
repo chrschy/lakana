@@ -59,12 +59,30 @@ lakana secret list --env dev
 ```
 
 To bind a secret on its own, or to move it, an administrator runs `lakana secret bind` with
-exactly one of `--index NAME`, `--repository NAME` or `--own-env`:
+exactly one of `--index NAME`, `--repository NAME`, `--connection NAME` or `--own-env`:
 
 <!-- source: docs/examples/bind-a-secret/run.sh#bind -->
 ```bash
 lakana secret bind hook --env dev --own-env
 ```
+
+A connection's own secret is usually created with the connection (`lakana connection create …
+--password-stdin`); binding an existing secret to a connection needs the right to manage secrets.
+The bind also makes it the secret the connection uses, in one step, and the connection lets go of
+the secret it used before:
+
+<!-- source: docs/examples/connections/run.sh#bind -->
+```bash
+lakana secret bind crm-reader --env dev --connection crm-db
+```
+
+<!-- output: connections#bind -->
+```text
+Bound secret crm-reader in dev to connection crm-db (db2.example.com:5432); it is now the secret the connection uses
+```
+
+The reference page [Connections](../reference/connections.md) lists who may give a connection
+which secret.
 
 Someone who may only register indexes or repositories (`MANAGE_PACKAGE_INDEX`,
 `MANAGE_REPOSITORY`) can name a secret only if it is already bound to that same index or

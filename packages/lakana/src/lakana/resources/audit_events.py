@@ -59,6 +59,7 @@ class AuditEvents:
         until: datetime | None = None,
         limit: int = 100,
         cursor: str | None = None,
+        kind: str | None = None,
     ) -> AuditEventPage:
         """List one page of audit events, newest first, optionally filtered.
 
@@ -84,6 +85,9 @@ class AuditEvents:
             with a 422.
         cursor
             A previous page's `next_cursor`, to fetch the page after it.
+        kind
+            Only return events of this kind, if given: ``connection`` is every
+            ``CONNECTION_*`` type. With `event_type`, the type must be of the kind.
 
         Returns
         -------
@@ -95,7 +99,8 @@ class AuditEvents:
         lakana.errors.PermissionDenied
             If the caller may not read the audit log.
         lakana.errors.ValidationError
-            If `cursor` is not one the server issued.
+            If `cursor` is not one the server issued, `kind` is not a kind, or `event_type`
+            is not of `kind`.
         """
         response = self._transport.request(
             ROUTES["audit_events.list"],
@@ -107,6 +112,7 @@ class AuditEvents:
                 until=None if until is None else until.isoformat(),
                 limit=limit,
                 cursor=cursor,
+                kind=kind,
             ),
         )
         body = response.json()
@@ -124,6 +130,7 @@ class AuditEvents:
         since: datetime | None = None,
         until: datetime | None = None,
         page_size: int = 100,
+        kind: str | None = None,
     ) -> Iterator[AuditEvent]:
         """Yield every matching audit event, newest first, fetching pages as needed.
 
@@ -141,6 +148,9 @@ class AuditEvents:
             Only yield events at or before this time, if given.
         page_size
             Events per request, between 1 and 500 inclusive.
+        kind
+            Only yield events of this kind, if given: ``connection`` is every
+            ``CONNECTION_*`` type.
 
         Yields
         ------
@@ -162,6 +172,7 @@ class AuditEvents:
                 until=until,
                 limit=page_size,
                 cursor=cursor,
+                kind=kind,
             )
             yield from page.items
             if page.next_cursor is None:
