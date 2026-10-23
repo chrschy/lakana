@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import threading
 import time
 import uuid
@@ -17,12 +18,15 @@ from testcontainers.postgres import PostgresContainer
 
 from lakana_core.auth import Action, AllowAllAuthorization, PrincipalRef, SecurableKind
 from lakana_core.config import DatabaseConfig
+from lakana_core.connections.kinds import ConnectionKind
+from lakana_core.connections.service import ConnectionService
 from lakana_core.db import create_engine
 from lakana_core.grants.authorization import GrantAuthorization
 from lakana_core.grants.roles import Role
 from lakana_core.grants.service import GrantService
 from lakana_core.models import (
     Base,
+    Connection,
     Environment,
     PackageIndex,
     Principal,
@@ -31,6 +35,7 @@ from lakana_core.models import (
     SecretUseKind,
 )
 from lakana_core.projects.package_indexes import PackageIndexService
+from lakana_core.secrets import service as secret_service_module
 from lakana_core.secrets.keys import EnvKeyProvider
 from lakana_core.secrets.service import SecretService
 from lakana_core.secrets.uses import SecretBindingRefused, SecretUse
@@ -245,3 +250,103 @@ def test_a_url_change_waits_for_a_bind_and_is_refused(engine: Engine) -> None:
             ).scalar_one()
             == f"https://{world.a}.example/s"
         )
+
+
+def test_two_moves_between_the_same_connections_in_opposite_directions_both_commit(
+    engine: Engine,
+) -> None:
+    """S1 moves from A to B while S2 moves from B to A: no deadlock, no 409, rows agree.
+
+    Each bind waits at a barrier right after it locked its entry. Taking both connections in
+    one order first (`lock_connections`) makes the second bind queue before the barrier, so
+    the barrier times out and the binds run one after the other; without that order each would
+    hold one connection and wait for the other.
+    """
+    tag = uuid.uuid4().hex[:8]
+    with Session(engine) as session:
+        session.add(Environment(id=uuid.uuid4(), name=f"env-{tag}", storage_root="file:///srv/c"))
+        session.commit()
+        admin = _principal(session, f"admin-{tag}")
+        connections = ConnectionService(session, AllowAllAuthorization(), _KEYS)
+        for name in (f"a-{tag}", f"b-{tag}"):
+            connections.create(
+                admin,
+                f"env-{tag}",
+                name=name,
+                kind=ConnectionKind.POSTGRESQL,
+                address={"host": "db.example.com", "database": "crm"},
+                settings={"user": "reader"},
+                secret_values={"password": "pw"},
+            )
+        rows = {
+            row.name: row
+            for row in session.execute(
+                select(Connection).where(Connection.name.in_([f"a-{tag}", f"b-{tag}"]))
+            ).scalars()
+        }
+        first, second = rows[f"a-{tag}"], rows[f"b-{tag}"]
+        moves = [
+            (first.secret_id, SecretUse(SecretUseKind.CONNECTION, second.id, second.name)),
+            (second.secret_id, SecretUse(SecretUseKind.CONNECTION, first.id, first.name)),
+        ]
+        ids = {"a": first.id, "b": second.id, "s1": first.secret_id, "s2": second.secret_id}
+
+    barrier = threading.Barrier(2)
+    original = secret_service_module.lock_entry
+
+    def _lock_then_meet(session: Session, use: SecretUse, environment: Environment) -> SecretUse:
+        """Lock the entry, then wait for the other bind at the barrier, at most a while.
+
+        Parameters
+        ----------
+        session
+            Database session.
+        use
+            The use whose entry to lock.
+        environment
+            The secret's environment.
+
+        Returns
+        -------
+        SecretUse
+            What `lock_entry` returned.
+        """
+        locked = original(session, use, environment)
+        with contextlib.suppress(threading.BrokenBarrierError):
+            barrier.wait(timeout=_WAIT_SECONDS)
+        return locked
+
+    outcomes: list[BaseException | None] = [None, None]
+
+    def _move(index: int) -> None:
+        """Run one bind on its own session.
+
+        Parameters
+        ----------
+        index
+            Which move.
+        """
+        secret_id, use = moves[index]
+        assert secret_id is not None
+        try:
+            with Session(engine) as own:
+                SecretService(own, AllowAllAuthorization(), _KEYS).bind(admin, secret_id, use)
+        except BaseException as exc:
+            outcomes[index] = exc
+
+    with patch.object(secret_service_module, "lock_entry", _lock_then_meet):
+        workers = [threading.Thread(target=_move, args=(i,), daemon=True) for i in (0, 1)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(_JOIN_SECONDS)
+    assert not any(worker.is_alive() for worker in workers), "a bind never finished"
+
+    assert outcomes == [None, None]
+    with Session(engine) as session:
+        a, b = session.get(Connection, ids["a"]), session.get(Connection, ids["b"])
+        s1, s2 = session.get(Secret, ids["s1"]), session.get(Secret, ids["s2"])
+        assert a is not None and b is not None and s1 is not None and s2 is not None
+        assert (a.secret_id, b.secret_id) == (ids["s2"], ids["s1"])
+        assert (s1.use_kind, s1.use_target_id) == (SecretUseKind.CONNECTION, ids["b"])
+        assert (s2.use_kind, s2.use_target_id) == (SecretUseKind.CONNECTION, ids["a"])
