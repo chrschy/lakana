@@ -1338,8 +1338,9 @@ class Launcher:
             code = waited.get("StatusCode") if isinstance(waited, dict) else None
             timed_out, stopped = live.timed_out.is_set(), live.stopped.is_set()
             # Docker sets `OOMKilled` from a containerd event that is lost when the container's
-            # cgroup goes first. Only the kernel sends SIGKILL to a task the launcher neither
-            # stopped nor timed out, and in a container with a memory limit that is the OOM killer.
+            # cgroup goes first. A SIGKILL the launcher did not send (it neither stopped nor timed
+            # out the run) is read as the memory limit, its most likely sender; a task killing
+            # itself, an operator's `docker kill` or the host's OOM killer read the same way.
             killed = code == _SIGKILL_EXIT and not timed_out and not stopped
             return {
                 "exit": code if isinstance(code, int) else None,
