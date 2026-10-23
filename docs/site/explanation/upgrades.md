@@ -140,7 +140,11 @@ and four `.env` lines (see [Upgrading](../how-to/deploy-with-compose.md#upgradin
 page); Docker Engine 28 or later is required. Task containers sit outside the worker's memory
 limit: budget `LAKANA_RUN__TASK_MEMORY` (2 GB) per worker on top of the workers' own. Builds reach
 package indexes only through `egress`: a corporate proxy goes in `LAKANA_EGRESS_UPSTREAM_PROXY`,
-and `LAKANA_RUN__HTTPS_PROXY` and `LAKANA_RUN__CA_BUNDLE` are refused with the docker runner.
+and `LAKANA_RUN__HTTPS_PROXY` and `LAKANA_RUN__CA_BUNDLE` are refused with the docker runner, and
+so is an `http://` `LAKANA_RUN__INDEX_URL`. A registered package index on another port than 443
+that has no credential, which builds of the local runner reached, is refused (403 from `egress`)
+under the docker runner until [#301](https://github.com/lakana-labs/lakana/issues/301): give it a
+credential or serve it on port 443.
 `LAKANA_RUNNER=local` runs tasks as the worker's own processes again, as before, but the new
 `compose.yaml` still starts `launcher` and `egress`: Docker Engine 28, the Docker socket and
 `LAKANA_TASK_IMAGE` stay required, and the workers wait for the launcher (to drop both services,

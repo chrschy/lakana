@@ -296,7 +296,9 @@ proxy whose certificate a private certificate authority signed therefore needs
 `LAKANA_RUN__RUNNER=local` for now (see [Python assets](../how-to/deploy-with-compose.md#python-assets)
 in "Deploying with Compose"). The egress service lets a build reach port 443 of each package
 index's host, and another port only when the index's URL names it (a registered index with a
-credential, or `LAKANA_RUN__INDEX_URL`); it tunnels https only, so an `http://` index cannot be
+credential, or `LAKANA_RUN__INDEX_URL`; a registered index on another port without a credential
+is refused until [#301](https://github.com/lakana-labs/lakana/issues/301): give it a credential
+or serve it on port 443); it tunnels https only, so an `http://` index cannot be
 reached from a build, and an `http://` `LAKANA_RUN__INDEX_URL` stops a `docker` worker at start
 with a message (serve the index over https, or keep `LAKANA_RUN__RUNNER=local`). `docker compose logs egress` names each host and port it refuses
 (`Refused a build connection from … to <host>:<port>: not in its token.`). At start a `docker` worker asks the launcher to remove the containers

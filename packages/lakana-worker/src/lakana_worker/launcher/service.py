@@ -93,9 +93,9 @@ _PROBE_SECONDS = 300.0
 _WAIT_MARGIN = 60.0
 """Seconds past a run's timeout and grace that the wait for its container may last."""
 _SUBNET_TRIES = 8
+"""How many subnets are tried when Docker says one overlaps an address pool of its own."""
 _REST_MARGIN = 60
 """Seconds past its last token's expiry that a build's subnet stays out of use."""
-"""How many subnets are tried when Docker says one overlaps an address pool of its own."""
 _CACHE_MAX_AGE = 14 * 86400
 """Seconds after which an idle shared cache is removed; the next build fills a new one."""
 _MAX_FRAME_PIECE = 1 << 20
