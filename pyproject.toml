@@ -3,7 +3,7 @@ members = ["packages/*"]
 
 [dependency-groups]
 dev = [
-    "hypothesis>=6.169.4",
+    "hypothesis>=6.170.2",
     "polars>=1.30",
     "import-linter>=2",
     "pip-licenses>=5",
@@ -31,7 +31,7 @@ dev = [
 ]
 # The documentation site (docs/site). Built in CI; published at the public beta.
 docs = [
-    "zensical>=0.0.70",
+    "zensical>=0.0.71",
 ]
 
 [tool.ruff]
