@@ -20,7 +20,7 @@ Name the principal and the object. `--scope dev` is the environment `dev`:
 lakana access explain alice --scope dev
 ```
 
-<!-- output -->
+<!-- output: give-access#explain -->
 ```text
 What alice may do on environment dev:
 ┏━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
@@ -62,7 +62,7 @@ A person explains themselves in the same way, with their own profile:
 lakana access explain alice --scope dev/silver/visits
 ```
 
-<!-- output -->
+<!-- output: give-access#explain-self -->
 ```text
 What alice may do on table silver.visits in environment dev:
 ┏━━━━━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓

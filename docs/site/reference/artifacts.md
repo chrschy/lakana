@@ -313,7 +313,7 @@ lakana artifact list --env dev
 
 You see one row per artifact:
 
-<!-- output -->
+<!-- output: train-and-predict#artifact-list -->
 ```text
 ┏━━━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━┓
 ┃ name        ┃ namespace ┃ current_version ┃ versions ┃ size  ┃
@@ -367,7 +367,7 @@ ls ~/spend-model
 
 The command names the file it made, and `ls` lists the folder:
 
-<!-- output -->
+<!-- output: train-and-predict#artifact-download -->
 ```text
 Downloaded dev/models.spend_model version 1 to /home/you/spend-model/model.joblib
 model.joblib
@@ -407,7 +407,7 @@ an artifact that exists stores a new version of it.
 The command prints the version it stored with the number and the size of its files, then how many
 files it sent:
 
-<!-- output -->
+<!-- output: train-and-predict#upload -->
 ```text
 Stored dev/models.scratch_model version 1 (1 file, 33 B)
 Sent 1 file; none were already stored.

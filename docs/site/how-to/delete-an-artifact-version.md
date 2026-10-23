@@ -37,7 +37,7 @@ confirm.` Add `--yes` only when you are sure.
 The command prints what it did. Version 3 had one file that no other version shares, so the file
 is freed:
 
-<!-- output -->
+<!-- output: train-and-predict#delete-version -->
 ```text
 Deleted version 3 of dev/models.scratch_model. Freed 1 file (33 B).
 ```
@@ -53,7 +53,7 @@ the same file, so deleting version 1 frees nothing: version 2 still needs the fi
 lakana artifact versions delete models.scratch_twin 1 --env dev --yes
 ```
 
-<!-- output -->
+<!-- output: train-and-predict#delete-shared -->
 ```text
 Deleted version 1 of dev/models.scratch_twin. Freed no files.
 Kept 1 file (33 B) that version 2 also uses.
@@ -121,7 +121,7 @@ dev/models.scratch_model and delete its 2 versions (66 B, 1 more already deleted
 undone. [y/N]: `
 The command prints:
 
-<!-- output -->
+<!-- output: train-and-predict#drop -->
 ```text
 Dropped artifact dev/models.scratch_model; its files are removed from storage, and Lakana's periodic clean-up removes any it could not.
 ```

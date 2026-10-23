@@ -32,7 +32,7 @@ environment where a process was killed in the middle of an upload of `models.aba
 lakana artifact uploads list --env dev
 ```
 
-<!-- output -->
+<!-- output: train-and-predict#uploads-list -->
 ```text
 ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
 ┃ upload_id                            ┃ artifact               ┃ created_at                  ┃
@@ -60,7 +60,7 @@ example reads the id into `UPLOAD_ID` first:
 lakana artifact uploads abort models.abandoned_model "$UPLOAD_ID" --env dev
 ```
 
-<!-- output -->
+<!-- output: train-and-predict#uploads-abort -->
 ```text
 Withdrew upload a8906dd2-aca6-46da-88cb-d8368776a48e of dev/models.abandoned_model
 ```
@@ -73,7 +73,7 @@ clean-up finds that no version and no open upload needs them. The list is now em
 lakana artifact uploads list --env dev
 ```
 
-<!-- output -->
+<!-- output: train-and-predict#uploads-list-empty -->
 ```text
 You have no open uploads in dev.
 ```

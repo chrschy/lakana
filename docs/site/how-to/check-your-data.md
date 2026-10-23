@@ -64,7 +64,7 @@ checks of the project in this guide, as `find` lists them:
 find checks -name '*.sql' | sort
 ```
 
-<!-- output -->
+<!-- output: check-your-data#list-checks -->
 ```text
 checks/silver/station_temperatures/has_rows.sql
 checks/silver/station_temperatures/no_missing_station.sql
@@ -150,7 +150,7 @@ and line. A dry run does the same and lists the checks it found, a table at a ti
 lakana deploy --env dev --dry-run
 ```
 
-<!-- output -->
+<!-- output: check-your-data#deploy-dry-run -->
 ```text
 Queued dry run 5c3be0a7-eead-4c62-bd70-eaad2b3bb1b2
 Dry run of readings in dev at 27083bdc2e1a95cd44bccffbc705282d7c99e59d
@@ -317,7 +317,7 @@ policies, but a read of it is refused, because an empty table would look like "n
 lakana sql "SELECT count(*) FROM silver.station_temperatures"
 ```
 
-<!-- output -->
+<!-- output: check-your-data#read-unpublished -->
 ```text
 Error: `silver.station_temperatures` has not been published: its first build failed the check `no_missing_station` (run
 941ef675-0bb6-497a-8bd5-8bfd22d7d2ae). Look at the rows: `lakana check rows 941ef675-0bb6-497a-8bd5-8bfd22d7d2ae
@@ -403,7 +403,7 @@ non-ASCII letter, say) shows `CHECK` instead, and the message says to copy the n
 lakana check rows "$RUN_ID" silver.station_temperatures/no_missing_station --env dev
 ```
 
-<!-- output -->
+<!-- output: check-your-data#check-rows -->
 ```text
 ┏━━━━━━━━━━━━┳━━━━━━━━━━━━┓
 ┃ station_id ┃ avg_temp_c ┃
@@ -525,7 +525,7 @@ a station comes from a reading without a station:
 lakana sql "SELECT station_id, temp_c FROM bronze.readings WHERE station_id IS NULL"
 ```
 
-<!-- output -->
+<!-- output: check-your-data#find-rows -->
 ```text
 ┏━━━━━━━━━━━━┳━━━━━━━━┓
 ┃ station_id ┃ temp_c ┃
@@ -660,7 +660,7 @@ rows of the run that succeeded, not the failing ones:
 lakana sql "SELECT station_id, avg_temp_c FROM silver.station_temperatures ORDER BY station_id"
 ```
 
-<!-- output -->
+<!-- output: check-your-data#after-rollback -->
 ```text
 ┏━━━━━━━━━━━━┳━━━━━━━━━━━━┓
 ┃ station_id ┃ avg_temp_c ┃
@@ -681,7 +681,7 @@ above:
 lakana check rows "$RUN3" silver.station_temperatures/no_missing_station --env dev
 ```
 
-<!-- output -->
+<!-- output: check-your-data#check-rows-rolled-back -->
 ```text
 ┏━━━━━━━━━━━━┳━━━━━━━━━━━━┓
 ┃ station_id ┃ avg_temp_c ┃
@@ -922,7 +922,7 @@ table, so you find them with the check's own `SELECT`:
 lakana sql "SELECT station_id, avg_temp_c FROM silver.station_temperatures WHERE avg_temp_c < -90 OR avg_temp_c > 60"
 ```
 
-<!-- output -->
+<!-- output: check-your-data#warn-rows -->
 ```text
 ┏━━━━━━━━━━━━┳━━━━━━━━━━━━┓
 ┃ station_id ┃ avg_temp_c ┃
@@ -1080,7 +1080,7 @@ holds the data that failed. Tasks do not read it until its checks pass.
 lakana sql "SELECT sensor_id, battery_pct FROM bronze.sensor_log WHERE battery_pct > 100"
 ```
 
-<!-- output -->
+<!-- output: check-your-data#keep-rows -->
 ```text
 ┏━━━━━━━━━━━┳━━━━━━━━━━━━━┓
 ┃ sensor_id ┃ battery_pct ┃

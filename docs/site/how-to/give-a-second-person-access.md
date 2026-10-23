@@ -20,7 +20,7 @@ A person is a principal of the type `user`:
 lakana principal create alice --type user
 ```
 
-<!-- output -->
+<!-- output: give-access#create -->
 ```text
 Created user alice
 It can do nothing yet. Next:
@@ -41,7 +41,7 @@ change who may do what:
 lakana grant create --principal alice --role ANALYST --kind ENVIRONMENT --env dev
 ```
 
-<!-- output -->
+<!-- output: give-access#grant -->
 ```text
 Created grant c913f5e7-8bf0-4b21-9630-46de66a0082d (ANALYST on environment dev) to alice
 ```
@@ -95,7 +95,7 @@ printf '%s\n' "$TOKEN" | lakana login --url "$URL" --env dev --token-stdin
 `$URL` is the address of the instance and `$TOKEN` is the token they were given. `--env dev` makes
 `dev` the default environment, so that no command needs `--env`.
 
-<!-- output -->
+<!-- output: give-access#login -->
 ```text
 Logged in as alice (USER) at http://127.0.0.1:50899; saved profile 'default'
 ```
@@ -108,12 +108,13 @@ lakana whoami
 lakana sql "SELECT count(*) AS visits FROM silver.visits"
 ```
 
-<!-- output -->
+<!-- output: give-access#first -->
 ```text
 ┌────────────┬───────┐
 │ name       │ alice │
 │ type       │ USER  │
 │ task_token │       │
+│ ci_token   │       │
 └────────────┴───────┘
 ┏━━━━━━━━┓
 ┃ visits ┃
@@ -209,7 +210,7 @@ identify a person who may do nothing until a new grant exists.
 lakana grant revoke "$GRANT_ID" --yes
 ```
 
-<!-- output -->
+<!-- output: give-access#revoke-grant -->
 ```text
 Revoked grant c913f5e7-8bf0-4b21-9630-46de66a0082d
 ```
@@ -225,7 +226,7 @@ too if you want the list to show only people who have access.
 lakana principal deactivate alice --yes
 ```
 
-<!-- output -->
+<!-- output: give-access#deactivate -->
 ```text
 Deactivated principal alice
 ```

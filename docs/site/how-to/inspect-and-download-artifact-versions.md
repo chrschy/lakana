@@ -21,7 +21,7 @@ lakana artifact list --env dev
 
 You see one row for each artifact:
 
-<!-- output -->
+<!-- output: train-and-predict#artifact-list -->
 ```text
 ┏━━━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━┓
 ┃ name        ┃ namespace ┃ current_version ┃ versions ┃ size  ┃
@@ -98,7 +98,7 @@ ls ~/spend-model
 The command names the file it made, and `ls` lists the folder (here one scikit-learn model saved
 with `joblib`). Your folder is your own:
 
-<!-- output -->
+<!-- output: train-and-predict#artifact-download -->
 ```text
 Downloaded dev/models.spend_model version 1 to /home/you/spend-model/model.joblib
 model.joblib
