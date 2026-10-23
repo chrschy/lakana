@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 from lakana_worker.launcher.requests import (
+    BUILD_DOWNLOADS,
     LABEL_OWNER,
     LABEL_STACK,
     MAX_REQUEST_BYTES,
@@ -75,7 +76,7 @@ BUILD: dict[str, Any] = {
         {"url": "https://pkgs.example.org/simple", "username": "ci", "password": "p@ss word"}
     ],
     "operator_index": None,
-    "hosts": ["pkgs.example.org", "pypi.org", "files.pythonhosted.org"],
+    "targets": ["pkgs.example.org:443", "pypi.org:443", "files.pythonhosted.org:443"],
     "no_build": True,
     "memory_mb": 2048,
     "cpus": 1,
@@ -203,7 +204,7 @@ HOSTILE: list[Any] = [
     pytest.param(
         _with(BUILD, network="host"), "build takes exactly", id="build-extra-network-host"
     ),
-    pytest.param(_without(BUILD, "hosts"), "build takes exactly", id="build-missing-field"),
+    pytest.param(_without(BUILD, "targets"), "build takes exactly", id="build-missing-field"),
     pytest.param(
         {"op": "status", "token": TOKEN, "python": "3.13", "environment": KEY, "pid": "host"},
         "status takes exactly",
@@ -231,6 +232,12 @@ HOSTILE: list[Any] = [
         id="cleanup-owner-shell",
     ),
     pytest.param({"op": "stop", "token": TOKEN}, "stop takes exactly", id="stop-missing"),
+    pytest.param(
+        {"op": "stop", "token": TOKEN, "id": "a"}, "stop takes exactly", id="stop-without-owner"
+    ),
+    pytest.param(
+        {"op": "stop", "token": TOKEN, "id": "a", "owner": "w; rm"}, "owner:", id="stop-owner-shell"
+    ),
     pytest.param(
         _with(RUN, Mounts=[{"Type": "bind", "Source": "/"}]), "run takes exactly", id="extra-Mounts"
     ),
@@ -290,26 +297,52 @@ HOSTILE: list[Any] = [
         _with(
             BUILD,
             operator_index="https://op:pw@pkgs.example.org\\@evil.org/",
-            hosts=["pkgs.example.org", "evil.org"],
+            targets=["pkgs.example.org:443", "evil.org:443"],
         ),
         "operator_index:",
         id="operator-backslash",
     ),
-    pytest.param(_with(BUILD, hosts=["127.0.0.1"], indexes=[]), "hosts:", id="host-loopback"),
-    pytest.param(_with(BUILD, hosts=["169.254.169.254"], indexes=[]), "hosts:", id="host-metadata"),
-    pytest.param(_with(BUILD, hosts=["10.1.2.3"], indexes=[]), "hosts:", id="host-rfc1918-10"),
-    pytest.param(_with(BUILD, hosts=["172.16.0.1"], indexes=[]), "hosts:", id="host-rfc1918-172"),
-    pytest.param(_with(BUILD, hosts=["192.168.0.1"], indexes=[]), "hosts:", id="host-rfc1918-192"),
-    pytest.param(_with(BUILD, hosts=["0.0.0.0"], indexes=[]), "hosts:", id="host-unspecified"),
-    pytest.param(_with(BUILD, hosts=["::1"], indexes=[]), "hosts:", id="host-ipv6-loopback"),
-    pytest.param(_with(BUILD, hosts=["fd00::1"], indexes=[]), "hosts:", id="host-ipv6-ula"),
-    pytest.param(_with(BUILD, hosts=["fe80::1"], indexes=[]), "hosts:", id="host-ipv6-link-local"),
-    pytest.param(_with(BUILD, hosts=["::"], indexes=[]), "hosts:", id="host-ipv6-unspecified"),
-    pytest.param(_with(BUILD, hosts=["127.1"], indexes=[]), "hosts:", id="host-short-ipv4"),
-    pytest.param(_with(BUILD, hosts=["127.0.0.0x1"], indexes=[]), "hosts:", id="host-mixed-hex"),
-    pytest.param(_with(BUILD, hosts=["0.0x0.0.0"], indexes=[]), "hosts:", id="host-hex-label"),
-    pytest.param(_with(BUILD, hosts=["100.64.0.1"], indexes=[]), "hosts:", id="host-shared-space"),
-    pytest.param(_with(BUILD, hosts=["224.0.0.1"], indexes=[]), "hosts:", id="host-multicast"),
+    pytest.param(
+        _with(BUILD, targets=["127.0.0.1:443"], indexes=[]), "targets:", id="host-loopback"
+    ),
+    pytest.param(
+        _with(BUILD, targets=["169.254.169.254:443"], indexes=[]), "targets:", id="host-metadata"
+    ),
+    pytest.param(
+        _with(BUILD, targets=["10.1.2.3:443"], indexes=[]), "targets:", id="host-rfc1918-10"
+    ),
+    pytest.param(
+        _with(BUILD, targets=["172.16.0.1:443"], indexes=[]), "targets:", id="host-rfc1918-172"
+    ),
+    pytest.param(
+        _with(BUILD, targets=["192.168.0.1:443"], indexes=[]), "targets:", id="host-rfc1918-192"
+    ),
+    pytest.param(
+        _with(BUILD, targets=["0.0.0.0:443"], indexes=[]), "targets:", id="host-unspecified"
+    ),
+    pytest.param(
+        _with(BUILD, targets=["::1:443"], indexes=[]), "targets:", id="host-ipv6-loopback"
+    ),
+    pytest.param(_with(BUILD, targets=["fd00::1:443"], indexes=[]), "targets:", id="host-ipv6-ula"),
+    pytest.param(
+        _with(BUILD, targets=["fe80::1:443"], indexes=[]), "targets:", id="host-ipv6-link-local"
+    ),
+    pytest.param(
+        _with(BUILD, targets=[":::443"], indexes=[]), "targets:", id="host-ipv6-unspecified"
+    ),
+    pytest.param(_with(BUILD, targets=["127.1:443"], indexes=[]), "targets:", id="host-short-ipv4"),
+    pytest.param(
+        _with(BUILD, targets=["127.0.0.0x1:443"], indexes=[]), "targets:", id="host-mixed-hex"
+    ),
+    pytest.param(
+        _with(BUILD, targets=["0.0x0.0.0:443"], indexes=[]), "targets:", id="host-hex-label"
+    ),
+    pytest.param(
+        _with(BUILD, targets=["100.64.0.1:443"], indexes=[]), "targets:", id="host-shared-space"
+    ),
+    pytest.param(
+        _with(BUILD, targets=["224.0.0.1:443"], indexes=[]), "targets:", id="host-multicast"
+    ),
     pytest.param(_with(RUN, op="exec"), "op must be one of", id="op-exec"),
     pytest.param(
         _with(RUN, token="x" * 64), "does not carry the launcher's token", id="wrong-token"
@@ -318,10 +351,12 @@ HOSTILE: list[Any] = [
     pytest.param([1, 2], "one JSON object", id="a-list"),
     pytest.param("run", "one JSON object", id="a-string"),
     pytest.param(
-        {"op": "stop", "token": TOKEN, "id": "../lakana-server"}, "id:", id="stop-traversal"
+        {"op": "stop", "token": TOKEN, "id": "../lakana-server", "owner": "w1"},
+        "id:",
+        id="stop-traversal",
     ),
     pytest.param(
-        {"op": "stop", "token": TOKEN, "id": "a", "force": True},
+        {"op": "stop", "token": TOKEN, "id": "a", "owner": "w1", "force": True},
         "stop takes exactly",
         id="stop-extra",
     ),
@@ -364,7 +399,7 @@ HOSTILE: list[Any] = [
             BUILD,
             indexes=[{"url": "https://other.example.org/simple", "username": "", "password": "p"}],
         ),
-        "every index's host must be in hosts",
+        "every index's host and port must be in targets",
         id="index-host-not-allowed",
     ),
     pytest.param(
@@ -403,9 +438,14 @@ HOSTILE: list[Any] = [
     pytest.param(
         _with(BUILD, indexes=[BUILD["indexes"][0]] * 17), "indexes:", id="too-many-indexes"
     ),
-    pytest.param(_with(BUILD, hosts=["PKGS.example.org"]), "hosts:", id="host-upper-case"),
-    pytest.param(_with(BUILD, hosts=["pkgs.example.org:8443"]), "hosts:", id="host-with-port"),
-    pytest.param(_with(BUILD, hosts=[]), "hosts:", id="no-host"),
+    pytest.param(_with(BUILD, targets=["PKGS.example.org:443"]), "targets:", id="host-upper-case"),
+    pytest.param(_with(BUILD, targets=["pkgs.example.org"]), "targets:", id="target-without-port"),
+    pytest.param(_with(BUILD, targets=[]), "targets:", id="no-target"),
+    pytest.param(
+        _with(BUILD, indexes=[], targets=[f"h{n}.example.org:443" for n in range(33)]),
+        "targets:",
+        id="too-many-targets",
+    ),
     pytest.param(
         _with(BUILD, operator_index="https://in dex/simple"), "operator_index:", id="operator-space"
     ),
@@ -473,7 +513,9 @@ def test_the_valid_requests_parse_into_their_plain_values() -> None:
     run = parse_request(_raw(RUN), token=TOKEN, settings=SETTINGS)
     build = parse_request(_raw(BUILD), token=TOKEN, settings=SETTINGS)
     stop = parse_request(
-        _raw({"token": TOKEN, "op": "stop", "id": "0f3c9a1e"}), token=TOKEN, settings=SETTINGS
+        _raw({"token": TOKEN, "op": "stop", "id": "0f3c9a1e", "owner": "worker-1"}),
+        token=TOKEN,
+        settings=SETTINGS,
     )
     status = parse_request(
         _raw({"token": TOKEN, "op": "status", "python": "3.13", "environment": KEY}),
@@ -491,7 +533,7 @@ def test_the_valid_requests_parse_into_their_plain_values() -> None:
     )
     assert isinstance(build, BuildRequest) and build.indexes[0].host == "pkgs.example.org"
     assert "p@ss word" not in repr(build)
-    assert isinstance(stop, StopRequest) and stop.id == "0f3c9a1e"
+    assert isinstance(stop, StopRequest) and (stop.id, stop.owner) == ("0f3c9a1e", "worker-1")
     assert isinstance(status, StatusRequest) and status.environment == KEY
     assert isinstance(cleanup, CleanupRequest) and cleanup.owner == "worker-1"
 
@@ -566,6 +608,8 @@ def test_the_build_spec_mounts_only_code_environment_and_cache() -> None:
         in spec["Env"]
     )
     assert "LAKANA_BUILD_NO_BUILD=1" in spec["Env"]
+    assert f"UV_CONCURRENT_DOWNLOADS={BUILD_DOWNLOADS}" in spec["Env"]
+    assert BUILD_DOWNLOADS * 2 <= 32, "#302: uv's downloads fit well within one build's cap"
     assert not any(v.startswith(("HTTPS_PROXY=", "https_proxy=")) for v in spec["Env"])
     assert host["NetworkMode"] == "lakana-build-b0f3c9a1e"
     with_proxy = build_container_spec(
@@ -593,7 +637,15 @@ def test_volume_names_change_with_the_image_and_the_index_set() -> None:
     build = parse_request(_raw(BUILD), token=TOKEN, settings=SETTINGS)
     other = parse_request(
         _raw(
-            _with(BUILD, hosts=["pkgs.example.org", "pypi.org", "files.pythonhosted.org", "x.org"])
+            _with(
+                BUILD,
+                targets=[
+                    "pkgs.example.org:443",
+                    "pypi.org:443",
+                    "files.pythonhosted.org:443",
+                    "x.org:443",
+                ],
+            )
         ),
         token=TOKEN,
         settings=SETTINGS,
@@ -710,18 +762,18 @@ def test_the_cache_key_separates_tokens_that_share_a_user_name() -> None:
 
 def test_the_cache_key_separates_operator_index_tokens() -> None:
     """The operator's own credential counts as well."""
-    hosts = [*BUILD["hosts"], "mirror.example.org"]
-    one = _build_request(operator_index="https://u:one@mirror.example.org/simple", hosts=hosts)
-    two = _build_request(operator_index="https://u:two@mirror.example.org/simple", hosts=hosts)
+    targets = [*BUILD["targets"], "mirror.example.org:443"]
+    one = _build_request(operator_index="https://u:one@mirror.example.org/simple", targets=targets)
+    two = _build_request(operator_index="https://u:two@mirror.example.org/simple", targets=targets)
 
     assert cache_volume(SETTINGS, one, key=CACHE_KEY) != cache_volume(SETTINGS, two, key=CACHE_KEY)
 
 
 def test_the_cache_key_holds_the_operator_index_user() -> None:
     """The operator's own credential is part of the identity too."""
-    hosts = [*BUILD["hosts"], "mirror.example.org"]
-    one = _build_request(operator_index="https://u1:p@mirror.example.org/simple", hosts=hosts)
-    two = _build_request(operator_index="https://u2:p@mirror.example.org/simple", hosts=hosts)
+    targets = [*BUILD["targets"], "mirror.example.org:443"]
+    one = _build_request(operator_index="https://u1:p@mirror.example.org/simple", targets=targets)
+    two = _build_request(operator_index="https://u2:p@mirror.example.org/simple", targets=targets)
 
     assert cache_volume(SETTINGS, one, key=CACHE_KEY) != cache_volume(SETTINGS, two, key=CACHE_KEY)
 
@@ -786,19 +838,25 @@ def test_the_control_probe_has_no_option_and_its_own_name() -> None:
 
 def test_the_cache_volume_depends_on_the_operator_index_host_and_keeps_the_password_out() -> None:
     """Another host is another cache, and the password is not in the name."""
-    hosts = [*BUILD["hosts"], "mirror.example.org", "other.example.org"]
+    targets = [*BUILD["targets"], "mirror.example.org:443", "other.example.org:443"]
     first = parse_request(
-        _raw(_with(BUILD, operator_index="https://u:one@mirror.example.org/simple", hosts=hosts)),
+        _raw(
+            _with(BUILD, operator_index="https://u:one@mirror.example.org/simple", targets=targets)
+        ),
         token=TOKEN,
         settings=SETTINGS,
     )
     second = parse_request(
-        _raw(_with(BUILD, operator_index="https://u:two@mirror.example.org/simple", hosts=hosts)),
+        _raw(
+            _with(BUILD, operator_index="https://u:two@mirror.example.org/simple", targets=targets)
+        ),
         token=TOKEN,
         settings=SETTINGS,
     )
     other = parse_request(
-        _raw(_with(BUILD, operator_index="https://u:one@other.example.org/simple", hosts=hosts)),
+        _raw(
+            _with(BUILD, operator_index="https://u:one@other.example.org/simple", targets=targets)
+        ),
         token=TOKEN,
         settings=SETTINGS,
     )
@@ -816,7 +874,7 @@ def test_the_operator_index_comes_first_and_keeps_its_own_credential() -> None:
             _with(
                 BUILD,
                 operator_index="https://op:pw@mirror.example.org/simple",
-                hosts=["pkgs.example.org", "mirror.example.org"],
+                targets=["pkgs.example.org:443", "mirror.example.org:443"],
             )
         ),
         token=TOKEN,
@@ -862,7 +920,9 @@ def test_a_repeated_json_key_is_refused(raw: bytes, reason: str) -> None:
 def test_public_ip_literals_and_host_names_are_allowed_hosts() -> None:
     """Only loopback, link-local, private and unspecified literals are refused."""
     build = parse_request(
-        _raw(_with(BUILD, hosts=["8.8.8.8", "pkgs.example.org"])), token=TOKEN, settings=SETTINGS
+        _raw(_with(BUILD, targets=["8.8.8.8:443", "pkgs.example.org:443"])),
+        token=TOKEN,
+        settings=SETTINGS,
     )
     assert isinstance(build, BuildRequest)
 
@@ -897,8 +957,8 @@ def test_every_spec_overrides_the_entrypoint_with_its_own_command() -> None:
     assert specs[1]["Entrypoint"] == ["/usr/local/bin/python", "-I", "/opt/lakana-task/build.py"]
 
 
-def test_a_build_may_reach_port_443_of_its_hosts_and_the_ports_its_index_urls_name() -> None:
-    """The token's pairs: port 443 of every host, and an explicit port where a URL names one."""
+def test_a_build_may_reach_exactly_the_host_and_port_pairs_the_worker_sent() -> None:
+    """#301: the token's pairs are the request's targets, whatever port an index is on."""
     build = parse_request(
         _raw(
             _with(
@@ -911,7 +971,11 @@ def test_a_build_may_reach_port_443_of_its_hosts_and_the_ports_its_index_urls_na
                     }
                 ],
                 operator_index="https://u:p@mirror.example.org:9443/simple",
-                hosts=["pkgs.example.org", "mirror.example.org", "pypi.org"],
+                targets=[
+                    "pkgs.example.org:8443",
+                    "mirror.example.org:9443",
+                    "open.example.org:7443",
+                ],
             )
         ),
         token=TOKEN,
@@ -920,27 +984,111 @@ def test_a_build_may_reach_port_443_of_its_hosts_and_the_ports_its_index_urls_na
     assert isinstance(build, BuildRequest)
 
     assert build_targets(build) == [
-        ("pkgs.example.org", 443),
-        ("mirror.example.org", 443),
-        ("pypi.org", 443),
         ("pkgs.example.org", 8443),
         ("mirror.example.org", 9443),
+        ("open.example.org", 7443),
     ]
 
 
-def test_a_plain_http_operator_index_adds_no_port() -> None:
-    """The proxy tunnels only (CONNECT): an http index is not reachable through it."""
-    build = parse_request(
-        _raw(
-            _with(
-                BUILD,
-                operator_index="http://mirror.example.org:8080/simple",
-                hosts=["pkgs.example.org", "mirror.example.org"],
-            )
+@pytest.mark.parametrize(
+    ("index", "operator", "targets"),
+    [
+        pytest.param(
+            "https://pkgs.example.org:8443/simple",
+            None,
+            ["pkgs.example.org:443"],
+            id="credential-port-missing",
         ),
-        token=TOKEN,
-        settings=SETTINGS,
-    )
-    assert isinstance(build, BuildRequest)
+        pytest.param(
+            "https://pkgs.example.org/simple",
+            None,
+            ["pkgs.example.org:8443"],
+            id="credential-default-port-missing",
+        ),
+        pytest.param(
+            "https://pkgs.example.org/simple",
+            "https://mirror.example.org:9443/simple",
+            ["pkgs.example.org:443", "mirror.example.org:443"],
+            id="operator-port-missing",
+        ),
+        pytest.param(
+            "https://pkgs.example.org/simple",
+            "http://mirror.example.org/simple",
+            ["pkgs.example.org:443", "mirror.example.org:443"],
+            id="operator-http-port-missing",
+        ),
+    ],
+)
+def test_every_index_with_a_url_needs_its_own_host_and_port_among_the_targets(
+    index: str, operator: str | None, targets: list[str]
+) -> None:
+    """A credential or the operator's index is sent only where the build may connect.
 
-    assert build_targets(build) == [("pkgs.example.org", 443), ("mirror.example.org", 443)]
+    Parameters
+    ----------
+    index
+        The credential's URL.
+    operator
+        The operator's index.
+    targets
+        The pairs sent.
+    """
+    request = _with(
+        BUILD,
+        indexes=[{"url": index, "username": "u", "password": "p"}],
+        operator_index=operator,
+        targets=targets,
+    )
+
+    with pytest.raises(Refused, match="every index's host and port must be in targets"):
+        parse_request(_raw(request), token=TOKEN, settings=SETTINGS)
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "pkgs.example.org",
+        "pkgs.example.org:",
+        "pkgs.example.org:0",
+        "pkgs.example.org:65536",
+        "pkgs.example.org:0443",
+        "pkgs.example.org:+443",
+        "pkgs.example.org:44 3",
+        "pkgs.example.org:443:443",
+        ":443",
+        "127.0.0.1:443",
+        "[::1]:443",
+        "pkgs.example.org:\u0664\u0664\u0663",
+    ],
+)
+def test_a_target_is_a_permitted_host_and_a_port_in_one_spelling(target: str) -> None:
+    """#301: a port is 1 to 65535 in digits without a sign or a leading zero.
+
+    Parameters
+    ----------
+    target
+        A malformed pair.
+    """
+    request = _with(BUILD, indexes=[], targets=[target.encode().decode("unicode_escape")])
+
+    with pytest.raises(Refused, match="targets:"):
+        parse_request(_raw(request), token=TOKEN, settings=SETTINGS)
+
+
+def test_a_target_that_is_not_a_string_is_refused() -> None:
+    """A number or a pair is not ``host:port``."""
+    for target in (443, ["pkgs.example.org", 443]):
+        with pytest.raises(Refused, match="targets:"):
+            parse_request(
+                _raw(_with(BUILD, indexes=[], targets=[target])), token=TOKEN, settings=SETTINGS
+            )
+
+
+def test_a_target_may_name_any_port_of_a_host_once() -> None:
+    """Two ports of one host are two targets; the same pair twice is refused."""
+    two = _with(BUILD, targets=["pkgs.example.org:443", "pkgs.example.org:8443"])
+    twice = _with(BUILD, targets=["pkgs.example.org:443", "pkgs.example.org:443"])
+
+    assert isinstance(parse_request(_raw(two), token=TOKEN, settings=SETTINGS), BuildRequest)
+    with pytest.raises(Refused, match="targets:"):
+        parse_request(_raw(twice), token=TOKEN, settings=SETTINGS)

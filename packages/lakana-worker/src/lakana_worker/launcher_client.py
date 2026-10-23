@@ -352,20 +352,23 @@ class LauncherClient:
             connection.close()
         raise self._unavailable("the launcher closed the connection without an answer")
 
-    def stop(self, ident: str) -> bool:
-        """Ask the launcher to stop a task or build.
+    def stop(self, ident: str, owner: str) -> bool:
+        """Ask the launcher to stop a task or build this worker started.
 
         Parameters
         ----------
         ident
             Its id.
+        owner
+            This worker (`claim_owner`); the launcher stops only runs started under it.
 
         Returns
         -------
         bool
-            Whether it was running.
+            Whether it was running; `False` too for an id the launcher has no run of this owner
+            under.
         """
-        return self.call({"op": "stop", "id": ident}).get("stopped") is True
+        return self.call({"op": "stop", "id": ident, "owner": owner}).get("stopped") is True
 
     def status(self, python: str, key: str) -> bool:
         """Ask whether an environment is built.

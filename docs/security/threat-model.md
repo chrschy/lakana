@@ -345,8 +345,12 @@ not protect against. Each is accepted.
    row "Compromise of the launcher" above).
 3. **A compromised worker** holds the launcher's token. It can start allowed task images with its
    own code as uid 10001, mount any environment volume read-only by its key, build into an
-   environment that is not complete, and stop any run whose id it learns; it cannot choose an
-   image, a host path, a capability or a network. It also holds everything a worker holds anyway.
+   environment that is not complete, and stop another worker's run only if it learns that run's
+   id: 128 random bits each worker makes per task and build and never stores or logs. The
+   launcher's owner check (#305) does not add a secret, because in the bundle every worker reads
+   the others' owner names from the shared `worker-cache` volume; it stops a request that
+   repeats a live id from ending the first run. It cannot choose an image, a host path, a
+   capability or a network. It also holds everything a worker holds anyway.
 4. **Task images are named by tag** and pulled once when absent: a tag repointed in the registry
    before the first pull is what runs. Releases attest the images; the launcher does not verify
    an attestation.
@@ -374,8 +378,9 @@ not protect against. Each is accepted.
     #303). With `LAKANA_EGRESS__UPSTREAM_PROXY` the proxy makes no address check of its own: the
     upstream proxy resolves and decides, and the token still limits the host:port pairs. A
     tunnel whose writes block can outlive its token's expiry by up to the 300-second idle
-    timeout. One build can hold all `LAKANA_EGRESS__MAX_CONNECTIONS` (256) slots (#302). A
-    registered index on a port other than 443 without a credential is refused (#301). A build
+    timeout. One build holds at most `LAKANA_EGRESS__MAX_CONNECTIONS_PER_NETWORK` (32) of the
+    proxy's `LAKANA_EGRESS__MAX_CONNECTIONS` (256), so it takes at most its share; enough builds
+    at their cap together (eight with the defaults) still fill the proxy. A build
     trusts only public certificate authorities, so a private-CA index needs the local runner
     (#292).
 12. **Protection is read once per attempt.** A protected environment refuses a Python task on a

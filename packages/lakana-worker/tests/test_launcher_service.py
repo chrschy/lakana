@@ -96,7 +96,7 @@ def _build(build: str = "b1", key: str = KEY) -> BuildRequest:
         attempt="attempt-x1",
         indexes=(),
         operator_index=None,
-        hosts=("pypi.org",),
+        targets=(("pypi.org", 443),),
         no_build=False,
         limits=LIMITS,
         max_bytes=1 << 30,
@@ -293,11 +293,74 @@ def test_stop_stops_a_running_task(tmp_path: Path) -> None:
     worker.start()
     _until(lambda: _task_started(engine))
 
-    assert launcher.stop(StopRequest("t1")) == {"stopped": True}
+    assert launcher.stop(StopRequest("t1", "w1")) == {"stopped": True}
     worker.join(10)
 
     assert results[0]["stopped"] is True and results[0]["oom_killed"] is False
-    assert launcher.stop(StopRequest("t1")) == {"stopped": False}
+    assert launcher.stop(StopRequest("t1", "w1")) == {"stopped": False}
+
+
+@pytest.mark.parametrize("kind", ["task", "build"])
+def test_a_second_owner_cannot_stop_the_first_owners_run(tmp_path: Path, kind: str) -> None:
+    """#305: `stop` acts only on its owner's runs, and a refusal looks like an unknown id."""
+    engine = FakeEngine(hold=True)
+    launcher = _started(engine, tmp_path, built=kind == "task")
+    results: list[dict[str, object]] = []
+    ident = "t1" if kind == "task" else "b1"
+
+    def work() -> None:
+        if kind == "task":
+            results.append(launcher.run(_run(), lambda line: None))
+        else:
+            results.append(launcher.build(_build(), lambda line: None))
+
+    worker = threading.Thread(target=work)
+    worker.start()
+    _until(lambda: _task_started(engine))
+
+    foreign = launcher.stop(StopRequest(ident, "w2"))
+    unknown = launcher.stop(StopRequest("nobody", "w2"))
+
+    assert foreign == unknown == {"stopped": False}
+    assert not any(p.endswith(("/stop", "/kill")) for _, p, _ in engine.calls)
+    assert worker.is_alive()
+    assert launcher.stop(StopRequest(ident, "w1")) == {"stopped": True}
+    worker.join(10)
+    assert results[0]["stopped"] is True
+
+
+def test_a_second_owner_cannot_abandon_the_first_owners_run(tmp_path: Path) -> None:
+    """#305: a connection of another owner that names a live id and closes kills nothing."""
+    engine = FakeEngine(hold=True)
+    launcher = _started(engine, tmp_path)
+    results: list[dict[str, object]] = []
+    worker = threading.Thread(
+        target=lambda: results.append(launcher.run(_run(), lambda line: None))
+    )
+    worker.start()
+    _until(lambda: _task_started(engine))
+
+    launcher.abandon(_named(launcher), "w2")
+    launcher.forget(_named(launcher), "w2")
+
+    assert not any(p.endswith(("/stop", "/kill")) for _, p, _ in engine.calls)
+    assert worker.is_alive()
+    launcher.abandon(_named(launcher), "w1")
+    worker.join(10)
+    assert results[0]["stopped"] is True
+
+
+def test_another_owners_departure_before_a_run_registers_does_not_stop_it(
+    tmp_path: Path,
+) -> None:
+    """#305: an abandonment is remembered for its own owner only."""
+    engine = FakeEngine()
+    launcher = _started(engine, tmp_path)
+    launcher.abandon(_named(launcher), "w2")
+
+    result = launcher.run(_run(), lambda line: None)
+
+    assert result["stopped"] is False and result["exit"] == 0
 
 
 @pytest.mark.parametrize(
@@ -320,11 +383,11 @@ def test_a_stop_docker_did_not_carry_out_answers_false_and_a_retry_stops_the_tas
     real = engine.request
     _intercept(engine, lambda method, path, body: path.endswith("/stop"), failure)
 
-    assert launcher.stop(StopRequest("t1")) == {"stopped": False}
+    assert launcher.stop(StopRequest("t1", "w1")) == {"stopped": False}
     assert worker.is_alive()
 
     engine.request = real  # ty: ignore[invalid-assignment]
-    assert launcher.stop(StopRequest("t1")) == {"stopped": True}
+    assert launcher.stop(StopRequest("t1", "w1")) == {"stopped": True}
     worker.join(10)
     assert results[0]["stopped"] is True
 
@@ -340,9 +403,9 @@ def test_a_stop_of_a_container_that_already_ended_or_is_gone_answers_true(tmp_pa
 
     for status in (304, 404):
         _intercept(engine, lambda method, path, body: path.endswith("/stop"), (status, b""))
-        assert launcher.stop(StopRequest("t1")) == {"stopped": True}
+        assert launcher.stop(StopRequest("t1", "w1")) == {"stopped": True}
         engine.request = real  # ty: ignore[invalid-assignment]
-    launcher.stop(StopRequest("t1"))
+    launcher.stop(StopRequest("t1", "w1"))
     worker.join(10)
 
 
@@ -366,7 +429,7 @@ def test_a_closed_connection_removes_the_container_and_its_network(tmp_path: Pat
     )
     worker.start()
     _until(lambda: _task_started(quiet))
-    launcher.abandon(container_name(launcher.settings, "task", "t1"))
+    launcher.abandon(container_name(launcher.settings, "task", "t1"), "w1")
     worker.join(10)
     assert results[0]["stopped"] is True
     assert quiet.containers == {} and quiet.networks == {}
@@ -392,7 +455,7 @@ def test_cleanup_spares_a_container_whose_connection_is_alive(tmp_path: Path) ->
 
     assert "orphan" not in engine.containers
     assert any(c["Name"] == "lakana-task-t1" for c in engine.containers.values())
-    launcher.stop(StopRequest("t1"))
+    launcher.stop(StopRequest("t1", "w1"))
     worker.join(10)
 
 
@@ -415,6 +478,55 @@ def test_two_builds_of_one_environment_run_once(tmp_path: Path) -> None:
     assert [r["complete"] for r in results] == [True, True]
     assert len(engine.created("build")) == 1
     assert launcher.status(StatusRequest("3.13", KEY)) == {"complete": True}
+
+
+def test_a_build_stopped_while_it_waits_for_another_build_ends_at_once(tmp_path: Path) -> None:
+    """#291: a stop reaches a build queued behind a build of the same environment."""
+    engine = FakeEngine(hold=True)
+    launcher = _started(engine, tmp_path, built=False)
+    first = threading.Thread(target=lambda: launcher.build(_build("b1"), lambda line: None))
+    first.start()
+    _until(lambda: _task_started(engine))
+    results: list[dict[str, object]] = []
+    second = threading.Thread(
+        target=lambda: results.append(launcher.build(_build("b2"), lambda line: None))
+    )
+    second.start()
+    _until(lambda: _named(launcher, "build", "b2") in launcher._live)
+    time.sleep(0.5)  # it keeps waiting while nobody stops it
+    assert second.is_alive()
+
+    assert launcher.stop(StopRequest("b2", "w1")) == {"stopped": True}
+    second.join(5)
+
+    assert not second.is_alive(), "the queued build waited for the other build to end"
+    assert results[0]["stopped"] is True and results[0]["complete"] is False
+    assert first.is_alive()
+    launcher.stop(StopRequest("b1", "w1"))
+    first.join(10)
+
+
+def test_a_stopped_build_leaves_no_environment_and_no_cache(tmp_path: Path) -> None:
+    """#291: what a stopped build wrote is removed; the next build starts clean."""
+    engine = FakeEngine(hold=True)
+    launcher = _started(engine, tmp_path, built=False)
+    volume = environment_volume(launcher.settings, "3.13", KEY)
+    cache = cache_volume(launcher.settings, _build(), key=launcher._cache_key)
+    results: list[dict[str, object]] = []
+    worker = threading.Thread(
+        target=lambda: results.append(launcher.build(_build(), lambda line: None))
+    )
+    worker.start()
+    _until(lambda: _task_started(engine))
+    assert volume in engine.volumes and cache in engine.volumes
+
+    assert launcher.stop(StopRequest("b1", "w1")) == {"stopped": True}
+    worker.join(10)
+
+    assert results[0]["complete"] is False
+    assert volume not in engine.volumes and cache not in engine.volumes
+    assert launcher.status(StatusRequest("3.13", KEY)) == {"complete": False}
+    assert not launcher._marker(volume).exists()
 
 
 def test_a_failed_build_leaves_no_marker_and_no_volume(tmp_path: Path) -> None:
@@ -879,13 +991,13 @@ def test_a_caller_that_left_before_the_run_registered_never_starts_it(tmp_path: 
     """The watcher can fire before the request reaches `run`; the name is remembered."""
     engine = FakeEngine()
     launcher = _started(engine, tmp_path)
-    launcher.abandon(_named(launcher))
+    launcher.abandon(_named(launcher), "w1")
 
     result = launcher.run(_run(), lambda line: None)
 
     assert result["stopped"] is True and result["exit"] is None
     assert engine.created("task") == [] and _started_count(engine) == 0
-    assert launcher.stop(StopRequest("t1")) == {"stopped": False}
+    assert launcher.stop(StopRequest("t1", "w1")) == {"stopped": False}
     assert launcher.run(_run(), lambda line: None)["stopped"] is False  # the name was spent
 
 
@@ -894,7 +1006,7 @@ def test_a_caller_that_left_during_the_image_pull_never_starts_the_task(tmp_path
     engine = FakeEngine(hold=True)
     launcher = _started(engine, tmp_path)
     engine.images.clear()
-    engine.hooks["pull"] = lambda: launcher.abandon(_named(launcher))
+    engine.hooks["pull"] = lambda: launcher.abandon(_named(launcher), "w1")
 
     result = launcher.run(_run(), lambda line: None)
 
@@ -921,9 +1033,9 @@ def test_a_stop_between_create_and_start_leaves_nothing_running(
 
     def leave_now() -> None:
         if leave == "stop":
-            launcher.stop(StopRequest("t1"))
+            launcher.stop(StopRequest("t1", "w1"))
         else:
-            launcher.abandon(_named(launcher))
+            launcher.abandon(_named(launcher), "w1")
 
     engine.hooks[moment] = leave_now
 
@@ -938,7 +1050,7 @@ def test_a_caller_that_left_while_docker_starts_the_container_kills_it(tmp_path:
     """Leaving after the start call began: the kill that found nothing running is repeated."""
     engine = FakeEngine(hold=True)
     launcher = _started(engine, tmp_path)
-    engine.hooks["start"] = lambda: launcher.abandon(_named(launcher))
+    engine.hooks["start"] = lambda: launcher.abandon(_named(launcher), "w1")
 
     result = launcher.run(_run(), lambda line: None)
 
@@ -951,7 +1063,7 @@ def test_a_build_whose_caller_left_while_it_waited_does_not_build(tmp_path: Path
     """A build queued behind one of the same environment checks again on its turn."""
     engine = FakeEngine()
     launcher = _started(engine, tmp_path, built=False)
-    launcher.abandon(_named(launcher, "build", "b1"))
+    launcher.abandon(_named(launcher, "build", "b1"), "w1")
 
     result = launcher.build(_build(), lambda line: None)
 
@@ -970,7 +1082,7 @@ def test_stop_reaches_a_build_by_its_id(tmp_path: Path) -> None:
     worker.start()
     _until(lambda: _task_started(engine))
 
-    assert launcher.stop(StopRequest("b1")) == {"stopped": True}
+    assert launcher.stop(StopRequest("b1", "w1")) == {"stopped": True}
     worker.join(10)
 
     assert results[0]["stopped"] is True and results[0]["complete"] is False
@@ -1066,7 +1178,7 @@ def test_handle_dispatches_each_request_kind(tmp_path: Path) -> None:
 
     assert launcher.handle(_build(), lambda line: None)["complete"] is True
     assert launcher.handle(_run(), lambda line: None)["exit"] == 0
-    assert launcher.handle(StopRequest("t1"), lambda line: None) == {"stopped": False}
+    assert launcher.handle(StopRequest("t1", "w1"), lambda line: None) == {"stopped": False}
     assert launcher.handle(StatusRequest("3.13", KEY), lambda line: None) == {"complete": True}
     assert launcher.handle(CleanupRequest("w1"), lambda line: None) == {"removed": 0}
 
@@ -1177,7 +1289,7 @@ def test_a_kill_that_docker_cannot_carry_out_does_not_fail_the_run(tmp_path: Pat
     engine = FakeEngine(hold=True)
     launcher = _started(engine, tmp_path)
     _intercept(engine, lambda m, p, b: p.endswith("/kill"), EngineError("gone"))
-    engine.hooks["attach"] = lambda: launcher.abandon(_named(launcher))
+    engine.hooks["attach"] = lambda: launcher.abandon(_named(launcher), "w1")
 
     assert launcher.run(_run(), lambda line: None)["stopped"] is True
 
@@ -1299,7 +1411,7 @@ def test_a_second_run_with_a_live_id_is_refused_and_leaves_the_first_alone(tmp_p
     with pytest.raises(EngineError, match="a run with the id t1 is already live"):
         launcher.run(_run(), lambda line: None)
 
-    assert launcher.stop(StopRequest("t1")) == {"stopped": True}
+    assert launcher.stop(StopRequest("t1", "w1")) == {"stopped": True}
     worker.join(10)
     assert results[0]["stopped"] is True
 
@@ -1322,7 +1434,7 @@ def test_cleanup_lists_the_containers_before_it_looks_at_the_live_runs(tmp_path:
     ) -> tuple[int, Any]:
         answer = real(method, path, body, query=query, timeout=timeout)
         if path == "/containers/json":
-            launcher._register("lakana-task-late", 3, 0)
+            launcher._register("lakana-task-late", "w1", 3, 0)
         return answer
 
     engine.request = listing_then_register  # ty: ignore[invalid-assignment]
@@ -2299,7 +2411,7 @@ def test_the_memory_of_live_runs_is_bounded_in_total(tmp_path: Path) -> None:
     with pytest.raises(EngineError, match="LAKANA_LAUNCHER__MAX_TOTAL_MEMORY_MB"):
         launcher.run(_run("t2"), lambda line: None)
 
-    launcher.stop(StopRequest("t1"))
+    launcher.stop(StopRequest("t1", "w1"))
     worker.join(10)
     engine.hold = False
     assert launcher._reserved_mb == 0

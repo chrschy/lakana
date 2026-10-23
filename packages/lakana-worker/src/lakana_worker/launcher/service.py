@@ -25,6 +25,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import errno
+import hmac
 import ipaddress
 import json
 import logging
@@ -96,6 +97,8 @@ _WAIT_MARGIN = 60.0
 """Seconds past a run's timeout and grace that the wait for its container may last."""
 _SUBNET_TRIES = 8
 """How many subnets are tried when Docker says one overlaps an address pool of its own."""
+_LOCK_POLL = 0.2
+"""Seconds between looks at a queued build's stop while it waits for its environment's lock."""
 _REST_MARGIN = 60
 """Seconds past its last token's expiry that a build's subnet stays out of use."""
 _CACHE_MAX_AGE = 14 * 86400
@@ -164,6 +167,8 @@ class _Live:
 
     Parameters
     ----------
+    owner
+        The worker that started it: only its `stop` and its closed connection end the run.
     grace
         Seconds between SIGTERM and SIGKILL on a stop.
     memory_mb
@@ -176,6 +181,7 @@ class _Live:
         Set by the timer.
     """
 
+    owner: str
     grace: int
     memory_mb: int = 0
     container_id: str | None = None
@@ -203,6 +209,25 @@ def _expired(labels: object, moment: float) -> bool:
         return raw is not None and int(raw) < moment
     except ValueError:
         return False
+
+
+def _same_owner(live: _Live, owner: str) -> bool:
+    """Say whether a request's owner is the owner of a registered run.
+
+    Parameters
+    ----------
+    live
+        The registration.
+    owner
+        The owner a request named.
+
+    Returns
+    -------
+    bool
+        Compared in constant time: the owner is the only thing that sets one worker's runs apart
+        from another's.
+    """
+    return hmac.compare_digest(live.owner.encode("utf-8"), owner.encode("utf-8"))
 
 
 def _deadline(seconds: int) -> int:
@@ -358,7 +383,7 @@ class Launcher:
         self.engine = engine
         self.no_new_privileges = settings.no_new_privileges == "on"
         self._live: dict[str, _Live] = {}
-        self._abandoned: set[str] = set()
+        self._abandoned: set[tuple[str, str]] = set()
         self.unusable_roots: dict[str, str] = {}
         self._lock = threading.Lock()
         self._build_locks: dict[str, threading.Lock] = {}
@@ -858,7 +883,9 @@ class Launcher:
             if root in self.unusable_roots:
                 raise Refused(self.unusable_roots[root])
         name = container_name(self.settings, "task", request.task)
-        live = self._register(name, request.kill_grace_seconds, request.limits.memory_mb)
+        live = self._register(
+            name, request.owner, request.kill_grace_seconds, request.limits.memory_mb
+        )
         deadline = _deadline(request.limits.timeout_seconds + request.kill_grace_seconds)
         try:
             volume = environment_volume(self.settings, request.python, request.environment)
@@ -892,7 +919,7 @@ class Launcher:
             finally:
                 self.close_network(network)
         finally:
-            self.forget(name, live)
+            self.forget(name, request.owner, live)
 
     @staticmethod
     def _not_built(python: str, environment: str) -> EngineError:
@@ -939,15 +966,22 @@ class Launcher:
             Whatever `emit` raises when the caller is gone.
         """
         name = container_name(self.settings, "build", request.build)
-        live = self._register(name, 0, request.limits.memory_mb)
+        live = self._register(name, request.owner, 0, request.limits.memory_mb)
         try:
             volume = environment_volume(self.settings, request.python, request.environment)
             with self._lock:
                 lock = self._build_locks.setdefault(volume, threading.Lock())
-            with lock:
+            # A build of the same environment may run for minutes: a stop or a closed connection
+            # ends the wait for it, so a cancelled task does not wait for another's build.
+            while not lock.acquire(timeout=_LOCK_POLL):
+                if live.stopped.is_set():
+                    return {**_STOPPED_BEFORE_START, "complete": False}
+            try:
                 return self._build_locked(request, emit, name, live, volume)
+            finally:
+                lock.release()
         finally:
-            self.forget(name, live)
+            self.forget(name, request.owner, live)
 
     def _build_locked(
         self, request: BuildRequest, emit: Emit, name: str, live: _Live, volume: str
@@ -1062,26 +1096,29 @@ class Launcher:
         return {**result, "complete": complete}
 
     def stop(self, request: StopRequest) -> dict[str, object]:
-        """Stop a running task or build: SIGTERM, SIGKILL after its grace.
+        """Stop a running task or build of the asking worker: SIGTERM, SIGKILL after its grace.
+
+        Only a run the same owner started is stopped. A run of another owner gets the answer an
+        id nobody registered gets, so the answer does not tell whether the id exists.
 
         Parameters
         ----------
         request
-            The id.
+            The id and the owner.
 
         Returns
         -------
         dict
-            ``stopped``: `True` when a run is registered under that id and Docker stopped its
-            container, found it not running or gone, or it has none yet (a run that has not
-            started its container never will). `False` when nothing is registered under the id,
-            or Docker did not carry out the stop: the caller asks again.
+            ``stopped``: `True` when a run of this owner is registered under that id and Docker
+            stopped its container, found it not running or gone, or it has none yet (a run that
+            has not started its container never will). `False` when no run of this owner is
+            registered under the id, or Docker did not carry out the stop: the caller asks again.
         """
         for kind in ("task", "build"):
             name = container_name(self.settings, kind, request.id)
             with self._lock:
                 live = self._live.get(name)
-            if live is not None:
+            if live is not None and _same_owner(live, request.owner):
                 live.stopped.set()
                 cid = live.container_id
                 if cid is None:
@@ -1107,32 +1144,38 @@ class Launcher:
                 return {"stopped": False}
         return {"stopped": False}
 
-    def abandon(self, name: str) -> None:
+    def abandon(self, name: str, owner: str) -> None:
         """Kill a run at once and never start it: its caller's connection closed.
 
-        The name is remembered, because the connection can close before the request reaches
-        `run` or `build`, which looks the name up when it registers.
+        The name is remembered with its owner, because the connection can close before the
+        request reaches `run` or `build`, which looks the pair up when it registers. A run of
+        another owner under the name is left alone: a request that repeats a live id of another
+        worker, refused as a duplicate, must not end that worker's run when it disconnects.
 
         Parameters
         ----------
         name
             The container's name.
+        owner
+            The owner the departed connection's request named.
         """
         with self._lock:
-            self._abandoned.add(name)
+            self._abandoned.add((name, owner))
             live = self._live.get(name)
-        if live is None:
+        if live is None or not _same_owner(live, owner):
             return
         live.stopped.set()
         self._kill(live)
 
-    def forget(self, name: str, live: _Live | None = None) -> None:
-        """Drop a finished run: its registration and any abandonment of its name.
+    def forget(self, name: str, owner: str, live: _Live | None = None) -> None:
+        """Drop a finished run: its registration and any abandonment of its name by its owner.
 
         Parameters
         ----------
         name
             The container's name.
+        owner
+            The owner the request named.
         live
             The registration to drop. Another run's registration under the same name is left
             alone; `None` (the socket server's call, after the run unregistered itself) drops
@@ -1142,7 +1185,7 @@ class Launcher:
             if live is not None and self._live.get(name) is live:
                 del self._live[name]
                 self._reserved_mb -= live.memory_mb
-            self._abandoned.discard(name)
+            self._abandoned.discard((name, owner))
 
     def status(self, request: StatusRequest) -> dict[str, object]:
         """Say whether an environment is built.
@@ -1181,13 +1224,15 @@ class Launcher:
         )
         return {"removed": removed}
 
-    def _register(self, name: str, grace: int, memory_mb: int) -> _Live:
+    def _register(self, name: str, owner: str, grace: int, memory_mb: int) -> _Live:
         """Register a run or build, stopped at once when its caller left already.
 
         Parameters
         ----------
         name
             The container's name.
+        owner
+            The worker that asked.
         grace
             Seconds between SIGTERM and SIGKILL.
         memory_mb
@@ -1204,7 +1249,7 @@ class Launcher:
             If a run is registered under that name already, or the live runs would hold more
             memory in total than the ceiling allows.
         """
-        live = _Live(grace, memory_mb)
+        live = _Live(owner, grace, memory_mb)
         with self._lock:
             if name in self._live:
                 ident = name.removeprefix(f"{self.settings.stack}-").split("-", 1)[-1]
@@ -1220,7 +1265,7 @@ class Launcher:
                 )
             self._reserved_mb += memory_mb
             self._live[name] = live
-            if name in self._abandoned:
+            if (name, owner) in self._abandoned:
                 live.stopped.set()
         return live
 

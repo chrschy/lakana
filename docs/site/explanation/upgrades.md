@@ -133,7 +133,39 @@ Each cell is a summary. The page named in the last column has the detail. The ch
 
 ## Notes for the next release
 
-Nothing yet.
+### Builds reach a package index on any port
+
+Under the docker runner a build now reaches each package index on the port of its URL, with a
+credential or without: a registered index on another port than 443 no longer needs a credential
+(the limit of 0.20.0). Upgrade the launcher and the workers together, as the bundle does: a
+worker of 0.20.0 and a launcher of this release (or the other way round) refuse each other's
+build requests (`build takes exactly the fields ...`), and the task fails until both are
+upgraded. The shared build caches get new names, so the first build of each environment after
+the upgrade downloads its packages again.
+
+### A cancel stops an environment build
+
+A cancel, a drain past its grace or a lost lease now stops a task's environment build at once,
+with either runner, instead of waiting for it to end (up to `LAKANA_RUN__VENV_BUILD_TIMEOUT`,
+600 s). Nothing of the stopped build is kept: the next run of the project builds its environment
+again.
+
+### Only the worker that started a task can stop it
+
+The launcher stops a task or a build only for the worker that started it, also when a worker's
+connection closes. Nothing changes for a bundle whose workers and launcher run the same release.
+A worker of 0.20.0 next to a launcher of this release cannot stop its tasks (the launcher
+refuses its stop request), so its cancelled tasks run until their timeout: upgrade the workers
+and the launcher together.
+
+### One build holds at most 32 connections of the egress proxy
+
+`egress` lets one build hold at most 32 connections at once
+(`LAKANA_EGRESS__MAX_CONNECTIONS_PER_NETWORK`), so a build cannot take the connections other
+builds need; a build past it gets a `503` that names the setting. Builds now download at most
+16 packages at once (uv's own default is 50), which stays within it. A build whose own code opens
+many connections may need the setting raised under `egress` in `compose.yaml`; see
+[The egress proxy](../how-to/run-python-tasks-in-containers.md#the-egress-proxy).
 
 ## Notes for 0.20.0
 

@@ -227,8 +227,10 @@ class _Handler(socketserver.StreamRequestHandler):
             self._try_send({"error": _INTERNAL_ERROR})
             return
         name: str | None = None
+        owner = ""
         done = threading.Event()
         if isinstance(request, (RunRequest, BuildRequest)):
+            owner = request.owner
             kind, ident = (
                 ("task", request.task)
                 if isinstance(request, RunRequest)
@@ -237,7 +239,7 @@ class _Handler(socketserver.StreamRequestHandler):
             name = container_name(launcher.settings, kind, ident)
             threading.Thread(
                 target=_watch,
-                args=(self.connection, done, functools.partial(launcher.abandon, name)),
+                args=(self.connection, done, functools.partial(launcher.abandon, name, owner)),
                 daemon=True,
             ).start()
         try:
@@ -246,7 +248,7 @@ class _Handler(socketserver.StreamRequestHandler):
             done.set()
             if name is not None:
                 # A departure that landed just before `done` was set is spent here.
-                launcher.forget(name)
+                launcher.forget(name, owner)
 
     def _answer(self, request: Request) -> None:
         """Run a parsed request and send its result, or say what went wrong.

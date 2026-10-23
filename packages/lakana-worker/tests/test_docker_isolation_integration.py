@@ -589,7 +589,7 @@ def test_a_task_container_mounts_only_its_volumes_and_makes_no_anonymous_one(
     name = container_name(running.launcher.settings, "task", task)
     mounts = running.client.containers.get(name).attrs["Mounts"]
 
-    assert running.launcher.stop(StopRequest(task)) == {"stopped": True}
+    assert running.launcher.stop(StopRequest(task, "test")) == {"stopped": True}
     thread.join(60)
 
     env = environment_volume(running.launcher.settings, PYTHON, KEY)
@@ -626,7 +626,7 @@ def test_a_stopped_task_leaves_no_process_and_nothing_labelled(running: Stack) -
     thread, outcome = _in_background(lambda: running.run(attempt, task=task, timeout=120))
     _until(lambda: host_processes(marker), 30, "the task never started")
 
-    assert running.launcher.stop(StopRequest(task)) == {"stopped": True}
+    assert running.launcher.stop(StopRequest(task, "test")) == {"stopped": True}
 
     _until(
         lambda: not host_processes(marker) and not running.labelled(),

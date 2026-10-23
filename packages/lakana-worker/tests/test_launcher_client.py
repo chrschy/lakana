@@ -257,11 +257,16 @@ def test_stop_and_status_read_their_answers(answering: Answering) -> None:
     ]
     client = LauncherClient(Path("l.sock"))
 
-    assert client.stop("abc") is True
-    assert client.stop("abc") is False
+    assert client.stop("abc", "worker-1") is True
+    assert client.stop("abc", "worker-1") is False
     assert client.status("3.13", "e" * 64) is True
     assert client.cleanup("worker-1") == 0
-    assert json.loads(answering.received[0]) == {"op": "stop", "id": "abc", "token": "t" * 64}
+    assert json.loads(answering.received[0]) == {
+        "op": "stop",
+        "id": "abc",
+        "owner": "worker-1",
+        "token": "t" * 64,
+    }
     assert json.loads(answering.received[2]) == {
         "op": "status",
         "python": "3.13",

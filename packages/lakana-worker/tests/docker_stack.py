@@ -407,7 +407,7 @@ class Stack:
                 attempt=attempt,
                 indexes=(),
                 operator_index=None,
-                hosts=(),
+                targets=(),
                 no_build=no_build,
                 limits=Limits(1024, 1.0, 256, 300),
                 max_bytes=1 << 30,

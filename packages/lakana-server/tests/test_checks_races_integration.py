@@ -2046,6 +2046,8 @@ def _python_engine(stack: QueryStack, root: Path, steps: list[Step]) -> tuple[Ru
         project: Path,
         on_log: Callable[[bytes], None],
         indexes: IndexResolver | None = None,
+        *,
+        stop: Callable[[], bool] | None = None,
     ) -> VenvLease:
         """Stand in for the venv cache: no build; a lease with a real descriptor to close.
 
@@ -2060,6 +2062,8 @@ def _python_engine(stack: QueryStack, root: Path, steps: list[Step]) -> tuple[Ru
         on_log
             Ignored.
         indexes
+            Ignored.
+        stop
             Ignored.
 
         Returns

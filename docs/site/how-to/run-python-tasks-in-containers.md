@@ -24,7 +24,9 @@ a build container, to the package indexes the build may use.
   it used more than its container's memory limit" and is retried while it has attempts left.
 - **Leftovers.** When a task ends, is cancelled or times out, or its worker stops or dies (its
   connection to the launcher closes), the container is removed with every process in it,
-  including those the task started in the background.
+  including those the task started in the background. An environment build is stopped the same
+  way: a cancel, a drain past its grace or a lost lease kills the build container, and nothing of
+  the half-built environment is kept, so the next run builds it again.
 
 Inside the container a task runs without capabilities, with a read-only root filesystem, as uid
 10001 in a group of its own, and with `no-new-privileges` where Docker allows it.
@@ -46,14 +48,16 @@ Inside the container a task runs without capabilities, with a read-only root fil
   capabilities and a read-only filesystem, and it takes only a fixed set of requests from the
   workers; a fault in it is still a fault on the host. Protect the host as you would any Docker
   host, and give the Docker group only to people you would give root.
+- **Workers trust each other.** A compromised worker can stop another worker's task or build only
+  if it learns that task's id: 128 random bits that each worker makes for every task and build
+  and neither stores nor logs. The name a worker gives the launcher (`launcher-owner` in the
+  `worker-cache` volume, which every worker of the bundle shares) is readable by the other
+  workers, so it protects nothing by itself.
 - **Disk.** A task's scratch directory, the built environments and the build caches have no disk
   quota (Docker volumes have none on most storage drivers). An environment larger than
   `LAKANA_RUN__VENV_MAX_BYTES` is refused once it is built; nothing stops a build from filling the
   disk while it runs. The launcher keeps the 10 most recently used environments and removes a
   build cache that nobody used for 14 days.
-- **A build is not stopped by a cancel.** A cancel, a drain or a lost lease waits for a running
-  environment build to end, up to `LAKANA_RUN__VENV_BUILD_TIMEOUT` (600 s)
-  ([#291](https://github.com/lakana-labs/lakana/issues/291)).
 - **The local runner and local mode.** `LAKANA_RUN__RUNNER=local` and local mode
   (`lakana server start --local`) run tasks as the worker's own processes, so one instance stays
   one trust domain: see [Isolation](../explanation/python-assets.md#isolation-one-instance-is-one-trust-domain).
@@ -93,11 +97,9 @@ A build reaches only the hosts of the package indexes its project may use: the p
 registered package indexes its lock names. A package's files must come from one of those hosts.
 `egress` refuses anything else, and the build fails with uv's error in the task's log.
 
-- **Port 443.** A build reaches port 443 of each of those hosts, and another port only when the
-  index's URL names it and reaches the launcher: a registered index with a credential, or
-  `LAKANA_RUN__INDEX_URL`. A registered index on another port without a credential is refused
-  until [#301](https://github.com/lakana-labs/lakana/issues/301): give it a credential or serve it
-  on port 443.
+- **Ports.** A build reaches each of those hosts on the port of the index's URL: port 443 unless
+  the URL names another (`https://pkgs.example.org:8443/simple`), with a credential or without.
+  Another port of the same host stays closed.
 - **https only.** `egress` tunnels https, so an `http://` index cannot be reached from a build,
   and an `http://` `LAKANA_RUN__INDEX_URL` stops a worker with the docker runner at start.
 - **Addresses.** `egress` never connects to loopback, link-local (cloud metadata), multicast or
@@ -202,7 +204,8 @@ Set these under `environment:` of the `egress` service in `compose.yaml`.
 | Setting | Default | What it does |
 |---|---|---|
 | `LAKANA_EGRESS__UPSTREAM_PROXY` | none (from `LAKANA_EGRESS_UPSTREAM_PROXY` in `.env`) | The proxy builds go through, `http://[user:password@]host:port`. |
-| `LAKANA_EGRESS__MAX_CONNECTIONS` | `256` | Connections at once, 1 to 4096. One build can hold all of them ([#302](https://github.com/lakana-labs/lakana/issues/302)). |
+| `LAKANA_EGRESS__MAX_CONNECTIONS` | `256` | Connections at once, 1 to 4096. |
+| `LAKANA_EGRESS__MAX_CONNECTIONS_PER_NETWORK` | `32` | Connections one build may hold at once, 1 to `LAKANA_EGRESS__MAX_CONNECTIONS`, so that one build cannot take the connections the others need. A build downloads at most 16 packages at once; keep this at 24 or more. A build past it gets `503` with the reason in uv's error. |
 | `LAKANA_EGRESS__LISTEN` | `0.0.0.0:3128` | Where the proxy listens. Leave it. |
 | `LAKANA_EGRESS__KEY` | `/run/lakana-egress/egress.key` | The key the launcher signs build tokens with; a new one at every launcher start. Leave it. |
 
@@ -234,7 +237,8 @@ If a project may have deployed a malicious dependency or package, or a worker ma
 | `The group of the Docker socket (...) is a group that task or build containers run in` (launcher log) | The Docker group's id is 10002 or 10003. | Give the Docker group another id on the host. |
 | `The Docker socket ... is writable by everyone` (launcher log) | The socket's mode lets any local user control Docker. | Restrict it to the docker group on the host: `chmod 660`, owned by root:docker. |
 | `this task was ended because it used more than its container's memory limit` | The task used more than `LAKANA_RUN__TASK_MEMORY`. A task process killed by signal 9 that Lakana neither stopped nor timed out reads the same way, because the memory limit is by far the most likely sender; a task that kills itself, an operator's `docker kill` or `docker rm -f`, or the host's own OOM killer also end a task with that signal and read as this message. | Read less in the task, or raise the setting. |
-| `... is not a destination this build may reach` (in uv's error), `Refused a build connection ... not in its token.` (egress log) | The build tried a host or port that is not one of its indexes. | Register the index (`lakana index add`), or set `LAKANA_RUN__INDEX_URL`; for another port than 443, see [Package indexes and proxies](#package-indexes-and-proxies). |
+| `... is not a destination this build may reach` (in uv's error), `Refused a build connection ... not in its token.` (egress log) | The build tried a host or port that is not one of its indexes. | Register the index (`lakana index add`), or set `LAKANA_RUN__INDEX_URL`, with the port in its URL; see [Package indexes and proxies](#package-indexes-and-proxies). |
+| `this client's network already holds 32 connections to the egress proxy ...` (in uv's error) | The build has `LAKANA_EGRESS__MAX_CONNECTIONS_PER_NETWORK` connections open already: its own code, a build backend for example, opens many. | The task is retried. If it keeps happening, raise the setting under `egress` in `compose.yaml`; see [The egress proxy](#the-egress-proxy). |
 | `python: must be one of "3.11", "3.12", "3.13", "3.14" ...` | The version has no task image, or lacks quotes. | Write one of the four, in quotes. |
 | `this project names Python X in lakana.yaml, and this worker runs Python tasks on its own Python Y without containers ...` | A local-runner worker took the task. | Run it on a worker with `LAKANA_RUN__RUNNER=docker`, or remove `python:`. |
 | `the launcher refused the task: ...` | Worker and launcher settings disagree. | Compare `LAKANA_LAUNCHER__IMAGES` and the `LAKANA_LAUNCHER__MAX_*` ceilings with the `LAKANA_RUN__TASK_*` settings. |

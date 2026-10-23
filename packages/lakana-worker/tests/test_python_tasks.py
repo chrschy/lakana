@@ -174,6 +174,7 @@ from lakana_worker.venvs import (
     IndexResolver,
     VenvBuildError,
     VenvBuildRefused,
+    VenvBuildStopped,
     VenvCacheUnsafe,
     VenvLease,
     VenvSettings,
@@ -355,6 +356,8 @@ class PyWorld:
     resolvers
         The index resolver of every venv request, in order (`None` for a lock that uses no
         registered index).
+    stops
+        The stop of every venv request, in order.
     """
 
     world: World
@@ -362,6 +365,7 @@ class PyWorld:
     leases: list[VenvLease] = field(default_factory=list)
     runners: list[FakeRunner] = field(default_factory=list)
     resolvers: list[IndexResolver | None] = field(default_factory=list)
+    stops: list[Callable[[], bool] | None] = field(default_factory=list)
 
     def deploy(
         self,
@@ -420,6 +424,8 @@ class PyWorld:
         project: Path,
         on_log: Callable[[bytes], None],
         indexes: IndexResolver | None = None,
+        *,
+        stop: Callable[[], bool] | None = None,
     ) -> VenvLease:
         """Stand in for the venv cache: no build, a lease that records its release.
 
@@ -437,6 +443,8 @@ class PyWorld:
             Receives one line, as a build would log.
         indexes
             The index resolver the runtime passed; recorded, never called here.
+        stop
+            Says when the task is to stop; recorded.
 
         Returns
         -------
@@ -444,6 +452,7 @@ class PyWorld:
             A lease on a directory under `root`.
         """
         self.resolvers.append(indexes)
+        self.stops.append(stop)
         assert (project / "uv.lock").is_file()
         on_log(b"Resolved 2 packages\n")
         read_end, write_end = os.pipe()
@@ -1423,6 +1432,8 @@ def test_a_drain_before_the_process_starts_releases_without_a_process(
         project: Path,
         on_log: Callable[[bytes], None],
         indexes: IndexResolver | None = None,
+        *,
+        stop: Callable[[], bool] | None = None,
     ) -> VenvLease:
         drain.set()
         assert signalled.wait(_WAIT), "the keeper never released the task"
@@ -1750,6 +1761,8 @@ def test_a_failed_environment_build_is_retried_and_its_output_logged(py: PyWorld
         project: Path,
         on_log: Callable[[bytes], None],
         indexes: IndexResolver | None = None,
+        *,
+        stop: Callable[[], bool] | None = None,
     ) -> VenvLease:
         on_log(b"error: no solution found\n")
         raise VenvBuildError("environment build failed: uv exited with status 2")
@@ -1774,6 +1787,8 @@ def test_an_unsafe_venv_cache_fails_permanently(py: PyWorld) -> None:
         project: Path,
         on_log: Callable[[bytes], None],
         indexes: IndexResolver | None = None,
+        *,
+        stop: Callable[[], bool] | None = None,
     ) -> VenvLease:
         raise VenvCacheUnsafe("environment build failed: the venv cache directory is not private")
 
@@ -1877,6 +1892,8 @@ def test_an_attempt_superseded_before_the_token_is_minted_records_nothing(py: Py
         project: Path,
         on_log: Callable[[bytes], None],
         indexes: IndexResolver | None = None,
+        *,
+        stop: Callable[[], bool] | None = None,
     ) -> VenvLease:
         py.steal()
         return py.acquire(settings, sha, project, on_log)
@@ -1909,6 +1926,8 @@ def test_a_lease_the_keeper_saw_lost_during_the_build_starts_no_process(
         project: Path,
         on_log: Callable[[bytes], None],
         indexes: IndexResolver | None = None,
+        *,
+        stop: Callable[[], bool] | None = None,
     ) -> VenvLease:
         py.steal()
         assert keepers[-1].cancel.wait(_WAIT), "the keeper never noticed the lost lease"
@@ -1932,6 +1951,8 @@ def test_a_cancel_during_the_build_cancels_without_a_process(py: PyWorld) -> Non
         project: Path,
         on_log: Callable[[bytes], None],
         indexes: IndexResolver | None = None,
+        *,
+        stop: Callable[[], bool] | None = None,
     ) -> VenvLease:
         py.cancel(claimed.run_id)
         return py.acquire(settings, sha, project, on_log)
@@ -1945,6 +1966,158 @@ def test_a_cancel_during_the_build_cancels_without_a_process(py: PyWorld) -> Non
     assert (row.outcome, row.error_message) == (AttemptOutcome.CANCELLED, RUN_CANCELLED_MESSAGE)
 
 
+def _building_until_stopped(
+    seen: list[bool], before: Callable[[], None]
+) -> Callable[..., VenvLease]:
+    """Build a venv stand-in that builds until the task's stop says so, as a long build does.
+
+    Parameters
+    ----------
+    seen
+        Receives what the stop said when the build gave up.
+    before
+        Runs first: the cancel, the drain or the theft that the build is to notice.
+
+    Returns
+    -------
+    callable
+        The stand-in, raising `VenvBuildStopped` once stopped.
+    """
+
+    def building(
+        settings: VenvSettings,
+        sha: str,
+        project: Path,
+        on_log: Callable[[bytes], None],
+        indexes: IndexResolver | None = None,
+        *,
+        stop: Callable[[], bool] | None = None,
+    ) -> VenvLease:
+        """Build until stopped.
+
+        Parameters
+        ----------
+        settings
+            Ignored.
+        sha
+            Ignored.
+        project
+            Ignored.
+        on_log
+            Ignored.
+        indexes
+            Ignored.
+        stop
+            The task's stop.
+
+        Raises
+        ------
+        VenvBuildStopped
+            When the stop says so.
+        """
+        assert stop is not None, "the build gets the task's stop"
+        before()
+        deadline = time.monotonic() + _WAIT
+        while not stop() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        seen.append(stop())
+        raise VenvBuildStopped("environment build failed: stopped before it ended")
+
+    return building
+
+
+def test_a_cancel_during_a_long_build_stops_the_build_and_cancels_the_task(py: PyWorld) -> None:
+    """#291: the build is told to stop, and the task ends as cancelled without a process."""
+    seen: list[bool] = []
+    engine = py.engine(
+        _forged, acquire_venv=_building_until_stopped(seen, lambda: py.cancel(claimed.run_id))
+    )
+    claimed = py.claim_python(engine)
+    started = time.monotonic()
+
+    run_claimed(engine, claimed)
+
+    assert seen == [True] and time.monotonic() - started < _WAIT
+    assert py.runner.tasks == [] and py.tokens() == []
+    assert _task(py.world, "gold.scores").status is TaskStatus.CANCELLED
+    row = _attempts(py.world, claimed.task_run_id)[0]
+    assert (row.outcome, row.error_message) == (AttemptOutcome.CANCELLED, RUN_CANCELLED_MESSAGE)
+
+
+def test_a_drain_during_a_long_build_stops_the_build_and_releases_the_task(py: PyWorld) -> None:
+    """#291: a drain past its grace stops the build; the task goes back to the queue."""
+    drain = threading.Event()
+    seen: list[bool] = []
+    engine = py.engine(_forged, drain=drain, acquire_venv=_building_until_stopped(seen, drain.set))
+    claimed = py.claim_python(engine)
+
+    run_claimed(engine, claimed)
+
+    assert seen == [True] and py.runner.tasks == []
+    task = _task(py.world, "gold.scores")
+    assert (task.status, task.attempt) == (TaskStatus.PENDING, 0)
+    row = _attempts(py.world, claimed.task_run_id)[0]
+    assert (row.outcome, row.error_message) == (AttemptOutcome.RELEASED, "stopped: worker draining")
+
+
+def test_a_lease_lost_during_a_long_build_stops_the_build_and_records_nothing(
+    py: PyWorld,
+) -> None:
+    """#291: the build of a task another worker took stops, and nothing is recorded."""
+    seen: list[bool] = []
+    engine = py.engine(_forged, acquire_venv=_building_until_stopped(seen, py.steal))
+    claimed = py.claim_python(engine)
+
+    run_claimed(engine, claimed)
+
+    assert seen == [True] and py.runner.tasks == []
+    assert _task(py.world, "gold.scores").lease_owner != engine.settings.worker_id
+
+
+def test_a_build_stopped_without_a_reason_fails_and_is_retried(py: PyWorld) -> None:
+    """A build that reports a stop nobody asked for is a transient build failure."""
+    seen: list[bool] = []
+
+    def stopped(
+        settings: VenvSettings,
+        sha: str,
+        project: Path,
+        on_log: Callable[[bytes], None],
+        indexes: IndexResolver | None = None,
+        *,
+        stop: Callable[[], bool] | None = None,
+    ) -> VenvLease:
+        """Report a stop at once.
+
+        Parameters
+        ----------
+        settings
+            Ignored.
+        sha
+            Ignored.
+        project
+            Ignored.
+        on_log
+            Ignored.
+        indexes
+            Ignored.
+        stop
+            The task's stop, recorded.
+
+        Raises
+        ------
+        VenvBuildStopped
+            Always.
+        """
+        seen.append(stop is not None and stop())
+        raise VenvBuildStopped("environment build failed: stopped before it ended")
+
+    _, message = _fails(py, py.engine(_forged, acquire_venv=stopped))
+
+    assert seen == [False]
+    assert "neither a cancel, a drain nor a lost lease" in message
+
+
 def test_a_principal_deactivated_during_the_build_fails_permanently(py: PyWorld) -> None:
     world = py.world
 
@@ -1954,6 +2127,8 @@ def test_a_principal_deactivated_during_the_build_fails_permanently(py: PyWorld)
         project: Path,
         on_log: Callable[[bytes], None],
         indexes: IndexResolver | None = None,
+        *,
+        stop: Callable[[], bool] | None = None,
     ) -> VenvLease:
         with world.session() as session:
             account = session.get(Principal, world.admin.id)
@@ -2428,6 +2603,8 @@ class RealProcess:
         project: Path,
         on_log: Callable[[bytes], None],
         indexes: IndexResolver | None = None,
+        *,
+        stop: Callable[[], bool] | None = None,
     ) -> VenvLease:
         """Lease the stand-in venv.
 
@@ -2442,6 +2619,8 @@ class RealProcess:
         on_log
             Ignored.
         indexes
+            Ignored.
+        stop
             Ignored.
 
         Returns
@@ -4313,6 +4492,8 @@ def _building(
     project: Path,
     on_log: Callable[[bytes], None],
     indexes: IndexResolver | None = None,
+    *,
+    stop: Callable[[], bool] | None = None,
 ) -> NoReturn:
     """Stand in for a venv cache that must build: it asks for the credentials first.
 
@@ -4328,6 +4509,8 @@ def _building(
         Ignored.
     indexes
         The resolver the runtime passed.
+    stop
+        Ignored.
 
     Raises
     ------
@@ -4488,6 +4671,8 @@ def test_a_cached_environment_runs_the_task_without_reading_the_secret(py: PyWor
         project: Path,
         on_log: Callable[[bytes], None],
         indexes: IndexResolver | None = None,
+        *,
+        stop: Callable[[], bool] | None = None,
     ) -> VenvLease:
         assert indexes is not None
 
@@ -4547,6 +4732,8 @@ def test_the_task_process_is_given_nothing_of_the_credential(py: PyWorld) -> Non
         project: Path,
         on_log: Callable[[bytes], None],
         indexes: IndexResolver | None = None,
+        *,
+        stop: Callable[[], bool] | None = None,
     ) -> VenvLease:
         assert indexes is not None
         resolved.append(list(indexes()))
@@ -6585,6 +6772,8 @@ def test_a_cancel_before_the_process_was_prepared_ends_the_task_cancelled(py: Py
         project: Path,
         on_log: Callable[[bytes], None],
         indexes: IndexResolver | None = None,
+        *,
+        stop: Callable[[], bool] | None = None,
     ) -> VenvLease:
         py.cancel(claimed.run_id)
         raise LakanaError("the environment build was interrupted")
@@ -6775,6 +6964,7 @@ class FakeEnvironments:
         attempt: str,
         used: tuple[RegisteredIndex, ...],
         project_id: uuid.UUID,
+        stop: Callable[[], bool] | None = None,
     ) -> VenvLease:
         """Record the request and hand out a key.
 
@@ -6796,6 +6986,8 @@ class FakeEnvironments:
             The registered indexes the lock uses.
         project_id
             The project the environment belongs to.
+        stop
+            Says when the task is to stop; recorded.
 
         Returns
         -------
@@ -6816,6 +7008,7 @@ class FakeEnvironments:
                 "used": used,
                 "project_id": project_id,
                 "resolved": [access.name for access in resolved],
+                "stop": stop,
             }
         )
         if self.error is not None:
@@ -7148,6 +7341,8 @@ def test_a_retried_attempt_of_a_protected_environment_is_refused_on_the_local_ru
         project: Path,
         on_log: Callable[[bytes], None],
         indexes: IndexResolver | None = None,
+        *,
+        stop: Callable[[], bool] | None = None,
     ) -> VenvLease:
         raise VenvBuildError("environment build failed: uv exited with status 2")
 

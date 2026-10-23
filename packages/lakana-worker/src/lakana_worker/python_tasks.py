@@ -155,9 +155,11 @@ from lakana_worker.tasks import (
     require_upstreams,
 )
 from lakana_worker.venvs import (
+    AcquireVenv,
     IndexResolver,
     VenvBuildError,
     VenvBuildRefused,
+    VenvBuildStopped,
     VenvCacheUnsafe,
     VenvLease,
     VenvSettings,
@@ -217,6 +219,10 @@ _PROTECTED = (
 )
 """The failure of a Python task of a protected environment on a local-runner worker."""
 
+_BUILD_STOPPED = (
+    "environment build failed: the build was stopped, but neither a cancel, a drain nor a lost "
+    "lease was found; the task is tried again"
+)
 _BUILD_LOG_FAILED = (
     "environment build failed: the task's log could not be written while its environment was "
     "built; the worker's log has the cause"
@@ -691,9 +697,9 @@ class PythonRuntime:
     limits
         Bounds on the unpacked code.
     acquire_venv
-        Returns the venv of a lockfile; `lakana_worker.venvs.acquire`. The last argument returns
-        the credentials of the registered indexes the lock uses and is called only if a build
-        runs.
+        Returns the venv of a lockfile; `lakana_worker.venvs.acquire`. The last positional
+        argument returns the credentials of the registered indexes the lock uses and is called
+        only if a build runs; `stop` ends a build when the task is to stop.
     sweeper
         Removes attempt directories a dead worker left behind; told which
         directories this worker's running tasks hold. `None` sweeps nothing.
@@ -715,9 +721,7 @@ class PythonRuntime:
     kill_grace: float = 10.0
     max_ttl_seconds: int = 86_400
     limits: DeployLimits = field(default_factory=DeployLimits)
-    acquire_venv: Callable[
-        [VenvSettings, str, Path, Callable[[bytes], None], IndexResolver | None], VenvLease
-    ] = acquire
+    acquire_venv: AcquireVenv = acquire
     sweeper: AttemptSweeper | None = None
     deploy_sweeper: DeploySweeper | None = None
     caches: CacheKeeper | None = None
@@ -1024,15 +1028,24 @@ class PythonRuntime:
             )
             used = self._used_indexes(code_dir, prepared.sources)
             resolver = self._index_resolver(session, engine, prepared.environment, used)
-            lease = self._venv(
-                lock_sha256,
-                code_dir,
-                sink,
-                resolver,
-                python=prepared.python,
-                used=used,
-                project_id=prepared.project_id,
-            )
+            stop = KeeperStop(keeper)
+            try:
+                lease = self._venv(
+                    lock_sha256,
+                    code_dir,
+                    sink,
+                    resolver,
+                    python=prepared.python,
+                    used=used,
+                    project_id=prepared.project_id,
+                    stop=stop.is_set,
+                )
+            except VenvBuildStopped:
+                # The keeper asked for the stop: a cancel, a drain or a lost lease decides.
+                _refuse_if_stopped(session, keeper, claimed.run_id)
+                raise TaskFailure(
+                    FailureKind.TRANSIENT, _BUILD_STOPPED, FailureCode.BUILD_FAILED
+                ) from None
             cleanup.callback(lease.release)
             baseline: Baseline | None = None
             if prepared.output == "artifact":
@@ -1088,7 +1101,7 @@ class PythonRuntime:
                     python=prepared.python,
                 ),
                 sink,
-                KeeperStop(keeper),
+                stop,
             )
         return self._classify(
             session, engine, claimed, keeper, prepared, before, outcome, ended, baseline
@@ -1853,6 +1866,7 @@ class PythonRuntime:
         python: str,
         used: tuple[RegisteredIndex, ...] = (),
         project_id: uuid.UUID,
+        stop: Callable[[], bool] | None = None,
     ) -> VenvLease:
         """Get the venv of the lockfile and `pyproject.toml`, building it on first use.
 
@@ -1877,6 +1891,8 @@ class PythonRuntime:
             The registered indexes the lock uses (DockerRunner only).
         project_id
             `environment_owner` of the project version (DockerRunner only).
+        stop
+            The task's stop (`KeeperStop.is_set`): a build ends when it says so (#291).
 
         Returns
         -------
@@ -1885,6 +1901,8 @@ class PythonRuntime:
 
         Raises
         ------
+        VenvBuildStopped
+            If `stop` said so before the venv was there; the caller asks the keeper why.
         TaskFailure
             Permanent for an unsafe cache (a configuration error), for a build that cannot
             succeed until a credential, an index or the lock changes, and for a launcher build
@@ -1901,8 +1919,11 @@ class PythonRuntime:
                     attempt=code_dir.parent.name,
                     used=used,
                     project_id=project_id,
+                    stop=stop,
                 )
-            return self.acquire_venv(self.venvs, lock_sha256, code_dir, sink, indexes)
+            return self.acquire_venv(self.venvs, lock_sha256, code_dir, sink, indexes, stop=stop)
+        except VenvBuildStopped:
+            raise
         except LogSinkFailed as exc:
             logger.warning(
                 "The output of an environment build could not be written to the task's log.",

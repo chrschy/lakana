@@ -1269,7 +1269,7 @@ class DockerRunner:
             registered the run, so the caller asks again.
         """
         with contextlib.suppress(LauncherUnavailable, LauncherRefused):
-            return self._client.stop(ident)
+            return self._client.stop(ident, self._owner)
         return False
 
     @property

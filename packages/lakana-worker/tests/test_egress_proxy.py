@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import ipaddress
+import json
 import logging
 import select
 import socket
@@ -12,12 +13,19 @@ import socketserver
 import struct
 import threading
 import time
+import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 import pytest
+from fake_launcher import FakeLauncher
+from launcher_fakes import settings
 
+from lakana_core.projects.package_sources import RegisteredIndex
+from lakana_worker.docker_environments import DockerEnvironments
+from lakana_worker.index_credentials import IndexAccess
 from lakana_worker.launcher import egress
 from lakana_worker.launcher.egress import (
     EgressServer,
@@ -27,6 +35,7 @@ from lakana_worker.launcher.egress import (
     load_settings,
 )
 from lakana_worker.launcher.egress_token import ensure_key, mint, rotate_key
+from lakana_worker.launcher.requests import BuildRequest, build_targets, parse_request
 
 LOOPBACK = ipaddress.ip_network("127.0.0.0/8")
 _HEADER = "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\n"
@@ -171,6 +180,8 @@ def _proxy(tmp_path: Path, **changes: object) -> EgressServer:
     }
     values.update(changes)
     server = EgressServer(EgressSettings(**values))  # ty: ignore[invalid-argument-type]
+    _PRETENDED.clear()  # a port recorded by an earlier test may be any connection's now
+    _pretending(server)
     _serve(server)
     return server
 
@@ -483,6 +494,227 @@ def test_a_full_proxy_says_it_is_busy(tmp_path: Path, index: int) -> None:
         server.server_close()
 
 
+_PRETENDED: dict[int, str] = {}
+"""Client port to the address a connection pretends to come from (see `_from`)."""
+
+
+def _from(address: str, port: int) -> socket.socket:
+    """Open a connection to the proxy that the proxy counts as coming from `address`.
+
+    The connection comes from 127.0.0.1, the one loopback address every platform has (macOS
+    has no other); its port is recorded with `address`, and `_proxy` makes the proxy read the
+    peer as `address`, so the client network is still worked out from it, routing table and
+    all.
+
+    Parameters
+    ----------
+    address
+        The address to count the connection against.
+    port
+        The proxy's port.
+
+    Returns
+    -------
+    socket.socket
+        The connection; nothing is sent on it.
+    """
+    connection = socket.socket()
+    connection.settimeout(5)
+    connection.bind(("127.0.0.1", 0))
+    _PRETENDED[connection.getsockname()[1]] = address
+    connection.connect(("127.0.0.1", port))
+    return connection
+
+
+def _pretending(server: EgressServer) -> None:
+    """Make a proxy read a connection's peer as the address `_from` recorded for its port.
+
+    Parameters
+    ----------
+    server
+        The proxy.
+    """
+    real = server.client_network
+
+    def client_network(client_address: object) -> ipaddress.IPv4Network | ipaddress.IPv6Network:
+        """Swap the peer's host for the pretended one, then work out the network as usual.
+
+        Parameters
+        ----------
+        client_address
+            The peer.
+
+        Returns
+        -------
+        IPv4Network or IPv6Network
+            The client network of the pretended peer.
+        """
+        host, port = cast("tuple[str, int]", client_address)
+        return real((_PRETENDED.get(port, host), port))
+
+    server.client_network = client_network  # ty: ignore[invalid-assignment]
+
+
+def _connect_from(address: str, port: int, target: str, token: str) -> tuple[bytes, bytes]:
+    """Send a CONNECT from a loopback address and read the answer.
+
+    Parameters
+    ----------
+    address
+        The client's address.
+    port
+        The proxy's port.
+    target
+        ``host:port``.
+    token
+        The token.
+
+    Returns
+    -------
+    tuple
+        The status code and the first bytes of the body (empty for a tunnel).
+    """
+    credential = base64.b64encode(f"lakana:{token}".encode()).decode()
+    with _from(address, port) as connection:
+        connection.sendall(
+            f"CONNECT {target} HTTP/1.1\r\nProxy-Authorization: Basic {credential}\r\n\r\n".encode()
+        )
+        head = _head(connection)
+        status = head.split(b"\r\n", 1)[0].split()[1]
+        body = b"" if status == b"200" else connection.recv(4096)
+    return status, body
+
+
+def _held(server: EgressServer, count: int, address: str) -> list[socket.socket]:
+    """Open `count` connections from one address that send nothing, and wait until each is held.
+
+    Parameters
+    ----------
+    server
+        The proxy.
+    count
+        How many.
+    address
+        The client's address.
+
+    Returns
+    -------
+    list
+        The open connections.
+    """
+    before = server.slots_held()
+    connections = [_from(address, server.server_address[1]) for _ in range(count)]
+    deadline = time.monotonic() + 5
+    while server.slots_held() < before + count:
+        assert time.monotonic() < deadline, "the proxy never took the connections"
+        time.sleep(0.01)
+    return connections
+
+
+def test_one_build_holding_its_cap_cannot_starve_another(tmp_path: Path, index: int) -> None:
+    """#302: a network at its cap gets 503 naming the cause; another network still gets through."""
+    server = _proxy(tmp_path, max_connections=8, max_connections_per_network=3, head_seconds=30.0)
+    token = Running(server.server_address[1], index, ensure_key(tmp_path / "egress.key")).token()
+    port = server.server_address[1]
+    try:
+        idle = _held(server, 3, "127.0.0.2")
+        try:
+            status, body = _connect_from("127.0.0.2", port, f"localhost:{index}", token)
+            other, _ = _connect_from("127.0.0.3", port, f"localhost:{index}", token)
+        finally:
+            for connection in idle:
+                connection.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert status == b"503"
+    assert b"already holds 3 connections" in body
+    assert b"LAKANA_EGRESS__MAX_CONNECTIONS_PER_NETWORK" in body
+    assert other == b"200"
+
+
+def test_the_cap_counts_every_client_of_one_attached_network_together(
+    tmp_path: Path, index: int
+) -> None:
+    """#302: the cap belongs to the build's network, not to one address in it."""
+    route = tmp_path / "loopback-route"
+    route.write_text(_HEADER + "lo\t0000007F\t00000000\t0001\t0\t0\t0\tFCFFFFFF\n")  # /30
+    server = _proxy(tmp_path, max_connections_per_network=2, head_seconds=30.0, route=route)
+    token = Running(server.server_address[1], index, ensure_key(tmp_path / "egress.key")).token()
+    port = server.server_address[1]
+    try:
+        idle = _held(server, 2, "127.0.0.2")
+        try:
+            same, _ = _connect_from("127.0.0.3", port, f"localhost:{index}", token)
+            outside, _ = _connect_from("127.0.0.5", port, f"localhost:{index}", token)
+        finally:
+            for connection in idle:
+                connection.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert (same, outside) == (b"503", b"200")
+
+
+def test_a_full_proxy_is_busy_for_a_network_below_its_cap(tmp_path: Path, index: int) -> None:
+    """The total still applies when the client's network has room."""
+    server = _proxy(tmp_path, max_connections=1, max_connections_per_network=1, head_seconds=30.0)
+    token = Running(server.server_address[1], index, ensure_key(tmp_path / "egress.key")).token()
+    try:
+        idle = _held(server, 1, "127.0.0.2")
+        try:
+            status, body = _connect_from(
+                "127.0.0.3", server.server_address[1], f"localhost:{index}", token
+            )
+        finally:
+            for connection in idle:
+                connection.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert status == b"503" and b"busy" in body
+
+
+def test_the_client_network_of_a_mapped_or_unknown_connection(tmp_path: Path) -> None:
+    """An IPv4-mapped address counts as its IPv4 address; an unseen connection is looked up."""
+    server = _proxy(tmp_path)
+    try:
+        mapped = server.client_network(("::ffff:127.0.0.2", 1234))
+        looked_up = server.network_of(object(), ("127.0.0.9", 1234))
+        server._forget(object())  # a connection without a ticket gives nothing back
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert mapped == ipaddress.ip_network("127.0.0.2/32")
+    assert looked_up == ipaddress.ip_network("127.0.0.9/32")
+    assert server.threads_of(looked_up) == 0
+
+
+def test_a_flood_from_one_network_takes_only_its_own_threads(tmp_path: Path, index: int) -> None:
+    """#302: past its cap and a few answers, a network's connections are closed without a thread."""
+    server = _proxy(tmp_path, max_connections=8, max_connections_per_network=2, head_seconds=30.0)
+    token = Running(server.server_address[1], index, ensure_key(tmp_path / "egress.key")).token()
+    port = server.server_address[1]
+    try:
+        flood = [_from("127.0.0.2", port) for _ in range(40)]
+        try:
+            time.sleep(0.3)
+            assert server.threads_of(ipaddress.ip_network("127.0.0.2/32")) <= 2 + 4
+            other, _ = _connect_from("127.0.0.3", port, f"localhost:{index}", token)
+        finally:
+            for connection in flood:
+                connection.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert other == b"200"
+
+
 def test_a_flood_beyond_the_spare_threads_is_closed_without_a_thread(tmp_path: Path) -> None:
     """When every thread is taken, a new connection is closed at once."""
     server = _proxy(tmp_path, max_connections=1)
@@ -749,6 +981,21 @@ def test_an_upstream_refusal_is_a_bad_gateway(tmp_path: Path) -> None:
         ({"LAKANA_EGRESS__LISTEN": "3128"}, "LAKANA_EGRESS__LISTEN"),
         ({"LAKANA_EGRESS__LISTEN": "0.0.0.0:70000"}, "LAKANA_EGRESS__LISTEN"),
         ({"LAKANA_EGRESS__MAX_CONNECTIONS": "0"}, "LAKANA_EGRESS__MAX_CONNECTIONS"),
+        (
+            {"LAKANA_EGRESS__MAX_CONNECTIONS_PER_NETWORK": "0"},
+            "LAKANA_EGRESS__MAX_CONNECTIONS_PER_NETWORK",
+        ),
+        (
+            {"LAKANA_EGRESS__MAX_CONNECTIONS_PER_NETWORK": "x"},
+            "LAKANA_EGRESS__MAX_CONNECTIONS_PER_NETWORK",
+        ),
+        (
+            {
+                "LAKANA_EGRESS__MAX_CONNECTIONS": "16",
+                "LAKANA_EGRESS__MAX_CONNECTIONS_PER_NETWORK": "17",
+            },
+            "LAKANA_EGRESS__MAX_CONNECTIONS_PER_NETWORK",
+        ),
         ({"LAKANA_EGRESS__PORTS": "443"}, "LAKANA_EGRESS__PORTS"),
     ],
 )
@@ -775,6 +1022,13 @@ def test_the_defaults_work_and_the_upstream_credential_stays_out_of_repr() -> No
     assert settings.upstream == "http://u:pw@proxy:8080"
     assert "pw" not in repr(settings)
     assert settings.reachable == frozenset()
+    assert (settings.max_connections, settings.max_connections_per_network) == (256, 32)
+    assert (
+        load_settings(
+            {"LAKANA_EGRESS__MAX_CONNECTIONS_PER_NETWORK": "64"}
+        ).max_connections_per_network
+        == 64
+    )
 
 
 def test_an_unreachable_destination_is_a_bad_gateway(proxy: Running) -> None:
@@ -1186,7 +1440,7 @@ def test_main_serves_quietly_with_a_key(
 
 
 def test_a_refused_build_is_told_what_to_do(proxy: Running) -> None:
-    """The 403 says how to make an index reachable, including one on another port than 443."""
+    """The 403 says how to make an index reachable; no port is special any more (#301)."""
     answer, connection = _connect(proxy.port, "pkgs.example.org:8443", proxy.token())
     body = connection.recv(4096).decode()
     connection.close()
@@ -1195,6 +1449,55 @@ def test_a_refused_build_is_told_what_to_do(proxy: Running) -> None:
     assert "pkgs.example.org:8443 is not a destination this build may reach" in body
     assert "lakana index add" in body
     assert "LAKANA_RUN__INDEX_URL" in body
-    assert "443" in body.split("reach", 1)[1]
-    assert "credential" in body
-    assert "#301" in body
+    assert "#301" not in body and "credential" not in body
+
+
+def test_an_index_on_another_port_without_a_credential_is_reachable(
+    tmp_path: Path, proxy: Running
+) -> None:
+    """#301 end to end: worker request, launcher parse, token, proxy; other ports stay closed."""
+    launcher = FakeLauncher(
+        scripts={
+            "status": lambda request, on_log: {"complete": False},
+            "build": lambda request, on_log: {"complete": True},
+        }
+    )
+    code = tmp_path / "attempt-abc_12" / "code"
+    code.mkdir(parents=True)
+    (code / "pyproject.toml").write_text('[project]\nname = "demo"\n')
+    index = RegisteredIndex("odd", f"https://localhost:{proxy.index}/simple")
+    environments = DockerEnvironments(
+        client=launcher,  # ty: ignore[invalid-argument-type]
+        owner="worker-1",
+        memory_mb=2048,
+        cpus=1.0,
+        pids=256,
+        build_timeout=600.0,
+        max_bytes=1 << 30,
+    )
+    environments.acquire(
+        "a" * 64,
+        code,
+        lambda chunk: None,
+        lambda: [IndexAccess("odd", index.url, "dev")],
+        python="3.13",
+        attempt="attempt-abc_12",
+        used=(index,),
+        project_id=uuid.UUID(int=1),
+    )
+    sent = json.dumps({**launcher.requests[1], "token": "t" * 64}).encode()
+    build = parse_request(sent, token="t" * 64, settings=settings(tmp_path))
+    assert isinstance(build, BuildRequest) and build.indexes == ()
+    token = proxy.token(build_targets(build))
+    with socket.socket() as spare:
+        spare.bind(("127.0.0.1", 0))
+        undeclared = spare.getsockname()[1]
+
+    answer, connection = _connect(proxy.port, f"localhost:{proxy.index}", token)
+    connection.sendall(b"ping")
+    echoed = connection.recv(4)
+    connection.close()
+
+    assert answer.split()[1] == b"200" and echoed == b"ping"
+    assert _status(proxy.port, f"localhost:{undeclared}", token) == b"403"
+    assert _status(proxy.port, "localhost:443", token) == b"403"

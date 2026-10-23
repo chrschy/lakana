@@ -3,13 +3,12 @@
 What the bundle does not do, or does not protect, today, and why. The steps to run the bundle are in
 [Deploying with Compose](../how-to/deploy-with-compose.md).
 
-- **A venv build is not interrupted by a shutdown (#48).** `docker stop` (and Compose
+- **A worker stopped with `SIGKILL` releases nothing.** `docker stop` (and Compose
   restarts/`down`) sends `SIGTERM`: the worker stops claiming and lets a running task finish for
   up to 20 s (`LAKANA_RUN__DRAIN_GRACE_SECONDS`) before releasing it to another worker; the
-  bundle sets `stop_grace_period: 45s`. A task whose venv is still being built is not stopped by
-  that, nor by a cancel: with the docker runner too, the worker waits for the build to end, up to
-  `LAKANA_RUN__VENV_BUILD_TIMEOUT` (600 s), before the task ends
-  ([#291](https://github.com/lakana-labs/lakana/issues/291)). If Compose sends `SIGKILL` first, or the worker is lost, the platform ends what it held
+  bundle sets `stop_grace_period: 45s`. A task whose environment is still being built is released
+  the same way: its build is stopped when the grace has run out, and nothing of it is kept. If
+  Compose sends `SIGKILL` first, or the worker is lost, the platform ends what it held
   after about a minute: queries and deploys `FAILED` with the cause `worker_lost` (a write that
   had already committed ends `SUCCEEDED`), tasks released or reclaimed. Nothing stays `RUNNING`
   for ever; see [A worker that is lost](../how-to/stop-a-query.md#a-worker-that-is-lost) and

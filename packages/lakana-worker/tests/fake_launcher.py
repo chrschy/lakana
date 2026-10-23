@@ -32,6 +32,8 @@ class FakeLauncher:
         The socket the real client would use.
     timeouts
         The `timeout` of every `call`, in order.
+    owners
+        The owner of every `stop`, in order.
     """
 
     scripts: dict[str, Script] = field(default_factory=dict)
@@ -40,6 +42,7 @@ class FakeLauncher:
     released: threading.Event = field(default_factory=threading.Event)
     socket_path: Path = Path("/run/lakana-launcher/launcher.sock")
     timeouts: list[float | None] = field(default_factory=list)
+    owners: list[str] = field(default_factory=list)
 
     def call(
         self,
@@ -94,13 +97,15 @@ class FakeLauncher:
         answer = self.call({"op": "status", "python": python, "environment": key})
         return answer.get("complete") is True
 
-    def stop(self, ident: str) -> bool:
+    def stop(self, ident: str, owner: str) -> bool:
         """Record a stop and release a waiting script.
 
         Parameters
         ----------
         ident
             The task's id.
+        owner
+            The worker that asks, recorded in `owners`.
 
         Returns
         -------
@@ -108,6 +113,7 @@ class FakeLauncher:
             `True`.
         """
         self.stopped.append(ident)
+        self.owners.append(owner)
         self.released.set()
         return True
 

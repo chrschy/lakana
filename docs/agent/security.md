@@ -989,6 +989,16 @@ access-controlled on the server; `read_only=True` seals it (0400/0500) for a tas
   grace and `runners.DEADLINE_MARGIN_SECONDS` (900 s: the launcher's image pull and wait
   margin); past it the client closes the connection (`LauncherTimedOut`), which makes the
   launcher kill and remove the container, and the task fails as timed out naming the launcher.
+- **A build stops with its task (#291).** The supervisor's `KeeperStop` reaches the build as
+  `stop`: `DockerEnvironments.acquire` asks the launcher to stop the build by id and owner, with
+  the same retries as a run, and once the launcher confirmed it waits at most `stop_wait` (30 s,
+  for an image pull the launcher cannot interrupt) before the task ends without the result; the
+  launcher kills the build container (grace 0), removes the private cache and the environment
+  volume and marks nothing complete. A build queued behind another build of its environment
+  stops waiting (`_LOCK_POLL`). The local runner's `venvs.acquire` polls `stop` with the size
+  watch, kills uv's process group, removes the build directory and publishes nothing; a wait for
+  another task's build lock ends too. `VenvBuildStopped` is classified by the keeper
+  (`_refuse_if_stopped`): cancelled, released or lease lost, never a build failure.
 - **An environment belongs to one project.** Its key (`docker_environments.environment_key`) is
   the SHA-256 of the project's id, the lock digest, `pyproject.toml`'s digest, the Python version
   and the credential-free index set; the launcher adds the image to the volume's name. The
@@ -1026,7 +1036,7 @@ access-controlled on the server; `read_only=True` seals it (0400/0500) for a tas
   into a build mount, and `SSL_CERT_FILE` in the build; #292).
 - **A build gets only what its lock needs**: the credentials of the registered indexes it uses
   (an index without a credential is a host to reach, not an entry of `UV_INDEX`), the operator's
-  index, and the hosts of those indexes for the egress proxy. Credentials are decrypted only when
+  index, and the `host:port` of each of those indexes for the egress proxy. Credentials are decrypted only when
   a build runs, never for an environment the launcher reports complete; the build's output is
   redacted for every form of every credential before it reaches the task log.
 - **A build's only way out is the egress proxy** (`launcher/egress.py`, `lakana-egress`,
@@ -1034,7 +1044,9 @@ access-controlled on the server; `read_only=True` seals it (0400/0500) for a tas
   each build network and puts a token in the build's `HTTPS_PROXY` (`egress_token.mint`):
   HMAC-SHA256 with `egress.key` (32 random bytes, hex, mode 0640, in the `egress-key` volume the
   proxy mounts read-only) over a purpose (`build`), the build network's /29, exact host:port
-  pairs (`requests.build_targets`: 443 of every host, plus a port an index URL names) and an
+  pairs (`requests.build_targets`: exactly the request's `targets`, the `host:port` of every index
+  the build may use, with a credential or without, from `docker_environments.build_targets`;
+  parsing refuses a credential or an operator index whose pair is not among them; #301) and an
   expiry (the build's timeout and a minute, counted after the image pull). The proxy keeps no
   state and knows nothing of builds: it tunnels `CONNECT host:port` only when the token
   verifies, the client's address is in the token's network (a token copied into another
@@ -1048,7 +1060,13 @@ access-controlled on the server; `read_only=True` seals it (0400/0500) for a tas
   connecting to a checked address (no DNS rebinding); other private addresses stay reachable,
   because a company index often is one. The head must arrive whole within 10 s and 16 KiB,
   strictly CRLF, one `Proxy-Authorization`, at most 64 lines; at most 256 connections (503
-  beyond, then closed without a thread); a tunnel ends idle after 5 minutes and at the token's
+  beyond, then closed without a thread), and at most 32 from one client network
+  (`LAKANA_EGRESS__MAX_CONNECTIONS_PER_NETWORK`, #302): the most specific attached network that
+  holds the client's address (a build's /29), or the address alone, counted from the accept,
+  before the head, so idle connections count; past the cap 503 naming it, and past the cap and
+  four answering threads the network's connections are closed at once (`process_request`), so a
+  flood takes only its own threads. Builds set `UV_CONCURRENT_DOWNLOADS=16`
+  (`requests.BUILD_DOWNLOADS`) to stay within it; a tunnel ends idle after 5 minutes and at the token's
   expiry. A released build's /29 rests until its token's expiry plus a minute before any network
   gets it again, running and resting networks counting together against the network cap. The
   rest lives in the launcher's memory, so every launcher start writes a new `egress.key`
@@ -1150,9 +1168,17 @@ start) authenticates a worker, compared with `hmac.compare_digest`.
     and the REST API with its own token (as before);
   - a compromised worker holds the launcher token: it can start allowed images with its own code
     as uid 10001, mount any environment volume read-only by key, build into an environment not yet
-    complete, stop any run whose id it learns (ids are random, and `stop` checks no owner), and
-    use any credential the worker can decrypt; it
-    cannot choose an image, a host path, a capability or a network;
+    complete, stop a run of another worker only if it learns that run's id, and use any
+    credential the worker can decrypt. `stop` and a closed connection act only on a run
+    registered under the same owner (`_same_owner`; another owner's id gets the answer an unknown
+    id gets), but the owner is **not** a secret: it is `<host>.<16 hex>` from `launcher-owner` in
+    the worker's cache directory (`launcher_client.claim_owner`), and in the bundle every replica
+    mounts the same `worker-cache` volume as the same user, so any worker can read every other
+    worker's owner. What protects another worker's run is its id: 128 random bits
+    (`uuid.uuid4().hex`) that `DockerRunner` and `DockerEnvironments` make per task and per build
+    and never store or log (only the launcher logs it). The owner check closes the case where a
+    `run` or `build` repeating a live id with another owner, refused as a duplicate (which tells
+    only that the id is live), ended the first run when its connection closed. It cannot choose an image, a host path, a capability or a network;
   - while the launcher is down, tasks fail as "runner unavailable" and are retried; containers it
     started keep running until it starts again and removes them (their tokens are revoked by the
     worker when its call fails);
@@ -1164,8 +1190,7 @@ start) authenticates a worker, compared with `hmac.compare_digest`.
   networks the proxy is attached to (a company index often is one; operator ranges are #303);
   with `LAKANA_EGRESS__UPSTREAM_PROXY` the proxy makes no address check of its own, the upstream
   proxy resolves and decides; a tunnel whose writes block can outlive its token's expiry by up to
-  the 300 s idle timeout; one build can hold all `LAKANA_EGRESS__MAX_CONNECTIONS` slots (#302);
-  a registered index on a port other than 443 without a credential is refused (#301).
+  the 300 s idle timeout.
 
 ## The artifact store (M5c2b)
 
@@ -4838,8 +4863,8 @@ matter for an operator deciding where to run it:
   task whose worker dies is reclaimed with its write run failed. The ad-hoc queries and deploys of
   a worker that dies (`SIGKILL`, power loss) are ended by the scheduler's sweep after about a
   lease, `FAILED` with the cause `worker_lost`; a write that had already committed ends
-  `SUCCEEDED`. Nothing stays `RUNNING` for ever. A venv build in progress is not interrupted
-  (#48).
+  `SUCCEEDED`. Nothing stays `RUNNING` for ever. A venv build in progress is stopped once the
+  drain grace has run out (#291).
 - **SeaweedFS's internal HTTP APIs are unreachable from the worker (#14), by network isolation.**
   The worker runs user SQL with DuckDB's `httpfs` (since allow-list mode, a query process opens
   only the URL prefixes of the tables it reads, but follows a redirect and lets a literal `..`

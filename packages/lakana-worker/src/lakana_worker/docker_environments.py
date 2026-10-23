@@ -16,9 +16,12 @@ cost is one build per project for a lock several projects use.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import math
 import re
+import threading
+import time
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -39,13 +42,25 @@ from lakana_worker.index_credentials import (
 from lakana_worker.launcher.task_build import NO_INTERPRETER, NO_SDK, TOO_LARGE
 from lakana_worker.launcher_client import LauncherClient, LauncherRefused, LauncherUnavailable
 from lakana_worker.processes import OutputRedactor
-from lakana_worker.runners import NO_SDK_MESSAGE
-from lakana_worker.venvs import IndexResolver, Tee, VenvBuildError, VenvBuildRefused, VenvLease
+from lakana_worker.runners import NO_SDK_MESSAGE, stop_retry_gap
+from lakana_worker.venvs import (
+    BuildStop,
+    IndexResolver,
+    Tee,
+    VenvBuildError,
+    VenvBuildRefused,
+    VenvBuildStopped,
+    VenvLease,
+)
 
 PUBLIC_INDEX_HOSTS = ("pypi.org", "files.pythonhosted.org")
 """The hosts of the public package index, which a build without `LAKANA_RUN__INDEX_URL` uses."""
 
 _FAILED = "environment build failed"
+_STOPPED = (
+    f"{_FAILED}: stopped before it ended (the task was cancelled, lost its lease, or the worker "
+    "is stopping); the launcher removed what it had built"
+)
 _SHA256 = re.compile(r"\A[0-9a-f]{64}\Z")
 
 
@@ -113,8 +128,32 @@ def environment_key(
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
-def build_hosts(used: Sequence[RegisteredIndex], operator_index: str | None) -> list[str]:
-    """List the hosts a build may reach through the egress proxy.
+def _endpoint(url: str) -> str:
+    """Name the host and port a URL connects to.
+
+    Parameters
+    ----------
+    url
+        An index URL.
+
+    Returns
+    -------
+    str
+        ``host:port``, the host in lower case, the port the scheme's own (443 for https, 80 for
+        http) when the URL names none; empty for a URL without a host.
+    """
+    parts = urlsplit(url)
+    if not parts.hostname:
+        return ""
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    return f"{parts.hostname.lower()}:{port}"
+
+
+def build_targets(used: Sequence[RegisteredIndex], operator_index: str | None) -> list[str]:
+    """List the host:port pairs a build may reach through the egress proxy.
+
+    Every index is sent with its port, whether it has a credential or not: the launcher's token
+    grants exactly these pairs (#301).
 
     Parameters
     ----------
@@ -126,13 +165,15 @@ def build_hosts(used: Sequence[RegisteredIndex], operator_index: str | None) -> 
     Returns
     -------
     list of str
-        The default index's hosts, then each registered index's, lower case, without repeats.
+        The default index's pairs (port 443 of the public index's hosts), then each registered
+        index's, without repeats.
     """
-    hosts = (
-        [urlsplit(operator_index).hostname or ""] if operator_index else list(PUBLIC_INDEX_HOSTS)
-    )
-    hosts += [urlsplit(index.url).hostname or "" for index in used]
-    return list(dict.fromkeys(host.lower() for host in hosts if host))
+    if operator_index:
+        targets = [_endpoint(operator_index)]
+    else:
+        targets = [f"{host}:443" for host in PUBLIC_INDEX_HOSTS]
+    targets += [_endpoint(index.url) for index in used]
+    return list(dict.fromkeys(target for target in targets if target))
 
 
 @dataclass
@@ -157,6 +198,12 @@ class DockerEnvironments:
         `LAKANA_RUN__VENV_MAX_BYTES`.
     operator_index
         `LAKANA_RUN__INDEX_URL`; may carry a password, left out of `repr`.
+    poll_seconds
+        How often a running build's stop is checked.
+    stop_wait
+        Seconds a stopped build's result is waited for once the launcher confirmed the stop;
+        then the task ends without it (an image pull the launcher cannot interrupt), and the
+        launcher removes the build when the pull ends.
     """
 
     client: LauncherClient
@@ -167,6 +214,8 @@ class DockerEnvironments:
     build_timeout: float
     max_bytes: int
     operator_index: str | None = field(default=None, repr=False)
+    poll_seconds: float = 0.2
+    stop_wait: float = 30.0
 
     def acquire(
         self,
@@ -179,6 +228,7 @@ class DockerEnvironments:
         attempt: str,
         used: Sequence[RegisteredIndex],
         project_id: uuid.UUID,
+        stop: BuildStop | None = None,
     ) -> VenvLease:
         """Return the environment of a lock, building it in a container on first use.
 
@@ -200,6 +250,9 @@ class DockerEnvironments:
             The registered indexes the lock uses.
         project_id
             The project the task belongs to; part of the key.
+        stop
+            Says when the task is to stop (#291): the launcher is asked to stop the build, which
+            kills its container and keeps nothing of it.
 
         Returns
         -------
@@ -208,6 +261,8 @@ class DockerEnvironments:
 
         Raises
         ------
+        VenvBuildStopped
+            If `stop` said so before the environment was built.
         VenvBuildRefused
             If a credential cannot be used, the launcher refused the build, an index refused the
             credential, a wheel is missing while a credential is in play, or the environment has
@@ -232,6 +287,8 @@ class DockerEnvironments:
         try:
             if self.client.status(python, key):
                 return lease
+            if stop is not None and stop():
+                raise VenvBuildStopped(_STOPPED)
             accesses = list(indexes()) if indexes is not None else []
             tee = Tee(
                 OutputRedactor(
@@ -251,7 +308,7 @@ class DockerEnvironments:
                     if a.password is not None
                 ],
                 "operator_index": self.operator_index,
-                "hosts": build_hosts(used, self.operator_index),
+                "targets": build_targets(used, self.operator_index),
                 "no_build": wheels_only(accesses),
                 "memory_mb": self.memory_mb,
                 "cpus": self.cpus,
@@ -260,7 +317,7 @@ class DockerEnvironments:
                 "max_bytes": self.max_bytes,
             }
             try:
-                result = self.client.call(request, tee.feed)
+                result = self._call(request, tee.feed, stop)
             finally:
                 tee.close()
         except LauncherRefused as exc:
@@ -269,7 +326,106 @@ class DockerEnvironments:
             raise VenvBuildError(str(exc)) from None
         if result.get("complete") is True:
             return lease
+        if stop is not None and stop() and result.get("stopped") is True:
+            raise VenvBuildStopped(_STOPPED)
         raise self._failure(result, tee.text(), accesses)
+
+    def _call(
+        self,
+        request: dict[str, object],
+        on_log: Callable[[bytes], None],
+        stop: BuildStop | None,
+    ) -> dict[str, object]:
+        """Send the build and wait for its result, asking the launcher to stop it on `stop`.
+
+        Parameters
+        ----------
+        request
+            The build request.
+        on_log
+            Receives the build's output.
+        stop
+            Says when to stop the build; `None` waits for its end.
+
+        Returns
+        -------
+        dict
+            The launcher's result.
+
+        Raises
+        ------
+        VenvBuildStopped
+            If the launcher confirmed the stop and sent no result within `stop_wait`.
+        Exception
+            Whatever the launcher client raised.
+        """
+        if stop is None:
+            return self.client.call(request, on_log)
+        box: dict[str, object] = {}
+        given_up = threading.Event()
+
+        def feed(chunk: bytes) -> None:
+            """Pass output on until the task stopped waiting for the build.
+
+            Parameters
+            ----------
+            chunk
+                A piece of the build's output.
+            """
+            if not given_up.is_set():
+                on_log(chunk)
+
+        def call() -> None:
+            """Run the launcher call on its own thread, keeping what it returned or raised."""
+            try:
+                box["result"] = self.client.call(request, feed)
+            except Exception as exc:  # handed back to the waiting thread below
+                box["error"] = exc
+
+        thread = threading.Thread(target=call, name="lakana-docker-build", daemon=True)
+        thread.start()
+        ident = str(request["build"])
+        confirmed: float | None = None
+        gap = 0.0
+        next_stop = 0.0
+        while thread.is_alive():
+            thread.join(self.poll_seconds)
+            if not thread.is_alive() or not stop():
+                continue
+            now = time.monotonic()
+            if confirmed is None and now >= next_stop:
+                # False until the launcher registered the build, and when Docker did not stop
+                # the container: asked again, less often each time.
+                if self._stop(ident):
+                    confirmed = now
+                next_stop = now + gap
+                gap = stop_retry_gap(gap, self.poll_seconds)
+            elif confirmed is not None and now - confirmed >= self.stop_wait:
+                given_up.set()
+                raise VenvBuildStopped(_STOPPED)
+        error = box.get("error")
+        if isinstance(error, BaseException):
+            raise error
+        result = box.get("result")
+        assert isinstance(result, dict)  # nosec B101 -- set by `call` when nothing was raised
+        return result
+
+    def _stop(self, ident: str) -> bool:
+        """Ask the launcher to stop a build; a launcher that cannot is not an error here.
+
+        Parameters
+        ----------
+        ident
+            The build's id.
+
+        Returns
+        -------
+        bool
+            Whether the launcher stopped it; `False` also before it registered the build.
+        """
+        with contextlib.suppress(LauncherUnavailable, LauncherRefused):
+            return self.client.stop(ident, self.owner)
+        return False
 
     def _failure(
         self, result: dict[str, object], output: str, accesses: Sequence[IndexAccess]

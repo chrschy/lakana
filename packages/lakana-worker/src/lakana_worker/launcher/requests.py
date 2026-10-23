@@ -26,7 +26,12 @@ from lakana_worker.launcher.settings import LauncherSettings
 MAX_REQUEST_BYTES = 512 * 1024
 MAX_STDIN_BYTES = 256 * 1024
 MAX_INDEXES = 16
-MAX_HOSTS = 32
+MAX_TARGETS = 32
+"""The most host:port pairs one build may reach."""
+BUILD_DOWNLOADS = 16
+"""uv's parallel downloads in a build (`UV_CONCURRENT_DOWNLOADS`, 50 by default): half the egress
+proxy's default cap of 32 connections per build network, which leaves room for the connections
+uv keeps open to an index's other host and for a build backend's own."""
 MAX_ROOTS = 16
 MAX_CREDENTIAL_CHARS = 4096
 MAX_URL_CHARS = 2048
@@ -93,13 +98,13 @@ FIELDS: dict[str, frozenset[str]] = {
             "attempt",
             "indexes",
             "operator_index",
-            "hosts",
+            "targets",
             "no_build",
             "max_bytes",
         }
     )
     | _LIMITS,
-    "stop": frozenset({"token", "op", "id"}),
+    "stop": frozenset({"token", "op", "id", "owner"}),
     "status": frozenset({"token", "op", "python", "environment"}),
     "cleanup": frozenset({"token", "op", "owner"}),
 }
@@ -163,7 +168,8 @@ class RunRequest:
     task
         The attempt's id; names the container and its network.
     owner
-        The worker that asked, for `cleanup`.
+        The worker that asked: only it may stop the run (`stop`, a closed connection), and
+        `cleanup` removes by it.
     python
         The Python version; selects the image.
     environment
@@ -200,7 +206,7 @@ class BuildRequest:
     build
         The build's id; names the container and its network.
     owner
-        The worker that asked.
+        The worker that asked: only it may stop the build.
     python
         The Python version; selects the image.
     environment
@@ -211,8 +217,8 @@ class BuildRequest:
         Registered indexes with a credential.
     operator_index
         `LAKANA_RUN__INDEX_URL`, which may carry its own credential. Left out of `repr`.
-    hosts
-        Every host the build may reach through the egress proxy.
+    targets
+        Every host and port the build may reach through the egress proxy.
     no_build
         Whether uv may install wheels only (a credential is in play).
     limits
@@ -228,7 +234,7 @@ class BuildRequest:
     attempt: str
     indexes: tuple[IndexCredential, ...]
     operator_index: str | None = field(repr=False)
-    hosts: tuple[str, ...]
+    targets: tuple[tuple[str, int], ...]
     no_build: bool
     limits: Limits
     max_bytes: int
@@ -236,15 +242,18 @@ class BuildRequest:
 
 @dataclass(frozen=True)
 class StopRequest:
-    """Stop a running task or build.
+    """Stop a running task or build of the worker that asks.
 
     Parameters
     ----------
     id
         The task's or build's id.
+    owner
+        The worker that asks; only a run it started is stopped.
     """
 
     id: str
+    owner: str
 
 
 @dataclass(frozen=True)
@@ -517,6 +526,66 @@ def _allowed_host(host: str) -> bool:
     return address.is_global and not address.is_multicast
 
 
+def _port(text: str) -> int | None:
+    """Read a port in its one spelling.
+
+    Parameters
+    ----------
+    text
+        The text after a host's colon.
+
+    Returns
+    -------
+    int or None
+        1 to 65535, written in ASCII digits without a sign or a leading zero; `None` otherwise.
+    """
+    if not text.isascii() or not text.isdigit() or text.startswith("0") or len(text) > 5:
+        return None
+    number = int(text)
+    return number if number < 65536 else None
+
+
+def _target(item: object) -> tuple[str, int] | None:
+    """Read one ``host:port`` of a build's targets.
+
+    Parameters
+    ----------
+    item
+        An element of ``targets``.
+
+    Returns
+    -------
+    tuple or None
+        The host and the port; `None` unless the host is one a build may reach
+        (`_allowed_host`) and the port is in its one spelling.
+    """
+    if not isinstance(item, str):
+        return None
+    host, colon, port_text = item.rpartition(":")
+    port = _port(port_text)
+    if not colon or port is None or not _allowed_host(host):
+        return None
+    return host, port
+
+
+def _endpoint(url: str) -> tuple[str, int]:
+    """Name the host and port a URL that `_host_of` accepted connects to.
+
+    Parameters
+    ----------
+    url
+        The URL.
+
+    Returns
+    -------
+    tuple
+        The lower-case host and the port, the scheme's own (443 for https, 80 for http) when the
+        URL names none.
+    """
+    parts = urlsplit(url)
+    return (parts.hostname or "").lower(), parts.port or (443 if parts.scheme == "https" else 80)
+
+
 def _host_of(url: str, *, schemes: tuple[str, ...], userinfo: bool) -> str | None:
     """Return the host of a URL the launcher will hand to uv, or `None` for a bad one.
 
@@ -665,17 +734,14 @@ def _build(data: dict[str, Any], settings: LauncherSettings) -> BuildRequest:
     if not isinstance(indexes, list) or len(indexes) > MAX_INDEXES:
         raise Refused("indexes: a list of at most 16 credentials")
     credentials = tuple(_credential(item) for item in indexes)
-    hosts = data["hosts"]
-    if (
-        not isinstance(hosts, list)
-        or not 1 <= len(hosts) <= MAX_HOSTS
-        or not all(isinstance(h, str) and _allowed_host(h) for h in hosts)
-        or len(set(hosts)) != len(hosts)
-    ):
+    sent = data["targets"]
+    targets = [_target(item) for item in sent] if isinstance(sent, list) else []
+    if not 1 <= len(targets) <= MAX_TARGETS or None in targets or len(set(targets)) != len(targets):
         raise Refused(
-            "hosts: a list of 1 to 32 distinct lower-case host names without a port, or public "
-            "IP addresses"
+            "targets: a list of 1 to 32 distinct host:port, each a lower-case host name or a "
+            "public IP address and a port from 1 to 65535"
         )
+    allowed = {target for target in targets if target is not None}
     operator = data["operator_index"]
     operator_host = None
     if operator is not None:
@@ -686,10 +752,9 @@ def _build(data: dict[str, Any], settings: LauncherSettings) -> BuildRequest:
         )
         if operator_host is None:
             raise Refused("operator_index: null or an http(s) URL without spaces")
-    if any(c.host not in hosts for c in credentials) or (
-        operator_host is not None and operator_host not in hosts
-    ):
-        raise Refused("indexes: every index's host must be in hosts")
+    urls = [c.url for c in credentials] + ([operator] if operator_host is not None else [])
+    if any(_endpoint(url) not in allowed for url in urls):
+        raise Refused("indexes: every index's host and port must be in targets")
     if type(data["no_build"]) is not bool:
         raise Refused("no_build: true or false")
     return BuildRequest(
@@ -700,7 +765,7 @@ def _build(data: dict[str, Any], settings: LauncherSettings) -> BuildRequest:
         attempt=_pattern(data, "attempt", _ATTEMPT, _ATTEMPT_RULE),
         indexes=credentials,
         operator_index=operator,
-        hosts=tuple(hosts),
+        targets=tuple(target for target in targets if target is not None),
         no_build=data["no_build"],
         limits=_limits(data, settings),
         max_bytes=_integer(data, "max_bytes", 1, MAX_ENVIRONMENT_BYTES),
@@ -760,7 +825,9 @@ def parse_request(raw: bytes, *, token: str, settings: LauncherSettings) -> Requ
     if op == "build":
         return _build(data, settings)
     if op == "stop":
-        return StopRequest(_pattern(data, "id", _ID, _ID_RULE))
+        return StopRequest(
+            _pattern(data, "id", _ID, _ID_RULE), _pattern(data, "owner", _OWNER, _OWNER_RULE)
+        )
     if op == "status":
         return StatusRequest(
             python=_python(data, settings),
@@ -930,7 +997,7 @@ def cache_volume(settings: LauncherSettings, request: BuildRequest, *, key: byte
     identity = (
         operator,
         operator_who,
-        *sorted(request.hosts),
+        *sorted(f"{host}:{port}" for host, port in request.targets),
         *sorted(_fingerprint(key, c.url, c.username, c.password) for c in request.indexes),
     )
     if request.no_build:
@@ -1243,12 +1310,11 @@ def uv_index_value(request: BuildRequest) -> str | None:
 
 
 def build_targets(request: BuildRequest) -> list[tuple[str, int]]:
-    """List the host:port pairs a build's egress token grants.
+    """List the host:port pairs a build's egress token grants: exactly the request's targets.
 
-    Port 443 of every host the worker named, then the port an index URL names explicitly: an
-    https index on another port is reachable only on that port, and only when its URL reaches
-    the launcher (a credential's, or the operator's index). The proxy tunnels with CONNECT only,
-    so a plain http index adds nothing.
+    The worker sends the host and port of every index the build may use, with a credential or
+    without (#301); parsing refused a request whose credential or operator index is on a pair it
+    does not list.
 
     Parameters
     ----------
@@ -1258,17 +1324,9 @@ def build_targets(request: BuildRequest) -> list[tuple[str, int]]:
     Returns
     -------
     list of tuple
-        Distinct pairs, in that order.
+        Distinct pairs, in the request's order.
     """
-    pairs = [(host, 443) for host in request.hosts]
-    urls = [index.url for index in request.indexes]
-    if request.operator_index:
-        urls.append(request.operator_index)
-    for url in urls:
-        parts = urlsplit(url)
-        if parts.scheme == "https" and parts.hostname and parts.port:
-            pairs.append((parts.hostname.lower(), parts.port))
-    return list(dict.fromkeys(pairs))
+    return list(request.targets)
 
 
 def build_container_spec(
@@ -1316,6 +1374,7 @@ def build_container_spec(
         "UV_PYTHON_DOWNLOADS=never",
         "UV_CACHE_DIR=/uv-cache",
         "UV_NO_PROGRESS=1",
+        f"UV_CONCURRENT_DOWNLOADS={BUILD_DOWNLOADS}",
         f"LAKANA_BUILD_NO_BUILD={1 if request.no_build else 0}",
         f"LAKANA_BUILD_MAX_BYTES={request.max_bytes}",
         f"LAKANA_BUILD_SRC={source}",
