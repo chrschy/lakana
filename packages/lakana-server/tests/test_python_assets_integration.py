@@ -986,6 +986,17 @@ class _CutConnectionsAfterTheProcess:
         self._cut = cut
         self.cut: list[int] = []
 
+    @property
+    def isolated(self) -> bool:
+        """Whether the wrapped runner isolates its tasks.
+
+        Returns
+        -------
+        bool
+            The inner runner's answer.
+        """
+        return self._inner.isolated
+
     def run(
         self, task: PythonTask, on_log: Callable[[bytes], None], stop: StopSignal
     ) -> RunOutcome:
