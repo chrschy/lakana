@@ -14,9 +14,11 @@ import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from lakana_worker import launcher_client
 from lakana_worker.launcher_client import (
     LauncherClient,
     LauncherRefused,
@@ -404,6 +406,43 @@ def test_a_call_past_its_deadline_closes_the_connection_and_says_so(
         assert closed.wait(5), "the client left the connection open"
     finally:
         server.close()
+
+
+def test_a_line_that_arrives_after_the_deadline_ends_the_call(
+    answering: Answering, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A line read after the deadline is not handled, even if the read itself did not time out.
+
+    The test above reaches this branch only when the timing happens to fall that way; here
+    the clock jumps inside the log sink, so the second line is always read past the deadline.
+
+    Parameters
+    ----------
+    answering
+        The launcher stand-in.
+    monkeypatch
+        Replaces the client's clock.
+    """
+    now = [0.0]
+    monkeypatch.setattr(launcher_client, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    log = json.dumps({"log": base64.b64encode(b".").decode()}).encode() + b"\n"
+    answering.answers.append(log + log + b'{"result": {"complete": true}}\n')
+    logs: list[bytes] = []
+
+    def sink(chunk: bytes) -> None:
+        """Keep the chunk and move the clock past the deadline.
+
+        Parameters
+        ----------
+        chunk
+            The log bytes.
+        """
+        logs.append(chunk)
+        now[0] = 1000.0
+
+    with pytest.raises(LauncherTimedOut, match=r"no result within 60s"):
+        LauncherClient(Path("l.sock")).call({"op": "run"}, sink, timeout=60)
+    assert logs == [b"."]
 
 
 def test_a_call_without_a_deadline_waits_as_long_as_the_task_runs(answering: Answering) -> None:

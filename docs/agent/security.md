@@ -977,7 +977,9 @@ access-controlled on the server; `read_only=True` seals it (0400/0500) for a tas
   parent pid. The container's output is redacted like a local task's, a token split across
   Docker frames or log lines included; the result record in `<attempt>/task` is read with the
   same distrust (`O_NOFOLLOW`, regular file, bounded) and a stale one is removed before the run.
-  Docker's `OOMKilled` sets the memory stop reason; a cancel set first wins.
+  Docker's `OOMKilled` sets the memory stop reason, and so does exit 137 (SIGKILL) on a run the
+  launcher neither timed out nor stopped: the flag comes from a containerd event that is lost
+  when the container goes first. A cancel set first wins.
 - **A stop is asked for until the launcher confirms it, and the worker does not wait forever.**
   The launcher's `stop` answers `stopped: true` only when Docker stopped the container, found it
   not running or gone, or the run has no container yet; a failed or refused Docker call is

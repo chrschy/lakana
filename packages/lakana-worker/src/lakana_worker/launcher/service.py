@@ -90,6 +90,8 @@ _STOPPED_BEFORE_START: dict[str, object] = {
 """The result of a run whose caller left, or that was stopped, before its container started."""
 _PULL_SECONDS = 600.0
 _PROBE_SECONDS = 300.0
+_SIGKILL_EXIT = 128 + 9
+"""The exit status Docker's init reports for a task process killed by SIGKILL."""
 _WAIT_MARGIN = 60.0
 """Seconds past a run's timeout and grace that the wait for its container may last."""
 _SUBNET_TRIES = 8
@@ -1334,11 +1336,17 @@ class Launcher:
             _, info = self.engine.request("GET", f"/containers/{cid}/json")
             state = info.get("State", {}) if isinstance(info, dict) else {}
             code = waited.get("StatusCode") if isinstance(waited, dict) else None
+            timed_out, stopped = live.timed_out.is_set(), live.stopped.is_set()
+            # Docker sets `OOMKilled` from a containerd event that is lost when the container's
+            # cgroup goes first. A SIGKILL the launcher did not send (it neither stopped nor timed
+            # out the run) is read as the memory limit, its most likely sender; a task killing
+            # itself, an operator's `docker kill` or the host's OOM killer read the same way.
+            killed = code == _SIGKILL_EXIT and not timed_out and not stopped
             return {
                 "exit": code if isinstance(code, int) else None,
-                "oom_killed": bool(state.get("OOMKilled")),
-                "timed_out": live.timed_out.is_set(),
-                "stopped": live.stopped.is_set(),
+                "oom_killed": bool(state.get("OOMKilled")) or killed,
+                "timed_out": timed_out,
+                "stopped": stopped,
             }
         finally:
             timer.cancel()
