@@ -93,16 +93,25 @@ output blocks in the documentation are checked (#54). The next element was the m
 until at least October 2027 (#96 is closed). A few SQL forms behave differently; see the
 [notes for 0.19.0](upgrades.md). The query sandbox was hardened for DuckDB 2. A store
 certificate that cannot be verified now fails at once with a message that says why (#277). The
-next elements are M7b, task isolation (#38), then M6 and the public beta (M7c,
+next elements were M7b, task isolation (#38), then M6 and the public beta (M7c,
 #33).
+
+0.20.0 (2026-10-23) completed M7b, task isolation (#38 is closed). Each Python task runs in a
+container of its own, started by a launcher that alone holds the Docker socket. An environment
+build reaches only its package indexes, through an egress proxy. Two changes are breaking: the
+Compose bundle uses the docker runner by default, and a protected environment runs Python tasks
+only in containers. See [Run Python tasks in containers](../how-to/run-python-tasks-in-containers.md)
+and the [notes for 0.20.0](upgrades.md#notes-for-0200). The next elements are the open
+dependency updates and a batch of small issues, then M6 ingestion, then M7c (the public beta,
+#33), M7, M8, M8b, M8c, M8d, M9, M10 and v1.0.0.
 
 ## To v1.0.0
 
 The public beta comes before the web interface. The beta's purpose is that
 real users try Lakana and its documentation early, and what they report should shape the
 interface, which is the project's first front-end code and the least certain piece of work. The
-first testers are people at home in a terminal. Ingestion (M6) and task isolation (M7b) come
-before the beta: a new team's first job is getting its data in, so the beta ships with the
+first testers are people at home in a terminal. Ingestion (M6) comes
+before the beta (task isolation, M7b, is built): a new team's first job is getting its data in, so the beta ships with the
 ingestion helpers and named connections.
 
 1. **M5d, triggers, data quality checks and notifications (built).** Runs start by hand, on a schedule
@@ -116,20 +125,25 @@ ingestion helpers and named connections.
    release supported until at least October 2027. It was a migration, not a milestone, tracked in
    #96. The worker requires `duckdb>=2.0,<3`; what changed for SQL is in
    [Upgrade policy](upgrades.md).
-3. **M7b, task isolation.** A Docker runner executes each Python task in its own container. A
-   short design trial comes first: how the worker reaches a container runtime without gaining
-   root on the host. Done when a task cannot read the worker's credentials or another project's
-   environment, its memory and CPU limits are enforced by the container runtime, and a stopped
-   task leaves no process behind. It comes before the public beta so that the first public
-   release can isolate one project's code from another's.
-4. **M6, ingestion.** Python helpers in `lakana[assets]` for files, SQL
-   databases and JSON REST APIs, plus `lakana load` for a local file, which stays as a
-   convenience for exploration and tests. Named connections (#85): an administrator registers a source's address and
-   credentials once under a name, and a Python asset or `lakana load` uses the name. They are
-   managed through the CLI and the API; managing them in the web interface comes with M7. A
+3. **M7b, task isolation (built, 0.20.0).** Each Python task runs in a container of its own,
+   started by a launcher that alone holds the Docker socket, so a task cannot read the worker's
+   credentials or another project's environment. Its memory and CPU limits are enforced by the
+   container runtime, and a stopped task leaves no process behind. An environment build reaches
+   only its package indexes, through an egress proxy. The Compose bundle uses the docker runner
+   by default, and a protected environment runs Python tasks only in containers. See
+   [Run Python tasks in containers](../how-to/run-python-tasks-in-containers.md).
+4. **M6, ingestion.** An administrator registers a source once as a named connection (#85), per
+   environment, with its address and credentials; a connection is managed through the CLI and the
+   API, and in the web interface from M7. A Python asset declares the connections it uses in
+   its header, and an ingestion task reaches only those connections and nothing else on the
+   network (#308). Helpers in `lakana[assets]` read files (S3, GCS, Azure, HTTPS and
+   directories), SQL databases (PostgreSQL, SQLite and MariaDB) and REST APIs. The write modes
+   are `replace`, `append` and `merge` (an upsert); `history` follows in M8d. `lakana load`
+   loads a local file into bronze, and stays as a convenience for exploration and tests. A
    connection is only a name for an address and a secret: Lakana runs no connectors, and the
-   asset's helper does the reading. Done when a new team loads data from each kind of source with
-   a short asset, or loads a local file with `lakana load`.
+   asset's helper does the reading. Done when a new team loads data from each kind of source
+   with a short asset, merges a changing source into a table, or loads a local file with
+   `lakana load`.
 5. **M7c, public beta.** The repository is open and the packages are on PyPI as a pre-beta from
    0.12.0; the beta is the 0.x release that says it is ready to try.
    The beta is the CLI, the SDK and the REST API; it has no web interface yet, and the README and
@@ -162,8 +176,8 @@ ingestion helpers and named connections.
     and before M9. Opinionated support for medallion layers (bronze, silver, gold) and
     Kimball-lite star schemas, with optional wide tables. The parts: model metadata in the asset
     header (#250); translated labels and descriptions with a main language (#251); layer rules,
-    first opt-in and then enforced (#252); the write modes `merge` (upsert) and `history`
-    (SCD type 2), which supersede #39 (#253); a template and a guide (#254); and measures as
+    first opt-in and then enforced (#252); the write mode `history` (SCD type 2) (#253); `merge`
+    (upsert) comes earlier, with M6; a template and a guide (#254); and measures as
     metadata only, with no metrics layer (#255). Done when a new team can start from the
     template, build a star schema with a history dimension, and see its layers and labels in the
     catalog.
