@@ -366,6 +366,18 @@ def test_a_dropped_node_with_an_unparseable_recorded_name_is_hidden(
     assert graph.hidden_nodes == 1
 
 
+def test_a_dropped_node_with_no_recorded_name_is_unreadable(session: Session) -> None:
+    """A dropped id that no edge names gets no securable, so it is never shown."""
+    ids = _tables(session, "c")
+    service = LineageService(session, _Readable(*_EVERYTHING))
+
+    node, securable = service._node("dev", ids["env"], uuid.uuid4())
+
+    assert node.dropped is True
+    assert node.name == ""
+    assert securable is None
+
+
 def test_a_wide_graph_is_capped_and_flagged_truncated(
     session: Session, principal: PrincipalRef
 ) -> None:
