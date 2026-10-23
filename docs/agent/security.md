@@ -1168,13 +1168,17 @@ start) authenticates a worker, compared with `hmac.compare_digest`.
     and the REST API with its own token (as before);
   - a compromised worker holds the launcher token: it can start allowed images with its own code
     as uid 10001, mount any environment volume read-only by key, build into an environment not yet
-    complete, stop a run of another worker only if it learns both that run's id and that
-    worker's owner (`stop` and a closed connection act only on a run registered under the same
-    owner, `_same_owner`; another owner's id gets the answer an unknown id gets; owners are
-    `<host>.<16 random hex>`, `launcher_client.claim_owner`; a `run` or `build` that repeats
-    another worker's live id is refused as a duplicate, which tells only that the id is live, and
-    its closed connection ends nothing), and use any credential the worker can decrypt; it
-    cannot choose an image, a host path, a capability or a network;
+    complete, stop a run of another worker only if it learns that run's id, and use any
+    credential the worker can decrypt. `stop` and a closed connection act only on a run
+    registered under the same owner (`_same_owner`; another owner's id gets the answer an unknown
+    id gets), but the owner is **not** a secret: it is `<host>.<16 hex>` from `launcher-owner` in
+    the worker's cache directory (`launcher_client.claim_owner`), and in the bundle every replica
+    mounts the same `worker-cache` volume as the same user, so any worker can read every other
+    worker's owner. What protects another worker's run is its id: 128 random bits
+    (`uuid.uuid4().hex`) that `DockerRunner` and `DockerEnvironments` make per task and per build
+    and never store or log (only the launcher logs it). The owner check closes the case where a
+    `run` or `build` repeating a live id with another owner, refused as a duplicate (which tells
+    only that the id is live), ended the first run when its connection closed. It cannot choose an image, a host path, a capability or a network;
   - while the launcher is down, tasks fail as "runner unavailable" and are retried; containers it
     started keep running until it starts again and removes them (their tokens are revoked by the
     worker when its call fails);

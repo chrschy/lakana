@@ -17,6 +17,7 @@ import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 import pytest
 from fake_launcher import FakeLauncher
@@ -179,6 +180,8 @@ def _proxy(tmp_path: Path, **changes: object) -> EgressServer:
     }
     values.update(changes)
     server = EgressServer(EgressSettings(**values))  # ty: ignore[invalid-argument-type]
+    _PRETENDED.clear()  # a port recorded by an earlier test may be any connection's now
+    _pretending(server)
     _serve(server)
     return server
 
@@ -491,13 +494,22 @@ def test_a_full_proxy_says_it_is_busy(tmp_path: Path, index: int) -> None:
         server.server_close()
 
 
+_PRETENDED: dict[int, str] = {}
+"""Client port to the address a connection pretends to come from (see `_from`)."""
+
+
 def _from(address: str, port: int) -> socket.socket:
-    """Open a connection to the proxy from a loopback address of the test's choice.
+    """Open a connection to the proxy that the proxy counts as coming from `address`.
+
+    The connection comes from 127.0.0.1, the one loopback address every platform has (macOS
+    has no other); its port is recorded with `address`, and `_proxy` makes the proxy read the
+    peer as `address`, so the client network is still worked out from it, routing table and
+    all.
 
     Parameters
     ----------
     address
-        The client's address, in ``127.0.0.0/8``.
+        The address to count the connection against.
     port
         The proxy's port.
 
@@ -508,9 +520,39 @@ def _from(address: str, port: int) -> socket.socket:
     """
     connection = socket.socket()
     connection.settimeout(5)
-    connection.bind((address, 0))
+    connection.bind(("127.0.0.1", 0))
+    _PRETENDED[connection.getsockname()[1]] = address
     connection.connect(("127.0.0.1", port))
     return connection
+
+
+def _pretending(server: EgressServer) -> None:
+    """Make a proxy read a connection's peer as the address `_from` recorded for its port.
+
+    Parameters
+    ----------
+    server
+        The proxy.
+    """
+    real = server.client_network
+
+    def client_network(client_address: object) -> ipaddress.IPv4Network | ipaddress.IPv6Network:
+        """Swap the peer's host for the pretended one, then work out the network as usual.
+
+        Parameters
+        ----------
+        client_address
+            The peer.
+
+        Returns
+        -------
+        IPv4Network or IPv6Network
+            The client network of the pretended peer.
+        """
+        host, port = cast("tuple[str, int]", client_address)
+        return real((_PRETENDED.get(port, host), port))
+
+    server.client_network = client_network  # ty: ignore[invalid-assignment]
 
 
 def _connect_from(address: str, port: int, target: str, token: str) -> tuple[bytes, bytes]:
@@ -640,7 +682,7 @@ def test_the_client_network_of_a_mapped_or_unknown_connection(tmp_path: Path) ->
     """An IPv4-mapped address counts as its IPv4 address; an unseen connection is looked up."""
     server = _proxy(tmp_path)
     try:
-        mapped = server.client_network("::ffff:127.0.0.2")
+        mapped = server.client_network(("::ffff:127.0.0.2", 1234))
         looked_up = server.network_of(object(), ("127.0.0.9", 1234))
         server._forget(object())  # a connection without a ticket gives nothing back
     finally:

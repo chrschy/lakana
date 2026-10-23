@@ -48,6 +48,11 @@ Inside the container a task runs without capabilities, with a read-only root fil
   capabilities and a read-only filesystem, and it takes only a fixed set of requests from the
   workers; a fault in it is still a fault on the host. Protect the host as you would any Docker
   host, and give the Docker group only to people you would give root.
+- **Workers trust each other.** A compromised worker can stop another worker's task or build only
+  if it learns that task's id: 128 random bits that each worker makes for every task and build
+  and neither stores nor logs. The name a worker gives the launcher (`launcher-owner` in the
+  `worker-cache` volume, which every worker of the bundle shares) is readable by the other
+  workers, so it protects nothing by itself.
 - **Disk.** A task's scratch directory, the built environments and the build caches have no disk
   quota (Docker volumes have none on most storage drivers). An environment larger than
   `LAKANA_RUN__VENV_MAX_BYTES` is refused once it is built; nothing stops a build from filling the

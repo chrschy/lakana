@@ -733,13 +733,16 @@ class EgressServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         self._network_of: dict[object, Network] = {}
         super().__init__(settings.listen, _Handler)
 
-    def client_network(self, host: str) -> Network:
+    def client_network(self, client_address: object) -> Network:
         """Name the client network a connection counts against.
+
+        Only the peer's host counts; its port does not. Tests replace this method to give
+        connections from one loopback address network identities of their own.
 
         Parameters
         ----------
-        host
-            The client's address.
+        client_address
+            The peer, ``(host, port)``.
 
         Returns
         -------
@@ -747,7 +750,7 @@ class EgressServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
             The most specific attached network that holds the address (a build's /29); the
             address alone when none does or the routing table cannot be read.
         """
-        address = ipaddress.ip_address(host)
+        address = ipaddress.ip_address(str(cast("tuple[str, int]", client_address)[0]))
         if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
             address = address.ipv4_mapped
         connected = connected_networks(self.settings.route, self.settings.route6) or frozenset()
@@ -773,7 +776,7 @@ class EgressServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
             found = self._network_of.get(request)
         if found is not None:
             return found
-        return self.client_network(str(cast("tuple[str, int]", client_address)[0]))
+        return self.client_network(client_address)
 
     def enter(self, network: Network) -> bool:
         """Take one of a client network's connection slots.
@@ -849,7 +852,7 @@ class EgressServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         client_address
             Its peer.
         """
-        network = self.client_network(str(cast("tuple[str, int]", client_address)[0]))
+        network = self.client_network(client_address)
         with self._count_lock:
             busy = self._threads_by.get(network, 0)
             if busy >= self.per_network + _SPARE_PER_NETWORK:
