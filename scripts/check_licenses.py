@@ -350,8 +350,24 @@ def check_npm(root: Path, allowlist: frozenset[str]) -> list[str]:
     return problems
 
 
+PIP_LICENSES_COMMAND = (
+    "uv",
+    "run",
+    "--all-groups",
+    "--all-extras",
+    "--all-packages",
+    "pip-licenses",
+    "--format=json",
+    "--with-urls",
+)
+"""What the gate runs: every dependency group, every extra of every workspace package.
+
+Groups alone miss an extra's dependencies (`lakana[assets]`): their licences would never be
+judged."""
+
+
 def main() -> int:
-    """Check every Python distribution in every dependency group and every npm lockfile.
+    """Check every Python distribution of every dependency group and extra, and every npm lockfile.
 
     Returns
     -------
@@ -362,10 +378,7 @@ def main() -> int:
     parser.parse_args()
 
     raw = subprocess.run(
-        ["uv", "run", "--all-groups", "pip-licenses", "--format=json", "--with-urls"],
-        capture_output=True,
-        text=True,
-        check=True,
+        list(PIP_LICENSES_COMMAND), capture_output=True, text=True, check=True, cwd=REPO_ROOT
     ).stdout
     violations = find_violations(json.loads(raw), ALLOWLIST)
 
