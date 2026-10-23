@@ -586,7 +586,12 @@ A protected environment runs Python assets only on workers that run tasks in con
 (`LAKANA_RUN__RUNNER=docker`, the Compose bundle's default). A worker with the local runner fails
 such a task at once with "environment 'prod' is protected, and this worker runs Python tasks
 without isolation (LAKANA_RUN__RUNNER=local). …" (failure code `no_runtime`); give every worker that
-takes pipeline work the docker runner before you protect an environment with Python assets. Local
+takes pipeline work the docker runner before you protect an environment with Python assets.
+This is also the security condition, not only a matter of where tasks run: a task on the local
+runner, of any environment, runs as the worker's own user and can read the worker's environment,
+which holds the database URL (`LAKANA_DATABASE__URL`) and the master key
+(`LAKANA_SECRETS__MASTER_KEY`). With those it could write to a protected environment and read every
+secret directly, and protection would mean nothing. Local
 mode runs tasks without containers, so it cannot run the Python assets of a protected environment.
 Protection is read when a task's attempt is prepared: an attempt already under way on a local-runner
 worker runs to its end. SQL assets are not affected. See

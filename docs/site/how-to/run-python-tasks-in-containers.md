@@ -126,6 +126,11 @@ environment is protected is read when a task's attempt is prepared: an attempt t
 under way on a local-runner worker when you protected the environment runs to its end there.
 Give every worker that takes pipeline work the docker runner before you protect an environment
 with Python assets (see [Protected environments](projects.md#protected-environments-lockdown-and-break-glass)).
+This is also the security condition, not only a matter of where tasks run: a task on the local
+runner, of any environment, runs as the worker's own user and can read the worker's environment,
+which holds the database URL (`LAKANA_DATABASE__URL`) and the master key
+(`LAKANA_SECRETS__MASTER_KEY`). With those it could write to a protected environment and read every
+secret directly, and protection would mean nothing.
 
 ## Settings
 
