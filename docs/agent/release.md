@@ -316,8 +316,8 @@ bad release never advances past the point that would have caught it:
 - **`five-minute-release`** needs only `publish-sdk` (not the image jobs — it doesn't touch
   Docker) and runs `scripts/five_minute_test.sh` against **PyPI**, the same script CI's
   `five-minute` job runs against locally built wheels on every PR. PyPI's index can lag
-  the upload by minutes, so `scripts/wait_for_pypi.py` first polls PyPI's JSON API (every 15 s,
-  for at most 10 minutes) until all four packages show the version, and fails with the missing
+  the upload by minutes, so `scripts/wait_for_pypi.py` first polls PyPI's JSON API and the simple index pip reads (every 30 s,
+  for at most 15 minutes) until both show the version of all four packages, and fails with the missing
   names after that. Then, for the odd blip, it retries the whole script up to 5 times, 30s
   apart, on failure.
 

@@ -3,8 +3,9 @@
 The ``five-minute-release`` job of ``release.yml`` installs ``lakana[server]`` from PyPI right
 after the packages were published. PyPI's index can lag behind an upload by several minutes,
 longer than the install's own retries cover. This script polls PyPI's JSON API
-(``https://pypi.org/pypi/<name>/<version>/json``) every `POLL_SECONDS` until each package shows
-the version, for at most `TIMEOUT_SECONDS`. It uses only the standard library, so the job needs
+(``https://pypi.org/pypi/<name>/<version>/json``) and the simple index pip reads
+(``https://pypi.org/simple/<name>/``) every `POLL_SECONDS` until both show the version of each
+package, for at most `TIMEOUT_SECONDS`. It uses only the standard library, so the job needs
 no environment for it.
 
 Usage: ``python3 scripts/wait_for_pypi.py <version>``. Exit 0 when every package is visible, 1
@@ -13,19 +14,19 @@ after the timeout, 2 for a wrong call.
 
 from __future__ import annotations
 
+import re
 import sys
 import time
-import urllib.error
 import urllib.request
 from collections.abc import Callable, Sequence
 
 PACKAGES = ("lakana", "lakana-core", "lakana-server", "lakana-worker")
 """The four distributions a release publishes."""
 
-TIMEOUT_SECONDS = 600
+TIMEOUT_SECONDS = 900
 """How long to wait for all of them."""
 
-POLL_SECONDS = 15
+POLL_SECONDS = 30
 """The pause between two polls."""
 
 REQUEST_SECONDS = 20
@@ -54,8 +55,42 @@ def release_url(name: str, version: str) -> str:
     return f"https://pypi.org/pypi/{name}/{version}/json"
 
 
-def fetch_status(url: str) -> int:
-    """Read the HTTP status of a URL; a failure to connect counts as "not there yet".
+def simple_url(name: str) -> str:
+    """Build the simple index URL of one project, the page pip reads.
+
+    Parameters
+    ----------
+    name
+        The distribution name.
+
+    Returns
+    -------
+    str
+        The URL; its page lists the files of every release PyPI's index knows.
+    """
+    return f"https://pypi.org/simple/{name}/"
+
+
+def lists_version(page: str, version: str) -> bool:
+    """Tell whether a simple index page lists a file of the version.
+
+    Parameters
+    ----------
+    page
+        The HTML of the project's simple index page.
+    version
+        The release version.
+
+    Returns
+    -------
+    bool
+        True when a wheel or source distribution of exactly this version is listed.
+    """
+    return re.search(rf"[-_]{re.escape(version)}(?:-|\.tar\.gz|\.zip)", page) is not None
+
+
+def fetch_body(url: str) -> str | None:
+    """Read a page; a failure to connect counts as "not there yet".
 
     Parameters
     ----------
@@ -64,22 +99,43 @@ def fetch_status(url: str) -> int:
 
     Returns
     -------
-    int
-        The status, or 0 when no answer came.
+    str | None
+        The body of a 200 answer, else None.
     """
     try:
         with urllib.request.urlopen(url, timeout=REQUEST_SECONDS) as response:  # nosec B310 -- fixed https URL
-            return int(response.status)
-    except urllib.error.HTTPError as error:
-        return error.code
-    except OSError:
-        return 0
+            return str(response.read().decode("utf-8", "replace"))
+    except OSError:  # HTTPError is one; 404 means not yet
+        return None
+
+
+def is_visible(name: str, version: str, fetch: Callable[[str], str | None]) -> bool:
+    """Tell whether both the JSON API and the simple index show a release.
+
+    Parameters
+    ----------
+    name
+        The distribution name.
+    version
+        The release version.
+    fetch
+        Reads a page: the body, or None when it is not there.
+
+    Returns
+    -------
+    bool
+        True when both answer.
+    """
+    if fetch(release_url(name, version)) is None:
+        return False
+    page = fetch(simple_url(name))
+    return page is not None and lists_version(page, version)
 
 
 def wait_for_release(
     version: str,
     *,
-    fetch: Callable[[str], int] = fetch_status,
+    fetch: Callable[[str], str | None] = fetch_body,
     sleep: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
 ) -> None:
@@ -90,7 +146,7 @@ def wait_for_release(
     version
         The release version.
     fetch
-        Reads the status of a URL.
+        Reads a page: the body, or None when it is not there.
     sleep
         Pauses; replaced in tests.
     clock
@@ -103,7 +159,7 @@ def wait_for_release(
     """
     start = clock()
     while True:
-        missing = [n for n in PACKAGES if fetch(release_url(n, version)) != 200]
+        missing = [n for n in PACKAGES if not is_visible(n, version, fetch)]
         if not missing:
             return
         waited = clock() - start

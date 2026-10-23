@@ -316,7 +316,8 @@ jobs:
         run: echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
         env: {TAG: "${{ needs.release-please.outputs.tag }}"}
       - name: Wait until PyPI shows the release
-        # PyPI's index can lag an upload by several minutes; wait (at most 10) before the
+        # PyPI's index can lag an upload by several minutes; wait (at most 15, JSON API and
+        # the simple index pip reads) before the
         # first install instead of failing it. The install's own retries stay for blips.
         run: python3 scripts/wait_for_pypi.py "${{ steps.version.outputs.version }}"
       - name: Five-minute test against PyPI
