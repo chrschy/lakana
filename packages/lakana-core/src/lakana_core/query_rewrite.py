@@ -1749,8 +1749,106 @@ def _reader_select_sql(source: TableSource, index: int, dialect: str) -> str:
     # above. The URLs are still the variable's value, never text.
     sql = f"SELECT {', '.join(projections)} FROM {reader}"  # nosec B608
     if source.row_filters:
-        sql += " WHERE " + " AND ".join(f"({expression})" for expression in source.row_filters)
+        sql += " WHERE " + " AND ".join(
+            f"({_compiled_row_filter(expression, source.mask_types, dialect)})"
+            for expression in source.row_filters
+        )
     return sql
+
+
+_DATE_TYPES = frozenset({exp.DType.DATE, exp.DType.DATE32})
+"""The types a row filter's comparison treats as a date."""
+
+_TIMESTAMP_TYPES = frozenset(
+    {
+        exp.DType.DATETIME,
+        exp.DType.TIMESTAMP,
+        exp.DType.TIMESTAMPNTZ,
+        exp.DType.TIMESTAMP_S,
+        exp.DType.TIMESTAMP_MS,
+        exp.DType.TIMESTAMP_NS,
+        exp.DType.TIMESTAMPTZ,
+        exp.DType.TIMESTAMPLTZ,
+    }
+)
+"""The types a row filter's comparison treats as a timestamp."""
+
+_FILTER_COMPARISONS = (exp.EQ, exp.NEQ, exp.GT, exp.GTE, exp.LT, exp.LTE)
+"""The comparisons a row filter may contain (`policy.expressions`)."""
+
+
+def _operand_type(node: exp.Expr, types: Mapping[str, exp.DataType]) -> exp.DataType | None:
+    """Give the type of one side of a row filter's comparison, when it is a column or literal.
+
+    Parameters
+    ----------
+    node
+        The side, possibly in parentheses.
+    types
+        The table's column types (`TableSource.mask_types`), by column name.
+
+    Returns
+    -------
+    sqlglot.expressions.DataType or None
+        The column's type (its name compared without regard to case, as the database does), a
+        typed literal's type (`DATE '...'`, `TIMESTAMP '...'`), or `None` for anything else.
+    """
+    while isinstance(node, exp.Paren):
+        node = node.this
+    if isinstance(node, exp.Column) and not node.table:
+        by_lower = {name.lower(): target for name, target in types.items()}
+        return by_lower.get(node.name.lower())
+    if isinstance(node, exp.Cast) and isinstance(node.this, exp.Literal):
+        return node.to
+    return None
+
+
+def _compiled_row_filter(expression: str, types: Mapping[str, exp.DataType], dialect: str) -> str:
+    """Convert the date side of each comparison of a date with a timestamp with `TRY_CAST`.
+
+    DuckDB compares a date with a timestamp by converting the date, and that conversion fails
+    for a date outside the timestamp range (after 294247-01-10 or before 290309-12-22 BC), which
+    would fail every read the filter covers (#178). Written as `TRY_CAST`, such a date becomes
+    `NULL`, so the comparison is unknown and the row is hidden: a filter in the subset of
+    `policy.expressions` (comparisons, `AND`, `OR`, `NOT`, no `IS NULL`) is true only when it
+    would be true whatever the unknown comparison was, so the conversion never lets a row
+    through, and never fails. Against a constant, DuckDB 2.0's optimizer moves the conversion
+    onto the constant and compares dates, which is exact for every date; either way no row
+    passes a comparison that is false. A filter with no such comparison is returned as written.
+
+    Parameters
+    ----------
+    expression
+        One resolved, context-substituted row filter.
+    types
+        The table's column types (`TableSource.mask_types`), by column name.
+    dialect
+        The SQL dialect to parse and render it as.
+
+    Returns
+    -------
+    str
+        The filter, with `TRY_CAST(<date side> AS <timestamp type>)` where a date is compared
+        with a timestamp.
+    """
+    parsed = sqlglot.parse_one(expression, dialect=dialect)
+    changed = False
+    for comparison in list(parsed.find_all(*_FILTER_COMPARISONS)):
+        left, right = comparison.left, comparison.right
+        left_type, right_type = _operand_type(left, types), _operand_type(right, types)
+        if left_type is None or right_type is None:
+            continue
+        for side, side_type, other_type in (
+            (left, left_type, right_type),
+            (right, right_type, left_type),
+        ):
+            if side_type.this in _DATE_TYPES and other_type.this in _TIMESTAMP_TYPES:
+                inner = side
+                while isinstance(inner, exp.Paren):
+                    inner = inner.this
+                inner.replace(exp.TryCast(this=inner.copy(), to=other_type.copy()))
+                changed = True
+    return _render(parsed, dialect) if changed else expression
 
 
 def _masked_projection(mask: str, name: str, target: exp.DataType | None, dialect: str) -> str:

@@ -684,6 +684,84 @@ def test_rewrite_leaves_a_qualifier_alone_in_a_sibling_branch() -> None:
     assert "SELECT gold.orders.id FROM raw.other" in rewritten.sql
 
 
+_DATE = exp.DataType(this=exp.DType.DATE)
+_TIMESTAMP = exp.DataType(this=exp.DType.TIMESTAMP)
+
+
+@pytest.mark.parametrize(
+    ("row_filter", "compiled"),
+    [
+        (
+            "born < TIMESTAMP '2026-01-01 00:00:00'",
+            "TRY_CAST(born AS TIMESTAMP) < CAST('2026-01-01 00:00:00' AS TIMESTAMP)",
+        ),
+        (
+            "TIMESTAMP '2026-01-01 00:00:00' > Born",
+            "CAST('2026-01-01 00:00:00' AS TIMESTAMP) > TRY_CAST(Born AS TIMESTAMP)",
+        ),
+        ("born < seen", "TRY_CAST(born AS TIMESTAMP) < seen"),
+        ("NOT (seen = (born))", "NOT (seen = (TRY_CAST(born AS TIMESTAMP)))"),
+        ("seen > DATE '2026-01-01'", "seen > TRY_CAST(CAST('2026-01-01' AS DATE) AS TIMESTAMP)"),
+    ],
+)
+def test_rewrite_converts_the_date_side_of_a_date_timestamp_filter_with_try_cast(
+    row_filter: str, compiled: str
+) -> None:
+    """A date outside the timestamp range becomes NULL in the comparison, never an error (#178).
+
+    Parameters
+    ----------
+    row_filter
+        A stored filter comparing a date with a timestamp.
+    compiled
+        How the generated read writes it.
+    """
+    source = TableSource(
+        urls=["a.parquet"],
+        file_format="parquet",
+        columns={"born": "date", "seen": "timestamp"},
+        row_filters=(row_filter,),
+        mask_types={"born": _DATE, "seen": _TIMESTAMP},
+    )
+
+    rewritten = rewrite_query("SELECT * FROM gold.people", {"gold.people": source})
+
+    assert f"WHERE ({compiled})" in rewritten.sql
+
+
+@pytest.mark.parametrize(
+    "row_filter",
+    [
+        "born = DATE '2026-01-01'",
+        "seen > TIMESTAMP '2026-01-01 00:00:00'",
+        "born = born",
+        "name = 'born'",
+        "has_group('x')",
+    ],
+)
+def test_rewrite_leaves_a_filter_without_a_date_timestamp_comparison_as_written(
+    row_filter: str,
+) -> None:
+    """Only a date compared with a timestamp is converted; every other filter is kept verbatim.
+
+    Parameters
+    ----------
+    row_filter
+        A stored filter with no comparison of a date with a timestamp.
+    """
+    source = TableSource(
+        urls=["a.parquet"],
+        file_format="parquet",
+        columns={"born": "date", "seen": "timestamp", "name": "string"},
+        row_filters=(row_filter,),
+        mask_types={"born": _DATE, "seen": _TIMESTAMP},
+    )
+
+    rewritten = rewrite_query("SELECT * FROM gold.people", {"gold.people": source})
+
+    assert "TRY_CAST" not in rewritten.sql
+
+
 def test_rewrite_merges_its_ctes_ahead_of_the_querys_own() -> None:
     """A query's own CTE may read a rewritten table, so the generated CTE comes first."""
     rewritten = rewrite_query(

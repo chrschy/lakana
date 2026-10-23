@@ -107,7 +107,13 @@ type (struct, list, map, nanosecond timestamp, unknown) has no cast, and creatio
 closed, never guessed). The only conversion a policy may contain is a typed `DATE '...'` or
 `TIMESTAMP '...'` literal, which `validate_restricted_expression` accepts only for a string literal
 that is a real date or moment in the exact `YYYY-MM-DD[ HH:MM:SS[.ffffff]]` form; it is a constant, so it
-cannot fail on a stored value. Any other `CAST`, `TRY_CAST` or `::` stays outside the subset. A new
+cannot fail on a stored value. Any other `CAST`, `TRY_CAST` or `::` stays outside the subset.
+A comparison of a date with a timestamp is accepted, and the read compiles its date side to
+`TRY_CAST(<date> AS <timestamp type>)` (`query_rewrite._compiled_row_filter`, from the column
+types in `TableSource.mask_types`): a date outside the timestamp range becomes `NULL`, the
+comparison is unknown and the row hidden, never an error (#178). This is fail-closed only because
+the filter subset has no `IS NULL`, `IS DISTINCT FROM` or `COALESCE`: adding one of those to the
+subset must revisit it. A new
 node type added to the subset needs a rule in `_Checker.type_of`; one without a rule is refused
 (`its type could not be determined`). Existing policies are not re-checked; the read path is
 unchanged and still replaces the engine's text with a fixed message.

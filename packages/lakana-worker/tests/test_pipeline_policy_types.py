@@ -9,10 +9,12 @@ refused by name, and a float column promoted to double.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.ipc
+import pyarrow.parquet
 import pytest
 from pyiceberg.schema import Schema
 from pyiceberg.table import StaticTable
@@ -450,3 +452,82 @@ def test_a_float_equality_on_a_column_promoted_to_double(
     assert equal_or == [3]
     assert not_equal == [1, 2, 4]
     assert negated == [1, 2, 4]
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "born < seen",
+        "seen > born",
+        "born < TIMESTAMP '2026-01-01 00:00:00'",
+        "TIMESTAMP '2026-01-01 00:00:00' > born",
+    ],
+)
+def test_a_date_outside_the_timestamp_range_never_fails_a_filtered_read(
+    session: Session,
+    principal: PrincipalRef,
+    catalog: CatalogService,
+    tmp_path: Path,
+    expression: str,
+) -> None:
+    """A filter comparing a date with a timestamp reads rows with any date, both ways round (#178).
+
+    The years 300000 and 300000 BC and the ends of DuckDB's date range lie outside the timestamp
+    range. Before #178 the engine's conversion of such a date failed every read the filter
+    covered. The table is a raw-zone table: pyiceberg cannot write such a date (its statistics
+    go through Python's `date`); the Iceberg column types are covered in
+    `test_query_rewrite_execution.py`.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    principal
+        The acting principal.
+    catalog
+        The catalog.
+    tmp_path
+        The environment's storage root.
+    expression
+        The row filter.
+    """
+    days = [10_957, 21_915, 108_854_000, -108_854_000, 2_147_483_646, -2_147_483_646]
+    directory = tmp_path / "raw" / "people"
+    directory.mkdir(parents=True)
+    pyarrow.parquet.write_table(
+        pa.table(
+            {
+                "id": pa.array(range(1, len(days) + 1), pa.int64()),
+                "born": pa.array(days, pa.int32()).cast(pa.date32()),
+                "seen": pa.array([datetime(2026, 1, 1)] * len(days), pa.timestamp("us")),
+            }
+        ),
+        directory / "a.parquet",
+    )
+    catalog.create_namespace(principal, "dev", NamespacePath.from_parts(["raw"]))
+    catalog.create_external_table(
+        principal,
+        TableRef(environment="dev", namespace=NamespacePath.from_parts(["raw"]), name="people"),
+        location_pattern="raw/people/*.parquet",
+        format="parquet",
+    )
+    RowFilterService(session, AllowAllAuthorization(), catalog).create(
+        principal,
+        principal="admin",
+        environment="dev",
+        namespace="raw",
+        table="people",
+        expression=expression,
+    )
+
+    ids = sorted(
+        _result(tmp_path, _query(session, principal, "SELECT id FROM raw.people"))
+        .column("id")
+        .to_pylist()
+    )
+
+    # Row 1 (2000-01-01) passes; row 2 (2030-01-01) does not; the dates outside the range are
+    # hidden, or, against a constant, compared as the dates they are (rows 4 and 6 are earlier).
+    assert ids in ([1], [1, 4, 6])
+    if "TIMESTAMP" not in expression:
+        assert ids == [1]

@@ -185,6 +185,13 @@ A query that calls an operator as a function, such as `"<"(id, 'a')`, `main."="(
 itself (`id < 'a'`). On DuckDB 2.0 such a call could fail with an internal error. A view or an
 asset written this way needs the operator written as an operator.
 
+### A date outside the timestamp range no longer fails a filtered read
+
+A row filter that compares a date with a timestamp (`born < seen`) used to fail every read it
+covered when a row held a date outside the timestamp range (a year such as 300000). Such a row is
+now hidden by the filter instead, and the read succeeds. See
+[Filter rows](../how-to/filter-rows.md).
+
 ## Notes for 0.20.0
 
 ### Python tasks run in containers in the Compose bundle

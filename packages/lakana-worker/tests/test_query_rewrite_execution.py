@@ -1311,3 +1311,113 @@ def test_every_operator_duckdb_lists_as_a_function_is_refused_by_name() -> None:
     for name in sorted(names):
         with pytest.raises(ValidationError, match="write the operator itself"):
             check_blacklist(f'SELECT "{name}"(1, 2)')
+
+
+_DATE_MAX_DAYS = 2_147_483_646
+"""Days after 1970-01-01 of DuckDB's largest date (5881580-07-10), far outside a timestamp."""
+_DATE_MIN_DAYS = -2_147_483_646
+"""Days before 1970-01-01 of DuckDB's smallest date (5877642-06-25 BC)."""
+_YEAR_300000_DAYS = 108_854_000
+"""A day in the year 300000, just outside the timestamp range (which ends in 294247)."""
+
+
+def _born_and_seen(tmp_path: Path) -> str:
+    """Write rows whose `born` dates reach both ends of DuckDB's date range.
+
+    Parameters
+    ----------
+    tmp_path
+        Where the file goes.
+
+    Returns
+    -------
+    str
+        The file's path. Rows 1 and 2 have ordinary dates (2000-01-01 and 2030-01-01), rows 3 to 6
+        dates outside the timestamp range; every `seen` is 2026-01-01 00:00:00.
+    """
+    path = tmp_path / "born.parquet"
+    ordinary = [
+        (date(2000, 1, 1) - date(1970, 1, 1)).days,
+        (date(2030, 1, 1) - date(1970, 1, 1)).days,
+    ]
+    days = [*ordinary, _DATE_MAX_DAYS, _DATE_MIN_DAYS, _YEAR_300000_DAYS, -_YEAR_300000_DAYS]
+    pq.write_table(
+        pa.table(
+            {
+                "id": pa.array(range(1, len(days) + 1), pa.int64()),
+                "born": pa.array(days, pa.int32()).cast(pa.date32()),
+                "seen": pa.array([datetime(2026, 1, 1)] * len(days), pa.timestamp("us")),
+            }
+        ),
+        path,
+    )
+    return str(path)
+
+
+@pytest.mark.parametrize(
+    ("row_filter", "hidden", "exact"),
+    [
+        ("born < TIMESTAMP '2026-01-01 00:00:00'", [1], [1, 4, 6]),
+        ("TIMESTAMP '2026-01-01 00:00:00' > born", [1], [1, 4, 6]),
+        ("born > TIMESTAMP '2026-01-01 00:00:00'", [2], [2, 3, 5]),
+        ("TIMESTAMP '2026-01-01 00:00:00' <= born", [2], [2, 3, 5]),
+        ("born < seen", [1], [1]),
+        ("seen > born", [1], [1]),
+        ("born >= seen", [2], [2]),
+        ("seen <> born", [1, 2], [1, 2]),
+        ("NOT (born < seen)", [2], [2]),
+        ("NOT (born = TIMESTAMP '2000-01-01 00:00:00') AND seen = seen", [2], [2, 3, 4, 5, 6]),
+        ("(born < seen) = FALSE", [2], [2]),
+        ("born < seen OR id = 4", [1, 4], [1, 4]),
+        ("born = DATE '2000-01-01'", [1], [1]),
+    ],
+)
+@pytest.mark.parametrize("stored", ["iceberg", "parquet"])
+def test_a_row_filter_comparing_a_date_with_a_timestamp_never_fails_on_dates_outside_the_range(
+    tmp_path: Path, row_filter: str, hidden: list[int], exact: list[int], stored: str
+) -> None:
+    """A date outside the timestamp range never fails the read and never passes a false filter.
+
+    Before #178 the engine's conversion of such a date failed the whole read. The date side is
+    now converted with `TRY_CAST`: where the engine has to convert such a date, the comparison
+    is unknown and the row hidden (`hidden`; a row passes only when the filter holds whatever the
+    comparison was, `id = 4` in an `OR`). Against a constant, DuckDB 2.0 moves the conversion to
+    the constant and compares dates, which gives the true answer for every date (`exact`). Both
+    are correct; the ordinary rows are the same in either. Two columns are always compared as
+    timestamps, so there `exact` is `hidden`.
+
+    Parameters
+    ----------
+    tmp_path
+        Where the file goes.
+    row_filter
+        A filter comparing the date column with a timestamp, in either order.
+    hidden
+        The rows shown when every date outside the timestamp range makes its comparison unknown.
+    exact
+        The rows for which the filter is true, for a comparison with a constant.
+    stored
+        Whether the column types come from an Iceberg schema or a raw table's stored Arrow
+        types.
+    """
+    if stored == "iceberg":
+        columns = {"id": "long", "born": "date", "seen": "timestamp"}
+        mask_types = {
+            "id": iceberg_cast_type(LongType()),
+            "born": exp.DataType(this=exp.DType.DATE),
+            "seen": exp.DataType(this=exp.DType.TIMESTAMP),
+        }
+    else:
+        columns = {"id": "int64", "born": "date32[day]", "seen": "timestamp[us]"}
+        mask_types = {name: arrow_cast_type(arrow) for name, arrow in columns.items()}
+    source = TableSource(
+        urls=[_born_and_seen(tmp_path)],
+        file_format="parquet",
+        columns=columns,
+        row_filters=(row_filter,),
+        mask_types={name: target for name, target in mask_types.items() if target is not None},
+    )
+
+    rows = _run("SELECT id FROM gold.people", {"gold.people": source})
+
+    assert rows in ([(i,) for i in hidden], [(i,) for i in exact])
