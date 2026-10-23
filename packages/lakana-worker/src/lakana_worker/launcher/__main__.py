@@ -20,8 +20,9 @@ def main() -> None:
     ------
     SystemExit
         With status 2 and the reason in the log when a setting is wrong, the engine is too old,
-        `no-new-privileges` is required and breaks, an ingestion root fails its probe, the socket
-        directory is not as the image prepares it, or Docker cannot be reached.
+        `no-new-privileges` is required and breaks, the socket directory is not as the image
+        prepares it, or Docker cannot be reached. An ingestion root that fails its probe does
+        not stop the launcher: it is marked unusable and the reason is logged.
     """
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"

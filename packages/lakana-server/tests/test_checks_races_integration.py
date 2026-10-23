@@ -1986,10 +1986,13 @@ class _Scripted:
         What each attempt does.
     seen
         Every task it was given.
+    isolated
+        `False`: it stands in for the local runner (`Runner.isolated`).
     """
 
     steps: list[Step]
     seen: list[PythonTask] = field(default_factory=list)
+    isolated: bool = False
 
     def run(
         self, task: PythonTask, on_log: Callable[[bytes], None], stop: StopSignal

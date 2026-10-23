@@ -272,6 +272,18 @@ class RunOutcome:
 class Runner(Protocol):
     """Runs one Python task to completion: `LocalProcessRunner` or `DockerRunner`."""
 
+    @property
+    def isolated(self) -> bool:
+        """Whether each task runs in a container of its own, isolated from the worker.
+
+        Returns
+        -------
+        bool
+            `True` for a container runner; a protected environment runs Python tasks only on
+            one.
+        """
+        ...
+
     def run(
         self, task: PythonTask, on_log: Callable[[bytes], None], stop: StopSignal
     ) -> RunOutcome:
@@ -871,6 +883,17 @@ class LocalProcessRunner:
         self._poll_seconds = poll_seconds
         self._memory_limit = memory_limit
 
+    @property
+    def isolated(self) -> bool:
+        """Not isolated: the task is a process of the worker.
+
+        Returns
+        -------
+        bool
+            `False`.
+        """
+        return False
+
     def run(
         self, task: PythonTask, on_log: Callable[[bytes], None], stop: StopSignal
     ) -> RunOutcome:
@@ -1248,6 +1271,17 @@ class DockerRunner:
         with contextlib.suppress(LauncherUnavailable, LauncherRefused):
             return self._client.stop(ident)
         return False
+
+    @property
+    def isolated(self) -> bool:
+        """Isolated: each task runs in a container of its own.
+
+        Returns
+        -------
+        bool
+            `True`.
+        """
+        return True
 
     def run(
         self, task: PythonTask, on_log: Callable[[bytes], None], stop: StopSignal

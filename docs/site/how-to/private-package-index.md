@@ -6,8 +6,11 @@ for a password. An administrator registers the index once. The password is a sec
 environment. It never goes into the project's files, and Lakana does not hand it to a task's own
 process.
 
-Before you register an index: under the current runner a task runs as the worker's operating-system
-user, so everyone who may deploy Python code to the instance can read the index's credential (see
+Before you register an index: with the local runner (`LAKANA_RUN__RUNNER=local`, and local mode) a
+task runs as the worker's operating-system user, so everyone who may deploy Python code to the
+instance can read the index's credential. With the docker runner, the Compose bundle's default, a
+task's container holds no credential, and a build that uses one installs wheels only (see
+[Run Python tasks in containers](run-python-tasks-in-containers.md),
 [Isolation: one instance is one trust domain](../explanation/python-assets.md#isolation-one-instance-is-one-trust-domain)
 and the [threat model](https://github.com/lakana-labs/lakana/blob/main/docs/security/threat-model.md)). Register an index only with a credential
 you would give those people.
