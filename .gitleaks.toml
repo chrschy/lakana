@@ -9,6 +9,8 @@ useDefault = true
 description = "Fake fixture tokens in SDK/CLI tests, and code lines misread as keys"
 regexTarget = "line"
 regexes = [
+  # A truncated, unusable key fragment in a connection-validation test that checks a pasted key is refused.
+  '''MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg''',
   '''lakana_pat_abc123_x_y-z_secret''',
   '''lakana_pat_k9_newsecret''',
   '''url=base_url, token=token, default_environment=environment''',
