@@ -4184,6 +4184,16 @@ exit criterion is being re-run after the M3f fixes above — see
 - **An incremental append is refused while a row filter or column mask on its target applies to
   the caller**: the watermark comes from Iceberg manifest statistics over every row, including rows
   the caller can't see.
+- **A merge (`CatalogService.merge`, `POST …/tables/{name}/merge`) needs `READ_TABLE` as well as
+  `WRITE_TABLE`, and is refused while a row filter or column mask on its target applies to the
+  caller** (`check_can_merge`, run as the route's precheck and again by `merge`). A merge reads
+  the target's rows that the batch's keys match and compares them: `rows_updated` against
+  `rows_inserted`, the "key repeats in N rows of the table" refusal and a no-op that commits
+  nothing would each tell the caller about rows or values it may not see. A key of several
+  columns is capped at `COMPOSITE_KEY_MAX_ROWS` (5,000) rows per batch, checked before anything
+  is read: pyiceberg matches such a key with one filter term per row and its time grows with the
+  square of the batch, so an uncapped batch would hold a server thread and an append slot for
+  minutes.
 - **A zero-row batch never writes a file.** An empty result creates or replaces the table without
   an empty Parquet file, and an append of nothing leaves no orphan.
 - **Masked data is persisted masked.** A write's SELECT goes through the same rewriter as a query,

@@ -4971,8 +4971,11 @@ class CatalogService:
     ) -> None:
         """Cheaply verify a merge would be authorized, before any data is read.
 
-        The same rules as `check_can_replace`: `WRITE_TABLE` first, and `CREATE_TABLE` as well
-        when the merge would create a missing table (`expected_snapshot_id="none"`).
+        The rules of `check_can_replace` (`WRITE_TABLE` first, `CREATE_TABLE` as well when the
+        merge would create a missing table with `expected_snapshot_id="none"`), and `READ_TABLE`
+        right after `WRITE_TABLE`: a merge compares the batch with the table's rows, and its
+        counts and refusals tell what it found. For the same reason a merge is refused while a
+        row filter or column mask on the table applies to `p`, as `read_watermark` is.
 
         Parameters
         ----------
@@ -4986,22 +4989,34 @@ class CatalogService:
         Raises
         ------
         PermissionDenied
-            Without `WRITE_TABLE`, or without `CREATE_TABLE` when the merge would create the
-            table.
+            Without `WRITE_TABLE` or `READ_TABLE`, or without `CREATE_TABLE` when the merge
+            would create the table.
         NotFoundError
             If the table does not exist and no precondition was given.
         ConflictError
             If the table does not exist and a snapshot id was expected.
         ValidationError
-            If the table is not a managed table.
+            If the table is not a managed table, or a row filter or column mask on it applies
+            to `p`.
         """
-        self._check_can_write_or_create(
+        row = self._check_can_write_or_create(
             p,
             ref,
             expected_snapshot_id,
             artifact_operation="merging rows",
             unmanaged="Merges are only supported on managed (Iceberg) tables.",
+            read=True,
         )
+        if row is None:
+            return
+        policy = PolicyResolver(self._session).resolve(p, ref, table_id=row.id)
+        if policy.row_filters or policy.column_masks:
+            raise ValidationError(
+                f"Merges into {ref.dotted()} are refused while a row filter or column mask "
+                "applies to you on it: a merge compares your rows with rows you can't see. Ask "
+                "someone the table is not filtered or masked for to run it, or ask an owner to "
+                "lift the filter or mask for you."
+            )
 
     def _check_can_write_or_create(
         self,
@@ -5011,7 +5026,8 @@ class CatalogService:
         *,
         artifact_operation: str,
         unmanaged: str,
-    ) -> None:
+        read: bool = False,
+    ) -> Table | None:
         """Run the pre-check of a write that may create its target.
 
         Parameters
@@ -5026,6 +5042,13 @@ class CatalogService:
             What was attempted, for `artifact_refusal`.
         unmanaged
             The refusal for a table that is neither managed nor an artifact.
+        read
+            Authorize `READ_TABLE` too, right after `WRITE_TABLE`.
+
+        Returns
+        -------
+        Table or None
+            The table's row, or `None` when the write would create the table.
 
         Raises
         ------
@@ -5040,6 +5063,8 @@ class CatalogService:
         """
         securable = Securable.table_scope(ref.environment, ref.namespace, ref.name)
         self._authz.authorize(p, Action.WRITE_TABLE, securable)
+        if read:
+            self._authz.authorize(p, Action.READ_TABLE, securable)
         row = self._existing_table(ref)
         if row is None:
             if expected_snapshot_id is None:
@@ -5047,11 +5072,12 @@ class CatalogService:
             if expected_snapshot_id != "none":
                 raise ConflictError(target_changed_message(ref.dotted()))
             self._authz.authorize(p, Action.CREATE_TABLE, securable)
-            return
+            return None
         if row.table_type is TableType.ARTIFACT:
             raise ValidationError(artifact_refusal(ref.dotted(), artifact_operation))
         if row.table_type is not TableType.ICEBERG:
             raise ValidationError(unmanaged)
+        return row
 
     def append(
         self,
@@ -5398,14 +5424,16 @@ class CatalogService:
         Raises
         ------
         PermissionDenied
-            If `p` may not write the table or read a source, or lacks `CREATE_TABLE` where the
-            merge would create the table.
+            If `p` may not write or read the table or read a source, or lacks `CREATE_TABLE`
+            where the merge would create the table.
         NotFoundError
             If the table or a source does not exist.
         ValidationError
             For a key the batch or the table cannot merge on, a null or repeated key in the
-            batch, a key of the batch matching two rows of the table, data that does not fit
-            the table, or a table that is not managed.
+            batch, a key of several columns with more than `COMPOSITE_KEY_MAX_ROWS` rows, a key
+            of the batch matching two rows of the table, data that does not fit the table, a
+            table that is not managed, or a row filter or column mask on it that applies to
+            `p` (see `check_can_merge`).
         ConflictError
             If another writer committed first, or `expected_snapshot_id` no longer matches.
         """

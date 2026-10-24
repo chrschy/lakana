@@ -15,16 +15,27 @@ from pyiceberg.catalog.noop import NoopCatalog
 from pyiceberg.schema import Schema
 from pyiceberg.table import StaticTable
 from pyiceberg.table.metadata import TableMetadata
+from pyiceberg.table.update import AddSnapshotUpdate
 from pyiceberg.types import LongType, NestedField, StringType, TimestampType
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from lakana_core.auth import Action, PrincipalRef
-from lakana_core.catalog.merge import MergeResult, check_merge_batch
+from lakana_core.auth import Action, AllowAllAuthorization, PrincipalRef
+from lakana_core.catalog import merge as merge_module
+from lakana_core.catalog import service as service_module
+from lakana_core.catalog.merge import COMPOSITE_KEY_MAX_ROWS, MergeResult, check_merge_batch
 from lakana_core.catalog.service import CatalogService
-from lakana_core.errors import ConflictError, NotFoundError, PermissionDenied, ValidationError
+from lakana_core.errors import (
+    AlreadyExistsError,
+    ConflictError,
+    NotFoundError,
+    PermissionDenied,
+    ValidationError,
+)
 from lakana_core.identifiers import NamespacePath, TableRef
 from lakana_core.models import AuditEvent, AuditEventType, LineageEdge
+from lakana_core.policy.column_masks import ColumnMaskService
+from lakana_core.policy.row_filters import RowFilterService
 from lakana_core.runs.lockdown import PROTECTED_MESSAGE
 from lakana_core.storage.resolver import StorageResolver
 
@@ -605,7 +616,11 @@ def test_creating_by_merge_needs_create_table(cat: Cat) -> None:
             expected_snapshot_id="none",
         )
 
-    assert [action for action, _ in allow.seen] == [Action.WRITE_TABLE, Action.CREATE_TABLE]
+    assert [action for action, _ in allow.seen] == [
+        Action.WRITE_TABLE,
+        Action.READ_TABLE,
+        Action.CREATE_TABLE,
+    ]
 
 
 def test_a_missing_table_without_none_is_not_found(cat: Cat) -> None:
@@ -745,3 +760,313 @@ def test_merge_into_a_protected_environment_needs_break_glass(cat: Cat) -> None:
         glass, cat.ref("bronze.customers"), cat.arrow([(1, "z", T1)]), key=["id"]
     )
     assert result.rows_updated == 1
+
+
+def test_merge_needs_read_table(cat: Cat) -> None:
+    """A merge compares the batch with the table's rows, so it needs READ_TABLE as well."""
+    allow = ActionAllowList(Action.WRITE_TABLE)
+    limited = CatalogService(cat.session, StorageResolver(cat.session), allow)
+    cat.append("bronze.customers", [(1, "a", T0)])
+    location = cat.metadata_location("bronze.customers")
+
+    with pytest.raises(PermissionDenied):
+        limited.merge(cat.admin, cat.ref("bronze.customers"), cat.arrow([(1, "z", T1)]), key=["id"])
+
+    assert [action for action, _ in allow.seen] == [Action.WRITE_TABLE, Action.READ_TABLE]
+    assert cat.metadata_location("bronze.customers") == location
+
+
+def test_a_reader_and_writer_without_a_policy_may_merge(cat: Cat) -> None:
+    """WRITE_TABLE and READ_TABLE, no row filter or column mask: the merge commits."""
+    allow = ActionAllowList(Action.WRITE_TABLE, Action.READ_TABLE)
+    limited = CatalogService(cat.session, StorageResolver(cat.session), allow)
+    cat.append("bronze.customers", [(1, "a", T0)])
+
+    result = limited.merge(
+        cat.admin, cat.ref("bronze.customers"), cat.arrow([(1, "z", T1), (2, "b", T1)]), key=["id"]
+    )
+
+    assert (result.rows_inserted, result.rows_updated) == (1, 1)
+
+
+_HIDDEN = (
+    "Merges into bronze.customers are refused while a row filter or column mask applies to you "
+    "on it: a merge compares your rows with rows you can't see. Ask someone the table is not "
+    "filtered or masked for to run it, or ask an owner to lift the filter or mask for you."
+)
+
+
+def test_a_writer_with_a_row_filter_may_not_merge(cat: Cat) -> None:
+    """The counts and the refusals would tell rows the filter hides; nothing is written."""
+    cat.append("bronze.customers", [(1, "a", T0), (5, "e", T0)])
+    location = cat.metadata_location("bronze.customers")
+    RowFilterService(cat.session, AllowAllAuthorization(), cat.service).create(
+        cat.admin,
+        principal="admin",
+        environment="dev",
+        namespace="bronze",
+        table="customers",
+        expression="id < 3",
+    )
+
+    for call in (
+        lambda: cat.service.check_can_merge(cat.admin, cat.ref("bronze.customers")),
+        lambda: cat.service.merge(
+            cat.admin, cat.ref("bronze.customers"), cat.arrow([(5, "z", T1)]), key=["id"]
+        ),
+    ):
+        with pytest.raises(ValidationError) as info:
+            call()
+        assert str(info.value) == _HIDDEN
+    assert cat.metadata_location("bronze.customers") == location
+
+
+def test_a_writer_with_a_column_mask_may_not_merge(cat: Cat) -> None:
+    """A masked column would be compared with values the writer can't see."""
+    cat.append("bronze.customers", [(1, "a", T0)])
+    ColumnMaskService(cat.session, AllowAllAuthorization(), cat.service).create(
+        cat.admin,
+        principal="admin",
+        environment="dev",
+        namespace="bronze",
+        table="customers",
+        column="name",
+        expression="'***'",
+    )
+
+    with pytest.raises(ValidationError) as info:
+        cat.service.merge(
+            cat.admin, cat.ref("bronze.customers"), cat.arrow([(1, "a", T1)]), key=["id"]
+        )
+
+    assert str(info.value) == _HIDDEN
+
+
+def _many(count: int) -> list[Row]:
+    """Build `count` distinct rows.
+
+    Parameters
+    ----------
+    count
+        How many.
+
+    Returns
+    -------
+    list of tuple
+        Rows with ids from 0.
+    """
+    return [(i, "n", T0) for i in range(count)]
+
+
+def test_a_composite_key_takes_at_most_the_cap(cat: Cat) -> None:
+    """Exactly the cap merges on a key of two columns."""
+    result = cat.service.merge(
+        cat.admin,
+        cat.ref("bronze.customers"),
+        cat.arrow(_many(COMPOSITE_KEY_MAX_ROWS)),
+        key=["id", "name"],
+    )
+
+    assert result.rows_inserted == COMPOSITE_KEY_MAX_ROWS
+
+
+def test_a_composite_key_over_the_cap_is_refused_before_staging(cat: Cat) -> None:
+    """One row over the cap: refused with the cap, the batch size and the advice."""
+    location = cat.metadata_location("bronze.customers")
+
+    with (
+        mock.patch.object(service_module, "stage_upsert") as staged,
+        pytest.raises(ValidationError) as info,
+    ):
+        cat.service.merge(
+            cat.admin,
+            cat.ref("bronze.customers"),
+            cat.arrow(_many(COMPOSITE_KEY_MAX_ROWS + 1)),
+            key=["id", "name"],
+        )
+
+    assert str(info.value) == (
+        "A merge on a key of several columns takes at most 5,000 rows per batch, and this "
+        "batch has 5,001. Merge on one key column (a column that holds the whole key), or send "
+        "batches of at most 5,000 rows."
+    )
+    staged.assert_not_called()
+    assert cat.metadata_location("bronze.customers") == location
+
+
+def test_a_single_column_key_has_no_cap(cat: Cat) -> None:
+    """One key column: far over the composite cap is fine."""
+    result = cat.service.merge(
+        cat.admin,
+        cat.ref("bronze.customers"),
+        cat.arrow(_many(COMPOSITE_KEY_MAX_ROWS * 3)),
+        key=["id"],
+    )
+
+    assert result.rows_inserted == COMPOSITE_KEY_MAX_ROWS * 3
+
+
+def _named_files(cat: Cat) -> tuple[set[str], set[str]]:
+    """List the files the table's snapshots name.
+
+    Parameters
+    ----------
+    cat
+        The helpers.
+
+    Returns
+    -------
+    tuple of set
+        The manifest lists and manifests, and the data files.
+    """
+    metadata = cat.metadata("bronze.customers")
+    file_io = StorageResolver(cat.session).for_environment("dev").file_io
+    avro = {s.manifest_list for s in metadata.snapshots}
+    parquet: set[str] = set()
+    for snapshot in metadata.snapshots:
+        for manifest in snapshot.manifests(file_io):
+            avro.add(manifest.manifest_path)
+            for entry in manifest.fetch_manifest_entry(file_io, discard_deleted=False):
+                parquet.add(entry.data_file.file_path)
+    return avro, parquet
+
+
+def test_a_storage_error_while_folding_deletes_the_staged_files(cat: Cat) -> None:
+    """The fold fails after pyiceberg wrote its snapshots: none of their files is left."""
+    cat.append("bronze.customers", [(1, "a", T0), (2, "b", T0)])
+    real = merge_module._live_files
+    calls = {"n": 0}
+
+    def failing(metadata: TableMetadata, file_io: object) -> object:
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError("storage went away")
+        return real(metadata, file_io)  # ty: ignore[invalid-argument-type]
+
+    with (
+        mock.patch.object(merge_module, "_live_files", side_effect=failing),
+        pytest.raises(OSError, match="storage went away"),
+    ):
+        cat.service.merge(
+            cat.admin,
+            cat.ref("bronze.customers"),
+            cat.arrow([(2, "B", T1), (3, "c", T1)]),
+            key=["id"],
+        )
+
+    avro, parquet = _named_files(cat)
+    assert calls["n"] == 2
+    assert cat.files(".avro") == avro
+    assert cat.files(".parquet") == parquet
+
+
+def test_a_concurrent_writer_wins_and_the_merge_conflicts(cat: Cat) -> None:
+    """Another writer appends while the merge stages: a conflict, its rows intact, no orphan."""
+    cat.append("bronze.customers", [(1, "a", T0), (2, "b", T0)])
+    other = CatalogService(cat.session, StorageResolver(cat.session), AllowAllAuthorization())
+    real = service_module.stage_upsert
+
+    def racing(*args: object, **kwargs: object) -> object:
+        staged = real(*args, **kwargs)  # ty: ignore[invalid-argument-type]
+        other.append(cat.admin, cat.ref("bronze.customers"), cat.arrow([(9, "i", T0)]))
+        return staged
+
+    with (
+        mock.patch.object(service_module, "stage_upsert", side_effect=racing),
+        pytest.raises(ConflictError, match="changed during the write"),
+    ):
+        cat.service.merge(
+            cat.admin,
+            cat.ref("bronze.customers"),
+            cat.arrow([(2, "B", T1), (3, "c", T1)]),
+            key=["id"],
+        )
+
+    assert cat.rows("bronze.customers") == [(1, "a", T0), (2, "b", T0), (9, "i", T0)]
+    avro, parquet = _named_files(cat)
+    assert cat.files(".avro") == avro
+    assert cat.files(".parquet") == parquet
+
+
+def test_cleaning_up_a_failed_staging_never_raises(caplog: pytest.LogCaptureFixture) -> None:
+    """A snapshot that cannot be listed loses its manifest list; a failed delete is logged."""
+    snapshot = mock.Mock(manifest_list="file:///nowhere/snap-1.avro")
+    tx = mock.Mock(_updates=[mock.Mock(spec=[]), mock.Mock(spec=AddSnapshotUpdate)])
+    tx._updates[1].snapshot = snapshot
+    file_io = mock.Mock()
+    file_io.delete.side_effect = PermissionError("no")
+
+    with mock.patch.object(merge_module, "new_data_file_paths", side_effect=OSError("gone")):
+        merge_module._delete_staged(tx, file_io)
+
+    file_io.delete.assert_called_once_with("file:///nowhere/snap-1.avro")
+    assert "Could not list the files of a failed merge's staged snapshot: OSError" in caplog.text
+    assert "cleaning up a failed merge: PermissionError" in caplog.text
+    assert "nowhere" not in caplog.text
+
+
+def test_a_key_column_sent_twice_is_refused() -> None:
+    """Two columns of the same name in the rows: refused by name."""
+    data = pa.table([pa.array([1]), pa.array([2])], names=["id", "id"])
+
+    with pytest.raises(ValidationError) as info:
+        check_merge_batch(data, ["id"], table_columns=["id"], table_name="bronze.customers")
+
+    assert str(info.value) == "Column 'id' appears more than once in the data."
+
+
+def test_a_table_without_a_snapshot_has_no_live_files(cat: Cat) -> None:
+    """The fold's file listing of an empty table is empty."""
+    file_io = StorageResolver(cat.session).for_environment("dev").file_io
+
+    assert merge_module._live_files(cat.metadata("bronze.customers"), file_io) == {}
+
+
+def test_a_table_created_by_someone_else_meanwhile_is_a_conflict(cat: Cat) -> None:
+    """The first merge loses the create to another writer: a conflict, as for a replace."""
+    with (
+        mock.patch.object(cat.service, "write_batches", side_effect=AlreadyExistsError("taken")),
+        pytest.raises(ConflictError, match="changed during the write"),
+    ):
+        cat.service.merge(
+            cat.admin,
+            cat.ref("bronze.accounts"),
+            cat.arrow([(1, "a", T0)]),
+            key=["id"],
+            expected_snapshot_id="none",
+        )
+
+
+def test_a_refused_commit_is_raised_as_it_is_and_its_files_deleted(cat: Cat) -> None:
+    """A refusal other than a conflict reaches the caller unchanged; nothing is left."""
+    cat.append("bronze.customers", [(1, "a", T0), (2, "b", T0)])
+    parquet, avro = cat.files(".parquet"), cat.files(".avro")
+
+    with (
+        mock.patch.object(cat.service, "commit_table", side_effect=ValidationError("refused")),
+        pytest.raises(ValidationError, match=r"^refused$"),
+    ):
+        cat.service.merge(
+            cat.admin, cat.ref("bronze.customers"), cat.arrow([(2, "B", T1)]), key=["id"]
+        )
+
+    assert (cat.files(".parquet"), cat.files(".avro")) == (parquet, avro)
+
+
+def test_a_commit_that_landed_although_it_raised_is_reported_as_committed(cat: Cat) -> None:
+    """The answer to the commit was lost: the table shows the merge, so it is kept."""
+    cat.append("bronze.customers", [(1, "a", T0)])
+    real = cat.service.commit_table
+
+    def lost_answer(*args: object, **kwargs: object) -> object:
+        real(*args, **kwargs)  # ty: ignore[invalid-argument-type]
+        raise ConnectionError("the answer was lost")
+
+    with mock.patch.object(cat.service, "commit_table", side_effect=lost_answer):
+        result = cat.service.merge(
+            cat.admin, cat.ref("bronze.customers"), cat.arrow([(1, "z", T1)]), key=["id"]
+        )
+
+    assert result.rows_updated == 1
+    assert cat.metadata("bronze.customers").current_snapshot_id == result.snapshot_id
+    assert cat.rows("bronze.customers") == [(1, "z", T1)]

@@ -1947,13 +1947,16 @@ async def merge_table_data(
     required: one or more columns) matches a row of the table replaces it; any other row is
     inserted; nothing is deleted. One snapshot: readers see the table before or after, never a
     half. Takes the same `source`, `source_version` and `expected_snapshot_id` as the append,
-    and the same body limits. Needs `WRITE_TABLE` on the table, and `CREATE_TABLE` as well to
-    create a missing table with `expected_snapshot_id=none`. Answers 404 when the table or a
+    and the same body limits. Needs `WRITE_TABLE` and `READ_TABLE` on the table (a merge
+    compares the rows with the table's), and `CREATE_TABLE` as well to create a missing table
+    with `expected_snapshot_id=none`; it is refused (422) while a row filter or column mask on
+    the table applies to the caller. Answers 404 when the table or a
     source does not exist, 409 when `expected_snapshot_id` no longer matches, 413 for a body
     over the server's limit, 408 when the body arrives too slowly, 503 when the server is busy
     with other uploads (try again after `Retry-After`) and 422 for a key column the table or
     the rows do not have, a null key, a key that repeats in the rows or matches two rows of the
-    table (counts only, never values), or rows that do not fit the table.
+    table (counts only, never values), a key of several columns with more than 5,000 rows, or
+    rows that do not fit the table.
 
     Parameters
     ----------
@@ -1993,8 +1996,9 @@ async def merge_table_data(
     ------
     lakana_core.errors.ValidationError
         Mapped to 422: a key column the table or the rows do not have, a null key, a key that
-        repeats in the rows or matches two rows of the table, rows that do not fit the table,
-        or any body check.
+        repeats in the rows or matches two rows of the table, a key of several columns with
+        more than 5,000 rows, rows that do not fit the table, a row filter or column mask that
+        applies to the caller, or any body check.
     lakana_core.errors.NotFoundError
         Mapped to 404: the table or a declared source does not exist.
     lakana_core.errors.PermissionDenied

@@ -13,6 +13,7 @@ to. No row is deleted.
 from __future__ import annotations
 
 import functools
+import logging
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 
@@ -21,7 +22,7 @@ from pyiceberg.catalog.noop import NoopCatalog
 from pyiceberg.expressions import And, In
 from pyiceberg.io import FileIO
 from pyiceberg.manifest import DataFile
-from pyiceberg.table import DataScan, StaticTable
+from pyiceberg.table import DataScan, StaticTable, Transaction
 from pyiceberg.table.metadata import TableMetadata
 from pyiceberg.table.snapshots import Snapshot
 from pyiceberg.table.update import AddSnapshotUpdate, TableRequirement, TableUpdate
@@ -29,6 +30,15 @@ from pyiceberg.table.upsert_util import create_match_filter
 
 from lakana_core.catalog.append import new_data_file_paths, new_manifest_paths
 from lakana_core.errors import ValidationError
+
+logger = logging.getLogger(__name__)
+
+COMPOSITE_KEY_MAX_ROWS = 5_000
+"""Most rows a merge on a key of several columns takes per batch.
+
+pyiceberg's upsert matches such a key with one filter term per row, and its time grows with the
+square of the batch: 5,000 rows take about ten seconds, 20,000 more than five minutes.
+"""
 
 
 @dataclass(frozen=True)
@@ -150,8 +160,8 @@ def check_merge_batch(
     ------
     ValidationError
         For an empty key, a column named twice in it, a key column missing from the table or
-        the data, a key column of a nested type, a null key, or a key that repeats within the
-        batch.
+        the data, a key column of a nested type, a key of several columns with more than
+        `COMPOSITE_KEY_MAX_ROWS` rows, a null key, or a key that repeats within the batch.
     """
     if not key:
         raise ValidationError("A merge needs at least one key column.")
@@ -171,6 +181,13 @@ def check_merge_batch(
                 f"key column `{column}` has type {kind}; a key column must hold single values "
                 "(a number, a string, a date or a timestamp)"
             )
+    if len(key) > 1 and data.num_rows > COMPOSITE_KEY_MAX_ROWS:
+        raise ValidationError(
+            f"A merge on a key of several columns takes at most {COMPOSITE_KEY_MAX_ROWS:,} rows "
+            f"per batch, and this batch has {data.num_rows:,}. Merge on one key column (a column "
+            f"that holds the whole key), or send batches of at most {COMPOSITE_KEY_MAX_ROWS:,} "
+            "rows."
+        )
     for column in key:
         nulls = data.column(column).null_count
         if nulls:
@@ -352,6 +369,83 @@ def stage_upsert(
     """
     _check_target_keys(metadata, file_io, data, key, table_name)
     tx = _static(metadata, metadata_location, file_io).transaction()
+    try:
+        return _upsert_folded(tx, metadata, metadata_location, file_io, data, key)
+    except Exception:
+        _delete_staged(tx, file_io)
+        raise
+
+
+def _delete_staged(tx: Transaction, file_io: FileIO) -> None:
+    """Best-effort delete the files of the snapshots a failed staging left behind.
+
+    Called while the staging's own error is being raised, so nothing here may replace it: each
+    snapshot and each file is tried on its own, and a failure is logged by its class alone.
+
+    Parameters
+    ----------
+    tx
+        The transaction pyiceberg's upsert staged into.
+    file_io
+        The environment's `FileIO`.
+    """
+    paths: list[str] = []
+    for update in tx._updates:
+        if not isinstance(update, AddSnapshotUpdate):
+            continue
+        # Every snapshot is listed before any file is deleted: a later snapshot reads the
+        # manifests an earlier one wrote.
+        try:
+            paths.extend(new_data_file_paths(update.snapshot, file_io))
+            paths.extend(new_manifest_paths(update.snapshot, file_io))
+        # Deliberately broad: the caller is already raising the real error.
+        except Exception as exc:
+            logger.warning(
+                "Could not list the files of a failed merge's staged snapshot: %s",
+                type(exc).__name__,
+            )
+            paths.append(update.snapshot.manifest_list)
+    for path in dict.fromkeys(paths):
+        try:
+            file_io.delete(path)
+        # Deliberately broad, as above.
+        except Exception as exc:
+            logger.warning(
+                "Failed to delete a file while cleaning up a failed merge: %s",
+                type(exc).__name__,
+            )
+
+
+def _upsert_folded(
+    tx: Transaction,
+    metadata: TableMetadata,
+    metadata_location: str,
+    file_io: FileIO,
+    data: pa.Table,
+    key: Sequence[str],
+) -> StagedMerge:
+    """Run pyiceberg's upsert and fold what it staged into one snapshot.
+
+    Parameters
+    ----------
+    tx
+        A transaction on the target's `StaticTable`.
+    metadata
+        The target's current metadata.
+    metadata_location
+        Its location.
+    file_io
+        The environment's `FileIO`.
+    data
+        The checked rows.
+    key
+        The key columns.
+
+    Returns
+    -------
+    StagedMerge
+        As `stage_upsert`.
+    """
     result = tx.upsert(data, join_cols=list(key))
     counts = MergeCounts(rows_inserted=result.rows_inserted, rows_updated=result.rows_updated)
     staged: list[Snapshot] = [u.snapshot for u in tx._updates if isinstance(u, AddSnapshotUpdate)]

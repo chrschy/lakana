@@ -1151,7 +1151,9 @@ class Tables:
         A row whose `key` matches a row of the table replaces it; any other row is inserted;
         nothing is deleted. One snapshot: readers see the table before or after, never a half.
         The rows must not repeat a key and no key may be null; a key that matches two rows of
-        the table is refused too. Serialised, sent and retried exactly like `append`, and a
+        the table is refused too. Needs `WRITE_TABLE` and `READ_TABLE`, and is refused while a
+        row filter or column mask on the table applies to you. A key of several columns takes
+        at most 5,000 rows per call. Serialised, sent and retried exactly like `append`, and a
         timeout is just as ambiguous here (a merge sent twice is harmless: the second changes
         nothing).
 
@@ -1200,7 +1202,8 @@ class Tables:
             `expected_snapshot_id` no longer matches.
         lakana.errors.ValidationError
             If a key column is missing, a key is null or repeats (the message gives the count
-            of rows, never a value), or `data` does not match the table.
+            of rows, never a value), a key of several columns comes with more than 5,000 rows,
+            `data` does not match the table, or a row filter or column mask applies to you.
         """
         columns = [key] if isinstance(key, str) else list(key)
         if not columns:

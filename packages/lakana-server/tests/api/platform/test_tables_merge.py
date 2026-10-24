@@ -342,10 +342,56 @@ def test_without_write_table_it_is_403_before_the_body_is_read(client: TestClien
     assert any("WRITE_TABLE" in str(event.detail) for event in denied)
 
 
-def test_creating_by_merge_needs_create_table(client: TestClient) -> None:
-    """`WRITE_TABLE` alone merges into a table but does not create one."""
+def test_a_merge_needs_read_table_too(client: TestClient) -> None:
+    """A merge compares the rows with the table's: `WRITE_TABLE` alone is refused."""
     _setup(client)
     writer = _restricted(client, "writer", ["WRITE_TABLE"])
+    before = _current_snapshot(client)
+
+    response = client.post(
+        f"{_TABLES}/customers/merge",
+        headers=writer,
+        params={"key": "id"},
+        content=b"not an arrow stream",
+    )
+
+    assert response.status_code == 403, response.text
+    assert "READ_TABLE" in response.text
+    assert _current_snapshot(client) == before
+
+
+def test_a_filtered_writer_is_refused_with_the_reason(client: TestClient) -> None:
+    """A row filter on the table for the caller: 422 naming the cause, before the body."""
+    _setup(client)
+    writer = _restricted(client, "writer", ["WRITE_TABLE", "READ_TABLE"])
+    created = client.post(
+        "/api/v1/row-filters",
+        headers=AUTH_HEADER,
+        json={
+            "principal": "writer",
+            "environment": "dev",
+            "namespace": "gold",
+            "table": "customers",
+            "expression": "id < 2",
+        },
+    )
+    assert created.status_code < 300, created.text
+
+    response = client.post(
+        f"{_TABLES}/customers/merge",
+        headers=writer,
+        params={"key": "id"},
+        content=b"not an arrow stream",
+    )
+
+    assert response.status_code == 422, response.text
+    assert "row filter or column mask applies to you" in response.json()["detail"]
+
+
+def test_creating_by_merge_needs_create_table(client: TestClient) -> None:
+    """`WRITE_TABLE` and `READ_TABLE` merge into a table but do not create one."""
+    _setup(client)
+    writer = _restricted(client, "writer", ["WRITE_TABLE", "READ_TABLE"])
     url = f"{_TABLES}/accounts/merge"
     params = {"key": "id", "expected_snapshot_id": "none"}
 

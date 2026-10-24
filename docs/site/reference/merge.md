@@ -84,8 +84,14 @@ same limits as an append: `LAKANA_APPEND__MAX_BYTES` (256 MiB by default),
 
 ## Who may merge
 
-`WRITE_TABLE` on the table. Creating a missing table with `expected_snapshot_id="none"` needs
-`CREATE_TABLE` as well. A task may merge into its own asset, as it may append to it.
+`WRITE_TABLE` and `READ_TABLE` on the table: a merge compares your rows with the table's, and
+its counts and refusals tell you what it found, so it needs the right to read them. Creating a
+missing table with `expected_snapshot_id="none"` needs `CREATE_TABLE` as well. A task may merge
+into its own asset, as it may append to it.
+
+A merge is refused while a row filter or column mask on the table applies to you, for the same
+reason: it would compare your rows with rows or values you can't see. Someone the table is not
+filtered or masked for can run it, or an owner can lift the filter or mask for you.
 
 ## Errors
 
@@ -97,10 +103,12 @@ same limits as an append: `LAKANA_APPEND__MAX_BYTES` (256 MiB by default),
 | `422` | a key that repeats in the rows | ``key `id` repeats in 12 rows of this batch; make it unique (for example with `unique(subset=['id'], keep='last')`)`` |
 | `422` | a key of the rows that matches two or more rows of the table | ``key `id` repeats in 2 rows of bronze.customers that this batch matches; a merge needs one row per key. Find them with `SELECT id, count(*) FROM bronze.customers GROUP BY id HAVING count(*) > 1` and remove the repeats (for example by replacing the table) before you merge.`` |
 | `422` | a key column holding lists or structs | the column and its type |
+| `422` | a key of several columns with more than 5,000 rows | ``A merge on a key of several columns takes at most 5,000 rows per batch, and this batch has 12,000. Merge on one key column (a column that holds the whole key), or send batches of at most 5,000 rows.`` |
+| `422` | a row filter or column mask on the table applies to you | ``Merges into bronze.customers are refused while a row filter or column mask applies to you on it: a merge compares your rows with rows you can't see. Ask someone the table is not filtered or masked for to run it, or ask an owner to lift the filter or mask for you.`` |
 | `422` | rows that do not fit the table | the column that differs, as for an append |
 | `422` | no `key` parameter | the parameter that is missing |
 | `404` | the table does not exist and `expected_snapshot_id` is not `none`, or a source does not exist | the name |
-| `403` | no `WRITE_TABLE`, or no `CREATE_TABLE` where the merge would create the table | the permission |
+| `403` | no `WRITE_TABLE` or `READ_TABLE`, or no `CREATE_TABLE` where the merge would create the table | the permission |
 | `409` | `expected_snapshot_id` no longer matches, or another writer committed first | ``bronze.customers changed during the write; retry.`` |
 | `413`, `408`, `503` | the body is over the limit, arrives too slowly, or the server is busy with other uploads | as for an append |
 
@@ -128,6 +136,7 @@ The first merge, which creates the table, records the event of a create (`detail
 - The server reads the rows of the table whose key the batch has, and holds them in memory while
   it compares them. On one key column, a merge of 100,000 rows into a table of 1,000,000 took
   about 4 seconds and raised the server's memory by about 300 MiB.
-- A key of several columns is much slower: the time grows with the square of the batch's rows.
-  5,000 rows took about 12 seconds. Send batches of a few thousand rows, or give the table one
-  column that holds the whole key.
+- A key of several columns takes at most 5,000 rows per batch; a larger batch is refused before
+  anything is read or written. Such a key is much slower: the time grows with the square of the
+  batch's rows, and 5,000 rows took about 12 seconds. A key of one column has no such limit, so
+  give the table one column that holds the whole key, or send batches of at most 5,000 rows.
