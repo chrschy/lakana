@@ -112,7 +112,7 @@ class AssetSpec:
         ``Float64`` (values beyond 2**53, or with more than about 15 significant digits, are
         rounded). ``exact``: it arrives as ``Decimal``, as stored.
     connections
-        Names of connections of the environment the asset reads through `lakana.ingest`.
+        Names of connections of the environment the asset reads from; checked at deploy.
     """
 
     inputs: dict[str, str]
@@ -265,9 +265,9 @@ def asset(
         beyond 2**53 or with more digits arrives rounded, without an error: use ``exact`` for a
         decimal identifier or a wide sum. What the function returns is stored as it is.
     connections
-        Names of connections of the environment the asset reads through `lakana.ingest`;
-        each must exist when you deploy. At most 16, each lower-case letters, digits and
-        ``-``, starting with a letter.
+        Names of connections of the environment the asset reads from; each must exist when
+        you deploy. Reading them from inside the task arrives in a later release. At most
+        16, each lower-case letters, digits and ``-``, starting with a letter.
 
     Returns
     -------

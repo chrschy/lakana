@@ -36,10 +36,10 @@ limits lie is in [Python assets: what they are for and how far they are trusted]
   double, a decimal column as a decimal. Older Lakana releases always
   handed a Python asset `decimal.Decimal` values; an asset written for them that relies on
   that needs `decimals="exact"` after an upgrade.
-- **Connections.** `connections` names the connections of the environment this asset reads with
-  `lakana.ingest`, for example `@asset(connections=["crm-db"])`. At most 16, each made of
-  lower-case letters, digits and `-`, starting with a letter, and none listed twice. Each must
-  exist in the environment you deploy to, or the deploy fails naming the
+- **Connections.** `connections` names the connections of the environment this asset reads from,
+  for example `@asset(connections=["crm-db"])`; reading them from inside the task arrives in a
+  later release. At most 16, each made of lower-case letters, digits and `-`, starting with a
+  letter, and none listed twice. Each must exist in the environment you deploy to, or the deploy fails naming the
   `lakana connection create` command that creates it. A rollback to a version whose connection
   was deleted since fails the same way. While a deployed version declares a connection, the
   connection cannot be deleted. An asset without `connections` deploys as before. A project
