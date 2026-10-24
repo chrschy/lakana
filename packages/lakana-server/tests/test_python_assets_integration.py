@@ -2340,6 +2340,7 @@ def test_a_second_attempts_failed_check_sets_the_table_back_to_before_the_first_
             f"{a.attempt} {a.outcome} {a.failure_code}: {a.error_message}"
             for a in _attempts(stack, run.id, "silver.wide")
         )
+        + f". Log:\n{stack.admin.runs.log(env, run.id, 'silver.wide').text}"
     )
     # Attempt 1 really committed: while its reply was held the table was at a new snapshot,
     # and that snapshot was the tip of the task run's own writes.
