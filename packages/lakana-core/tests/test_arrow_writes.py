@@ -571,3 +571,40 @@ def test_a_client_supplied_source_named_like_a_connection_is_a_table_lookup(
 
     assert _current_snapshot(catalog, principal, "gold.t") == before
     assert session.scalars(select(LineageEdge)).first() is None
+
+
+def test_a_connection_of_another_environment_is_never_a_source(
+    session: Session,
+    principal: PrincipalRef,
+    catalog: CatalogService,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A dev task declaring `crm-db` gets no edge from prod's `crm-db`; the name is skipped."""
+    prod_root = tmp_path / "prod"
+    prod_root.mkdir()
+    catalog.create_environment(
+        principal,
+        name="prod",
+        storage=StorageConfig(scheme="file", root=f"file://{prod_root}", options={}),
+    )
+    prod = session.scalars(select(Environment).where(Environment.name == "prod")).one()
+    session.add(
+        Connection(
+            id=uuid.uuid4(),
+            environment_id=prod.id,
+            name="crm-db",
+            kind=ConnectionKind.POSTGRESQL,
+            address={"host": "db.example.com", "port": 5432, "database": "crm"},
+            settings={"user": "reader", "tls": "verify-full"},
+            created_by=principal.id,
+        )
+    )
+    session.commit()
+
+    with caplog.at_level(logging.INFO, logger="lakana_core.catalog.connection_lineage"):
+        catalog.append(_task(principal, "crm-db"), _ref("gold.t"), _ids([2]))
+
+    assert _connection_edges(session) == []
+    skipped = [r for r in caplog.records if "'crm-db'" in r.getMessage()]
+    assert [r.levelno for r in skipped] == [logging.INFO]
