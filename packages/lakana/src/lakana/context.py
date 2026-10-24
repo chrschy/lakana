@@ -15,7 +15,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING
-from urllib.parse import quote
+from urllib.parse import quote, quote_plus
 
 if TYPE_CHECKING:
     from lakana.client import Client
@@ -145,7 +145,10 @@ def current() -> _TaskState:
 
 
 def secret_forms(value: str) -> set[str]:
-    """List the forms of a credential that text can carry it in.
+    """List the forms text can carry a credential in.
+
+    The same list as `lakana_core.secrets.forms.secret_forms`, which the worker hides in the log
+    it captures (the SDK cannot import that package; a test compares the two).
 
     Parameters
     ----------
@@ -155,12 +158,25 @@ def secret_forms(value: str) -> set[str]:
     Returns
     -------
     set of str
-        The value itself, and as it appears inside a Python `repr`, a JSON string and a URL
-        (percent-encoded), each when it differs; forms shorter than `MIN_SECRET_CHARS` are
-        left out.
+        The value itself; inside a Python `repr`, a JSON string (with and without
+        ``ensure_ascii``), a URL (`quote` keeping ``/`` and keeping nothing, `quote_plus`) and
+        the `repr` of its UTF-8 bytes; forms shorter than `MIN_SECRET_CHARS` are left out.
     """
-    forms = {value, repr(value)[1:-1], json.dumps(value)[1:-1], quote(value, safe="")}
-    return {form for form in forms if len(form) >= MIN_SECRET_CHARS}
+    # The copy of `lakana_core.secrets.forms.secret_forms`: the SDK cannot import lakana_core,
+    # and `lakana-worker/tests/test_secret_forms_parity.py` keeps the two the same.
+    # jscpd:ignore-start
+    found = {
+        value,
+        repr(value)[1:-1],
+        json.dumps(value)[1:-1],
+        json.dumps(value, ensure_ascii=False)[1:-1],
+        quote(value),
+        quote(value, safe=""),
+        quote_plus(value),
+        repr(value.encode())[2:-1],
+    }
+    return {form for form in found if len(form) >= MIN_SECRET_CHARS}
+    # jscpd:ignore-end
 
 
 def register_secret(value: str) -> None:

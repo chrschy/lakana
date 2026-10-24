@@ -46,8 +46,12 @@ a connection its asset declares ([How a task gets its credential](../reference/c
 The server answers only the token of a task that is running now, in its own environment, for a name
 its deployed asset declares; it answers an undeclared name the same way whether or not a
 connection of that name exists. The task keeps the credential in memory for the attempt, never in
-an environment variable or a file, and the values are shown as `***` in the task's log, its
-failure message and its trace. Every fetch and every refusal is in the audit log. The code you
+an environment variable or a file, and each value is shown as `***` in the task's log, its
+failure message and its trace, also in its common encodings (a `repr`, JSON, a URL); a value
+shorter than 4 characters, another transformation of it, or a value derived from it (such as an
+OAuth2 access token) is not hidden unless a Lakana helper registers it. A worker that cannot
+decrypt the secret does not start the task. Every fetch is in the audit log; refusals are recorded
+at a limited rate per principal and the rest counted. The code you
 deploy can read the credentials of the connections its asset declares and send them anywhere the
 task can reach, so review an asset's `connections` with its code.
 

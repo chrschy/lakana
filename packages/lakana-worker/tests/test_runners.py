@@ -26,6 +26,7 @@ import pytest
 import lakana_worker.runners as runners_module
 from lakana.runner import TaskDescription, parse_description
 from lakana_core.runs.failures import FailureCode
+from lakana_core.secrets.forms import secret_forms
 from lakana_worker.processes import remove_private_tree
 from lakana_worker.runners import (
     MAX_ERROR_MESSAGE_CHARS,
@@ -1045,6 +1046,34 @@ def test_a_declared_connections_secret_is_hidden_even_split_across_two_writes(
     assert "s3cr3t" not in harness.output()
     assert harness.output().startswith("password ***\n")
     assert outcome.error_message == "login ***"
+
+
+_TRICKY_PASSWORD = "Tr0ub\\4dor\"&'x\x01é"
+
+
+def test_every_form_of_a_declared_connections_secret_is_hidden(harness: Harness) -> None:
+    """repr, JSON (both), URL quoting, bytes, a dict, a log record: none reaches the log."""
+    harness.fields["hidden"] = tuple(secret_forms(_TRICKY_PASSWORD))
+    outcome = harness.run(
+        "import json, logging\n"
+        "from urllib.parse import quote, quote_plus\n"
+        f"pw = {_TRICKY_PASSWORD!r}\n"
+        "print('raw', pw)\n"
+        "print('repr', repr(pw))\n"
+        "print('dict', {'password': pw})\n"
+        "print('json', json.dumps({'password': pw}))\n"
+        "print('json8', json.dumps({'password': pw}, ensure_ascii=False))\n"
+        "print('quote', quote(pw), quote(pw, safe=''), quote_plus(pw))\n"
+        "print('bytes', pw.encode())\n"
+        "sys.stdout.flush()\n"
+        "logging.warning('%r', pw)\n"
+        "write({'status': 'succeeded', 'snapshot_id': 1, 'rows': 1})\n"
+    )
+    assert outcome.succeeded
+    out = harness.output()
+    for form in secret_forms(_TRICKY_PASSWORD) | {"Tr0ub", "4dor"}:
+        assert form not in out, form
+    assert out.count("***") == 10
 
 
 def test_the_token_is_only_on_stdin(harness: Harness) -> None:

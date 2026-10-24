@@ -70,6 +70,7 @@ from lakana_core.models import (
     JobVersion,
     Principal,
     Run,
+    Secret,
     Table,
     TableType,
     WriteMode,
@@ -107,6 +108,7 @@ from lakana_core.runs.tasks import (
     Written,
     record_baseline,
 )
+from lakana_core.secrets.forms import secret_forms
 from lakana_core.secrets.keys import KeyProvider
 from lakana_core.storage.resolver import StorageResolver
 from lakana_worker.attempt_sweep import AttemptSweeper
@@ -606,40 +608,48 @@ class _Prepared:
     connections: dict[str, dict[str, object]] = field(default_factory=dict)
 
 
+_CANNOT_HIDE = (
+    "this worker cannot decrypt the secret of connection `{name}`, so it could not hide the "
+    "value in the task's log, which the server would hand the task; set "
+    "LAKANA_SECRETS__MASTER_KEY on the worker to the server's value and restart it"
+)
+
+
 def _connection_secrets(
     session: Session, key_provider: KeyProvider | None, prepared: _Prepared
 ) -> tuple[str, ...]:
     """Decrypt the secrets of the connections the asset declares, to hide them in its output.
 
     The task fetches these values itself at run time (`lakana_core.connections.fetch`); the
-    worker only needs them to mask them in the log it captures and in the failure message.
-    Each secret is decrypted through `lakana_core.connections.fetch.connection_secret`, so only
-    a secret bound to that very connection is. A refusal or an unreadable secret does not fail
-    the attempt (the task's own fetch reports it); it is logged with the connection's name only.
-    This decryption is not audited: no value leaves the worker.
+    worker only needs them to mask them, in every form text can carry them in
+    (`lakana_core.secrets.forms.secret_forms`), in the log it captures and in the failure
+    message. Each secret is decrypted through `lakana_core.connections.fetch.connection_secret`,
+    so only a secret bound to that very connection is, and one that is not counts as none on
+    both sides. A worker that cannot decrypt an active secret (no master key, or another one
+    than the server's) refuses to start the task: the server would hand the task a value this
+    worker could not hide. This decryption is not audited: no value leaves the worker.
 
     Parameters
     ----------
     session
         The supervisor's session; rolled back afterwards.
     key_provider
-        The worker's key provider; `None` without a master key, which decrypts nothing.
+        The worker's key provider; `None` without a master key.
     prepared
         The attempt's plan, with the declared connections.
 
     Returns
     -------
     tuple of str
-        Every value of at least four characters, in declared order.
+        Every form of every value, in declared order.
+
+    Raises
+    ------
+    TaskFailure
+        Permanent (`NO_RUNTIME`), naming the connection and the setting, when an active secret
+        bound to a declared connection cannot be decrypted here.
     """
     if not prepared.connections:
-        return ()
-    if key_provider is None:
-        logger.warning(
-            "no secrets master key is configured, so the secrets of connections %s are not "
-            "hidden from the task's log",
-            ", ".join(prepared.connections),
-        )
         return ()
     rows = {
         row.name: row
@@ -658,14 +668,26 @@ def _connection_secrets(
         row = rows.get(name)
         if row is None:
             continue
+        if key_provider is None:
+            secret = None if row.secret_id is None else session.get(Secret, row.secret_id)
+            if secret is not None and secret.revoked_at is None:
+                raise TaskFailure(
+                    FailureKind.PERMANENT, _CANNOT_HIDE.format(name=name), FailureCode.NO_RUNTIME
+                )
+            continue
         values, why = connection_secret(session, key_provider, row, prepared.environment)
+        if why == "secret_unreadable":
+            raise TaskFailure(
+                FailureKind.PERMANENT, _CANNOT_HIDE.format(name=name), FailureCode.NO_RUNTIME
+            )
         if why is not None:
             logger.warning(
-                "the secret of connection %s could not be read to hide it from the task's log (%s)",
+                "the secret of connection %s is not bound to it, so the task gets none (%s)",
                 name,
                 why,
             )
-        hidden += [value for value in (values or {}).values() if len(value) >= 4]
+        for value in (values or {}).values():
+            hidden += sorted(secret_forms(value))
     session.rollback()
     return tuple(dict.fromkeys(hidden))
 

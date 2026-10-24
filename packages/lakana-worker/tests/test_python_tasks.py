@@ -149,6 +149,7 @@ from lakana_core.runs.tasks import (
     read_own_tip,
     record_attempt,
 )
+from lakana_core.secrets.forms import secret_forms
 from lakana_core.secrets.keys import EnvKeyProvider
 from lakana_core.secrets.service import SecretService
 from lakana_core.secrets.uses import SecretUse
@@ -7842,7 +7843,9 @@ def test_a_declared_connection_that_is_gone_fails_naming_it(py: PyWorld) -> None
 _CONNECTION_PASSWORD = "crm-db-pa55word"
 
 
-def _connection_with_secret(py: PyWorld, name: str = "crm-db") -> None:
+def _connection_with_secret(
+    py: PyWorld, name: str = "crm-db", password: str = _CONNECTION_PASSWORD
+) -> None:
     """Add a `tcp` connection to `dev` with its own secret, under the engine's test key.
 
     Parameters
@@ -7851,6 +7854,8 @@ def _connection_with_secret(py: PyWorld, name: str = "crm-db") -> None:
         The world.
     name
         Its name.
+    password
+        Its secret's `password`.
     """
     with py.world.session() as session:
         owner = session.get(Principal, py.world.admin.id)
@@ -7862,7 +7867,7 @@ def _connection_with_secret(py: PyWorld, name: str = "crm-db") -> None:
             kind=ConnectionKind.TCP,
             address={"host": "db.example.com", "port": 5432},
             settings={},
-            secret_values={"user": "abc", "password": _CONNECTION_PASSWORD},
+            secret_values={"user": "abc", "password": password},
         )
 
 
@@ -7899,15 +7904,70 @@ def test_a_secret_bound_elsewhere_is_not_decrypted_and_the_attempt_still_runs(
     assert _CONNECTION_PASSWORD not in caplog.text
 
 
-def test_without_a_master_key_nothing_is_decrypted_and_the_attempt_still_runs(
-    py: PyWorld, caplog: pytest.LogCaptureFixture
+def test_every_form_of_a_tricky_secret_is_hidden(py: PyWorld) -> None:
+    password = "Tr0ub\\4dor\"&'x\x01é"
+    _connection_with_secret(py, password=password)
+    py.deploy(connections=["crm-db"])
+    engine = _with_key(py.engine(_writer(py.world)))
+    run_claimed(engine, py.claim_python(engine))
+    assert set(py.runner.tasks[0].hidden) == secret_forms(password)
+
+
+def test_without_a_master_key_a_task_whose_connection_has_a_secret_never_starts(
+    py: PyWorld,
 ) -> None:
+    """The server would hand the task a value this worker could not hide in its log."""
     _connection_with_secret(py)
     py.deploy(connections=["crm-db"])
     engine = py.engine(_writer(py.world))
     engine.key_provider = None
-    with caplog.at_level(logging.WARNING):
-        run_claimed(engine, py.claim_python(engine))
+    task, message = _fails(py, engine)
+    assert (task.status, task.attempt, task.failure_code) == (TaskStatus.FAILED, 1, "no_runtime")
+    assert message == _CANNOT_HIDE.format(name="crm-db")
+    assert py.runner.tasks == []
+    assert _tokens_minted(py) == 0
+
+
+def test_a_worker_whose_key_cannot_read_the_secret_never_starts_the_task(py: PyWorld) -> None:
+    _connection_with_secret(py)
+    py.deploy(connections=["crm-db"])
+    engine = py.engine(_writer(py.world))
+    engine.key_provider = EnvKeyProvider(base64.b64encode(b"9" * 32).decode())
+    task, message = _fails(py, engine)
+    assert (task.status, task.failure_code) == (TaskStatus.FAILED, "no_runtime")
+    assert message == _CANNOT_HIDE.format(name="crm-db")
+    assert py.runner.tasks == []
+
+
+def test_without_a_master_key_a_connection_without_a_secret_still_runs(py: PyWorld) -> None:
+    _connection(py)
+    py.deploy(connections=["crm-db"])
+    engine = py.engine(_writer(py.world))
+    engine.key_provider = None
+    run_claimed(engine, py.claim_python(engine))
     assert py.runner.tasks[0].hidden == ()
     assert _task(py.world, "gold.scores").status is TaskStatus.SUCCEEDED
-    assert "master key" in caplog.text
+
+
+_CANNOT_HIDE = (
+    "this worker cannot decrypt the secret of connection `{name}`, so it could not hide the "
+    "value in the task's log, which the server would hand the task; set "
+    "LAKANA_SECRETS__MASTER_KEY on the worker to the server's value and restart it"
+)
+
+
+def _tokens_minted(py: PyWorld) -> int:
+    """Count the task tokens minted so far.
+
+    Parameters
+    ----------
+    py
+        The world.
+
+    Returns
+    -------
+    int
+        How many there are.
+    """
+    with py.world.session() as session:
+        return len(session.execute(select(TaskToken.id)).all())

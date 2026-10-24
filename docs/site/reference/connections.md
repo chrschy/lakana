@@ -292,16 +292,30 @@ def customers() -> pl.DataFrame:
   declare, whether or not a connection of that name exists.
 - **In memory only.** The credential is kept in the task's memory for the attempt and never put
   in an environment variable, a file, the task's log, an error message, lineage or the deploy
-  record. Every value of the secret is shown as `***` in what the task prints, in its failure
-  message and in its trace, and `repr(crm.secret)` shows `{'password': '***'}`.
+  record. Each value of the secret is shown as `***` in what the task prints, in its failure
+  message and in its trace: as it is, and as it appears in a `repr`, in JSON, URL-encoded
+  (`quote`, `quote_plus`) and as the `repr` of its bytes. `repr(crm.secret)` shows
+  `{'password': '***'}`. What is not hidden: a value or form shorter than 4 characters, any
+  other transformation of a value (such as base64 or a part of it), and a value your code
+  derives from the secret (such as an OAuth2 access token), unless a `lakana.ingest` helper
+  registers it.
+- **A worker hides only what it can decrypt.** A worker without the instance's secrets master
+  key (`LAKANA_SECRETS__MASTER_KEY`, the server's value) cannot hide a connection's secret in
+  the task's log, so it does not start a task whose asset declares a connection with a secret:
+  the attempt fails for good, naming the connection and the setting.
 - **A rotated secret is used by the next attempt.** Nothing is kept from one attempt to the
   next, so `lakana connection update crm-db --password-stdin` takes effect when the next attempt
-  starts, without a deploy.
+  starts, without a deploy. The worker reads the secret to hide it just before the task starts;
+  a secret rotated while an attempt runs is still hidden by the task in its failure message and
+  trace, but the new value may appear unhidden in the log the worker captures if the task
+  prints it. Rotate between runs.
 - **Only the secret bound to the connection.** A secret that is revoked, or bound to anything
   but this connection, counts as none: `crm.secret` is `None`.
-- **Every fetch is in the audit log**, and so is every refusal:
-  `CONNECTION_CREDENTIAL_FETCHED` and `CONNECTION_CREDENTIAL_REFUSED`
-  (`lakana audit list --kind connection`). No event holds a value.
+- **Every fetch is in the audit log**, as `CONNECTION_CREDENTIAL_FETCHED`; refusals are
+  `CONNECTION_CREDENTIAL_REFUSED` (`lakana audit list --kind connection`). Refusals are
+  rate-limited per principal (`LAKANA_DENIAL_AUDIT__PER_PRINCIPAL_PER_MINUTE`): the first of each
+  reason is always recorded, the ones past the limit are counted in the next recorded event and
+  named in the server's log. No event holds a value.
 - **Deployed code sees its declared credentials.** Code you deploy can read the secret of every
   connection its asset declares and send it to any host the task can reach. Review an asset's
   `connections` as you review its code.
@@ -333,7 +347,7 @@ it counted among the hidden nodes, without its name.
 | `CONNECTION_UPDATED` | A connection changed. | `name`, `changed` (such as `address.host`, `settings.tls`, `secret`), `address`, `secret` |
 | `CONNECTION_DELETED` | A connection was deleted. | `name`, `kind` |
 | `CONNECTION_CREDENTIAL_FETCHED` | A running task fetched a connection it declares. | `connection`, `environment`, `repository`, `asset`, `run_id`, `task_run_id`, `attempt`; `reason` (`secret_not_bound` or `secret_unreadable`) when it got no secret |
-| `CONNECTION_CREDENTIAL_REFUSED` | A fetch was refused. Recorded at most `LAKANA_DENIAL_AUDIT__PER_PRINCIPAL_PER_MINUTE` times a minute per principal, the first of each principal always. | the same fields as far as they are known, and `reason`: `not_bound`, `not_declared` or `not_in_environment` |
+| `CONNECTION_CREDENTIAL_REFUSED` | A fetch was refused. Recorded at most `LAKANA_DENIAL_AUDIT__PER_PRINCIPAL_PER_MINUTE` times a minute per principal, the first of each reason always; the others are counted in `suppressed` of the next one recorded. | the same fields as far as they are known, and `reason`: `not_bound`, `not_declared` or `not_in_environment` |
 | `SECRET_CREATED`, `SECRET_BOUND` | New values created the connection's secret, or a secret was bound to a connection or let go of it. | `use` is `connection`; `url` of `SECRET_BOUND` is every `host:port` the connection sends the secret to, such as `api.example.com:443, login.example.org:443` for an `oauth2` connection whose token URL is on another host |
 
 No event holds a secret's value or a CA certificate. `lakana audit list --kind connection` lists

@@ -3734,13 +3734,16 @@ secret's values, and the only way a secret reaches a Python asset (#23). User re
   `run_id`, `task_run_id`, `attempt` = the claim counter; `reason` when no secret was sent) is
   added in the same transaction and committed before the route returns the body.
   `CONNECTION_CREDENTIAL_REFUSED` (the fields known, plus `reason`) is committed through the
-  process's `DenialAuditLimiter` (action `FETCH_CONNECTION`), so a task asking in a loop is
-  refused every time but recorded at the limiter's rate. No detail holds a value; `connection`,
+  process's `DenialAuditLimiter` (action `FETCH_CONNECTION:<reason>`, so the first refusal of each
+  reason is recorded rather than folded into an earlier kind), so a task asking in a loop is
+  refused every time but recorded at the limiter's rate; a suppressed one is logged at INFO with
+  `reason`, `connection`, `asset` and `task_run_id`. No detail holds a value; `connection`,
   `asset` and `attempt` are `SHOWN_FIELDS`.
 - **The secret only through `require_use`.** `connection_secret` loads `Connection.secret_id`,
   treats a missing or revoked secret as none, calls `require_use(session, secret,
   SecretUse.connection(row), environment_name=...)` and only then `decrypt_secret_row`.
-  `SecretUseRefused` (a `secret_id` whose secret is now bound elsewhere) becomes `secret: null`
+  `SecretUseRefused` (a `secret_id` whose secret is now bound elsewhere), and `require_use`'s
+  `ValueError` (a stray `secret_id` into another environment), become `secret: null`
   with `reason: secret_not_bound` and a warning naming the connection, never a 422 that would name
   the secret and a bind command to the task. A decryption failure becomes `secret: null` with
   `reason: secret_unreadable` (`decrypt_secret_row` logs why, without a value). The S1 binding
@@ -3751,17 +3754,28 @@ secret's values, and the only way a secret reaches a Python asset (#23). User re
   egress grants and the binding's audit `url` use too. `Cache-Control: no-store`,
   `Pragma: no-cache`. The access log is uvicorn's request line and status; no body is logged
   anywhere (`test_task_connections.py` checks `caplog` and `capfd` for the value).
-- **Redaction on both sides.** The harness (`lakana.ingest._connections.fetch`) registers every
-  value with `lakana.context.register_secret`, which keeps it and its forms inside a `repr`, a
-  JSON string and a URL (`secret_forms`, at least 4 characters); `lakana.runner._mask` replaces
+- **Redaction on both sides.** Both sides hide the same forms of each value:
+  `lakana_core.secrets.forms.secret_forms` (worker) and its SDK copy
+  `lakana.context.secret_forms` (harness; the SDK cannot import core), compared by
+  `lakana-worker/tests/test_secret_forms_parity.py`: raw, `repr`, JSON with and without
+  `ensure_ascii`, `quote` (default and `safe=""`), `quote_plus`, and the `repr` of the UTF-8
+  bytes, each at least 4 characters. Not covered: shorter values, other transformations
+  (base64, slices), and derived values (an OAuth2 access token) unless a helper registers them.
+  The harness (`lakana.ingest._connections.fetch`) registers every value with
+  `lakana.context.register_secret`; `lakana.runner._mask` replaces
   them (longest first) with the token in the failure record's `message` and `error_type`, in the
   trace on stderr and in `_clean`. `main` clears the state and the fetched connections only after
   the record and the trace are written. The worker decrypts the declared connections' secrets
   before minting the token (`python_tasks._connection_secrets`, the same `connection_secret`) and
   adds them to `secrets_to_hide` of both runners (`PythonTask.hidden`, never sent to the task, not
   in `repr`), so `OutputRedactor` masks them in the captured log, split across writes too, and in
-  the record's message. A refusal or a missing master key there does not fail the attempt; it is
-  logged with the connection's name only. The worker's decryption is not audited: no value leaves
+  the record's message. A worker that cannot decrypt an active secret of a declared connection
+  (no master key, or another key than the server's: `secret_unreadable`) fails the attempt
+  before minting the token, permanent, `NO_RUNTIME`, naming the connection and
+  `LAKANA_SECRETS__MASTER_KEY`: the server would otherwise hand the task a value the captured log
+  could not hide. A secret not bound to the connection is none on both sides and only logged.
+  **Rotation window, accepted:** the worker decrypts before the task fetches; a secret rotated in
+  between is hidden by the harness but may appear in the worker-captured log. The worker's decryption is not audited: no value leaves
   the worker, and only the task's own fetch hands one out.
 - **Not retried.** `ConnectionNotDeclared`, `ConnectionRefused` and `CapExceeded`
   (`lakana.ingest._errors`) carry `retryable = False`, which `_retryable` honours for
