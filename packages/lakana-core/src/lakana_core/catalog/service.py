@@ -65,6 +65,11 @@ from lakana_core.catalog.append import (
 )
 from lakana_core.catalog.columns import sync_table_columns
 from lakana_core.catalog.commit import commit_metadata_pointer
+from lakana_core.catalog.connection_lineage import (
+    ConnectionSource,
+    connection_edges,
+    connection_sources,
+)
 from lakana_core.catalog.datafiles import list_data_files
 from lakana_core.catalog.descriptions import (
     ShownDescription,
@@ -5135,6 +5140,7 @@ class CatalogService:
                 target_name=ref.dotted(),
                 target_snapshot_id=snapshot_id,
                 query_run_id=None,
+                connections=self._connection_sources(p, environment_id),
             )
             self.commit_table(
                 p,
@@ -6450,6 +6456,7 @@ class CatalogService:
                 target_name=ref.dotted(),
                 target_snapshot_id=result.snapshot_id,
                 query_run_id=query_run_id,
+                connections=self._connection_sources(p, environment_id),
             )
         self._guard.note_result(
             ref.environment,
@@ -6461,6 +6468,25 @@ class CatalogService:
             publishes=publishes,
         )
 
+    def _connection_sources(
+        self, p: PrincipalRef, environment_id: uuid.UUID
+    ) -> list[ConnectionSource]:
+        """Find the connections a write by `p` records as lineage sources.
+
+        Parameters
+        ----------
+        p
+            The acting principal; only a token bound to a task attempt names any.
+        environment_id
+            The target's environment.
+
+        Returns
+        -------
+        list of ConnectionSource
+            See `lakana_core.catalog.connection_lineage.connection_sources`.
+        """
+        return connection_sources(self._session, p, environment_id)
+
     def _add_lineage_edges(
         self,
         *,
@@ -6470,6 +6496,7 @@ class CatalogService:
         target_name: str,
         target_snapshot_id: int | None,
         query_run_id: uuid.UUID | None,
+        connections: Sequence[ConnectionSource] = (),
     ) -> None:
         """Add one lineage edge per source to the session, uncommitted.
 
@@ -6478,7 +6505,7 @@ class CatalogService:
         environment_id
             The environment both ends live in.
         sources
-            The sources.
+            The source tables.
         target_id
             The target's id.
         target_name
@@ -6487,8 +6514,22 @@ class CatalogService:
             The target's new snapshot, or `None` for a view.
         query_run_id
             The run writing, if any.
+        connections
+            The connections the writing task's asset declares (`_connection_sources`), one
+            edge each; never from request input.
         """
         now = datetime.now(UTC)
+        self._session.add_all(
+            connection_edges(
+                connections,
+                environment_id=environment_id,
+                target_id=target_id,
+                target_name=target_name,
+                target_snapshot_id=target_snapshot_id,
+                query_run_id=query_run_id,
+                created_at=now,
+            )
+        )
         for source in sources:
             self._session.add(
                 LineageEdge(

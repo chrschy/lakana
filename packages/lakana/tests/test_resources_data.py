@@ -1858,6 +1858,42 @@ def test_tables_lineage_defaults_truncated_to_false() -> None:
     assert Tables(_transport(handler)).lineage("dev", "gold.t").truncated is False
 
 
+def test_tables_lineage_parses_a_connection_node_and_its_kind() -> None:
+    """A connection source carries its kind; an older server's nodes read as having none."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "root_id": "t",
+                "direction": "upstream",
+                "depth": 3,
+                "nodes": [
+                    {"id": "t", "name": "gold.t", "kind": "TABLE", "dropped": False},
+                    {
+                        "id": "c",
+                        "name": "crm-db",
+                        "kind": "CONNECTION",
+                        "dropped": False,
+                        "connection_kind": "postgresql",
+                    },
+                ],
+                "edges": [],
+                "hidden_nodes": 0,
+            },
+        )
+
+    nodes = Tables(_transport(handler)).lineage("dev", "gold.t").nodes
+
+    assert nodes == [
+        LineageNode(id="t", name="gold.t", kind="TABLE", dropped=False),
+        LineageNode(
+            id="c", name="crm-db", kind="CONNECTION", dropped=False, connection_kind="postgresql"
+        ),
+    ]
+    assert nodes[0].connection_kind is None
+
+
 def test_tables_maintain_posts_the_request_and_returns_a_run_handle() -> None:
     """`tables.maintain` returns a `QueryRun`, polled like any query."""
     seen: dict[str, Any] = {}

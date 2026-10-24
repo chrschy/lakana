@@ -10,6 +10,12 @@ that two readable tables are connected through one. A dropped
 table's node is judged at the namespace of the newest name recorded for its
 id, never as a table, so a table recreated under its name does not reveal it
 and the verdict does not depend on where the walk starts.
+
+A connection a task's asset declared is a source node of kind ``CONNECTION``
+(`lakana_core.catalog.connection_lineage`). It is shown only to someone who may read the
+connections of the environment (`READ_ENVIRONMENT`, and never through a task token, which may
+not list connections either); otherwise it is counted in `hidden_nodes` like any other. A
+connection has no sources, so the walk never continues past one.
 """
 
 from __future__ import annotations
@@ -23,10 +29,11 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from lakana_core.auth import Action, AuthorizationService, PrincipalRef, Securable
+from lakana_core.catalog.connection_lineage import CONNECTION_SOURCE
 from lakana_core.catalog.identity import resolve_environment_id, resolve_table_id
 from lakana_core.errors import NotFoundError, ValidationError
 from lakana_core.identifiers import NamespacePath, TableRef
-from lakana_core.models import LineageEdge, Namespace, Table
+from lakana_core.models import Connection, LineageEdge, Namespace, Table
 
 DEFAULT_LINEAGE_DEPTH = 3
 """Hops walked when the caller names none."""
@@ -47,7 +54,7 @@ class LineageDirection(enum.StrEnum):
 
 @dataclass(frozen=True)
 class LineageNode:
-    """One table, external table or view in a lineage graph.
+    """One table, external table, view, artifact or connection in a lineage graph.
 
     Parameters
     ----------
@@ -55,19 +62,24 @@ class LineageNode:
         Its id.
     name
         Its current dotted name, or, once dropped, the newest name recorded
-        for it on any edge.
+        for it on any edge. A connection's name.
     kind
-        ``TABLE``, ``EXTERNAL``, ``VIEW`` or ``ARTIFACT``; `None` once dropped. It says
-        what a link's snapshot ids at this node mean: for an ``ARTIFACT`` they are
-        version numbers.
+        ``TABLE``, ``EXTERNAL``, ``VIEW``, ``ARTIFACT`` or ``CONNECTION``; `None` once a
+        table is dropped (a deleted connection stays ``CONNECTION``). It says what a link's
+        snapshot ids at this node mean: for an ``ARTIFACT`` they are version numbers, and a
+        ``CONNECTION`` has none.
     dropped
-        Whether the table no longer exists.
+        Whether the table or connection no longer exists.
+    connection_kind
+        For a ``CONNECTION``, its kind (``postgresql``, ``s3``, ...); `None` for every other
+        node and for a deleted connection.
     """
 
     id: uuid.UUID
     name: str
     kind: str | None
     dropped: bool
+    connection_kind: str | None = None
 
 
 @dataclass(frozen=True)
@@ -210,15 +222,23 @@ class LineageService:
                 )
                 if other_id in hidden:
                     continue
+                connection = (
+                    direction is LineageDirection.UPSTREAM and edge.source_kind == CONNECTION_SOURCE
+                )
                 if other_id not in nodes:
-                    node, securable = self._node(ref.environment, environment_id, other_id)
-                    # A dropped node is never shown to a task token: a token's scope
-                    # patterns cannot say which dropped table they were meant to cover.
-                    if (
-                        securable is None
-                        or (node.dropped and p.task_scope is not None)
-                        or not self._authz.permits(p, Action.READ_TABLE, securable)
-                    ):
+                    if connection:
+                        node = self._connection_node(environment_id, edge)
+                        visible = self._may_see_connections(p, ref.environment)
+                    else:
+                        node, securable = self._node(ref.environment, environment_id, other_id)
+                        # A dropped node is never shown to a task token: a token's scope
+                        # patterns cannot say which dropped table they were meant to cover.
+                        visible = not (
+                            securable is None
+                            or (node.dropped and p.task_scope is not None)
+                            or not self._authz.permits(p, Action.READ_TABLE, securable)
+                        )
+                    if not visible:
                         hidden.add(other_id)
                         continue
                     # Checked after visibility: a node the caller can't read
@@ -228,7 +248,9 @@ class LineageService:
                         truncated = True
                         break
                     nodes[other_id] = node
-                    next_frontier.append(other_id)
+                    # A connection has no sources: the walk ends there.
+                    if not connection:
+                        next_frontier.append(other_id)
                 links.append(edge)
             if truncated:
                 break
@@ -298,6 +320,54 @@ class LineageService:
         for edge in rows:
             chosen[edge.source_table_id, edge.target_table_id] = edge
         return list(chosen.values())
+
+    def _may_see_connections(self, p: PrincipalRef, environment: str) -> bool:
+        """Say whether `p` may see the connections of an environment, as `ConnectionService.list`.
+
+        Parameters
+        ----------
+        p
+            The acting principal.
+        environment
+            The environment.
+
+        Returns
+        -------
+        bool
+            Whether `p` holds `READ_ENVIRONMENT` there and does not act with a task token.
+        """
+        return p.task_scope is None and self._authz.permits(
+            p, Action.READ_ENVIRONMENT, Securable.environment_scope(environment)
+        )
+
+    def _connection_node(self, environment_id: uuid.UUID, edge: LineageEdge) -> LineageNode:
+        """Describe the connection an edge names as its source.
+
+        Parameters
+        ----------
+        environment_id
+            The environment walked; a connection of another one reads as deleted.
+        edge
+            An edge whose `source_kind` is ``connection``.
+
+        Returns
+        -------
+        LineageNode
+            The connection under its name, with its kind; once deleted, under the name the
+            edge recorded.
+        """
+        row = self._session.get(Connection, edge.source_table_id)
+        if row is None or row.environment_id != environment_id:
+            return LineageNode(
+                id=edge.source_table_id, name=edge.source_name, kind="CONNECTION", dropped=True
+            )
+        return LineageNode(
+            id=row.id,
+            name=row.name,
+            kind="CONNECTION",
+            dropped=False,
+            connection_kind=row.kind.value,
+        )
 
     def _node(
         self, environment: str, environment_id: uuid.UUID, table_id: uuid.UUID

@@ -58,7 +58,10 @@ limits lie is in [Python assets: what they are for and how far they are trusted]
   must be written out as a literal: strings, numbers, lists and dicts of strings. Variables,
   `**unpacking` and function calls are refused.
 - **Lineage.** A Python asset has dependency lineage (its inputs) and no column lineage. A SQL
-  asset can read a Python asset's table by name; the run orders them as usual.
+  asset can read a Python asset's table by name; the run orders them as usual. A table written
+  by an asset that declares connections shows each connection as a source in its lineage
+  (`lakana table lineage`), recorded by the server from the deployed asset, never from what the
+  task sends. Who sees it: [Connections](connections.md#lineage).
 - **Who sees a dropped table in `table lineage`.** Lineage lists only tables you may read. A table
   that was dropped stays in the history of the tables it fed, marked `dropped`, and is shown only
   to someone who may read its whole namespace (a grant on the namespace, the environment or the

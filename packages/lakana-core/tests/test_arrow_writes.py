@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import dataclasses
+import logging
+import uuid
 from collections.abc import Sequence
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,13 +17,22 @@ from pyiceberg.table.update import TableRequirement, TableUpdate
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from lakana_core.auth import Action, AllowAllAuthorization, PrincipalRef
+from lakana_core.auth import Action, AllowAllAuthorization, BoundTask, PrincipalRef, TaskScope
 from lakana_core.catalog.service import CatalogService, LoadedTable
 from lakana_core.catalog.writes import parse_expected_snapshot
 from lakana_core.config import StorageConfig
+from lakana_core.connections.kinds import ConnectionKind
 from lakana_core.errors import ConflictError, NotFoundError, PermissionDenied, ValidationError
 from lakana_core.identifiers import TableRef
-from lakana_core.models import AuditEvent, AuditEventType, LineageEdge, TableType, WriteMode
+from lakana_core.models import (
+    AuditEvent,
+    AuditEventType,
+    Connection,
+    Environment,
+    LineageEdge,
+    TableType,
+    WriteMode,
+)
 from lakana_core.storage.resolver import StorageResolver
 
 
@@ -350,3 +362,212 @@ def test_a_writer_landing_in_the_commit_of_an_empty_table_is_a_conflict(
         .to_arrow()
     )
     assert ids.column("id").to_pylist() == [5]
+
+
+def _connection(session: Session, principal: PrincipalRef, name: str) -> Connection:
+    """Create a PostgreSQL connection in `dev`.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    principal
+        Its creator.
+    name
+        Its name.
+
+    Returns
+    -------
+    Connection
+        The row.
+    """
+    environment = session.scalars(select(Environment).where(Environment.name == "dev")).one()
+    row = Connection(
+        id=uuid.uuid4(),
+        environment_id=environment.id,
+        name=name,
+        kind=ConnectionKind.POSTGRESQL,
+        address={"host": "db.example.com", "port": 5432, "database": "crm"},
+        settings={"user": "reader", "tls": "verify-full"},
+        created_by=principal.id,
+    )
+    session.add(row)
+    session.commit()
+    return row
+
+
+def _task(principal: PrincipalRef, *connections: str, readable: bool = True) -> PrincipalRef:
+    """Act as the bound task token of the asset `gold.t`, which declares `connections`.
+
+    Parameters
+    ----------
+    principal
+        The run principal.
+    *connections
+        The connection names the deployed manifest declares.
+    readable
+        Whether the manifest's `connections` value could be read.
+
+    Returns
+    -------
+    PrincipalRef
+        The principal as its bound token authenticates it.
+    """
+    bound = BoundTask(
+        task_run_id=uuid.uuid4(),
+        claim=1,
+        asset="gold.t",
+        inputs=("bronze.src",),
+        readable=("bronze.src",),
+        connections=connections,
+        connections_readable=readable,
+        repository="analytics",
+    )
+    return dataclasses.replace(
+        principal,
+        task_scope=TaskScope(environment="dev", asset_scope=[], token_id=uuid.uuid4(), bound=bound),
+    )
+
+
+def _connection_edges(session: Session) -> list[LineageEdge]:
+    """Read the connection edges, by source name.
+
+    Parameters
+    ----------
+    session
+        Database session.
+
+    Returns
+    -------
+    list of LineageEdge
+        The edges whose source is a connection.
+    """
+    return list(
+        session.scalars(
+            select(LineageEdge)
+            .where(LineageEdge.source_kind == "connection")
+            .order_by(LineageEdge.source_name)
+        )
+    )
+
+
+@pytest.mark.parametrize("write", ["append", "replace"])
+def test_a_task_write_records_one_edge_per_declared_connection(
+    session: Session, principal: PrincipalRef, catalog: CatalogService, write: str
+) -> None:
+    """The server derives connection sources from the deployed asset, beside the table edges."""
+    crm = _connection(session, principal, "crm-db")
+    files = _connection(session, principal, "files")
+
+    result = getattr(catalog, write)(
+        _task(principal, "crm-db", "files"), _ref("gold.t"), _ids([2]), sources=["bronze.src"]
+    )
+
+    edges = _connection_edges(session)
+    assert [
+        (e.source_table_id, e.source_name, e.source_snapshot_id, e.target_name) for e in edges
+    ] == [(crm.id, "crm-db", None, "gold.t"), (files.id, "files", None, "gold.t")]
+    assert {e.target_snapshot_id for e in edges} == {result.snapshot_id}
+    table_edge = session.scalars(
+        select(LineageEdge).where(LineageEdge.source_kind == "table")
+    ).one()
+    assert table_edge.source_name == "bronze.src"
+
+
+def test_a_sql_style_write_of_a_task_records_the_connections_too(
+    session: Session, principal: PrincipalRef, catalog: CatalogService
+) -> None:
+    """`write_batches` (a SQL write submitted with the task's token) takes the same path."""
+    crm = _connection(session, principal, "crm-db")
+
+    catalog.write_batches(
+        _task(principal, "crm-db"),
+        _ref("gold.t"),
+        mode=WriteMode.APPEND,
+        schema=_ids([3]).schema,
+        batches=_ids([3]).to_batches(),
+    )
+
+    assert [(e.source_table_id, e.source_name) for e in _connection_edges(session)] == [
+        (crm.id, "crm-db")
+    ]
+
+
+def test_a_declared_connection_that_no_longer_exists_is_skipped_and_logged(
+    session: Session,
+    principal: PrincipalRef,
+    catalog: CatalogService,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A missing name records no edge and never fails the write."""
+    crm = _connection(session, principal, "crm-db")
+
+    with caplog.at_level(logging.INFO, logger="lakana_core.catalog.connection_lineage"):
+        catalog.append(_task(principal, "crm-db", "gone"), _ref("gold.t"), _ids([2]))
+
+    assert [e.source_table_id for e in _connection_edges(session)] == [crm.id]
+    skipped = [r for r in caplog.records if "'gone'" in r.getMessage()]
+    assert len(skipped) == 1
+    assert skipped[0].levelno == logging.INFO
+
+
+def test_an_unreadable_connections_entry_records_none_and_logs_once(
+    session: Session,
+    principal: PrincipalRef,
+    catalog: CatalogService,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A damaged manifest entry never fails the write; it is logged once, for this write."""
+    _connection(session, principal, "crm-db")
+
+    with caplog.at_level(logging.INFO, logger="lakana_core.catalog.connection_lineage"):
+        result = catalog.append(_task(principal, readable=False), _ref("gold.t"), _ids([2]))
+
+    assert result.snapshot_id is not None
+    assert _connection_edges(session) == []
+    unreadable = [r for r in caplog.records if "cannot be read" in r.getMessage()]
+    assert len(unreadable) == 1
+
+
+@pytest.mark.parametrize("write", ["append", "replace"])
+def test_a_pat_write_records_no_connection_edge(
+    session: Session, principal: PrincipalRef, catalog: CatalogService, write: str
+) -> None:
+    """Only a bound task token's write names connections."""
+    _connection(session, principal, "crm-db")
+
+    getattr(catalog, write)(principal, _ref("gold.t"), _ids([2]), sources=["bronze.src"])
+
+    assert _connection_edges(session) == []
+
+
+def test_an_unbound_task_token_records_no_connection_edge(
+    session: Session, principal: PrincipalRef, catalog: CatalogService
+) -> None:
+    """A REST-minted task token has no deployed asset, so no connections."""
+    _connection(session, principal, "crm-db")
+    unbound = dataclasses.replace(
+        principal,
+        task_scope=TaskScope(environment="dev", asset_scope=["gold.t"], token_id=uuid.uuid4()),
+    )
+
+    catalog.append(unbound, _ref("gold.t"), _ids([2]))
+
+    assert _connection_edges(session) == []
+
+
+@pytest.mark.parametrize("write", ["append", "replace"])
+@pytest.mark.parametrize("actor", ["pat", "task"])
+def test_a_client_supplied_source_named_like_a_connection_is_a_table_lookup(
+    session: Session, principal: PrincipalRef, catalog: CatalogService, write: str, actor: str
+) -> None:
+    """`sources` can never produce a connection edge: `crm-db` is not a table, so it fails."""
+    _connection(session, principal, "crm-db")
+    p = principal if actor == "pat" else _task(principal)
+    before = _current_snapshot(catalog, principal, "gold.t")
+
+    with pytest.raises((NotFoundError, ValidationError)):
+        getattr(catalog, write)(p, _ref("gold.t"), _ids([2]), sources=["crm-db"])
+
+    assert _current_snapshot(catalog, principal, "gold.t") == before
+    assert session.scalars(select(LineageEdge)).first() is None

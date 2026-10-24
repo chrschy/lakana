@@ -662,19 +662,24 @@ class LineageNode:
     Parameters
     ----------
     id
-        The table's id.
+        The table's id, or the connection's.
     name
-        Its dotted name.
+        Its dotted name, or the connection's name.
     kind
-        ``TABLE``, ``EXTERNAL``, ``VIEW`` or ``ARTIFACT``; `None` once dropped.
+        ``TABLE``, ``EXTERNAL``, ``VIEW``, ``ARTIFACT`` or ``CONNECTION``; `None` once a
+        table is dropped. A ``CONNECTION`` is a connection the writing asset declared.
     dropped
-        Whether the table no longer exists.
+        Whether the table or connection no longer exists.
+    connection_kind
+        For a ``CONNECTION``, its kind (for example ``postgresql``); `None` otherwise, once
+        the connection is deleted, and from a server that predates the field.
     """
 
     id: str
     name: str
     kind: str | None
     dropped: bool
+    connection_kind: str | None = None
 
 
 @dataclass(frozen=True)

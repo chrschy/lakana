@@ -254,6 +254,21 @@ events = client.audit_events.list(kind="connection")
 
 `update` takes `address`, `settings`, `secret`, `secret_values` and `clear` (a list of names).
 
+## Lineage
+
+A table or artifact written by an asset that declares connections shows each connection as a
+source in its lineage. `lakana table lineage` prints it as `connection crm-db (postgresql)`, and
+as `connection crm-db (deleted)` once the connection is gone. In the REST answer and the SDK the
+node has `kind` `CONNECTION`, the connection's name and id, and its kind in `connection_kind`.
+
+Lakana records these sources itself, from the asset the deploy recorded, when the asset's task
+writes; nothing a task or a client sends can add one. A connection that was deleted after the
+deploy is left out of the write's lineage. A write with your own token records none.
+
+A connection appears in lineage only to someone who may list the environment's connections
+(`READ_ENVIRONMENT`, see [Who may do what](#who-may-do-what)), never to a task. Everyone else sees
+it counted among the hidden nodes, without its name.
+
 ## Audit events
 
 | Event | When | Detail |

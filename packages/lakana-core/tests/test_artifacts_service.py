@@ -54,6 +54,7 @@ from lakana_core.auth import (
 )
 from lakana_core.catalog.service import CatalogService
 from lakana_core.config import ArtifactsConfig
+from lakana_core.connections.kinds import ConnectionKind
 from lakana_core.errors import (
     ConflictError,
     NotFoundError,
@@ -68,6 +69,7 @@ from lakana_core.models import (
     ArtifactVersion,
     AuditEvent,
     AuditEventType,
+    Connection,
     Environment,
     LineageEdge,
     Namespace,
@@ -2214,3 +2216,88 @@ def test_storage_that_cannot_be_written_is_a_domain_error_without_storage_text(
     assert "Try again" in str(caught.value)
     assert "storage_unreachable" in {getattr(r, "event", None) for r in caplog.records}
     assert not session.in_transaction()
+
+
+def _crm_connection(session: Session, principal: PrincipalRef) -> uuid.UUID:
+    """Create the connection `crm-db` in `dev`.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    principal
+        Its creator.
+
+    Returns
+    -------
+    uuid.UUID
+        Its id.
+    """
+    environment = session.scalars(select(Environment).where(Environment.name == "dev")).one()
+    row = Connection(
+        id=uuid.uuid4(),
+        environment_id=environment.id,
+        name="crm-db",
+        kind=ConnectionKind.POSTGRESQL,
+        address={"host": "db.example.com", "port": 5432, "database": "crm"},
+        settings={"user": "reader", "tls": "verify-full"},
+        created_by=principal.id,
+    )
+    session.add(row)
+    session.commit()
+    return row.id
+
+
+def _connection_edges(session: Session) -> list[tuple[uuid.UUID, str, int | None, int | None]]:
+    """Read the connection edges.
+
+    Parameters
+    ----------
+    session
+        Database session.
+
+    Returns
+    -------
+    list of tuple
+        Each edge's source id, source name, source snapshot and target version.
+    """
+    return [
+        (e.source_table_id, e.source_name, e.source_snapshot_id, e.target_snapshot_id)
+        for e in session.scalars(
+            select(LineageEdge)
+            .where(LineageEdge.source_kind == "connection")
+            .order_by(LineageEdge.source_name)
+        )
+    ]
+
+
+def test_a_task_version_records_its_assets_declared_connections(
+    session: Session, tmp_path: Path, principal: PrincipalRef
+) -> None:
+    """An artifact written by a bound task names its connections, as a table write does."""
+    service = artifact_service(session, tmp_path)
+    crm = _crm_connection(session, principal)
+    _, actor = _attempt(session, principal)
+    assert actor.task_scope is not None
+    assert actor.task_scope.bound is not None
+    bound = dataclasses.replace(actor.task_scope.bound, connections=("crm-db", "gone"))
+    actor = dataclasses.replace(
+        actor, task_scope=dataclasses.replace(actor.task_scope, bound=bound)
+    )
+
+    result = store_version(service, actor, ARTIFACT_REF, _FILES)
+
+    assert _connection_edges(session) == [(crm, "crm-db", None, result.version.version)]
+    edge = session.scalars(select(LineageEdge)).one()
+    assert edge.target_name == "models.churn"
+
+
+def test_a_pat_version_records_no_connection_edge(
+    session: Session, tmp_path: Path, principal: PrincipalRef
+) -> None:
+    service = artifact_service(session, tmp_path)
+    _crm_connection(session, principal)
+
+    store_version(service, principal, ARTIFACT_REF, _FILES)
+
+    assert _connection_edges(session) == []

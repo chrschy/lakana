@@ -54,6 +54,17 @@ class BoundTask:
     keep_versions
         How many live versions an artifact asset keeps; `None` keeps all.
         Applied by the server at commit.
+    connections
+        The connections the asset declares in the project version manifest, in declared
+        order (`lakana_core.projects.manifest.read_entry_connections`); empty when it declares
+        none or when the stored value cannot be read. A write by this task records one lineage
+        edge per connection, derived here and never from what the task sends.
+    connections_readable
+        Whether the manifest's `connections` value could be read; `False` for a damaged entry,
+        which then declares none.
+    repository
+        The name of the repository the run's project version was deployed from; empty when
+        that row is gone.
     """
 
     task_run_id: uuid.UUID
@@ -63,6 +74,9 @@ class BoundTask:
     readable: tuple[str, ...]
     output: str = "table"
     keep_versions: int | None = None
+    connections: tuple[str, ...] = ()
+    connections_readable: bool = True
+    repository: str = ""
 
 
 @dataclass(frozen=True)

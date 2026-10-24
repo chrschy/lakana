@@ -1068,19 +1068,25 @@ class LineageNodeOut(BaseModel):
     Parameters
     ----------
     id
-        The table's id.
+        The table's id, or the connection's.
     name
-        Its dotted name.
+        Its dotted name, or the connection's name.
     kind
-        ``TABLE``, ``EXTERNAL``, ``VIEW`` or ``ARTIFACT``; `None` once dropped.
+        ``TABLE``, ``EXTERNAL``, ``VIEW``, ``ARTIFACT`` or ``CONNECTION``; `None` once a
+        table is dropped. A ``CONNECTION`` is a connection the writing asset declared, shown
+        only to a reader of the environment's connections.
     dropped
-        Whether the table no longer exists.
+        Whether the table or connection no longer exists.
+    connection_kind
+        For a ``CONNECTION``, its kind (for example ``postgresql``); `None` otherwise and once
+        the connection is deleted.
     """
 
     id: str
     name: str
     kind: str | None
     dropped: bool
+    connection_kind: str | None = None
 
 
 class LineageEdgeOut(BaseModel):
