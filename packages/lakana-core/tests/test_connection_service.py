@@ -1768,7 +1768,9 @@ def test_a_task_token_cannot_list_or_show_connections(world: World) -> None:
         with pytest.raises(PermissionDenied) as caught:
             call()
         assert "crm-db" not in str(caught.value)
-        assert str(caught.value).startswith("a task cannot list or show connections")
+        assert str(caught.value) == (
+            "a task token cannot list or show connections; read them with your own token"
+        )
 
 
 def test_an_update_gives_the_secret_one_way_only(world: World) -> None:
@@ -2055,3 +2057,23 @@ def test_a_region_change_moves_a_default_s3_endpoint_but_keeps_a_custom_one(
         "address.endpoint",
         "address.region",
     ]
+
+
+def test_a_name_the_environment_reserves_is_skipped_for_a_new_secret(world: World) -> None:
+    """A name storage uses, with no secret of that name yet, is never given to a connection.
+
+    The new secret takes the next free name instead of the create failing.
+    """
+    env = world.session.execute(select(Environment).where(Environment.name == "prod")).scalar_one()
+    env.storage_secret_ref = "crm-db-connection"
+    world.session.commit()
+
+    view = world.postgres(world.data_engineer)
+
+    assert view.secret == "crm-db-connection-2"
+    assert (
+        world.session.execute(
+            select(Secret).where(Secret.name == "crm-db-connection")
+        ).scalar_one_or_none()
+        is None
+    )

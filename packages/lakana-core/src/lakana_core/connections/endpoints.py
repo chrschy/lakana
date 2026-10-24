@@ -1,7 +1,8 @@
 """The exact host:port pairs a connection lets a task reach.
 
-One place for the worker (the targets it grants a task) and the fetch route (the endpoints the
-helper connects to), so the two cannot disagree.
+One place for the worker (the targets it grants a task) and for what a binding shows and records
+(`endpoint_hosts`); the run-time fetch of a connection, added in a later change, is to read the
+same list, so they cannot disagree.
 """
 
 from __future__ import annotations

@@ -740,6 +740,9 @@ def test_a_task_token_may_not_list_or_show_connections(
             assert response.status_code == 403, (kind, response.text)
             assert "crm-db" not in response.text
             assert "db.example.com" not in response.text
+            assert response.json()["detail"] == (
+                "a task token cannot list or show connections; read them with your own token"
+            )
     listed = reader.get("/api/v1/environments/dev/connections")
     assert listed.status_code == 200
     assert [item["name"] for item in listed.json()["items"]] == ["crm-db"]

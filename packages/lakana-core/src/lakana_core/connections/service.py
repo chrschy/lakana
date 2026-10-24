@@ -81,6 +81,7 @@ from lakana_core.secrets.uses import (
     record_refusal,
     release_connection_secrets,
     require_secret_management_for_url_change,
+    used_by_its_environment,
 )
 
 _NAME_RULE = (
@@ -187,18 +188,16 @@ def _changed(part: str, before: Mapping[str, Any], after: Mapping[str, Any]) -> 
     )
 
 
-_TASK_REFUSED = (
-    "a task cannot list or show connections; it reads the connections its asset declares when "
-    "it runs"
-)
+_TASK_REFUSED = "a task token cannot list or show connections; read them with your own token"
 
 
 def _refuse_task(p: PrincipalRef) -> None:
     """Refuse a principal acting with a task token, bound to a run or not.
 
     `READ_ENVIRONMENT` is an action a task token carries, but a task must not see the hosts,
-    users, secret names or declaring assets of the environment's connections: it learns its own
-    only through the fetch at run time. The refusal names no connection.
+    users, secret names or declaring assets of the environment's connections (a run-time fetch
+    of the connections its asset declares is added in a later change). The refusal names no
+    connection.
 
     Parameters
     ----------
@@ -1001,7 +1000,8 @@ class ConnectionService:
 
         ``<name>-connection``, then ``<name>-connection-2`` up to ``-100``. A name any secret
         of the environment holds (bound elsewhere, unbound or revoked) is never reused, so no
-        secret is overwritten.
+        secret is overwritten; nor is a name the environment reserves for its storage or a
+        webhook (`used_by_its_environment`), which no connection may take.
 
         Parameters
         ----------
@@ -1023,7 +1023,9 @@ class ConnectionService:
         base = f"{name}-connection"
         for number in range(1, _MAX_SECRET_NUMBER + 1):
             candidate = base if number == 1 else f"{base}-{number}"
-            if self._secret_named(env, candidate) is None:
+            if self._secret_named(env, candidate) is None and not used_by_its_environment(
+                self._session, env, candidate
+            ):
                 return candidate
         raise AlreadyExistsError(
             f"secrets `{shown(base)}` to `{shown(base)}-{_MAX_SECRET_NUMBER}` all exist in "
