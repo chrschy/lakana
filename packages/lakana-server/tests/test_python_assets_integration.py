@@ -2260,10 +2260,9 @@ def test_the_deploy_refuses_what_an_artifact_cannot_do(stack: _Stack, wheelhouse
     ] == []
 
 
-_WIDE_TIMEOUT = 30
-"""Attempt 1's whole budget: the process starts, reads its input and replaces the table well
-within it even on a loaded CI runner (10 s was not: #321), and then its timeout ends it while
-the reply is held."""
+_WIDE_TIMEOUT = 10
+"""Attempt 1's whole budget: the process starts, reads its input and replaces the table within
+it, and then its timeout ends it while the reply is held."""
 
 _WIDE = f'''\
 import polars as pl
@@ -2334,7 +2333,7 @@ def test_a_second_attempts_failed_check_sets_the_table_back_to_before_the_first_
     assert stack.hold.status == 200, (
         f"attempt 1 did not replace silver.wide within its {_WIDE_TIMEOUT} s timeout: the "
         f"reply the test holds back answered {stack.hold.status} (None: no replace arrived), "
-        "so the case under test never happened. Is the runner slower than the timeout allows? "
+        "so the case under test never happened. The attempts and the task's log say why. "
         f"Run: {finished}. Attempts: "
         + "; ".join(
             f"{a.attempt} {a.outcome} {a.failure_code}: {a.error_message}"

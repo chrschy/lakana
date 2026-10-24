@@ -370,11 +370,14 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --all-packages --locked
+      # Every pytest here keeps its temp files under $RUNNER_TEMP, on the work disk: /tmp on
+      # GitHub's hosted runners can have a disk quota, and the Python-asset tests, which copy
+      # the wheel directory into every project and build a venv per project, exceeded it.
       # First, and on their own, the tests that install no packages: a package index
       # outage must not take them down with the Python-asset tests.
       - name: Integration tests
         run: >-
-          uv run pytest -m "integration and not docker"
+          uv run pytest -m "integration and not docker" --basetemp "$RUNNER_TEMP/pytest-integration"
           --ignore=packages/lakana-server/tests/test_python_assets_integration.py
       # The exit criterion of task isolation, against this runner's Docker Engine (28 or later:
       # GitHub's ubuntu-latest has it). Its own step, so a Docker failure is named as such.
@@ -383,7 +386,7 @@ jobs:
         if: ${{ !cancelled() }}
         env:
           LAKANA_TEST_DOCKER: "1"
-        run: uv run pytest -m docker packages/lakana-worker/tests
+        run: uv run pytest -m docker --basetemp "$RUNNER_TEMP/pytest-docker" packages/lakana-worker/tests
       # The Python-asset tests install from an offline wheel directory. Building it is
       # the only step that may ask a package index, and only for wheels the cache does
       # not hold: the locked wheels are cached by uv.lock, the lakana wheel is rebuilt
@@ -405,7 +408,7 @@ jobs:
         env:
           LAKANA_TEST_WHEELHOUSE: ${{ runner.temp }}/wheelhouse
         run: >-
-          uv run pytest -m integration
+          uv run pytest -m integration --basetemp "$RUNNER_TEMP/pytest-assets"
           packages/lakana-server/tests/test_python_assets_integration.py
 
   five-minute:
