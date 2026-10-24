@@ -4291,3 +4291,15 @@ def test_an_ingest_error_says_whether_another_attempt_could_help(
     """Only `lakana.ingest`'s own errors are read: a user's attribute decides nothing."""
     record = _failing(world, f"{raised}\nraise E('no')")
     assert (record["phase"], record["retryable"]) == ("function", retryable)
+
+
+def test_overlapping_occurrences_of_a_value_are_masked_whole(world: _World) -> None:
+    """`abab` in `ababab`: both occurrences overlap, so the whole run is one span."""
+    record = _failing(
+        world,
+        "from lakana import context\n"
+        "context.register_secret('abab')\n"
+        "context.register_secret('cdcd-long')\n"
+        "raise ValueError('ababab and cdcd-longcdcd-long and xabab')",
+    )
+    assert record["message"] == "ValueError: *** and *** and x***"

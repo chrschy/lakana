@@ -22,6 +22,9 @@ _CORPUS = [
     'say "hi"',
     "abc",
     "",
+    "Zürich-Pass-2026",
+    'Zq-quote"Pass',
+    "back\\slash\\and'quote\"",
 ]
 
 
@@ -32,3 +35,9 @@ def test_the_worker_and_the_harness_list_the_same_forms(value: str) -> None:
 
 def test_the_minimum_length_is_the_same() -> None:
     assert forms.MIN_SECRET_CHARS == context.MIN_SECRET_CHARS
+
+
+def test_both_refuse_a_value_that_is_not_text() -> None:
+    for secret_forms in (forms.secret_forms, context.secret_forms):
+        with pytest.raises(UnicodeEncodeError):
+            secret_forms("x\ud800yz")

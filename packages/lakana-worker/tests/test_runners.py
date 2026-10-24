@@ -1076,6 +1076,28 @@ def test_every_form_of_a_declared_connections_secret_is_hidden(harness: Harness)
     assert out.count("***") == 10
 
 
+@pytest.mark.parametrize("password", ["Zürich-Pass-2026", 'Zq-quote"Pass'])
+def test_a_json_body_printed_again_hides_the_secret(harness: Harness, password: str) -> None:
+    """A second layer: a JSON body as bytes, in a dict's repr, or JSON-encoded again."""
+    harness.fields["hidden"] = tuple(secret_forms(password))
+    outcome = harness.run(
+        "import json\n"
+        f"pw = {password!r}\n"
+        "for ascii_only in (True, False):\n"
+        "    body = json.dumps({'password': pw}, ensure_ascii=ascii_only)\n"
+        "    print(body.encode())\n"
+        "    print({'body': body})\n"
+        "    print(json.dumps(body))\n"
+        "    print(json.dumps(body, ensure_ascii=False))\n"
+        "print(json.dumps(json.dumps(pw)))\n"
+        "write({'status': 'succeeded', 'snapshot_id': 1, 'rows': 1})\n"
+    )
+    assert outcome.succeeded
+    out = harness.output()
+    assert "Pass" not in out
+    assert out.count("***") == 9
+
+
 def test_the_token_is_only_on_stdin(harness: Harness) -> None:
     harness.run(
         "print(json.dumps({'argv': sys.orig_argv, 'env': dict(os.environ)}))\n"

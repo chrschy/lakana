@@ -615,6 +615,13 @@ _CANNOT_HIDE = (
 )
 
 
+_NOT_TEXT = (
+    "the secret of connection `{name}` holds a value that is not valid text, so it could not "
+    "be hidden in the task's log; set it again: lakana connection update {name} --env "
+    "{environment} --password-stdin (or --values-stdin)"
+)
+
+
 def _connection_secrets(
     session: Session, key_provider: KeyProvider | None, prepared: _Prepared
 ) -> tuple[str, ...]:
@@ -647,7 +654,9 @@ def _connection_secrets(
     ------
     TaskFailure
         Permanent (`NO_RUNTIME`), naming the connection and the setting, when an active secret
-        bound to a declared connection cannot be decrypted here.
+        bound to a declared connection cannot be decrypted here; and naming the command that
+        sets it again when one of its values is not valid text (a row from before such values
+        were refused).
     """
     if not prepared.connections:
         return ()
@@ -686,8 +695,15 @@ def _connection_secrets(
                 name,
                 why,
             )
-        for value in (values or {}).values():
-            hidden += sorted(secret_forms(value))
+        try:
+            for value in (values or {}).values():
+                hidden += sorted(secret_forms(value))
+        except UnicodeEncodeError:
+            raise TaskFailure(
+                FailureKind.PERMANENT,
+                _NOT_TEXT.format(name=name, environment=prepared.environment),
+                FailureCode.NO_RUNTIME,
+            ) from None
     session.rollback()
     return tuple(dict.fromkeys(hidden))
 

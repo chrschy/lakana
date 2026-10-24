@@ -294,21 +294,26 @@ def customers() -> pl.DataFrame:
   in an environment variable, a file, the task's log, an error message, lineage or the deploy
   record. Each value of the secret is shown as `***` in what the task prints, in its failure
   message and in its trace: as it is, and as it appears in a `repr`, in JSON, URL-encoded
-  (`quote`, `quote_plus`) and as the `repr` of its bytes. `repr(crm.secret)` shows
+  (`quote`, `quote_plus`) and as the `repr` of its bytes, and a JSON form once more inside a
+  `repr`, as bytes or JSON-encoded again (a JSON body printed as it is sent). `repr(crm.secret)` shows
   `{'password': '***'}`. What is not hidden: a value or form shorter than 4 characters, any
   other transformation of a value (such as base64 or a part of it), and a value your code
   derives from the secret (such as an OAuth2 access token), unless a `lakana.ingest` helper
   registers it.
-- **A worker hides only what it can decrypt.** A worker without the instance's secrets master
-  key (`LAKANA_SECRETS__MASTER_KEY`, the server's value) cannot hide a connection's secret in
-  the task's log, so it does not start a task whose asset declares a connection with a secret:
-  the attempt fails for good, naming the connection and the setting.
+- **A worker hides only what it can decrypt.** When an attempt starts, the worker reads the
+  secrets of the connections the asset declares. A worker without the instance's secrets master
+  key (`LAKANA_SECRETS__MASTER_KEY`, the server's value) cannot hide them in the task's log, so
+  it does not start an attempt whose declared connections have a secret then: the attempt fails
+  for good, naming the connection and the setting. A secret value must be text: one that
+  cannot be written as UTF-8 is refused when it is created or set again (422, naming its key).
 - **A rotated secret is used by the next attempt.** Nothing is kept from one attempt to the
   next, so `lakana connection update crm-db --password-stdin` takes effect when the next attempt
-  starts, without a deploy. The worker reads the secret to hide it just before the task starts;
-  a secret rotated while an attempt runs is still hidden by the task in its failure message and
-  trace, but the new value may appear unhidden in the log the worker captures if the task
-  prints it. Rotate between runs.
+  starts, without a deploy. The worker reads the secrets to hide when the attempt starts. A
+  secret added, bound or rotated while an attempt runs, and the secret of a declared connection
+  created after the attempt started, is still hidden by the task in its failure message and
+  trace, but may appear unhidden in the log the worker captures if the task prints it; on a
+  worker without the master key, such a secret is not caught by the check at the start either.
+  Change secrets between runs.
 - **Only the secret bound to the connection.** A secret that is revoked, or bound to anything
   but this connection, counts as none: `crm.secret` is `None`.
 - **Every fetch is in the audit log**, as `CONNECTION_CREDENTIAL_FETCHED`; refusals are
@@ -367,6 +372,7 @@ every `CONNECTION_*` event.
 | ``Secret 'crm-pw' of environment 'prod' is not bound to connection 'crm-db'. Ask someone who may manage secrets in 'prod' to bind it to this connection: lakana secret bind crm-pw --env prod --connection crm-db (the bind also makes it the secret the connection uses)`` | An administrator runs the command; nothing else is needed. Or give the connection new values with `--password-stdin`. |
 | ``This change of connection 'crm-db' (its address, TLS, CA certificate or how it sends its secret) could send secret 'crm-db-connection' of environment 'prod' somewhere new. ...`` | Give new values in the same command (`--password-stdin` or `--values-stdin`), or ask an administrator to make the change. |
 | ``address.base_url ...`` (or another field) | The message names the field and its rule; fix that value. |
+| ``the value of `password` is not valid text (it cannot be written as UTF-8); give it again as plain text`` | The value holds a character that is not text (a lone surrogate, such as `\ud800` in JSON). Give the value again, as plain text. |
 | ``connection `crm-db` is not declared by asset `bronze.customers` `` (403) | The task asked for a connection its deployed asset does not declare. Add it to `@asset(connections=[...])` and deploy. |
 | ``connection `crm-db` is not in environment `dev` `` (403) | The asset declares it, but the task's environment has no connection of that name (it was deleted since the deploy). Create it: `lakana connection create crm-db --env dev ...`. |
 | ``only a running task can fetch a connection`` (403) | Only a task's own token, while the task runs, may fetch a credential. Read connections with `lakana connection show` instead; it never shows the secret. |

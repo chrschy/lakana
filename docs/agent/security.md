@@ -3754,12 +3754,21 @@ secret's values, and the only way a secret reaches a Python asset (#23). User re
   egress grants and the binding's audit `url` use too. `Cache-Control: no-store`,
   `Pragma: no-cache`. The access log is uvicorn's request line and status; no body is logged
   anywhere (`test_task_connections.py` checks `caplog` and `capfd` for the value).
-- **Redaction on both sides.** Both sides hide the same forms of each value:
+- **Redaction on both sides.** Both sides list the same forms of a value (the worker also hides
+  the 4+-character forms of a value shorter than 4 characters; the harness's `register_secret`
+  ignores such a value entirely):
   `lakana_core.secrets.forms.secret_forms` (worker) and its SDK copy
   `lakana.context.secret_forms` (harness; the SDK cannot import core), compared by
   `lakana-worker/tests/test_secret_forms_parity.py`: raw, `repr`, JSON with and without
-  `ensure_ascii`, `quote` (default and `safe=""`), `quote_plus`, and the `repr` of the UTF-8
-  bytes, each at least 4 characters. Not covered: shorter values, other transformations
+  `ensure_ascii`, `quote` (default and `safe=""`), `quote_plus`, the `repr` of the UTF-8
+  bytes (each `repr` under both quote choices, since a dict's repr of a JSON body quotes with
+  `'` and escapes an apostrophe), and each JSON form again inside a `repr`, as bytes and
+  JSON-encoded twice, each at least 4 characters. The harness's `_mask` masks every occurrence
+  of every form as spans and joins overlapping or touching ones (`abab` in `ababab` → `***`).
+  A value that cannot be written as UTF-8 (a lone surrogate) has no forms:
+  `secrets.forms.require_text` refuses it at every create and rotate (and in
+  `check_secret_values`), 422 naming the key only, and the worker fails a task whose stored row
+  holds one, permanent, naming `lakana connection update`. Not covered: shorter values, other transformations
   (base64, slices), and derived values (an OAuth2 access token) unless a helper registers them.
   The harness (`lakana.ingest._connections.fetch`) registers every value with
   `lakana.context.register_secret`; `lakana.runner._mask` replaces
@@ -3774,8 +3783,10 @@ secret's values, and the only way a secret reaches a Python asset (#23). User re
   before minting the token, permanent, `NO_RUNTIME`, naming the connection and
   `LAKANA_SECRETS__MASTER_KEY`: the server would otherwise hand the task a value the captured log
   could not hide. A secret not bound to the connection is none on both sides and only logged.
-  **Rotation window, accepted:** the worker decrypts before the task fetches; a secret rotated in
-  between is hidden by the harness but may appear in the worker-captured log. The worker's decryption is not audited: no value leaves
+  **Window, accepted:** the worker decrypts when the attempt starts, before the task fetches; a
+  secret added, bound or rotated in between (or the secret of a declared connection created
+  after the check, or, on a worker without the key, a secret bound mid-attempt) is hidden by the
+  harness but may appear in the worker-captured log. The worker's decryption is not audited: no value leaves
   the worker, and only the task's own fetch hands one out.
 - **Not retried.** `ConnectionNotDeclared`, `ConnectionRefused` and `CapExceeded`
   (`lakana.ingest._errors`) carry `retryable = False`, which `_retryable` honours for

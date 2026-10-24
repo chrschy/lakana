@@ -144,6 +144,9 @@ def current() -> _TaskState:
     return _state
 
 
+# The copy of `lakana_core.secrets.forms.secret_forms`: the SDK cannot import lakana_core, and
+# `lakana-worker/tests/test_secret_forms_parity.py` keeps the two the same.
+# jscpd:ignore-start
 def secret_forms(value: str) -> set[str]:
     """List the forms text can carry a credential in.
 
@@ -158,23 +161,29 @@ def secret_forms(value: str) -> set[str]:
     Returns
     -------
     set of str
-        The value itself; inside a Python `repr`, a JSON string (with and without
-        ``ensure_ascii``), a URL (`quote` keeping ``/`` and keeping nothing, `quote_plus`) and
-        the `repr` of its UTF-8 bytes; forms shorter than `MIN_SECRET_CHARS` are left out.
+        The value itself; as it appears inside a Python `repr` (either quote), a JSON string
+        (with and without ``ensure_ascii``), a URL (`quote` with its default ``/`` kept and with
+        nothing kept, `quote_plus`) and the `repr` of its UTF-8 bytes; and each JSON form again
+        inside a `repr`, the `repr` of its bytes and a second JSON string (a JSON body printed
+        as bytes, in a dict or encoded twice). Forms shorter than `MIN_SECRET_CHARS` are left
+        out.
+
+    Raises
+    ------
+    UnicodeEncodeError
+        For a value that cannot be written as UTF-8 (a lone surrogate); no form of it could be
+        found in a log.
     """
-    # The copy of `lakana_core.secrets.forms.secret_forms`: the SDK cannot import lakana_core,
-    # and `lakana-worker/tests/test_secret_forms_parity.py` keeps the two the same.
-    # jscpd:ignore-start
-    found = {
-        value,
-        repr(value)[1:-1],
-        json.dumps(value)[1:-1],
-        json.dumps(value, ensure_ascii=False)[1:-1],
-        quote(value),
-        quote(value, safe=""),
-        quote_plus(value),
-        repr(value.encode())[2:-1],
-    }
+    ascii_json = json.dumps(value)[1:-1]
+    text_json = json.dumps(value, ensure_ascii=False)[1:-1]
+    found = {value, ascii_json, text_json, quote(value), quote(value, safe=""), quote_plus(value)}
+    for text in (value, ascii_json, text_json):
+        # Inside a repr, with either quote: a repr picks `"` for text that holds a `'` alone.
+        found |= {repr(text)[1:-1], repr(text + "\"'")[1:-4]}
+        data = text.encode()
+        found |= {repr(data)[2:-1], repr(data + b"\"'")[2:-4]}
+    for text in (ascii_json, text_json):
+        found |= {json.dumps(text)[1:-1], json.dumps(text, ensure_ascii=False)[1:-1]}
     return {form for form in found if len(form) >= MIN_SECRET_CHARS}
     # jscpd:ignore-end
 

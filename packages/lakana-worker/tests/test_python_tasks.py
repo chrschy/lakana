@@ -149,6 +149,7 @@ from lakana_core.runs.tasks import (
     read_own_tip,
     record_attempt,
 )
+from lakana_core.secrets.crypto import SecretBinding, encrypt_secret_values
 from lakana_core.secrets.forms import secret_forms
 from lakana_core.secrets.keys import EnvKeyProvider
 from lakana_core.secrets.service import SecretService
@@ -7971,3 +7972,31 @@ def _tokens_minted(py: PyWorld) -> int:
     """
     with py.world.session() as session:
         return len(session.execute(select(TaskToken.id)).all())
+
+
+def test_a_stored_value_that_is_not_text_fails_the_task_for_good_naming_the_cause(
+    py: PyWorld,
+) -> None:
+    """An older row can hold one; the worker could not hide it, so the task never starts."""
+    _connection_with_secret(py)
+    with py.world.session() as session:
+        secret = session.execute(
+            select(Secret).where(Secret.name == "crm-db-connection")
+        ).scalar_one()
+        sealed = encrypt_secret_values(
+            {"password": "x\ud800yz"},
+            _INDEX_KEY,
+            SecretBinding(secret.id, secret.environment_id, secret.name),
+        )
+        secret.ciphertext, secret.nonce = sealed.ciphertext, sealed.nonce
+        secret.wrapped_data_key, secret.key_id = sealed.wrapped_data_key, sealed.key_id
+        session.commit()
+    py.deploy(connections=["crm-db"])
+    task, message = _fails(py, _with_key(py.engine(_writer(py.world))))
+    assert (task.status, task.attempt, task.failure_code) == (TaskStatus.FAILED, 1, "no_runtime")
+    assert message == (
+        "the secret of connection `crm-db` holds a value that is not valid text, so it could not "
+        "be hidden in the task's log; set it again: lakana connection update crm-db --env dev "
+        "--password-stdin (or --values-stdin)"
+    )
+    assert py.runner.tasks == []

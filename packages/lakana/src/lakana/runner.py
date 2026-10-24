@@ -1970,7 +1970,11 @@ _CONTROL_ESCAPES = {0x2028, 0x2029}
 
 
 def _mask(text: str, token: str) -> str:
-    """Replace the task token and every value registered to hide with ``***``.
+    """Replace every occurrence of the task token and of every value registered to hide.
+
+    Every occurrence of every value is a span, overlapping ones included; spans that overlap or
+    touch are joined and each joined span becomes one ``***`` (as the worker's redactor does),
+    so no part of a value is left beside a mask.
 
     Parameters
     ----------
@@ -1982,14 +1986,31 @@ def _mask(text: str, token: str) -> str:
     Returns
     -------
     str
-        The text, the longest value replaced first, so that one value inside another never
-        leaves the rest of the longer one behind.
+        The masked text.
     """
     state = context._state
     hidden = {token, *(state.secrets if state is not None else ())} - {""}
-    for value in sorted(hidden, key=len, reverse=True):
-        text = text.replace(value, "***")
-    return text
+    spans: list[tuple[int, int]] = []
+    for value in hidden:
+        at = text.find(value)
+        while at >= 0:
+            spans.append((at, at + len(value)))
+            at = text.find(value, at + 1)
+    if not spans:
+        return text
+    spans.sort()
+    joined = [spans[0]]
+    for start, end in spans[1:]:
+        if start <= joined[-1][1]:
+            joined[-1] = (joined[-1][0], max(joined[-1][1], end))
+        else:
+            joined.append((start, end))
+    out, kept = [], 0
+    for start, end in joined:
+        out += [text[kept:start], "***"]
+        kept = end
+    out.append(text[kept:])
+    return "".join(out)
 
 
 def _clean(text: str) -> str:

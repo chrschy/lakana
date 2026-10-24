@@ -6,6 +6,7 @@ mints it, for a running attempt of `gold.scores` that declares `crm-db` and `gon
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -224,3 +225,30 @@ def test_the_secret_is_in_no_log_line_of_the_request(
     captured = capfd.readouterr()
     logged = "\n".join(record.getMessage() for record in caplog.records)
     assert _PASSWORD not in logged + captured.out + captured.err
+
+
+@pytest.mark.parametrize("route", ["connections", "secrets"])
+def test_a_secret_value_that_is_not_text_is_refused_naming_only_its_key(
+    client: TestClient, route: str
+) -> None:
+    r"""`"\ud800"` is valid JSON but no text: refused with 422, the value never echoed."""
+    create_environment(client)
+    body: dict[str, object] = (
+        {
+            "name": "crm-db",
+            "kind": "postgresql",
+            "address": {"host": "db.example.com", "database": "crm"},
+            "settings": {"user": "reader"},
+            "secret_values": {"password": "pa\ud800ss-word"},
+        }
+        if route == "connections"
+        else {"name": "crm-pw", "values": {"password": "pa\ud800ss-word"}}
+    )
+    answer = client.post(
+        f"/api/v1/environments/dev/{route}",
+        headers={**AUTH_HEADER, "Content-Type": "application/json"},
+        content=json.dumps(body),  # ASCII: the surrogate travels as `\ud800`
+    )
+    assert answer.status_code == 422, answer.text
+    assert "`password`" in answer.text
+    assert "pa" + "\\ud800" not in answer.text and "ss-word" not in answer.text

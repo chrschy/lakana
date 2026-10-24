@@ -50,7 +50,9 @@ an environment variable or a file, and each value is shown as `***` in the task'
 failure message and its trace, also in its common encodings (a `repr`, JSON, a URL); a value
 shorter than 4 characters, another transformation of it, or a value derived from it (such as an
 OAuth2 access token) is not hidden unless a Lakana helper registers it. A worker that cannot
-decrypt the secret does not start the task. Every fetch is in the audit log; refusals are recorded
+decrypt a declared connection's secret when the attempt starts does not start it; a secret
+added, bound or rotated while an attempt runs may appear in the log the worker captures, so
+change secrets between runs. Every fetch is in the audit log; refusals are recorded
 at a limited rate per principal and the rest counted. The code you
 deploy can read the credentials of the connections its asset declares and send them anywhere the
 task can reach, so review an asset's `connections` with its code.
