@@ -1030,6 +1030,7 @@ class PythonRuntime:
             kept_table: KeptTable | None = None,
             in_transaction: Callable[[Session], None] | None = None,
             failure_code: FailureCode | None = None,
+            wrote_nothing: bool = False,
         ) -> TaskOutcome:
             """Build the outcome, with the output captured so far.
 
@@ -1055,6 +1056,8 @@ class PythonRuntime:
                 Work to land with the attempt's record (a failed integrity check's run failure).
             failure_code
                 Why the attempt failed; `None` for a success and a release.
+            wrote_nothing
+                A success whose task run committed nothing to the table.
 
             Returns
             -------
@@ -1075,6 +1078,7 @@ class PythonRuntime:
                 kept_table=kept_table,
                 in_transaction=in_transaction,
                 failure_code=failure_code,
+                wrote_nothing=wrote_nothing,
             )
 
         try:
@@ -1406,6 +1410,7 @@ class PythonRuntime:
                     )
                     if earlier
                     else None,
+                    wrote_nothing=not earlier,
                 )
         stop = cancel_kind(session, keeper, claimed.run_id)
         if stop is not None:

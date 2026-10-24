@@ -873,6 +873,7 @@ def _execute(
         kept_table=prepared.kept_table if succeeded else None,
         built_snapshot_id=write.snapshot_id if succeeded and prepared.kept_table else None,
         failure_code=code,
+        wrote_nothing=succeeded and write.snapshot_id is None and not rows,
     )
 
 

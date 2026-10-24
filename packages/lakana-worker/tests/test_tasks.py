@@ -2206,6 +2206,49 @@ def test_a_merge_asset_creates_its_table_and_later_runs_merge_on_its_key(world: 
     assert _ids(world, "silver.orders") == [1, 2, 3, 4, 5]
 
 
+def test_a_merge_that_changes_nothing_says_the_run_left_the_table_as_it_was(
+    world: World,
+) -> None:
+    """A failing blocking check after a merge that committed nothing: nothing to set back."""
+    _outside_table(world, "bronze.events", [1, 2, 3])
+    entry = {
+        "references": ["bronze.events"],
+        "materialize": "table",
+        "write_mode": "merge",
+        "first_write_mode": "create",
+        "incremental_key": None,
+        "write": "merge",
+        "key": ["id"],
+        "watermark": None,
+        "retry_delay_seconds": 0,
+        "retries": 0,
+    }
+    world.set_manifest(_entry("silver.orders", "SELECT id FROM bronze.events", **entry))
+    _start(world)
+    _drain(world)
+    assert _task(world, "silver.orders").status is TaskStatus.SUCCEEDED
+    world.set_manifest(
+        _entry("silver.orders", "SELECT id FROM bronze.events", **entry),
+        checks=[_check("no_threes", "SELECT id FROM silver.orders WHERE id = 3")],
+    )
+
+    run_id = _start(world)
+    _drain(world)
+
+    task = _task(world, "silver.orders")
+    assert task.status is TaskStatus.FAILED
+    assert task.error_message is not None
+    assert task.error_message.startswith(
+        "Check `silver.orders/no_threes` failed: 1 row (checks/silver/orders/no_threes.sql). "
+        "The table was not changed by this run, and nothing downstream was built."
+    )
+    assert "rollback failed" not in task.error_message.lower()
+    (result,) = _results(world, task.id)
+    assert result.rollback_outcome is RollbackOutcome.NOTHING_WRITTEN
+    assert "rollback: nothing_written" in _log(world, run_id, "silver.orders")
+    assert _ids(world, "silver.orders") == [1, 2, 3]
+
+
 def test_the_first_run_of_a_merge_asset_refuses_a_repeated_key_and_creates_nothing(
     world: World,
 ) -> None:

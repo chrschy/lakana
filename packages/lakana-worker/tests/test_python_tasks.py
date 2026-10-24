@@ -7701,6 +7701,31 @@ def test_an_empty_retry_after_an_attempt_that_created_the_table_ends_not_publish
     assert (rolled["outcome"], rolled["before"]) == ("unpublished", None)
 
 
+def test_an_empty_success_over_rows_that_fail_a_check_says_nothing_was_set_back(
+    py: PyWorld,
+) -> None:
+    """The check fails on rows an earlier run wrote; this run wrote nothing, so nothing goes back."""
+    py.deploy(write="append", watermark="id", write_mode="append")
+    _published_before(py)
+    _with_checks(py, _NO_ROWS)
+
+    claimed = _rerun(py, py.engine(_nothing_new))
+
+    task = _task(py.world, "gold.scores")
+    assert task.status is TaskStatus.FAILED
+    assert task.error_message is not None
+    assert task.error_message.startswith(
+        "Check `gold.scores/no_rows` failed: 1 row (checks/gold/scores/no_rows.sql). "
+        "The table was not changed by this run, and nothing downstream was built."
+    )
+    assert "rollback failed" not in task.error_message.lower()
+    with py.world.session() as session:
+        (result,) = results_of_task(session, claimed.task_run_id)
+    assert result.rollback_outcome is RollbackOutcome.NOTHING_WRITTEN
+    assert _ids(py.world, "gold.scores") == [0]
+    assert _rollbacks(py) == []
+
+
 def test_an_empty_success_of_a_run_that_wrote_nothing_has_nothing_to_set_back(
     py: PyWorld,
 ) -> None:
