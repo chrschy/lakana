@@ -148,6 +148,7 @@ def test_the_secret_never_shows_in_a_repr_or_a_str() -> None:
     assert str(found.secret) == "{'password': '***'}"
     assert f"{found.secret}" == "{'password': '***'}"
     assert _PASSWORD not in repr(found)
+    assert (len(found.secret), list(found.secret)) == (1, ["password"])
 
 
 def test_every_secret_value_is_registered_with_the_harness() -> None:

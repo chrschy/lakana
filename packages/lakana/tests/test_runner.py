@@ -4337,3 +4337,44 @@ def test_a_version_3_description_says_whether_the_table_exists(
     fields = {**_v3(watermark=_WATERMARK_ID), "table_exists": value}
     with pytest.raises(ValueError, match="table_exists must be true or false"):
         parse_description(world.description(**fields))
+
+
+@pytest.mark.parametrize(
+    ("body", "key"),
+    [
+        ("return obs.head(1)", ["id"]),
+        ("return obs.rename({'id': 'other'})", ["id"]),
+        (
+            "import uuid\nreturn pa.table({'id': pa.array([uuid.uuid4().bytes] * 2, pa.uuid())})",
+            ["id"],
+        ),
+    ],
+    ids=["one-row", "key-column-missing", "key-type-arrow-cannot-group"],
+)
+def test_a_merge_the_harness_cannot_judge_is_left_to_the_server(
+    world: _World, body: str, key: list[str]
+) -> None:
+    """A merge of one row, without its key column or keyed on a uuid goes to the server as is.
+
+    One row cannot repeat; a missing key column, or one pyarrow cannot group, is the server's to
+    judge.
+    """
+    _write_asset(world, body)
+    assert world.run(**_v3("merge", key=key)) == 0
+    (call,) = world.client.tables.calls
+    assert (call["method"], call["key"]) == ("merge", key)
+
+
+def test_a_function_whose_signature_cannot_be_read_is_called_without_ctx(world: _World) -> None:
+    """A `__signature__` that `inspect` refuses: the function is called with its inputs only."""
+    world.result_path.parent.mkdir(exist_ok=True)
+    (world.root / "assets" / "gold" / "scores.py").write_text(
+        "from lakana import asset\n\n\n"
+        "@asset(inputs={'obs': 'silver.weather'})\n"
+        "def f(obs, **rest):\n"
+        "    assert 'ctx' not in rest\n"
+        "    return obs\n\n\n"
+        "f.__signature__ = 'not a signature'\n"
+    )
+    assert world.run() == 0
+    assert _uploaded(world).to_pydict() == {"id": [1, 2]}

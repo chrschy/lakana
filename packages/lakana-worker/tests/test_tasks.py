@@ -2297,7 +2297,12 @@ def test_a_later_run_of_a_merge_asset_refuses_a_repeated_key_with_advice_for_its
         ({"write": "upsert"}, "the project version's write mode 'upsert' for silver.orders"),
         ({"key": []}, "the project version merges silver.orders without a key"),
         ({"key": "id"}, "the project version merges silver.orders without a key"),
+        (
+            {"first_write_mode": "replace"},
+            "the project version's write mode 'replace' for silver.orders is not valid",
+        ),
     ],
+    ids=["unknown-write", "no-key", "key-not-a-list", "merge-written-as-replace"],
 )
 def test_a_merge_entry_that_cannot_be_read_fails_without_writing(
     world: World, extra: dict[str, object], message: str

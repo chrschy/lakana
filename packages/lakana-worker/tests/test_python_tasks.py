@@ -44,6 +44,7 @@ from check_run_helpers import (
     _outside_table,
     _refused_text,
 )
+from sqlalchemy import delete as sqlalchemy_delete
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
@@ -7857,6 +7858,29 @@ def test_the_task_carries_the_kind_of_every_declared_connection(py: PyWorld) -> 
     (task,) = py.runner.tasks
     assert task.write == "replace"
     assert task.connections == {"crm-db": {"kind": "postgresql"}}
+    assert _task(py.world, "gold.scores").status is TaskStatus.SUCCEEDED
+
+
+def test_a_connection_deleted_after_the_attempt_was_prepared_hides_nothing(
+    py: PyWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Its row is gone, so it has no secret to hide; the task's own fetch is refused later."""
+    _connection(py)
+    py.deploy(connections=["crm-db"])
+    real = python_tasks_module._connection_secrets
+
+    def after_a_delete(session: Session, *args: object) -> tuple[str, ...]:
+        session.execute(sqlalchemy_delete(Connection).where(Connection.name == "crm-db"))
+        session.commit()
+        return real(session, *args)  # ty: ignore[invalid-argument-type]
+
+    monkeypatch.setattr(python_tasks_module, "_connection_secrets", after_a_delete)
+    engine = py.engine(_writer(py.world))
+    run_claimed(engine, py.claim_python(engine))
+
+    (task,) = py.runner.tasks
+    assert task.connections == {"crm-db": {"kind": "postgresql"}}
+    assert task.hidden == ()
     assert _task(py.world, "gold.scores").status is TaskStatus.SUCCEEDED
 
 

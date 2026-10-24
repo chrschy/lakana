@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import dataclasses
 import json
 import logging
 import uuid
@@ -453,3 +454,32 @@ def test_each_reason_records_its_first_refusal_and_a_suppressed_one_is_logged(
     assert "connection=nope-db" in line
     assert "asset=gold.scores" in line
     assert f"task_run_id={world.task.id}" in line
+
+
+def test_a_refusal_after_suppressed_ones_records_how_many_were_not_recorded(world: World) -> None:
+    """The next row a principal gets carries the count of the refusals in between."""
+    now = [0.0]
+    limiter = DenialAuditLimiter(1, clock=lambda: now[0])
+    p = world.principal()
+    for step in (0.0, 1.0, 60.0):
+        now[0] = step
+        with pytest.raises(PermissionDenied):
+            world.fetch(p, "nope-db", limiter)
+    first, later = world.events(_REFUSED)
+    assert "suppressed" not in first.detail
+    assert later.detail["suppressed"] == 1
+    assert later.detail["reason"] == "not_declared"
+
+
+def test_a_bound_attempt_whose_task_run_is_gone_is_described_without_its_run(
+    world: World,
+) -> None:
+    """The detail names the attempt the token is bound to; the run comes from its row."""
+    p = world.principal()
+    assert p.task_scope is not None and p.task_scope.bound is not None
+    gone = dataclasses.replace(p.task_scope.bound, task_run_id=uuid.uuid4())
+    ghost = dataclasses.replace(p, task_scope=dataclasses.replace(p.task_scope, bound=gone))
+    message, detail = _refused(world, ghost, "nope-db")
+    assert message == "connection `nope-db` is not declared by asset `gold.scores`"
+    assert "run_id" not in detail
+    assert detail["task_run_id"] == str(gone.task_run_id)
