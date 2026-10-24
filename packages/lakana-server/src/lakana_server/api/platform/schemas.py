@@ -1777,7 +1777,8 @@ class SecretOut(BaseModel):
     use_target
         The index's or repository's name; `None` otherwise, also when that entry was removed.
     use_target_url
-        Its URL, which is where the secret is sent; `None` when `use_target` is.
+        Its URL, which is where the secret is sent (for a connection, every ``host:port`` it
+        sends the secret to, joined by ``, ``); `None` when `use_target` is.
     """
 
     id: uuid.UUID

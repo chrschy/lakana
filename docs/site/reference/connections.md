@@ -81,7 +81,11 @@ A connection's secret is given one of three ways, and who may give it depends on
 
 A secret that another connection, a package index or a repository uses, or that the environment
 uses for its storage or webhooks, is never taken by naming it: an administrator moves it on purpose
-with `lakana secret bind`.
+with `lakana secret bind`. `lakana secret bind` prints every `host:port` the connection sends the
+secret to (an `oauth2` connection's token URL included), and `lakana secret list` shows them as
+`use_target_url`; read them before you bind. A refusal sent to someone who may not read the
+environment, such as a package index manager, says "a connection of environment 'prod'" without
+its name.
 
 A change that could send a connection's secret somewhere new also needs `MANAGE_SECRET`, unless
 the same change gives new values: a new address (`host`, `port`, `base_url`, `endpoint`, `bucket`,
@@ -276,7 +280,7 @@ it counted among the hidden nodes, without its name.
 | `CONNECTION_CREATED` | A connection was created. | `name`, `kind`, `address`, `secret` (its name) |
 | `CONNECTION_UPDATED` | A connection changed. | `name`, `changed` (such as `address.host`, `settings.tls`, `secret`), `address`, `secret` |
 | `CONNECTION_DELETED` | A connection was deleted. | `name`, `kind` |
-| `SECRET_CREATED`, `SECRET_BOUND` | New values created `<name>-connection`, or a secret was bound to a connection or let go of it. | `use` is `connection` |
+| `SECRET_CREATED`, `SECRET_BOUND` | New values created `<name>-connection`, or a secret was bound to a connection or let go of it. | `use` is `connection`; `url` of `SECRET_BOUND` is every `host:port` the connection sends the secret to, such as `api.example.com:443, login.example.org:443` for an `oauth2` connection whose token URL is on another host |
 
 No event holds a secret's value or a CA certificate. `lakana audit list --kind connection` lists
 every `CONNECTION_*` event.

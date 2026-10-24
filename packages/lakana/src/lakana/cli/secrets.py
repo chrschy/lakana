@@ -128,8 +128,8 @@ def _use_text(kind: str, target: str | None, url: str | None) -> str:
     target
         The index's, repository's or connection's name.
     url
-        Its URL as the server holds it (a connection's first ``host:port``); the person who
-        binds sees where the secret goes.
+        Its URL as the server holds it (for a connection, every ``host:port`` it sends the
+        secret to); the person who binds sees where the secret goes.
 
     Returns
     -------

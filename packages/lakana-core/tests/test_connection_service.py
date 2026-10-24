@@ -3,24 +3,27 @@
 from __future__ import annotations
 
 import base64
+import dataclasses
 import inspect
 import json
 import logging
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import Any
 
 import pytest
 from core_test_helpers import deploy_manifest
 from sqlalchemy import select
-from sqlalchemy.exc import OperationalError
+from sqlalchemy import update as sa_update
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from lakana_core.audit.authorization import AuditingAuthorization
 from lakana_core.audit.denial_limiter import DenialAuditLimiter
-from lakana_core.auth import AllowAllAuthorization, PrincipalRef, SecurableKind
+from lakana_core.auth import AllowAllAuthorization, PrincipalRef, SecurableKind, TaskScope
 from lakana_core.connections.kinds import ConnectionKind
 from lakana_core.connections.service import (
     ConnectionService,
@@ -1572,6 +1575,20 @@ class _PgError(Exception):
     """A driver error carrying a SQLSTATE, as pg8000 (in `args[0]["C"]`) or psycopg does."""
 
 
+class _PsycopgError(Exception):
+    """A driver error carrying its SQLSTATE as an attribute, as psycopg does.
+
+    Parameters
+    ----------
+    pgcode
+        The SQLSTATE.
+    """
+
+    def __init__(self, pgcode: str) -> None:
+        super().__init__("could not serialize access")
+        self.pgcode = pgcode
+
+
 @pytest.mark.parametrize(
     ("orig", "conflict"),
     [
@@ -1579,10 +1596,12 @@ class _PgError(Exception):
         (_PgError({"C": "40001"}), True),
         (_PgError({"C": "23505"}), False),
         (_PgError("no state"), False),
+        (_PsycopgError("40001"), True),
+        (_PsycopgError("23505"), False),
     ],
 )
 def test_a_deadlock_or_serialization_failure_is_a_conflict_to_retry(
-    session: Session, orig: _PgError, conflict: bool
+    session: Session, orig: Exception, conflict: bool
 ) -> None:
     """Two administrators swapping secrets may deadlock; the caller is told to try again.
 
@@ -1649,3 +1668,294 @@ def test_a_bind_that_deadlocks_is_a_conflict(world: World, monkeypatch: pytest.M
         world.secrets().bind(world.admin, secret.id, SecretUse.connection(row))
     monkeypatch.undo()
     assert world.secret("prod", "pw").use_kind is None
+
+
+def test_binding_names_every_host_the_secret_goes_to(world: World) -> None:
+    """An oauth2 client secret goes to the token URL's host too: the bind shows and records both.
+
+    `use_target_url` (the secret listing, `lakana secret bind`'s output) and the SECRET_BOUND
+    event name every endpoint of the connection, not only the API's.
+    """
+    world.connections().create(
+        world.admin,
+        "prod",
+        name="api",
+        kind=ConnectionKind.HTTP,
+        address={"base_url": "https://api.example.com/v1"},
+        settings={
+            "auth": "oauth2",
+            "client_id": "lakana",
+            "token_url": "https://login.example.org/oauth/token",
+        },
+    )
+    row = world.connection("prod", "api")
+    assert row is not None
+    service = world.secrets()
+    secret = world.make_secret("prod", "api-client", {"client_secret": "c"})
+
+    bound = service.bind(world.admin, secret.id, SecretUse.connection(row))
+
+    hosts = "api.example.com:443, login.example.org:443"
+    assert service.use_target_url(bound) == hosts
+    assert world.events(AuditEventType.SECRET_BOUND)[-1].detail["url"] == hosts
+
+
+def test_a_tcp_secret_names_its_host(world: World) -> None:
+    """A tcp connection's secret goes to its one host and port."""
+    world.connections().create(
+        world.admin,
+        "prod",
+        name="exports",
+        kind=ConnectionKind.TCP,
+        address={"host": "db.example.com", "port": 1521},
+        settings={},
+        secret_values={"password": "pw"},
+    )
+    secret = world.secret("prod", "exports-connection")
+    assert world.secrets().use_target_url(secret) == "db.example.com:1521"
+
+
+def test_a_task_token_cannot_list_or_show_connections(world: World) -> None:
+    """A principal acting with a task token is refused, naming no connection."""
+    world.postgres(world.data_engineer)
+    task = dataclasses.replace(
+        world.data_engineer,
+        task_scope=TaskScope(environment="prod", asset_scope=[], token_id=uuid.uuid4()),
+    )
+    service = world.connections()
+
+    for call in (lambda: service.list(task, "prod"), lambda: service.get(task, "prod", "crm-db")):
+        with pytest.raises(PermissionDenied) as caught:
+            call()
+        assert "crm-db" not in str(caught.value)
+        assert str(caught.value).startswith("a task cannot list or show connections")
+
+
+def test_an_update_gives_the_secret_one_way_only(world: World) -> None:
+    """A named secret and new values together, or a cleared secret with a new one, are refused."""
+    world.postgres(world.data_engineer)
+    service = world.connections()
+
+    with pytest.raises(ValidationError) as both:
+        service.update(
+            world.data_engineer,
+            "prod",
+            "crm-db",
+            secret="crm-pw",
+            secret_values={"password": "pw"},
+        )
+    with pytest.raises(ValidationError) as clear_and_new:
+        service.update(
+            world.data_engineer,
+            "prod",
+            "crm-db",
+            secret_values={"password": "pw"},
+            clear=["secret"],
+        )
+
+    assert str(both.value) == "give either --secret or --password-stdin/--values-stdin, not both"
+    assert str(clear_and_new.value) == (
+        "give a new secret or clear the secret, not both in the same change"
+    )
+    assert world.connections().get(world.analyst, "prod", "crm-db").secret == "crm-db-connection"
+
+
+def test_a_commit_refused_for_another_reason_is_a_conflict_without_its_statement(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A commit the database refuses, with no name taken, is a 409 to retry; nothing is kept.
+
+    The database's text, which holds the statement and its parameters, never reaches the
+    caller.
+
+    Parameters
+    ----------
+    world
+        The world.
+    monkeypatch
+        Makes the commit fail once.
+    """
+    original = world.session.commit
+    calls: list[int] = []
+
+    def refused_once() -> None:
+        """Refuse the first commit as the database would.
+
+        Raises
+        ------
+        IntegrityError
+            The first time.
+        """
+        calls.append(1)
+        if len(calls) == 1:
+            raise IntegrityError("INSERT INTO audit_events ... s3cr3t-value", {}, Exception("x"))
+        original()
+
+    monkeypatch.setattr(world.session, "commit", refused_once)
+
+    with pytest.raises(ConflictError) as caught:
+        world.postgres(world.data_engineer)
+
+    assert str(caught.value) == (
+        "Could not save connection `crm-db`: the write failed for a reason other than a name "
+        "collision. Try again."
+    )
+    assert world.connection("prod", "crm-db") is None
+
+
+def test_new_values_never_set_a_secret_revoked_after_the_connection_was_read(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A secret revoked between the first read and its lock is not set again.
+
+    The secret is read afresh under its lock before new values rotate it; revoked meanwhile,
+    it is left alone, and the fresh `crm-db-connection` the values would need is taken by
+    the revoked one's name.
+
+    Parameters
+    ----------
+    world
+        The world.
+    monkeypatch
+        Lets the first read see the secret as it was before a concurrent revoke.
+    """
+    world.postgres(world.data_engineer)
+    secret = world.secret("prod", "crm-db-connection")
+    secret.revoked_at = datetime.now(UTC)
+    world.session.commit()
+    before = secret.ciphertext
+    monkeypatch.setattr(ConnectionService, "_used_secret", lambda self, row: secret)
+
+    with pytest.raises(AlreadyExistsError, match="a secret `crm-db-connection` already exists"):
+        world.connections().update(
+            world.data_engineer, "prod", "crm-db", secret_values={"password": "new"}
+        )
+    assert world.secret("prod", "crm-db-connection").ciphertext == before
+
+
+def test_naming_a_secret_for_settings_that_take_none_is_refused_on_update(world: World) -> None:
+    """An http connection without auth takes no secret, by name either."""
+    service = world.connections()
+    service.create(
+        world.admin,
+        "prod",
+        name="api",
+        kind=ConnectionKind.HTTP,
+        address={"base_url": "https://api.example.com"},
+        settings={},
+    )
+    world.make_secret("prod", "api-token", {"token": "t"})
+
+    with pytest.raises(ValidationError, match="An http connection with auth none takes no secret"):
+        service.update(world.admin, "prod", "api", secret="api-token")
+    assert world.secret("prod", "api-token").use_kind is None
+
+
+def test_a_secret_revoked_while_its_binding_is_checked_is_not_taken(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The binding check reads the secret afresh under its lock; a revoked one is not used.
+
+    Parameters
+    ----------
+    world
+        The world.
+    monkeypatch
+        Revokes the secret during the check, as a concurrent revoke would.
+    """
+    from lakana_core.connections import service as module
+
+    world.postgres(world.data_engineer, secret_values=None)
+    secret = world.make_secret("prod", "crm-pw", {"password": "pw"})
+    original = module.bind_or_require_named_secrets
+
+    def revoking(*args: object, **kwargs: object) -> None:
+        """Revoke the secret, then run the real check.
+
+        Parameters
+        ----------
+        *args
+            Passed on.
+        **kwargs
+            Passed on.
+        """
+        secret.revoked_at = datetime.now(UTC)
+        original(*args, **kwargs)  # ty: ignore[invalid-argument-type]
+
+    monkeypatch.setattr(module, "bind_or_require_named_secrets", revoking)
+
+    with pytest.raises(NotFoundError) as caught:
+        world.connections().update(world.admin, "prod", "crm-db", secret="crm-pw")
+
+    assert str(caught.value) == (
+        "environment `prod` has no secret `crm-pw` this connection may use; "
+        "`lakana secret list --env prod` lists them"
+    )
+    assert world.connections().get(world.analyst, "prod", "crm-db").secret is None
+
+
+def test_a_bind_whose_secret_moved_meanwhile_is_a_conflict(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A secret bound to a third connection while the locks are taken is not moved; try again.
+
+    Parameters
+    ----------
+    world
+        The world.
+    monkeypatch
+        Moves the secret to `third` between the connection locks and the secret's re-read.
+    """
+    from lakana_core.secrets import service as module
+
+    world.postgres(world.admin, "first", secret_values=None)
+    world.postgres(world.admin, "second", secret_values=None)
+    world.postgres(world.admin, "third", secret_values=None)
+    first, second, third = (world.connection("prod", n) for n in ("first", "second", "third"))
+    assert first is not None and second is not None and third is not None
+    secrets = world.secrets()
+    secret = world.make_secret("prod", "pw", {"password": "pw"}, SecretUse.connection(first))
+    original = module.lock_entry
+
+    def moving(*args: object, **kwargs: object) -> object:
+        """Bind the secret to `third` behind the caller's back, then lock as usual.
+
+        Parameters
+        ----------
+        *args
+            Passed on.
+        **kwargs
+            Passed on.
+
+        Returns
+        -------
+        object
+            What the real lock returns.
+        """
+        world.session.execute(
+            sa_update(Secret).where(Secret.id == secret.id).values(use_target_id=third.id)
+        )
+        return original(*args, **kwargs)  # ty: ignore[invalid-argument-type]
+
+    monkeypatch.setattr(module, "lock_entry", moving)
+
+    with pytest.raises(ConflictError, match=r"Secret 'pw' changed at the same time; try again\."):
+        secrets.bind(world.admin, secret.id, SecretUse.connection(second))
+
+
+def test_the_listing_names_where_each_secret_goes(world: World) -> None:
+    """Unbound: nothing; an index: its name and URL; a connection: its name and hosts."""
+    index = PackageIndexService(world.session, world.authz()).create(
+        world.admin, name="corp", url="https://corp.example.org/simple"
+    )
+    secrets = world.secrets()
+    unbound = world.make_secret("prod", "loose", {"password": "pw"})
+    for_index = world.make_secret(
+        "prod", "corp-pw", {"password": "pw"}, SecretUse.package_index(index)
+    )
+
+    assert (secrets.use_target_name(unbound), secrets.use_target_url(unbound)) == (None, None)
+    assert (secrets.use_target_name(for_index), secrets.use_target_url(for_index)) == (
+        "corp",
+        "https://corp.example.org/simple",
+    )

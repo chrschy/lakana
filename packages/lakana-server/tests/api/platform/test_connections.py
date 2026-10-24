@@ -756,3 +756,38 @@ def test_a_badly_shaped_secret_values_names_a_connection_key(client_as: ClientAs
     text = response.text
     assert '{\\"password\\": \\"...\\"}' in text
     assert "access_key_id" not in text
+
+
+def test_binding_shows_every_host_the_secret_goes_to(
+    client: TestClient, client_as: ClientAs
+) -> None:
+    """An oauth2 connection's client secret also goes to the token URL's host: the bind says so."""
+    admin = client_as("admin")
+    created = admin.post(
+        _BASE,
+        json={
+            "name": "api",
+            "kind": "http",
+            "address": {"base_url": "https://api.example.com/v1"},
+            "settings": {
+                "auth": "oauth2",
+                "client_id": "lakana",
+                "token_url": "https://login.example.org/oauth/token",
+            },
+        },
+    )
+    assert created.status_code == 201, created.text
+    admin.post(
+        "/api/v1/environments/prod/secrets",
+        json={"name": "api-client", "values": {"client_secret": "c"}},
+    )
+
+    bound = admin.put(
+        "/api/v1/environments/prod/secrets/api-client/use",
+        json={"kind": "connection", "target": "api"},
+    )
+
+    hosts = "api.example.com:443, login.example.org:443"
+    assert bound.status_code == 200, bound.text
+    assert bound.json()["use_target_url"] == hosts
+    assert _details(client, AuditEventType.SECRET_BOUND)[-1]["url"] == hosts

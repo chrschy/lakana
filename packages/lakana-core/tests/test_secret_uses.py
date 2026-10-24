@@ -24,9 +24,13 @@ from lakana_core.models import (
 from lakana_core.secrets.uses import (
     SecretUse,
     SecretUseRefused,
+    adopt_connection_secret,
     approved_storage_options,
     bind_command,
     describe_use,
+    detach_from_connection,
+    lock_entry,
+    require_connection_takes,
     require_use,
     resolve_use,
     target_row,
@@ -414,8 +418,17 @@ def _connection(
 
 
 def test_a_connection_use_names_its_option_and_itself() -> None:
-    """`--connection <name>` selects it; a message calls it `connection '<name>'`."""
-    row = Connection(id=uuid.uuid4(), name="crm-db")
+    """`--connection <name>` selects it; a message calls it `connection '<name>'`.
+
+    Its URL is the host and port it sends the secret to.
+    """
+    row = Connection(
+        id=uuid.uuid4(),
+        name="crm-db",
+        kind=ConnectionKind.POSTGRESQL,
+        address={"host": "db.example.com", "port": 5432, "database": "crm"},
+        settings={"user": "reader"},
+    )
 
     use = SecretUse.connection(row)
 
@@ -423,7 +436,7 @@ def test_a_connection_use_names_its_option_and_itself() -> None:
         SecretUseKind.CONNECTION,
         row.id,
         "crm-db",
-        None,
+        "db.example.com:5432",
     )
     assert use.option() == "--connection crm-db"
     assert use.wanted() == "connection 'crm-db'"
@@ -491,3 +504,47 @@ def test_resolve_use_finds_a_connection_in_the_given_environment_only(
         resolve_use(session, SecretUseKind.CONNECTION, "crm-db", environment_id=dev.id)
     with pytest.raises(ValueError, match="needs the environment"):
         resolve_use(session, SecretUseKind.CONNECTION, "crm-db")
+
+
+def test_a_connection_removed_before_its_lock_is_reported(
+    session: Session, principal: PrincipalRef
+) -> None:
+    """`lock_entry` on a connection deleted meanwhile says so instead of binding to nothing."""
+    env = _environment(session)
+    row = _connection(session, env, principal)
+    use = SecretUse.connection(row)
+    session.delete(row)
+    session.commit()
+
+    with pytest.raises(NotFoundError, match="The connection was removed by someone else"):
+        lock_entry(session, use, env)
+
+
+def test_the_connection_helpers_leave_alone_what_they_do_not_own(
+    session: Session, principal: PrincipalRef
+) -> None:
+    """Each helper changes only a connection that exists and names this very secret.
+
+    `adopt_connection_secret` and `require_connection_takes` do nothing for a connection id that
+    names no row (deleted in the same transaction); `detach_from_connection` keeps a connection
+    that names another secret.
+    """
+    env = _environment(session)
+    crm = _connection(session, env, principal)
+    kept = _secret(session, env, principal, "kept", SecretUseKind.CONNECTION, crm.id)
+    crm.secret_id = kept.id
+    session.commit()
+    gone = uuid.uuid4()
+    stray = _secret(session, env, principal, "stray", SecretUseKind.CONNECTION, gone)
+
+    adopt_connection_secret(session, principal, stray, env.name)
+    require_connection_takes(
+        session,
+        SecretUse(SecretUseKind.CONNECTION, gone, "gone"),
+        "stray",
+        {"password": "x"},
+    )
+    detach_from_connection(session, stray, crm.id)
+
+    assert crm.secret_id == kept.id
+    assert session.get(Connection, gone) is None

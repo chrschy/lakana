@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 from lakana_core.audit.authorization import AuditingAuthorization
 from lakana_core.audit.service import AuditService
 from lakana_core.auth import Action, AuthorizationService, PrincipalRef, Securable
+from lakana_core.connections.endpoints import endpoint_hosts
 from lakana_core.connections.kinds import check_secret_values, takes_secret
 from lakana_core.errors import NotFoundError, PermissionDenied, ValidationError
 from lakana_core.identifiers import shown
@@ -191,9 +192,15 @@ class SecretUse:
         Returns
         -------
         SecretUse
-            The use (no URL: a connection's address is recorded on its own audit events).
+            The use; its URL is every ``host:port`` the connection sends the secret to
+            (`endpoint_hosts`), so a binding's audit event records where it goes.
         """
-        return cls(SecretUseKind.CONNECTION, row.id, row.name)
+        return cls(
+            SecretUseKind.CONNECTION,
+            row.id,
+            row.name,
+            endpoint_hosts(row.kind, row.address, row.settings),
+        )
 
     @classmethod
     def environment(cls) -> SecretUse:
@@ -964,6 +971,12 @@ def bind_or_require_named_secrets(
             cause, reason = f"is not bound to {use.wanted()}", "secret_not_bound_to_entry"
         else:
             described = describe_use(session, current, secret.use_target_id)
+            if current is SecretUseKind.CONNECTION and not authz.permits(
+                p, Action.READ_ENVIRONMENT, scope
+            ):
+                # An index or repository manager may not read the environment's connections:
+                # the refusal must not name one.
+                described = f"a connection of environment '{env_name}'"
             cause, reason = (
                 f"is bound to {described}, not to {use.wanted()}",
                 "secret_bound_elsewhere",

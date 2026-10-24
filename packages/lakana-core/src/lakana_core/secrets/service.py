@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 
 from lakana_core.audit.service import AuditService
 from lakana_core.auth import Action, AuthorizationService, PrincipalRef, Securable
-from lakana_core.connections.endpoints import endpoints
+from lakana_core.connections.endpoints import endpoint_hosts
 from lakana_core.db import refuse_concurrent_change
 from lakana_core.errors import AlreadyExistsError, ConflictError, NotFoundError, ValidationError
 from lakana_core.identifiers import shown
@@ -534,17 +534,16 @@ class SecretService:
         Returns
         -------
         str or None
-            The URL of an index or repository; for a connection, which has no URL, the
-            ``host:port`` of its first endpoint, or its name for a connection read from a
-            mount; never a secret. `None` for an unbound secret, the environment use, or a
+            The URL of an index or repository; for a connection, which has no URL, every
+            ``host:port`` it sends the secret to, joined by ``, `` (an oauth2 token URL's host
+            included); never a secret. `None` for an unbound secret, the environment use, or a
             target that was removed.
         """
         if secret.use_kind is None:
             return None
         row = target_row(self._session, secret.use_kind, secret.use_target_id)
         if isinstance(row, Connection):
-            found = endpoints(row.kind, row.address, row.settings)
-            return f"{found[0].host}:{found[0].port}" if found else row.name
+            return endpoint_hosts(row.kind, row.address, row.settings)
         return row.url if row is not None else None
 
     def list_for_environment(self, p: PrincipalRef, environment: str) -> list[Secret]:

@@ -112,3 +112,30 @@ def endpoints(
         if all((e.host, e.port) != (endpoint.host, endpoint.port) for e in unique):
             unique.append(endpoint)
     return tuple(unique)
+
+
+def endpoint_hosts(
+    kind: ConnectionKind, address: Mapping[str, Any], settings: Mapping[str, Any]
+) -> str | None:
+    """Write every ``host:port`` a connection sends its secret to, for a person to read.
+
+    Shown when a secret is bound to the connection and recorded in the binding's audit event:
+    an oauth2 client secret goes to the token URL's host as well as the API's.
+
+    Parameters
+    ----------
+    kind
+        The kind.
+    address
+        The validated address.
+    settings
+        The validated settings.
+
+    Returns
+    -------
+    str or None
+        The endpoints joined by ``, ``, in `endpoints` order; `None` for a kind read from a
+        mount, which has none.
+    """
+    found = endpoints(kind, address, settings)
+    return ", ".join(f"{e.host}:{e.port}" for e in found) or None

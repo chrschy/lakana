@@ -1352,7 +1352,8 @@ class Secret:
     use_target
         The bound index's or repository's name, when there is one.
     use_target_url
-        Its URL, which is where the secret is sent, when there is one.
+        Its URL, which is where the secret is sent, when there is one (for a connection,
+        every ``host:port`` it sends the secret to, joined by ``, ``).
     """
 
     id: str
