@@ -589,8 +589,10 @@ def test_unknown_name_is_404_listing_nothing(client_as: ClientAs, created: dict[
     assert missing_env.json()["detail"] == "No environment named 'nowhere'."
 
 
-def test_a_taken_name_or_secret_name_is_409(client_as: ClientAs, created: dict[str, Any]) -> None:
-    """Both conflicts name the next step."""
+def test_a_taken_name_is_409_and_a_taken_secret_name_takes_the_next(
+    client_as: ClientAs, created: dict[str, Any]
+) -> None:
+    """A taken connection name is a 409; a taken `<name>-connection` gives `-2`."""
     engineer = client_as("data_engineer")
 
     again = engineer.post(_BASE, json=_PG)
@@ -600,15 +602,11 @@ def test_a_taken_name_or_secret_name_is_409(client_as: ClientAs, created: dict[s
         "`lakana connection update crm-db --env prod`"
     )
 
-    made = client_as("admin").post(
-        "/api/v1/environments/prod/secrets",
-        json={"name": "web-connection", "values": {"password": "pw"}},
-    )
-    assert made.status_code == 201, made.text
-    taken = engineer.post(_BASE, json={**_PG, "name": "web", "secret_values": {"password": _VALUE}})
-    assert taken.status_code == 409
-    assert "a secret `web-connection` already exists in `prod`" in taken.json()["detail"]
-    assert engineer.get(f"{_BASE}/web").status_code == 404
+    assert engineer.delete(f"{_BASE}/crm-db").status_code == 204
+    recreated = engineer.post(_BASE, json={**_PG, "secret_values": {"password": _VALUE}})
+    assert recreated.status_code == 201, recreated.text
+    assert recreated.json()["secret"] == "crm-db-connection-2"
+    assert engineer.get(f"{_BASE}/crm-db").json()["secret"] == "crm-db-connection-2"
 
 
 def test_delete_while_declared_is_409(client: TestClient, client_as: ClientAs) -> None:

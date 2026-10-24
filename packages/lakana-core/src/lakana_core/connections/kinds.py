@@ -957,6 +957,81 @@ def _json_size(values: Mapping[str, Any]) -> int:
         ) from None
 
 
+def s3_default_endpoint(region: str) -> str:
+    """Give the AWS endpoint of a region, the default of an `s3` connection's `endpoint`.
+
+    Parameters
+    ----------
+    region
+        The region.
+
+    Returns
+    -------
+    str
+        ``https://s3.<region>.amazonaws.com``.
+    """
+    return f"https://s3.{region}.amazonaws.com"
+
+
+def merge_part(stored: Mapping[str, Any], changes: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Lay changes over a stored address or settings; a key given as `None` is removed.
+
+    Parameters
+    ----------
+    stored
+        The stored address or settings.
+    changes
+        The keys to change, or `None` for none.
+
+    Returns
+    -------
+    dict
+        The part after the change, not yet validated.
+    """
+    merged = dict(stored)
+    for key, value in (changes or {}).items():
+        if value is None:
+            merged.pop(key, None)
+        else:
+            merged[key] = value
+    return merged
+
+
+def follow_region(
+    kind: ConnectionKind, before: Mapping[str, Any], changes: Mapping[str, Any] | None
+) -> dict[str, Any]:
+    """Lay address changes over a stored address, moving a default `s3` endpoint with its region.
+
+    An `s3` endpoint that is the default of the stored region was derived from it, so a new
+    `region` without an `endpoint` derives the endpoint again; a custom endpoint, or one given
+    in the same change, stays. A key changed to `None` is removed.
+
+    Parameters
+    ----------
+    kind
+        The kind.
+    before
+        The stored address.
+    changes
+        The keys to change, or `None` for none.
+
+    Returns
+    -------
+    dict
+        The address after the change, not yet validated.
+    """
+    merged = merge_part(before, changes)
+    if (
+        _kind(kind) is ConnectionKind.S3
+        and changes
+        and "region" in changes
+        and "endpoint" not in changes
+        and before.get("endpoint") == s3_default_endpoint(str(before.get("region")))
+    ):
+        merged.pop("endpoint", None)
+    return merged
+
+
 def validate_connection(
     kind: ConnectionKind | str, address: Mapping[str, Any], settings: Mapping[str, Any]
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -1002,7 +1077,7 @@ def validate_connection(
             raise ValidationError(_problem(kind, part, model, exc) + ".") from None
     new_address, new_settings = checked
     if kind is ConnectionKind.S3 and "endpoint" not in new_address:
-        new_address["endpoint"] = f"https://s3.{new_address['region']}.amazonaws.com"
+        new_address["endpoint"] = s3_default_endpoint(new_address["region"])
     return new_address, new_settings
 
 

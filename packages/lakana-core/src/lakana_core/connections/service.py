@@ -4,9 +4,10 @@
 and shows. A connection has at most one bound secret (`SecretUseKind.CONNECTION`), and who may
 give it which secret is split by case:
 
-- new values (`--password-stdin`, `--values-stdin`) create a secret `<name>-connection`, born
-  bound to the connection, or set the connection's own secret again: `MANAGE_CONNECTION` is
-  enough, because nothing that existed before goes anywhere new;
+- new values (`--password-stdin`, `--values-stdin`) create a secret `<name>-connection` (or the
+  next free `<name>-connection-N` when a secret holds that name), born bound to the connection,
+  or set the connection's own secret again: `MANAGE_CONNECTION` is enough, because nothing that
+  existed before goes anywhere new;
 - naming the secret already bound to the connection keeps it: `MANAGE_CONNECTION` is enough;
 - naming any other secret binds it only for a holder of `MANAGE_SECRET`
   (`bind_or_require_named_secrets`), and a secret bound elsewhere or used by the environment is
@@ -40,6 +41,8 @@ from lakana_core.connections.kinds import (
     ConnectionKind,
     check_secret_values,
     fingerprint,
+    follow_region,
+    merge_part,
     moves_secret,
     takes_secret,
     validate_connection,
@@ -84,6 +87,8 @@ _NAME_RULE = (
     "connection names are lower-case letters, digits and '-', starting with a letter, at most 63"
 )
 _BOTH = "give either --secret or --password-stdin/--values-stdin, not both"
+_MAX_SECRET_NUMBER = 100
+"""The highest N of a new secret's name `<connection>-connection-N`."""
 _CLEAR_SECRET = "secret"  # nosec B105 -- the word a caller clears, not a credential
 
 
@@ -158,30 +163,6 @@ def missing_connections(
         query = query.with_for_update(read=True)
     found = set(session.execute(query).scalars())
     return [name for name in names if name not in found]
-
-
-def _merged(stored: Mapping[str, Any], changes: Mapping[str, Any] | None) -> dict[str, Any]:
-    """Lay changes over a stored part; a key given as `None` is removed.
-
-    Parameters
-    ----------
-    stored
-        The stored address or settings.
-    changes
-        The keys to change, or `None` for none.
-
-    Returns
-    -------
-    dict
-        The part after the change, not yet validated.
-    """
-    merged = dict(stored)
-    for key, value in (changes or {}).items():
-        if value is None:
-            merged.pop(key, None)
-        else:
-            merged[key] = value
-    return merged
 
 
 def _changed(part: str, before: Mapping[str, Any], after: Mapping[str, Any]) -> list[str]:
@@ -443,7 +424,8 @@ class ConnectionService:
         secret
             The name of an existing secret of the environment to use.
         secret_values
-            Values for a new secret `<name>-connection`, born bound to the connection.
+            Values for a new secret `<name>-connection` (or the next free
+            `<name>-connection-N`), born bound to the connection.
 
         Returns
         -------
@@ -463,7 +445,10 @@ class ConnectionService:
             For a name outside the rule, an invalid address, settings or secret keys, both
             `secret` and `secret_values`, or a secret for a kind that takes none.
         AlreadyExistsError
-            If the name is taken in the environment, or a secret `<name>-connection` exists.
+            If the name is taken in the environment, or new values find every name of
+            `_free_secret_name` taken.
+        ConflictError
+            If the new secret's name was taken at the same time.
         LakanaError
             If no usable secrets master key is configured; nothing is kept.
         """
@@ -631,7 +616,7 @@ class ConnectionService:
             The name of a secret of the environment to use instead.
         secret_values
             New values: they set the connection's own secret again, or create
-            `<name>-connection` when it has none.
+            `<name>-connection` (or the next free `<name>-connection-N`) when it has none.
         clear
             ``secret`` (stop using a secret and unbind it) and settings keys to remove.
 
@@ -654,8 +639,9 @@ class ConnectionService:
             If nothing changes, `clear` names something the connection does not have, the
             result is invalid, the secret is given two ways, or the kind takes no secret.
         AlreadyExistsError
-            If new values need a secret `<name>-connection` and one that is not this
-            connection's own exists.
+            If new values need a new secret and every name of `_free_secret_name` is taken.
+        ConflictError
+            If the new secret's name was taken at the same time.
         LakanaError
             If no usable secrets master key is configured; nothing is kept.
         """
@@ -738,7 +724,7 @@ class ConnectionService:
         ValidationError
             If `clear` names something the connection does not have, or the result is invalid.
         AlreadyExistsError
-            If new values need a secret `<name>-connection` that exists and is not its own.
+            If new values need a new secret and every name it could take is taken.
         """
         name = row.name
         if row.secret_id is not None and self._used_secret(row) is None:
@@ -756,11 +742,11 @@ class ConnectionService:
                 "give a new secret or clear the secret, not both in the same change"
             )
         old_address, old_settings = dict(row.address), dict(row.settings)
-        wanted_settings = _merged(old_settings, settings)
+        wanted_settings = merge_part(old_settings, settings)
         for key in clear:
             wanted_settings.pop(key, None)
         new_address, new_settings = validate_connection(
-            row.kind, _merged(old_address, address), wanted_settings
+            row.kind, follow_region(row.kind, old_address, address), wanted_settings
         )
         if secret_values is not None:
             check_secret_values(row.kind, new_settings, secret_values)
@@ -924,7 +910,7 @@ class ConnectionService:
         except IntegrityError as exc:
             self._collision(env, name, exc)
 
-    def _flush(self, env: Environment, name: str, *, secret_first: bool = False) -> None:
+    def _flush(self, env: Environment, name: str, *, secret: str | None = None) -> None:
         """Flush, and turn a unique-constraint failure into a named error, as `_commit` does.
 
         A concurrent create of the same connection or secret is refused by the database at the
@@ -936,24 +922,25 @@ class ConnectionService:
             The environment.
         name
             The connection's name.
-        secret_first
-            Look for a clashing `<name>-connection` secret before the connection (the flush
-            wrote a secret, and the connection exists already on an update).
+        secret
+            The name of the secret the flush wrote, if it wrote one: a clash on it is looked
+            for first (the connection exists already on an update).
 
         Raises
         ------
         AlreadyExistsError
-            If the connection or the secret exists.
+            If the connection exists.
         ConflictError
-            If the write failed for another reason.
+            If the secret's name was taken at the same time, or the write failed for another
+            reason.
         """
         try:
             self._session.flush()
         except IntegrityError as exc:
-            self._collision(env, name, exc, secret_first=secret_first)
+            self._collision(env, name, exc, secret=secret)
 
     def _collision(
-        self, env: Environment, name: str, exc: IntegrityError, *, secret_first: bool = False
+        self, env: Environment, name: str, exc: IntegrityError, *, secret: str | None = None
     ) -> NoReturn:
         """Roll back after a refused write and say which name was taken.
 
@@ -966,27 +953,25 @@ class ConnectionService:
         exc
             The database's refusal; its text, which holds the statement and its parameters,
             never reaches the caller.
-        secret_first
-            Look for the secret before the connection.
+        secret
+            The name of the secret the write created, if any; looked for first.
 
         Raises
         ------
         AlreadyExistsError
-            If the connection or the secret `<name>-connection` exists.
+            If the connection exists.
         ConflictError
-            Otherwise.
+            If the secret's name was taken at the same time (another try picks the next free
+            name), or the write failed for another reason.
         """
         self._session.rollback()
-        checks = [
-            (lambda: self._exists(env, name), self._taken),
-            (
-                lambda: self._secret_named(env, f"{name}-connection") is not None,
-                self._secret_taken,
-            ),
-        ]
-        for found, message in reversed(checks) if secret_first else checks:
-            if found():
-                raise AlreadyExistsError(message(env, name)) from exc
+        if secret is not None and self._secret_named(env, secret) is not None:
+            raise ConflictError(
+                f"secret `{shown(secret)}` was created in `{shown(env.name)}` at the same time; "
+                "try again"
+            ) from exc
+        if self._exists(env, name):
+            raise AlreadyExistsError(self._taken(env, name)) from exc
         raise ConflictError(
             f"Could not save connection `{shown(name)}`: the write failed for a reason other "
             "than a name collision. Try again."
@@ -1011,9 +996,12 @@ class ConnectionService:
             select(Secret).where(Secret.environment_id == env.id, Secret.name == secret)
         ).scalar_one_or_none()
 
-    @staticmethod
-    def _secret_taken(env: Environment, name: str) -> str:
-        """Write the message for a taken `<name>-connection` secret.
+    def _free_secret_name(self, env: Environment, name: str) -> str:
+        """Choose the name of a connection's new secret: the first free of its candidates.
+
+        ``<name>-connection``, then ``<name>-connection-2`` up to ``-100``. A name any secret
+        of the environment holds (bound elsewhere, unbound or revoked) is never reused, so no
+        secret is overwritten.
 
         Parameters
         ----------
@@ -1025,12 +1013,23 @@ class ConnectionService:
         Returns
         -------
         str
-            The message, naming `--secret`.
+            The name.
+
+        Raises
+        ------
+        AlreadyExistsError
+            If every candidate is taken; the message says what works without an administrator.
         """
-        secret = f"{name}-connection"
-        return (
-            f"a secret `{shown(secret)}` already exists in `{shown(env.name)}`; bind it with "
-            f"--secret {shown(secret)} or remove it first"
+        base = f"{name}-connection"
+        for number in range(1, _MAX_SECRET_NUMBER + 1):
+            candidate = base if number == 1 else f"{base}-{number}"
+            if self._secret_named(env, candidate) is None:
+                return candidate
+        raise AlreadyExistsError(
+            f"secrets `{shown(base)}` to `{shown(base)}-{_MAX_SECRET_NUMBER}` all exist in "
+            f"`{shown(env.name)}`; give the connection another name, or create it without new "
+            "values and ask an administrator to bind a secret to it: `lakana secret bind NAME "
+            f"--env {shown(env.name)} --connection {shown(name)}`"
         )
 
     def _secret_name(self, row: Connection) -> str | None:
@@ -1112,7 +1111,10 @@ class ConnectionService:
     def _new_secret(
         self, p: PrincipalRef, env: Environment, row: Connection, values: dict[str, str]
     ) -> Secret:
-        """Create `<name>-connection`, born bound to the connection, and let go of any other.
+        """Create the connection's new secret, born bound to it, and let go of any other.
+
+        It is named `<name>-connection`, or the next free `<name>-connection-N`
+        (`_free_secret_name`).
 
         Parameters
         ----------
@@ -1133,20 +1135,21 @@ class ConnectionService:
         Raises
         ------
         AlreadyExistsError
-            If a secret of that name exists (revoked or not).
+            If every name the secret could take is taken.
+        ConflictError
+            If the chosen name was taken at the same time.
         """
-        if self._secret_named(env, f"{row.name}-connection") is not None:
-            raise AlreadyExistsError(self._secret_taken(env, row.name))
+        chosen = self._free_secret_name(env, row.name)
         secret = insert_secret(
             self._session,
             self._key_provider,
             p,
             env,
-            name=f"{row.name}-connection",
+            name=chosen,
             values=values,
             use=SecretUse.connection(row),
         )
-        self._flush(env, row.name, secret_first=True)
+        self._flush(env, row.name, secret=chosen)
         self._let_go(p, env, row, keep=secret.id)
         return secret
 

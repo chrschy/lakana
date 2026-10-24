@@ -700,3 +700,25 @@ def test_the_cli_options_of_each_kind_are_its_fields() -> None:
         secretless = kind in (ConnectionKind.SQLITE_FILE, ConnectionKind.DIRECTORY)
         assert set(cli.SECRET_OPTIONS) <= set(options) or secretless, kind
         assert not (secretless and set(cli.SECRET_OPTIONS) & set(options)), kind
+
+
+def test_follow_region_moves_only_a_derived_s3_endpoint() -> None:
+    """A default endpoint follows a new region; a custom or a newly given one stays."""
+    from lakana_core.connections.kinds import follow_region
+
+    aws = {
+        "bucket": "b",
+        "region": "eu-central-1",
+        "endpoint": "https://s3.eu-central-1.amazonaws.com",
+    }
+    custom = {**aws, "endpoint": "https://minio.example.com"}
+
+    assert "endpoint" not in follow_region(K.S3, aws, {"region": "us-east-1"})
+    assert follow_region(K.S3, custom, {"region": "us-east-1"})["endpoint"] == (
+        "https://minio.example.com"
+    )
+    given = {"region": "us-east-1", "endpoint": "https://s3.example.org"}
+    assert follow_region(K.S3, aws, given)["endpoint"] == "https://s3.example.org"
+    assert follow_region(K.S3, aws, {"bucket": "c"}) == {**aws, "bucket": "c"}
+    assert follow_region(K.S3, aws, None) == aws
+    assert follow_region(K.POSTGRESQL, {"host": "h", "port": 1}, {"port": None}) == {"host": "h"}

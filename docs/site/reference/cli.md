@@ -1327,7 +1327,7 @@ Usage: `lakana connection create [OPTIONS] {name}`
 
 Create connection NAME of kind --kind; needs the right to manage connections.
 
-Give the kind's address and settings options, and its secret one of three ways: `--password-stdin` (stdin becomes the password, token or key the kind takes), `--values-stdin` (a JSON object of several keys), both of which create a secret NAME-connection that only this connection uses; or `--secret` with an existing secret. The values are never shown again. A connection that needs no secret takes none.
+Give the kind's address and settings options, and its secret one of three ways: `--password-stdin` (stdin becomes the password, token or key the kind takes), `--values-stdin` (a JSON object of several keys), both of which create a secret NAME-connection (NAME-connection-2, -3, ... when a secret holds that name) that only this connection uses; or `--secret` with an existing secret. The values are never shown again. A connection that needs no secret takes none.
 
 | Name | Type | Default | Description |
 |---|---|---|---|
@@ -1390,7 +1390,7 @@ Usage: `lakana connection update [OPTIONS] {name}`
 
 Change connection NAME; only the options given change. Its name and kind never change.
 
-`--password-stdin` or `--values-stdin` sets the connection's own secret again (or creates NAME-connection when it has none). A change that could send its secret somewhere new (the address, a weaker --tls, another --ca-file, another --auth or --api-key-in) also needs the right to manage secrets, unless it gives new values in the same command.
+`--password-stdin` or `--values-stdin` sets the connection's own secret again (or creates NAME-connection, or the next free NAME-connection-N, when it has none). A change that could send its secret somewhere new (the address, a weaker --tls, another --ca-file, another --auth or --api-key-in) also needs the right to manage secrets, unless it gives new values in the same command.
 
 | Name | Type | Default | Description |
 |---|---|---|---|

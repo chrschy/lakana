@@ -2160,8 +2160,9 @@ class ConnectionCreate(BaseModel):
     secret
         The name of an existing secret of the environment to use.
     secret_values
-        Values of a new secret ``<name>-connection``, born bound to the connection. Never
-        echoed. At most one of `secret` and `secret_values`.
+        Values of a new secret ``<name>-connection`` (or the next free
+        ``<name>-connection-N``), born bound to the connection. Never echoed. At most one of
+        `secret` and `secret_values`.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -2187,7 +2188,7 @@ class ConnectionUpdate(BaseModel):
         The name of a secret of the environment to use instead.
     secret_values
         New values: they set the connection's own secret again, or create
-        ``<name>-connection`` when it has none. Never echoed.
+        ``<name>-connection`` (or the next free name) when it has none. Never echoed.
     clear
         ``secret`` (stop using the secret and unbind it) and settings keys to remove.
     """

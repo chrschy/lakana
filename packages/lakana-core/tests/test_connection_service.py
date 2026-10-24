@@ -433,19 +433,59 @@ def test_a_data_engineer_creates_a_connection_and_its_secret(world: World) -> No
     assert "s3cr3t-value" not in world.audit_details_text()
 
 
-def test_a_taken_secret_name_is_a_conflict_naming_secret(world: World) -> None:
-    """A secret already called `<name>-connection` makes create a 409 that names --secret."""
+def test_a_taken_secret_name_gives_the_next_free_one(world: World) -> None:
+    """A secret already called `<name>-connection` is left alone; the new one is `-2`.
+
+    The view reports the name the new secret got.
+    """
     world.make_secret("prod", "crm-db-connection", {"password": "other"})
+
+    view = world.postgres(world.data_engineer)
+
+    assert view.secret == "crm-db-connection-2"
+    assert world.values("prod", "crm-db-connection-2") == {"password": "s3cr3t-value"}
+    assert world.values("prod", "crm-db-connection") == {"password": "other"}
+    assert world.secret("prod", "crm-db-connection").use_kind is None
+
+
+def test_a_deleted_connection_is_created_again_with_new_values(world: World) -> None:
+    """Delete, then create again with values: works, with or without a revoke in between.
+
+    The deleted connection's secret stays (unbound, or revoked by an administrator) and keeps
+    its name, so each new secret takes the next free one.
+    """
+    service = world.connections()
+    world.postgres(world.data_engineer)
+    service.delete(world.data_engineer, "prod", "crm-db")
+
+    again = world.postgres(world.data_engineer)
+    assert again.secret == "crm-db-connection-2"
+
+    service.delete(world.data_engineer, "prod", "crm-db")
+    revoked = world.secret("prod", "crm-db-connection-2")
+    world.secrets().revoke(world.admin, revoked.id)
+    third = world.postgres(world.data_engineer)
+
+    assert third.secret == "crm-db-connection-3"
+    assert world.secret("prod", "crm-db-connection").use_kind is None
+    assert world.secret("prod", "crm-db-connection-2").revoked_at is not None
+
+
+def test_when_every_secret_name_is_taken_the_refusal_says_what_works(world: World) -> None:
+    """After `-100` the create is a 409 whose next steps work for a data engineer."""
+    world.make_secret("prod", "crm-db-connection", {"password": "x"})
+    for number in range(2, 101):
+        world.make_secret("prod", f"crm-db-connection-{number}", {"password": "x"})
 
     with pytest.raises(AlreadyExistsError) as caught:
         world.postgres(world.data_engineer)
 
     assert str(caught.value) == (
-        "a secret `crm-db-connection` already exists in `prod`; bind it with "
-        "--secret crm-db-connection or remove it first"
+        "secrets `crm-db-connection` to `crm-db-connection-100` all exist in `prod`; give the "
+        "connection another name, or create it without new values and ask an administrator "
+        "to bind a secret to it: `lakana secret bind NAME --env prod --connection crm-db`"
     )
     assert world.connection("prod", "crm-db") is None
-    assert world.secret("prod", "crm-db-connection").use_kind is None
 
 
 def test_a_taken_connection_name_is_a_conflict(world: World) -> None:
@@ -888,11 +928,12 @@ def test_new_values_never_rotate_a_secret_that_was_moved_elsewhere(world: World)
     moved = world.secret("prod", "crm-db-connection")
     world.secrets().bind(world.admin, moved.id, SecretUse.package_index(index))
 
-    with pytest.raises(AlreadyExistsError, match="a secret `crm-db-connection` already exists"):
-        world.connections().update(
-            world.data_engineer, "prod", "crm-db", secret_values={"password": "mine"}
-        )
+    view = world.connections().update(
+        world.data_engineer, "prod", "crm-db", secret_values={"password": "mine"}
+    )
 
+    assert view.secret == "crm-db-connection-2"
+    assert world.values("prod", "crm-db-connection-2") == {"password": "mine"}
     assert world.values("prod", "crm-db-connection") == {"password": "s3cr3t-value"}
     assert world.secret("prod", "crm-db-connection").use_kind is SecretUseKind.PACKAGE_INDEX
 
@@ -1336,7 +1377,7 @@ def test_a_create_that_loses_a_race_for_the_name_is_a_conflict(
 def test_a_secret_that_loses_a_race_for_its_name_is_a_conflict(
     world: World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A `<name>-connection` created at the same moment is refused at the flush with the 409.
+    """A `<name>-connection` created at the same moment is refused at the flush; try again.
 
     Parameters
     ----------
@@ -1373,7 +1414,7 @@ def test_a_secret_that_loses_a_race_for_its_name_is_a_conflict(
 
     for attempt in ("create", "update"):
         calls.clear()
-        with pytest.raises(AlreadyExistsError) as caught:
+        with pytest.raises(ConflictError) as caught:
             if attempt == "create":
                 world.postgres(world.data_engineer)
             else:
@@ -1381,8 +1422,7 @@ def test_a_secret_that_loses_a_race_for_its_name_is_a_conflict(
                     world.data_engineer, "prod", "crm-db", secret_values={"password": "mine"}
                 )
         assert str(caught.value) == (
-            "a secret `crm-db-connection` already exists in `prod`; bind it with "
-            "--secret crm-db-connection or remove it first"
+            "secret `crm-db-connection` was created in `prod` at the same time; try again"
         )
         if attempt == "create":
             assert world.connection("prod", "crm-db") is None
@@ -1809,8 +1849,7 @@ def test_new_values_never_set_a_secret_revoked_after_the_connection_was_read(
     """A secret revoked between the first read and its lock is not set again.
 
     The secret is read afresh under its lock before new values rotate it; revoked meanwhile,
-    it is left alone, and the fresh `crm-db-connection` the values would need is taken by
-    the revoked one's name.
+    it is left alone, and the values make a new secret under the next free name.
 
     Parameters
     ----------
@@ -1826,10 +1865,13 @@ def test_new_values_never_set_a_secret_revoked_after_the_connection_was_read(
     before = secret.ciphertext
     monkeypatch.setattr(ConnectionService, "_used_secret", lambda self, row: secret)
 
-    with pytest.raises(AlreadyExistsError, match="a secret `crm-db-connection` already exists"):
-        world.connections().update(
-            world.data_engineer, "prod", "crm-db", secret_values={"password": "new"}
-        )
+    world.connections().update(
+        world.data_engineer, "prod", "crm-db", secret_values={"password": "new"}
+    )
+
+    row = world.connection("prod", "crm-db")
+    assert row is not None
+    assert row.secret_id == world.secret("prod", "crm-db-connection-2").id
     assert world.secret("prod", "crm-db-connection").ciphertext == before
 
 
@@ -1959,3 +2001,57 @@ def test_the_listing_names_where_each_secret_goes(world: World) -> None:
         "corp",
         "https://corp.example.org/simple",
     )
+
+
+def test_a_region_change_moves_a_default_s3_endpoint_but_keeps_a_custom_one(
+    world: World,
+) -> None:
+    """The default endpoint follows the region; a custom one stays.
+
+    Moving the endpoint moves the secret, so a data engineer needs new values for it (S1);
+    an administrator does not.
+    """
+    service = world.connections()
+    for name, address in (
+        ("aws", {"bucket": "landing", "region": "eu-central-1"}),
+        (
+            "minio",
+            {
+                "bucket": "landing",
+                "region": "eu-central-1",
+                "endpoint": "https://minio.example.com",
+            },
+        ),
+    ):
+        service.create(
+            world.data_engineer,
+            "prod",
+            name=name,
+            kind=ConnectionKind.S3,
+            address=address,
+            settings={"access_key_id": "AKIA1"},
+            secret_values={"secret_access_key": "k"},
+        )
+
+    with pytest.raises(PermissionDenied, match="could send secret 'aws-connection'"):
+        service.update(world.data_engineer, "prod", "aws", address={"region": "us-east-1"})
+    moved = service.update(world.admin, "prod", "aws", address={"region": "us-east-1"})
+    kept = service.update(world.data_engineer, "prod", "minio", address={"region": "us-east-1"})
+    explicit = service.update(
+        world.admin,
+        "prod",
+        "aws",
+        address={"region": "eu-west-1", "endpoint": "https://s3.us-east-1.amazonaws.com"},
+    )
+
+    assert moved.address == {
+        "bucket": "landing",
+        "region": "us-east-1",
+        "endpoint": "https://s3.us-east-1.amazonaws.com",
+    }
+    assert kept.address["endpoint"] == "https://minio.example.com"
+    assert explicit.address["endpoint"] == "https://s3.us-east-1.amazonaws.com"
+    assert world.events(AuditEventType.CONNECTION_UPDATED)[-3].detail["changed"] == [
+        "address.endpoint",
+        "address.region",
+    ]

@@ -9497,7 +9497,7 @@
           "connections"
         ],
         "summary": "Create a connection",
-        "description": "Creates a connection of the environment: its kind, address and settings, and its secret, either new values (stored as a new secret `<name>-connection`, born bound to it, never shown again) or the name of an existing secret. Needs `MANAGE_CONNECTION` in the environment, checked before anything in the body; naming a secret that is not bound to this connection also needs `MANAGE_SECRET`. Answers 403 without the right, 404 when the environment or the named secret does not exist, 409 when the name or `<name>-connection` is taken, and 422 for a name, kind, address, settings or secret keys that are not valid, naming the field. Answers 500 when the instance has no secrets master key.",
+        "description": "Creates a connection of the environment: its kind, address and settings, and its secret, either new values (stored as a new secret `<name>-connection`, or the next free `<name>-connection-N` when a secret holds that name, born bound to it, never shown again) or the name of an existing secret. Needs `MANAGE_CONNECTION` in the environment, checked before anything in the body; naming a secret that is not bound to this connection also needs `MANAGE_SECRET`. Answers 403 without the right, 404 when the environment or the named secret does not exist, 409 when the name is taken (or every secret name up to `<name>-connection-100` is), and 422 for a name, kind, address, settings or secret keys that are not valid, naming the field. Answers 500 when the instance has no secrets master key.",
         "operationId": "create_connection_api_v1_environments__environment_name__connections_post",
         "parameters": [
           {
@@ -9830,7 +9830,7 @@
           "connections"
         ],
         "summary": "Change a connection",
-        "description": "Changes its address, settings or secret; its name and kind never change. New secret values set its own secret again (or create `<name>-connection`); `clear` with `secret` stops using the secret and unbinds it. Needs `MANAGE_CONNECTION` in the environment, and also `MANAGE_SECRET` to name a secret not bound to it, or for a change that could send its secret somewhere new (its address, a weaker TLS, another CA certificate, another way of sending it) without new values. Answers 403 without the rights, 404 when the environment, the connection or the named secret does not exist, 409 when `<name>-connection` is taken by another secret or the connection changed at the same time, and 422 when nothing is given or the result is not valid, naming the field.",
+        "description": "Changes its address, settings or secret; its name and kind never change. New secret values set its own secret again (or create the next free `<name>-connection`); `clear` with `secret` stops using the secret and unbinds it. Needs `MANAGE_CONNECTION` in the environment, and also `MANAGE_SECRET` to name a secret not bound to it, or for a change that could send its secret somewhere new (its address, a weaker TLS, another CA certificate, another way of sending it) without new values. Answers 403 without the rights, 404 when the environment, the connection or the named secret does not exist, 409 when every secret name up to `<name>-connection-100` is taken or the connection changed at the same time, and 422 when nothing is given or the result is not valid, naming the field.",
         "operationId": "update_connection_api_v1_environments__environment_name__connections__connection_name__patch",
         "parameters": [
           {
@@ -17081,7 +17081,7 @@
           "address"
         ],
         "title": "ConnectionCreate",
-        "description": "Request body for creating a connection.\n\n`kind`, `address` and `settings` are judged by the service after the right is checked, so a\ncaller without `MANAGE_CONNECTION` learns nothing from a 422.\n\nParameters\n----------\nname\n    Lower-case letters, digits and ``-``, starting with a letter, at most 63; unique in\n    the environment. Never changes.\nkind\n    ``postgresql``, ``mariadb``, ``sqlite-file``, ``http``, ``s3``, ``gcs``, ``azure``,\n    ``directory`` or ``tcp``. Never changes.\naddress\n    Where the source is, by kind (``host``, ``port``, ``database``; ``base_url``; ...).\nsettings\n    How to reach it, by kind (``user``, ``tls``, ``ca_certificate``; ``auth``; ...).\nsecret\n    The name of an existing secret of the environment to use.\nsecret_values\n    Values of a new secret ``<name>-connection``, born bound to the connection. Never\n    echoed. At most one of `secret` and `secret_values`."
+        "description": "Request body for creating a connection.\n\n`kind`, `address` and `settings` are judged by the service after the right is checked, so a\ncaller without `MANAGE_CONNECTION` learns nothing from a 422.\n\nParameters\n----------\nname\n    Lower-case letters, digits and ``-``, starting with a letter, at most 63; unique in\n    the environment. Never changes.\nkind\n    ``postgresql``, ``mariadb``, ``sqlite-file``, ``http``, ``s3``, ``gcs``, ``azure``,\n    ``directory`` or ``tcp``. Never changes.\naddress\n    Where the source is, by kind (``host``, ``port``, ``database``; ``base_url``; ...).\nsettings\n    How to reach it, by kind (``user``, ``tls``, ``ca_certificate``; ``auth``; ...).\nsecret\n    The name of an existing secret of the environment to use.\nsecret_values\n    Values of a new secret ``<name>-connection`` (or the next free\n    ``<name>-connection-N``), born bound to the connection. Never echoed. At most one of\n    `secret` and `secret_values`."
       },
       "ConnectionOut": {
         "properties": {
@@ -17244,7 +17244,7 @@
         "additionalProperties": false,
         "type": "object",
         "title": "ConnectionUpdate",
-        "description": "Request body for changing a connection; only what is given changes.\n\nParameters\n----------\naddress\n    Address keys to change; a key set to `null` is removed.\nsettings\n    Settings keys to change; a key set to `null` is removed.\nsecret\n    The name of a secret of the environment to use instead.\nsecret_values\n    New values: they set the connection's own secret again, or create\n    ``<name>-connection`` when it has none. Never echoed.\nclear\n    ``secret`` (stop using the secret and unbind it) and settings keys to remove."
+        "description": "Request body for changing a connection; only what is given changes.\n\nParameters\n----------\naddress\n    Address keys to change; a key set to `null` is removed.\nsettings\n    Settings keys to change; a key set to `null` is removed.\nsecret\n    The name of a secret of the environment to use instead.\nsecret_values\n    New values: they set the connection's own secret again, or create\n    ``<name>-connection`` (or the next free name) when it has none. Never echoed.\nclear\n    ``secret`` (stop using the secret and unbind it) and settings keys to remove."
       },
       "DeclaringAssetOut": {
         "properties": {

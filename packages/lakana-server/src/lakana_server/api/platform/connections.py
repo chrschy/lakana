@@ -88,11 +88,13 @@ def create_connection(
     """Create a connection.
 
     Creates a connection of the environment: its kind, address and settings, and its secret,
-    either new values (stored as a new secret `<name>-connection`, born bound to it, never shown
-    again) or the name of an existing secret. Needs `MANAGE_CONNECTION` in the environment,
+    either new values (stored as a new secret `<name>-connection`, or the next free
+    `<name>-connection-N` when a secret holds that name, born bound to it, never shown again)
+    or the name of an existing secret. Needs `MANAGE_CONNECTION` in the environment,
     checked before anything in the body; naming a secret that is not bound to this connection
     also needs `MANAGE_SECRET`. Answers 403 without the right, 404 when the environment or the
-    named secret does not exist, 409 when the name or `<name>-connection` is taken, and 422 for
+    named secret does not exist, 409 when the name is taken (or every secret name up to
+    `<name>-connection-100` is), and 422 for
     a name, kind, address, settings or secret keys that are not valid, naming the field. Answers
     500 when the instance has no secrets master key.
 
@@ -207,13 +209,15 @@ def update_connection(
     """Change a connection.
 
     Changes its address, settings or secret; its name and kind never change. New secret values
-    set its own secret again (or create `<name>-connection`); `clear` with `secret` stops using
+    set its own secret again (or create the next free `<name>-connection`); `clear` with
+    `secret` stops using
     the secret and unbinds it. Needs `MANAGE_CONNECTION` in the environment, and also
     `MANAGE_SECRET` to name a secret not bound to it, or for a change that could send its
     secret somewhere new (its address, a weaker TLS, another CA certificate, another way of
     sending it) without new values. Answers 403 without the rights, 404 when the environment,
-    the connection or the named secret does not exist, 409 when `<name>-connection` is taken by
-    another secret or the connection changed at the same time, and 422 when nothing is given or
+    the connection or the named secret does not exist, 409 when every secret name up to
+    `<name>-connection-100` is taken or the connection changed at the same time, and 422 when
+    nothing is given or
     the result is not valid, naming the field.
 
     Parameters

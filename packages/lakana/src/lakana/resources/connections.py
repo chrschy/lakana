@@ -122,7 +122,8 @@ class Connections:
             The name of an existing secret of the environment to use. Naming one that is not
             bound to this connection needs `MANAGE_SECRET`.
         secret_values
-            Values of a new secret ``<name>-connection``, born bound to the connection, for
+            Values of a new secret ``<name>-connection`` (or the next free
+            ``<name>-connection-N``), born bound to the connection, for
             example ``{"password": ...}``. Sent once, in the request body; never shown again.
 
         Returns
@@ -135,7 +136,7 @@ class Connections:
         lakana.errors.PermissionDenied
             Without the right.
         lakana.errors.Conflict
-            If the name, or a secret ``<name>-connection``, is taken.
+            If the name is taken, or every secret name up to ``<name>-connection-100`` is.
         lakana.errors.ValidationError
             For a field that is not valid; the message names it.
         """
@@ -253,7 +254,8 @@ class Connections:
             The name of a secret of the environment to use instead.
         secret_values
             New values: they set the connection's own secret again, or create
-            ``<name>-connection`` when it has none. Sent once, in the request body.
+            ``<name>-connection`` (or the next free name) when it has none. Sent once, in the
+            request body.
         clear
             ``secret`` (stop using the secret and unbind it) and settings keys to remove.
 

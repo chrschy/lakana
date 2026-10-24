@@ -6,9 +6,13 @@ an object store or an HTTPS API. It has a name, a kind, an address (where the so
 own connections, as it has its own secrets, so `crm-db` in `dev` and `crm-db` in `prod` can point
 at different servers. An asset names the connections it reads from in
 `@asset(connections=[...])`; a deploy is refused while the environment lacks one of them.
+Reading a connection from inside a task arrives in a later release: in this one, connections are
+created, declared by assets and checked at deploy.
 
 Creating or changing a connection reaches no source: it only stores where the source is. The
-connection's name and kind never change; to change them, delete it and create it again.
+connection's name and kind never change; to change them, delete it and create it again. The
+deleted connection's secret stays in the environment, unbound, and keeps its name, so new values
+for the new connection create a secret under the next free name (`crm-db-connection-2`, below).
 
 ## Kinds
 
@@ -18,7 +22,7 @@ connection's name and kind never change; to change them, delete it and create it
 | `mariadb` | `host`, `port` (default `3306`), `database` | `user` (required), `tls`, `ca_certificate` | `password` |
 | `sqlite-file` | `root`, `path` (a file) | none | none |
 | `http` | `base_url` | `auth`, `username`, `api_key_name`, `api_key_in`, `client_id`, `token_url`, `scope`, `ca_certificate` | by `auth`: `token` (bearer), `password` (basic), `api_key` (api_key), `client_secret` (oauth2); none for `none` |
-| `s3` | `bucket`, `region`, `endpoint` (default `https://s3.<region>.amazonaws.com`) | `access_key_id` (required), `prefix` | `secret_access_key`, optional `session_token` |
+| `s3` | `bucket`, `region`, `endpoint` (default `https://s3.<region>.amazonaws.com`; while it is the default, a change of `region` moves it to the new region's) | `access_key_id` (required), `prefix` | `secret_access_key`, optional `session_token` |
 | `gcs` | `bucket` | `prefix` | `service_account_json` |
 | `azure` | `account`, `container` | `prefix` | exactly one of `account_key` and `sas_token` |
 | `directory` | `root`, `path` (a directory) | none | none |
@@ -75,7 +79,7 @@ A connection's secret is given one of three ways, and who may give it depends on
 
 | How | Needs |
 |---|---|
-| New values (`--password-stdin` or `--values-stdin`): Lakana creates a secret `<name>-connection` that only this connection uses, or sets the one it has again | `MANAGE_CONNECTION` |
+| New values (`--password-stdin` or `--values-stdin`): Lakana creates a secret `<name>-connection` that only this connection uses (or `<name>-connection-2`, `-3`, … up to `-100` when a secret, bound, unbound or revoked, holds that name; an existing secret is never overwritten), or sets the one it has again | `MANAGE_CONNECTION` |
 | `--secret NAME` with the secret the connection uses already | `MANAGE_CONNECTION` |
 | `--secret NAME` with any other secret, or `lakana secret bind NAME --connection CONNECTION` | also `MANAGE_SECRET` (the `ADMIN` role); the bind makes it the secret the connection uses, in one step |
 
@@ -91,7 +95,8 @@ A change that could send a connection's secret somewhere new also needs `MANAGE_
 the same change gives new values: a new address (`host`, `port`, `base_url`, `endpoint`, `bucket`,
 `account`), a weaker `tls`, another `ca_certificate`, another `auth` or `api_key_in`, or another
 `token_url`. A data engineer who moves a database to a new host gives its password again in the
-same command.
+same command. A new `region` of an `s3` connection whose endpoint is the default moves the
+endpoint too, so it counts as an address change.
 
 ## Command line
 
@@ -201,7 +206,7 @@ lakana audit list --kind connection --env dev
 
 | Route | Right | Answer |
 |---|---|---|
-| `POST /api/v1/environments/{env}/connections` | `MANAGE_CONNECTION` | 201 and the connection; 409 when the name or `<name>-connection` is taken; 422 naming the field that is not valid |
+| `POST /api/v1/environments/{env}/connections` | `MANAGE_CONNECTION` | 201 and the connection, whose `secret` is the name its new secret got; 409 when the name is taken; 422 naming the field that is not valid |
 | `GET /api/v1/environments/{env}/connections?limit=&cursor=` | `READ_ENVIRONMENT` | `{"items": [...], "next_cursor": ...}`, newest first, `limit` from 1 to 200 (default 100) |
 | `GET /api/v1/environments/{env}/connections/{name}` | `READ_ENVIRONMENT` | the connection; 404 names no other connection |
 | `PATCH /api/v1/environments/{env}/connections/{name}` | `MANAGE_CONNECTION`, and `MANAGE_SECRET` as above | the connection |
@@ -280,7 +285,7 @@ it counted among the hidden nodes, without its name.
 | `CONNECTION_CREATED` | A connection was created. | `name`, `kind`, `address`, `secret` (its name) |
 | `CONNECTION_UPDATED` | A connection changed. | `name`, `changed` (such as `address.host`, `settings.tls`, `secret`), `address`, `secret` |
 | `CONNECTION_DELETED` | A connection was deleted. | `name`, `kind` |
-| `SECRET_CREATED`, `SECRET_BOUND` | New values created `<name>-connection`, or a secret was bound to a connection or let go of it. | `use` is `connection`; `url` of `SECRET_BOUND` is every `host:port` the connection sends the secret to, such as `api.example.com:443, login.example.org:443` for an `oauth2` connection whose token URL is on another host |
+| `SECRET_CREATED`, `SECRET_BOUND` | New values created the connection's secret, or a secret was bound to a connection or let go of it. | `use` is `connection`; `url` of `SECRET_BOUND` is every `host:port` the connection sends the secret to, such as `api.example.com:443, login.example.org:443` for an `oauth2` connection whose token URL is on another host |
 
 No event holds a secret's value or a CA certificate. `lakana audit list --kind connection` lists
 every `CONNECTION_*` event.
@@ -291,7 +296,7 @@ every `CONNECTION_*` event.
 |---|---|
 | ``connection names are lower-case letters, digits and '-', starting with a letter, at most 63`` | Choose a name that follows the rule. |
 | `` environment `prod` already has a connection `crm-db`; change it with `lakana connection update crm-db --env prod` `` | Change the one that exists, or choose another name. |
-| ``a secret `crm-db-connection` already exists in `prod`; bind it with --secret crm-db-connection or remove it first`` | Unless that secret is still bound to this connection, both ways need an administrator: `lakana secret bind crm-db-connection --env prod --connection crm-db`, or `lakana secret revoke crm-db-connection --env prod`. Without an administrator, a data engineer can instead choose another name: new values always create a secret `<connection name>-connection`, so a connection of another name gets a secret name that is free. |
+| ``secrets `crm-db-connection` to `crm-db-connection-100` all exist in `prod`; give the connection another name, or create it without new values and ask an administrator to bind a secret to it: `lakana secret bind NAME --env prod --connection crm-db` `` | A hundred secrets hold the names a new secret could take. Choose another connection name, or create the connection without new values and ask an administrator to bind a secret to it. |
 | ``give either --secret or --password-stdin/--values-stdin, not both`` | Give the secret one way. |
 | ``environment `prod` has no connection `crm-db`; `lakana connection list --env prod` lists them`` | Check the name and the environment. |
 | ``a task cannot list or show connections; it reads the connections its asset declares when it runs`` | A task token was used. Read connections with your own token. |
