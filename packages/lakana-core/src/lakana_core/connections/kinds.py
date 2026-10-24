@@ -392,29 +392,10 @@ class _TcpAddress(_Part):
         return _host(value)
 
 
-class _DatabaseSettings(_Part):
-    """Who logs in, and how TLS is checked."""
+class _CaSettings(_Part):
+    """Settings that may carry the team's own CA certificates (PEM)."""
 
-    user: str = Field(min_length=1, max_length=255)
-    tls: Literal["verify-full", "require", "disable"] = "verify-full"
     ca_certificate: str | None = None
-
-    @field_validator("user")
-    @classmethod
-    def _check_user(cls, value: str) -> str:
-        """Refuse control characters in the user name.
-
-        Parameters
-        ----------
-        value
-            The user.
-
-        Returns
-        -------
-        str
-            `value`.
-        """
-        return _no_control(value)
 
     @field_validator("ca_certificate")
     @classmethod
@@ -432,6 +413,30 @@ class _DatabaseSettings(_Part):
             `value`.
         """
         return None if value is None else _certificate(value)
+
+
+class _DatabaseSettings(_CaSettings):
+    """Who logs in, and how TLS is checked."""
+
+    user: str = Field(min_length=1, max_length=255)
+    tls: Literal["verify-full", "require", "disable"] = "verify-full"
+
+    @field_validator("user")
+    @classmethod
+    def _check_user(cls, value: str) -> str:
+        """Refuse control characters in the user name.
+
+        Parameters
+        ----------
+        value
+            The user.
+
+        Returns
+        -------
+        str
+            `value`.
+        """
+        return _no_control(value)
 
 
 class _FileAddress(_Part):
@@ -526,7 +531,7 @@ _AUTH_REQUIRED: dict[str, tuple[str, ...]] = {
 _AUTH_ONLY_FIELDS = sorted(frozenset().union(*_AUTH_FIELDS.values()))
 
 
-class _HttpSettings(_Part):
+class _HttpSettings(_CaSettings):
     """How an HTTPS API authenticates."""
 
     auth: Literal["none", "bearer", "basic", "api_key", "oauth2"] = "none"
@@ -536,7 +541,6 @@ class _HttpSettings(_Part):
     client_id: str | None = Field(default=None, min_length=1, max_length=512)
     token_url: str | None = None
     scope: str | None = Field(default=None, max_length=1024)
-    ca_certificate: str | None = None
 
     @field_validator("username")
     @classmethod
@@ -621,23 +625,6 @@ class _HttpSettings(_Part):
             `value`.
         """
         return None if value is None else _https(value)
-
-    @field_validator("ca_certificate")
-    @classmethod
-    def _check_ca(cls, value: str | None) -> str | None:
-        """Check the CA bundle.
-
-        Parameters
-        ----------
-        value
-            The PEM text, or `None`.
-
-        Returns
-        -------
-        str or None
-            `value`.
-        """
-        return None if value is None else _certificate(value)
 
     @model_validator(mode="after")
     def _fields_of_the_auth(self) -> _HttpSettings:

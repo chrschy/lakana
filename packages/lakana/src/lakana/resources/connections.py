@@ -222,6 +222,9 @@ class Connections:
         )
         return _connection_from_json(_object(response, "a connection"))
 
+    # The parameters mirror `lakana_core.connections.service.ConnectionService.update`, which
+    # this package cannot import (the SDK depends on no other Lakana package).
+    # jscpd:ignore-start
     def update(
         self,
         environment: str,
@@ -233,6 +236,7 @@ class Connections:
         secret_values: Mapping[str, str] | None = None,
         clear: Iterable[str] = (),
     ) -> Connection:
+        # jscpd:ignore-end
         """Change a connection; only what is given changes.
 
         Parameters

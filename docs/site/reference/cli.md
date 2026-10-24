@@ -1396,6 +1396,7 @@ Change connection NAME; only the options given change. Its name and kind never c
 |---|---|---|---|
 | `NAME` | text | required |  |
 | `--env` | text | none | Environment (default: the profile's). |
+| `--clear` | text, repeatable | none | Remove 'secret' (unbinds it) or a setting, such as ca_certificate. |
 | `--host` | text | none | postgresql, mariadb, tcp: host name. |
 | `--port` | whole number | none | postgresql (5432), mariadb (3306), tcp (required): port. |
 | `--database` | text | none | postgresql, mariadb: database name. |
@@ -1422,7 +1423,6 @@ Change connection NAME; only the options given change. Its name and kind never c
 | `--secret` | text | none | Use this existing secret of the environment. |
 | `--password-stdin` | flag | off | Read the secret from stdin: the password, token or key the kind takes. |
 | `--values-stdin` | flag | off | Read the secret's keys as a JSON object from stdin. |
-| `--clear` | text, repeatable | none | Remove 'secret' (unbinds it) or a setting, such as ca_certificate. |
 
 ### `lakana connection delete`
 

@@ -8,8 +8,9 @@ module knows itself (`single_key`), so it asks the server nothing to learn it.
 
 from __future__ import annotations
 
+import inspect
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Any
@@ -328,22 +329,143 @@ def _secret_values(
     return {key: value.removesuffix("\n")}
 
 
+_OPTION_TYPES: dict[str, Any] = {
+    "--host": _HOST,
+    "--port": _PORT,
+    "--database": _DATABASE_NAME,
+    "--url": _URL,
+    "--bucket": _BUCKET,
+    "--region": _REGION,
+    "--endpoint": _ENDPOINT,
+    "--account": _ACCOUNT,
+    "--container": _CONTAINER,
+    "--root": _ROOT,
+    "--path": _PATH,
+    "--user": _USER,
+    "--tls": _TLS,
+    "--ca-file": _CA_FILE,
+    "--auth": _AUTH,
+    "--username": _USERNAME,
+    "--api-key-name": _API_KEY_NAME,
+    "--api-key-in": _API_KEY_IN,
+    "--client-id": _CLIENT_ID,
+    "--token-url": _TOKEN_URL,
+    "--scope": _SCOPE,
+    "--access-key-id": _ACCESS_KEY_ID,
+    "--prefix": _PREFIX,
+    "--secret": _SECRET,
+    "--password-stdin": _PASSWORD_STDIN,
+    "--values-stdin": _VALUES_STDIN,
+}
+"""Each address, settings and secret option, and its type with its help, in help order."""
+
+_FLAGS = frozenset({"--password-stdin", "--values-stdin"})
+
+
+def _with_kind_options(command: Callable[..., None]) -> Callable[..., None]:
+    """Give a command every option of `_OPTION_TYPES` in place of its `**options`.
+
+    `create` and `update` take the same two dozen options; declaring them once keeps the two
+    commands from drifting apart. Typer reads a command's parameters from its signature, so
+    the options are added there as keyword-only parameters and reach the command as
+    `**options`, by parameter name (``ca_file`` for ``--ca-file``).
+
+    Parameters
+    ----------
+    command
+        A command whose last parameter is ``**options``.
+
+    Returns
+    -------
+    Callable
+        The same command, with the options in its signature.
+    """
+    signature = inspect.signature(command, eval_str=True)
+    kept = [p for p in signature.parameters.values() if p.kind is not p.VAR_KEYWORD]
+    added = [
+        inspect.Parameter(
+            option.removeprefix("--").replace("-", "_"),
+            inspect.Parameter.KEYWORD_ONLY,
+            default=False if option in _FLAGS else None,
+            annotation=annotation,
+        )
+        for option, annotation in _OPTION_TYPES.items()
+    ]
+    # Typer, like `inspect.signature`, reads `__signature__` before the function's own.
+    command.__dict__["__signature__"] = signature.replace(parameters=[*kept, *added])
+    return command
+
+
 def _given(options: Mapping[str, object]) -> dict[str, object]:
-    """Keep the options that were given.
+    """Keep the options that were given, by option name.
 
     Parameters
     ----------
     options
-        Every option by name, `None` or `False` when not given.
+        The `**options` of a command, by parameter name, `None` or `False` when not given.
 
     Returns
     -------
     dict of str to object
-        The given ones, in the same order.
+        The given ones by option name (``--ca-file``), in `_OPTION_TYPES` order.
     """
     return {
-        name: value for name, value in options.items() if value is not None and value is not False
+        option: options[name]
+        for option in _OPTION_TYPES
+        if (name := option.removeprefix("--").replace("-", "_")) in options
+        and options[name] is not None
+        and options[name] is not False
     }
+
+
+def _request_parts(
+    kind: str, given: Mapping[str, object], name: str, auth: str
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, str] | None]:
+    """Check the options against the kind and build what the request sends.
+
+    Parameters
+    ----------
+    kind
+        The connection's kind.
+    given
+        The options given, by option name.
+    name
+        The connection's name, for a message.
+    auth
+        The connection's `auth` after the change (only `http` reads it).
+
+    Returns
+    -------
+    tuple of (dict, dict, dict or None)
+        The address, the settings and the new secret values (`None` when none were given).
+
+    Raises
+    ------
+    CliError
+        For an option the kind does not take, or a CA file or stdin that cannot be read
+        (exit 2).
+    """
+    _refuse_foreign(kind, given, name)
+    address, settings = _parts(given)
+    values = _secret_values(kind, auth, "--password-stdin" in given, "--values-stdin" in given)
+    return address, settings, values
+
+
+def _one_secret_way(given: Mapping[str, object]) -> None:
+    """Refuse two ways of giving the secret.
+
+    Parameters
+    ----------
+    given
+        The options given, by option name.
+
+    Raises
+    ------
+    CliError
+        If more than one of `SECRET_OPTIONS` was given (exit 2).
+    """
+    if sum(option in given for option in SECRET_OPTIONS) > 1:
+        raise CliError("Pass only one of --secret, --password-stdin or --values-stdin")
 
 
 def _pairs(values: Mapping[str, Any]) -> str:
@@ -386,37 +508,13 @@ def _declared(connection: Connection) -> str:
 
 
 @connection_app.command("create")
+@_with_kind_options
 def create(
     ctx: typer.Context,
     name: str,
     kind: Annotated[Kind, typer.Option("--kind", help="The kind of source.")],
     env: _ENV = None,
-    host: _HOST = None,
-    port: _PORT = None,
-    database: _DATABASE_NAME = None,
-    url: _URL = None,
-    bucket: _BUCKET = None,
-    region: _REGION = None,
-    endpoint: _ENDPOINT = None,
-    account: _ACCOUNT = None,
-    container: _CONTAINER = None,
-    root: _ROOT = None,
-    path: _PATH = None,
-    user: _USER = None,
-    tls: _TLS = None,
-    ca_file: _CA_FILE = None,
-    auth: _AUTH = None,
-    username: _USERNAME = None,
-    api_key_name: _API_KEY_NAME = None,
-    api_key_in: _API_KEY_IN = None,
-    client_id: _CLIENT_ID = None,
-    token_url: _TOKEN_URL = None,
-    scope: _SCOPE = None,
-    access_key_id: _ACCESS_KEY_ID = None,
-    prefix: _PREFIX = None,
-    secret: _SECRET = None,
-    password_stdin: _PASSWORD_STDIN = False,
-    values_stdin: _VALUES_STDIN = False,
+    **options: Any,  # ruff: ignore[any-type]
 ) -> None:
     """Create connection NAME of kind --kind; needs the right to manage connections.
 
@@ -436,109 +534,23 @@ def create(
         Its kind.
     env
         The environment.
-    host
-        Host name.
-    port
-        Port.
-    database
-        Database name.
-    url
-        Base URL.
-    bucket
-        Bucket.
-    region
-        Region.
-    endpoint
-        S3 endpoint URL.
-    account
-        Azure storage account.
-    container
-        Azure container.
-    root
-        Ingestion root name.
-    path
-        Relative path in the root.
-    user
-        Database user name.
-    tls
-        TLS mode.
-    ca_file
-        PEM file of CA certificates.
-    auth
-        HTTP authentication.
-    username
-        HTTP basic user name.
-    api_key_name
-        API key header or parameter name.
-    api_key_in
-        Where the API key goes.
-    client_id
-        OAuth2 client id.
-    token_url
-        OAuth2 token endpoint.
-    scope
-        OAuth2 scope.
-    access_key_id
-        S3 access key id.
-    prefix
-        Object prefix.
-    secret
-        An existing secret's name.
-    password_stdin
-        Read the single secret value from stdin.
-    values_stdin
-        Read the secret's keys as JSON from stdin.
-
-    Raises
-    ------
-    CliError
-        For an option the kind does not take, two ways of giving the secret, or a CA file or
-        stdin that cannot be read (exit 2).
+    **options
+        The address, settings and secret options (`_OPTION_TYPES`), by parameter name.
     """
-    given = _given(
-        {
-            "--host": host,
-            "--port": port,
-            "--database": database,
-            "--url": url,
-            "--bucket": bucket,
-            "--region": region,
-            "--endpoint": endpoint,
-            "--account": account,
-            "--container": container,
-            "--root": root,
-            "--path": path,
-            "--user": user,
-            "--tls": tls,
-            "--ca-file": ca_file,
-            "--auth": auth,
-            "--username": username,
-            "--api-key-name": api_key_name,
-            "--api-key-in": api_key_in,
-            "--client-id": client_id,
-            "--token-url": token_url,
-            "--scope": scope,
-            "--access-key-id": access_key_id,
-            "--prefix": prefix,
-            "--secret": secret,
-            "--password-stdin": password_stdin,
-            "--values-stdin": values_stdin,
-        }
-    )
-    _refuse_foreign(kind.value, given, name)
-    if sum(option in given for option in SECRET_OPTIONS) > 1:
-        raise CliError("Pass only one of --secret, --password-stdin or --values-stdin")
+    given = _given(options)
+    _one_secret_way(given)
     state = state_of(ctx)
     environment = resolve_environment(state, env)
-    address, settings = _parts(given)
-    values = _secret_values(kind.value, auth or "none", password_stdin, values_stdin)
+    address, settings, values = _request_parts(
+        kind.value, given, name, str(given.get("--auth", "none"))
+    )
     connection = state.client().connections.create(
         environment,
         name,
         kind=kind.value,
         address=address,
         settings=settings,
-        secret=secret,
+        secret=options.get("secret"),
         secret_values=values,
     )
     made = f"Created connection {_output.inline(name)} in {_output.inline(environment)}"
@@ -605,42 +617,18 @@ def show(ctx: typer.Context, name: str, env: _ENV = None) -> None:
 
 
 @connection_app.command("update")
+@_with_kind_options
 def update(
     ctx: typer.Context,
     name: str,
     env: _ENV = None,
-    host: _HOST = None,
-    port: _PORT = None,
-    database: _DATABASE_NAME = None,
-    url: _URL = None,
-    bucket: _BUCKET = None,
-    region: _REGION = None,
-    endpoint: _ENDPOINT = None,
-    account: _ACCOUNT = None,
-    container: _CONTAINER = None,
-    root: _ROOT = None,
-    path: _PATH = None,
-    user: _USER = None,
-    tls: _TLS = None,
-    ca_file: _CA_FILE = None,
-    auth: _AUTH = None,
-    username: _USERNAME = None,
-    api_key_name: _API_KEY_NAME = None,
-    api_key_in: _API_KEY_IN = None,
-    client_id: _CLIENT_ID = None,
-    token_url: _TOKEN_URL = None,
-    scope: _SCOPE = None,
-    access_key_id: _ACCESS_KEY_ID = None,
-    prefix: _PREFIX = None,
-    secret: _SECRET = None,
-    password_stdin: _PASSWORD_STDIN = False,
-    values_stdin: _VALUES_STDIN = False,
     clear: Annotated[
         list[str] | None,
         typer.Option(
             "--clear", help="Remove 'secret' (unbinds it) or a setting, such as ca_certificate."
         ),
     ] = None,
+    **options: Any,  # ruff: ignore[any-type]
 ) -> None:
     """Change connection NAME; only the options given change. Its name and kind never change.
 
@@ -657,119 +645,32 @@ def update(
         The connection's name.
     env
         The environment.
-    host
-        Host name.
-    port
-        Port.
-    database
-        Database name.
-    url
-        Base URL.
-    bucket
-        Bucket.
-    region
-        Region.
-    endpoint
-        S3 endpoint URL.
-    account
-        Azure storage account.
-    container
-        Azure container.
-    root
-        Ingestion root name.
-    path
-        Relative path in the root.
-    user
-        Database user name.
-    tls
-        TLS mode.
-    ca_file
-        PEM file of CA certificates.
-    auth
-        HTTP authentication.
-    username
-        HTTP basic user name.
-    api_key_name
-        API key header or parameter name.
-    api_key_in
-        Where the API key goes.
-    client_id
-        OAuth2 client id.
-    token_url
-        OAuth2 token endpoint.
-    scope
-        OAuth2 scope.
-    access_key_id
-        S3 access key id.
-    prefix
-        Object prefix.
-    secret
-        An existing secret's name to use instead.
-    password_stdin
-        Read the single secret value from stdin.
-    values_stdin
-        Read the secret's keys as JSON from stdin.
     clear
         ``secret`` or settings keys to remove.
+    **options
+        The address, settings and secret options (`_OPTION_TYPES`), by parameter name.
 
     Raises
     ------
     CliError
-        For an option the connection's kind does not take, two ways of giving the secret,
-        nothing to change, or a CA file or stdin that cannot be read (exit 2).
+        If nothing would change (exit 2).
     """
-    given = _given(
-        {
-            "--host": host,
-            "--port": port,
-            "--database": database,
-            "--url": url,
-            "--bucket": bucket,
-            "--region": region,
-            "--endpoint": endpoint,
-            "--account": account,
-            "--container": container,
-            "--root": root,
-            "--path": path,
-            "--user": user,
-            "--tls": tls,
-            "--ca-file": ca_file,
-            "--auth": auth,
-            "--username": username,
-            "--api-key-name": api_key_name,
-            "--api-key-in": api_key_in,
-            "--client-id": client_id,
-            "--token-url": token_url,
-            "--scope": scope,
-            "--access-key-id": access_key_id,
-            "--prefix": prefix,
-            "--secret": secret,
-            "--password-stdin": password_stdin,
-            "--values-stdin": values_stdin,
-        }
-    )
-    if sum(option in given for option in SECRET_OPTIONS) > 1:
-        raise CliError("Pass only one of --secret, --password-stdin or --values-stdin")
+    given = _given(options)
+    _one_secret_way(given)
     if not given and not clear:
         raise CliError("Nothing to change; pass at least one option.")
     state = state_of(ctx)
     environment = resolve_environment(state, env)
     client = state.client()
     current = client.connections.get(environment, name)
-    _refuse_foreign(current.kind, given, name)
-    address, settings = _parts(given)
-    values = _secret_values(
-        current.kind,
-        auth or str(current.settings.get("auth", "none")),
-        password_stdin,
-        values_stdin,
-    )
+    auth = given.get("--auth", current.settings.get("auth", "none"))
+    address, settings, values = _request_parts(current.kind, given, name, str(auth))
     connection = client.connections.update(
         environment,
         name,
         address=address or None,
         settings=settings or None,
-        secret=secret,
+        secret=options.get("secret"),
         secret_values=values,
         clear=clear or (),
     )

@@ -1,6 +1,6 @@
 {
-  "duplicated_lines": 1317,
-  "clones": 68,
+  "duplicated_lines": 1294,
+  "clones": 67,
   "pairs": {
     "lakana/_artifact_manifest.py ↔ lakana_core/artifacts/manifest.py": {
       "clones": 1,
@@ -20,7 +20,7 @@
     },
     "lakana/_models.py ↔ lakana_server/api/platform/schemas.py": {
       "clones": 12,
-      "lines": 231
+      "lines": 224
     },
     "lakana/cli/indexes.py ↔ lakana/cli/repos.py": {
       "clones": 1,
@@ -29,10 +29,6 @@
     "lakana/cli/tables.py ↔ lakana/cli/tables.py": {
       "clones": 1,
       "lines": 12
-    },
-    "lakana/resources/audit_events.py ↔ lakana_server/api/platform/audit_events.py": {
-      "clones": 1,
-      "lines": 16
     },
     "lakana/resources/column_masks.py ↔ lakana/resources/row_filters.py": {
       "clones": 1,

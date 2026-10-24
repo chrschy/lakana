@@ -482,3 +482,89 @@ def test_a_kind_this_command_line_does_not_know_says_to_upgrade(tmp_path: Path) 
         "upgrade lakana to change it (the server is newer)" in result.output
     )
     assert [r.method for r in api.requests] == ["GET"]
+
+
+def test_a_connection_without_secret_or_settings_says_so(tmp_path: Path) -> None:
+    """Created without a secret, the message names none; `show` writes `(none)` for each."""
+    files = {
+        **_CONNECTION,
+        "name": "exports",
+        "kind": "directory",
+        "address": {"root": "shared", "path": "exports"},
+        "settings": {},
+        "secret": None,
+        "declared_by": [],
+    }
+    api = FakeApi()
+    api.on("POST", _BASE, status=201, json=files)
+    api.on("GET", f"{_BASE}/exports", json=files)
+
+    created = invoke(
+        make_state(tmp_path, api),
+        "connection",
+        "create",
+        "exports",
+        "--env",
+        "prod",
+        "--kind",
+        "directory",
+        "--root",
+        "shared",
+        "--path",
+        "exports",
+    )
+    shown = invoke(make_state(tmp_path, api), "connection", "show", "exports", "--env", "prod")
+
+    assert created.exit_code == 0, created.output
+    assert created.stdout == "Created connection exports in prod\n"
+    lines = shown.stdout.splitlines()
+    assert "Settings:    (none)" in lines
+    assert "Secret:      (none)" in lines
+    assert "Declared by: (none)" in lines
+
+
+def test_update_refuses_two_ways_of_giving_the_secret_before_asking_the_server(
+    tmp_path: Path,
+) -> None:
+    api = FakeApi()
+    result = invoke(
+        make_state(tmp_path, api),
+        "connection",
+        "update",
+        "crm-db",
+        "--env",
+        "prod",
+        "--secret",
+        "crm-pw",
+        "--values-stdin",
+        input="{}",
+    )
+    assert result.exit_code == 2
+    assert "Pass only one of --secret, --password-stdin or --values-stdin" in result.output
+    assert api.requests == []
+
+
+def test_create_with_a_named_secret_says_which_it_uses(tmp_path: Path) -> None:
+    api = FakeApi()
+    api.on("POST", _BASE, status=201, json={**_CONNECTION, "secret": "crm-pw"})
+    result = invoke(
+        make_state(tmp_path, api),
+        "connection",
+        "create",
+        "crm-db",
+        "--env",
+        "prod",
+        "--kind",
+        "postgresql",
+        "--host",
+        "db.example.com",
+        "--database",
+        "crm",
+        "--user",
+        "reader",
+        "--secret",
+        "crm-pw",
+    )
+    assert result.exit_code == 0, result.output
+    assert _sent(api, "POST")[0]["secret"] == "crm-pw"
+    assert "Created connection crm-db in prod using secret crm-pw" in result.stdout
