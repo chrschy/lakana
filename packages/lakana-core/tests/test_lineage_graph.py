@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import itertools
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -12,7 +13,7 @@ from core_test_helpers import ensure_table
 from sqlalchemy import event
 from sqlalchemy.orm import Session
 
-from lakana_core.auth import Action, PrincipalRef, Securable, SecurableKind
+from lakana_core.auth import Action, PrincipalRef, Securable, SecurableKind, TaskScope
 from lakana_core.catalog import lineage_graph
 from lakana_core.catalog.lineage_graph import (
     MAX_LINEAGE_NODES,
@@ -20,9 +21,10 @@ from lakana_core.catalog.lineage_graph import (
     LineageGraph,
     LineageService,
 )
+from lakana_core.connections.kinds import ConnectionKind
 from lakana_core.errors import NotFoundError, PermissionDenied, ValidationError
 from lakana_core.identifiers import TableRef
-from lakana_core.models import LineageEdge
+from lakana_core.models import Connection, LineageEdge
 
 _T0 = datetime(2026, 9, 1, tzinfo=UTC)
 
@@ -798,3 +800,230 @@ def test_a_dropped_node_with_a_legacy_dotted_name_is_judged_at_the_namespace_bef
         (SecurableKind.NAMESPACE, "bronze.x", None)
     ]
     assert "bronze.x.y" in _names(graph)
+
+
+class _ReadsEnvironment(_Readable):
+    """`_Readable`, plus READ_ENVIRONMENT on `dev` when `environment` is set.
+
+    Parameters
+    ----------
+    *readable
+        As `_Readable`.
+    environment
+        Whether READ_ENVIRONMENT on `dev` is permitted.
+    """
+
+    def __init__(self, *readable: str, environment: bool = True) -> None:
+        super().__init__(*readable)
+        self.environment = environment
+        self.asked: list[tuple[Action, Securable]] = []
+
+    def permits(self, principal: PrincipalRef, action: Action, securable: Securable) -> bool:
+        """Answer READ_ENVIRONMENT from `environment`, the rest as `_Readable`.
+
+        Parameters
+        ----------
+        principal
+            Ignored.
+        action
+            The action.
+        securable
+            The object.
+
+        Returns
+        -------
+        bool
+            The verdict.
+        """
+        self.asked.append((action, securable))
+        if action is Action.READ_ENVIRONMENT:
+            return (
+                self.environment
+                and securable.kind is SecurableKind.ENVIRONMENT
+                and securable.environment == "dev"
+            )
+        return super().permits(principal, action, securable)
+
+
+def _connection_edge(
+    session: Session, ids: dict[str, uuid.UUID], connection_id: uuid.UUID, target: str
+) -> None:
+    """Record that connection `crm-db` fed `gold.<target>`.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    ids
+        As `_tables`.
+    connection_id
+        The connection's id.
+    target
+        The target table.
+    """
+    session.add(
+        LineageEdge(
+            id=uuid.uuid4(),
+            environment_id=ids["env"],
+            source_kind="connection",
+            source_table_id=connection_id,
+            source_name="crm-db",
+            source_snapshot_id=None,
+            target_table_id=ids[target],
+            target_name=f"gold.{target}",
+            target_snapshot_id=7,
+            query_run_id=None,
+            created_at=_T0,
+        )
+    )
+    session.commit()
+
+
+def _crm(session: Session, principal: PrincipalRef, environment_id: uuid.UUID) -> uuid.UUID:
+    """Create the PostgreSQL connection `crm-db`.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    principal
+        Its creator.
+    environment_id
+        Its environment.
+
+    Returns
+    -------
+    uuid.UUID
+        Its id.
+    """
+    row = Connection(
+        id=uuid.uuid4(),
+        environment_id=environment_id,
+        name="crm-db",
+        kind=ConnectionKind.POSTGRESQL,
+        address={"host": "db.example.com", "port": 5432, "database": "crm"},
+        settings={"user": "reader", "tls": "verify-full"},
+        created_by=principal.id,
+    )
+    session.add(row)
+    session.commit()
+    return row.id
+
+
+def test_upstream_lists_a_connection_node(session: Session, principal: PrincipalRef) -> None:
+    """A connection the asset declared is a source, kind `CONNECTION`, with its own kind."""
+    ids = _chain(session, "a", "customers")
+    crm = _crm(session, principal, ids["env"])
+    _connection_edge(session, ids, crm, "customers")
+
+    graph = LineageService(session, _ReadsEnvironment(*_EVERYTHING, "gold.customers")).lineage(
+        principal, _ref("customers")
+    )
+
+    connection = next(node for node in graph.nodes if node.id == crm)
+    assert (connection.name, connection.kind, connection.connection_kind, connection.dropped) == (
+        "crm-db",
+        "CONNECTION",
+        "postgresql",
+        False,
+    )
+    assert {node.name for node in graph.nodes} == {"gold.customers", "gold.a", "crm-db"}
+    edge = next(e for e in graph.edges if e.source_id == crm)
+    assert (edge.target_id, edge.source_snapshot_id, edge.target_snapshot_id) == (
+        ids["customers"],
+        None,
+        7,
+    )
+    assert graph.hidden_nodes == 0
+    tables = [node for node in graph.nodes if node.kind != "CONNECTION"]
+    assert all(node.connection_kind is None for node in tables)
+
+
+def test_walking_up_from_a_connection_stops(session: Session, principal: PrincipalRef) -> None:
+    """A connection has no sources: even an edge that names it as a target is never followed."""
+    ids = _tables(session, "customers", "x")
+    crm = _crm(session, principal, ids["env"])
+    _connection_edge(session, ids, crm, "customers")
+    _edge(session, ids["env"], (ids["x"], "gold.x"), (crm, "crm-db"))
+
+    graph = LineageService(session, _ReadsEnvironment(*_EVERYTHING, "gold.customers")).lineage(
+        principal, _ref("customers"), depth=10
+    )
+
+    assert {node.name for node in graph.nodes} == {"gold.customers", "crm-db"}
+    assert len(graph.edges) == 1
+
+
+def test_a_connection_is_hidden_without_read_environment(
+    session: Session, principal: PrincipalRef
+) -> None:
+    """Its name is shown only to a reader of the environment's connections."""
+    ids = _tables(session, "customers")
+    crm = _crm(session, principal, ids["env"])
+    _connection_edge(session, ids, crm, "customers")
+    authz = _ReadsEnvironment("gold.customers", environment=False)
+
+    graph = LineageService(session, authz).lineage(principal, _ref("customers"))
+
+    assert [node.name for node in graph.nodes] == ["gold.customers"]
+    assert graph.edges == []
+    assert graph.hidden_nodes == 1
+    assert (Action.READ_ENVIRONMENT, Securable.environment_scope("dev")) in authz.asked
+
+
+def test_a_connection_is_hidden_from_a_task_token(
+    session: Session, principal: PrincipalRef
+) -> None:
+    """A task may not list connections, so lineage does not show it one either."""
+    ids = _tables(session, "customers")
+    crm = _crm(session, principal, ids["env"])
+    _connection_edge(session, ids, crm, "customers")
+    task = dataclasses.replace(
+        principal,
+        task_scope=TaskScope(environment="dev", asset_scope=["gold.*"], token_id=uuid.uuid4()),
+    )
+
+    graph = LineageService(session, _ReadsEnvironment("gold.customers")).lineage(
+        task, _ref("customers")
+    )
+
+    assert [node.name for node in graph.nodes] == ["gold.customers"]
+    assert graph.hidden_nodes == 1
+
+
+def test_a_deleted_connection_keeps_its_recorded_name(
+    session: Session, principal: PrincipalRef
+) -> None:
+    """A connection deleted since the write stays in the history, marked, without a kind."""
+    ids = _tables(session, "customers")
+    gone = uuid.uuid4()
+    _connection_edge(session, ids, gone, "customers")
+
+    graph = LineageService(session, _ReadsEnvironment("gold.customers")).lineage(
+        principal, _ref("customers")
+    )
+
+    node = next(node for node in graph.nodes if node.id == gone)
+    assert (node.name, node.kind, node.connection_kind, node.dropped) == (
+        "crm-db",
+        "CONNECTION",
+        None,
+        True,
+    )
+
+
+def test_a_connection_of_another_environment_is_never_described(
+    session: Session, principal: PrincipalRef
+) -> None:
+    """An edge naming another environment's connection id reads as deleted, never as that row."""
+    ids = _tables(session, "customers")
+    other_env, _ = ensure_table(session, "prod", "gold", "customers")
+    other = _crm(session, principal, other_env)
+    _connection_edge(session, ids, other, "customers")
+
+    graph = LineageService(session, _ReadsEnvironment("gold.customers")).lineage(
+        principal, _ref("customers")
+    )
+
+    node = next(node for node in graph.nodes if node.id == other)
+    assert (node.connection_kind, node.dropped) == (None, True)

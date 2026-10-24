@@ -36,6 +36,7 @@ _PYTHON_ONLY_KEYS = {
     "output": '@asset(output="artifact")',
     "keep_versions": '@asset(output="artifact", keep_versions=N)',
     "decimals": '@asset(decimals="exact")',
+    "connections": '@asset(connections=["crm-db"])',
 }
 """Decorator arguments of a Python asset that a SQL block lacks, and how to declare them."""
 

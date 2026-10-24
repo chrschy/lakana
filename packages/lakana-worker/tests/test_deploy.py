@@ -30,6 +30,8 @@ from lakana_core.auth import Action, AllowAllAuthorization, PrincipalRef, Secura
 from lakana_core.catalog.identity import resolve_table_id
 from lakana_core.catalog.service import CatalogService
 from lakana_core.config import StorageConfig
+from lakana_core.connections.kinds import ConnectionKind
+from lakana_core.connections.service import ConnectionService
 from lakana_core.errors import ConflictError, NotFoundError
 from lakana_core.grants.authorization import GrantAuthorization
 from lakana_core.grants.service import GrantService
@@ -2783,3 +2785,93 @@ def test_a_deploy_checks_requires_python_against_the_python_the_project_names(
     assert run.status is DeployStatus.SUCCEEDED
     version = session.get(JobVersion, run.job_version_id)
     assert version is not None and version.manifest_json["python"] == "3.12"
+
+
+_CUSTOMERS_PY = (
+    "from lakana import asset\n"
+    "\n"
+    "\n"
+    "@asset(connections=['crm-db'])\n"
+    "def customers():\n"
+    '    """Customers from the CRM."""\n'
+    "    return None\n"
+)
+_UNKNOWN_CRM_DB = (
+    "assets/bronze/customers.py:4: Asset `bronze.customers` declares connection `crm-db`, "
+    "which environment `dev` does not have. Create it: `lakana connection create crm-db "
+    "--env dev --kind <kind> …` (see `lakana connection create --help`)."
+)
+
+
+def _commit_customers(world: World) -> None:
+    """Commit `bronze.customers`, a Python asset that declares `crm-db`.
+
+    Parameters
+    ----------
+    world
+        The fixture's values.
+    """
+    commit(
+        world.repo_path,
+        {
+            "assets/bronze/customers.py": _CUSTOMERS_PY,
+            "pyproject.toml": _PYPROJECT,
+            "uv.lock": _lock_text(),
+        },
+    )
+
+
+@pytest.mark.parametrize("kind", [DeployKind.DEPLOY, DeployKind.DRY_RUN])
+def test_a_connection_the_environment_does_not_have_fails_the_deploy_and_the_dry_run(
+    session: Session, principal: PrincipalRef, world: World, kind: DeployKind
+) -> None:
+    _commit_customers(world)
+    run = _submit_and_run(session, principal, world, kind, settings=_python_settings(world))
+    assert (run.status, run.error_message) == (DeployStatus.FAILED, _UNKNOWN_CRM_DB)
+    assert session.query(JobVersion).count() == 0
+
+
+def test_a_connection_the_environment_has_lets_the_deploy_through(
+    session: Session, principal: PrincipalRef, world: World
+) -> None:
+    _commit_customers(world)
+    ConnectionService(session, AllowAllAuthorization(), _KEY).create(
+        principal,
+        "dev",
+        name="crm-db",
+        kind=ConnectionKind.DIRECTORY,
+        address={"root": "shared", "path": "crm"},
+        settings={},
+    )
+    run = _submit_and_run(session, principal, world, settings=_python_settings(world))
+    assert (run.status, run.error_message) == (DeployStatus.SUCCEEDED, None)
+    version = session.get(JobVersion, run.job_version_id)
+    assert version is not None
+    assert version.manifest_json["version"] == 7
+    customers = {entry["table"]: entry for entry in version.manifest_json["assets"]}
+    assert customers["bronze.customers"]["connections"] == ["crm-db"]
+    assert customers["silver.clean"]["kind"] == "sql"
+
+
+def test_the_connection_check_names_every_missing_connection_of_every_asset(
+    session: Session, principal: PrincipalRef, world: World
+) -> None:
+    _commit_customers(world)
+    commit(
+        world.repo_path,
+        {
+            "assets/bronze/orders.py": _CUSTOMERS_PY.replace("customers", "orders").replace(
+                "['crm-db']", "['crm-db', 'erp']"
+            ),
+        },
+    )
+    run = _submit_and_run(session, principal, world, settings=_python_settings(world))
+    assert run.status is DeployStatus.FAILED
+    assert run.error_message is not None
+    lines = run.error_message.splitlines()
+    assert [line.split(": ", 1)[0] for line in lines] == [
+        "assets/bronze/customers.py:4",
+        "assets/bronze/orders.py:4",
+        "assets/bronze/orders.py:4",
+    ]
+    assert "connection `erp`" in lines[2]

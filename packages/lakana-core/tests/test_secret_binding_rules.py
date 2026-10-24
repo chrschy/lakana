@@ -218,7 +218,8 @@ _URL_REFUSAL = (
     "Changing the URL of {use} would send secret '{secret}' of environment 'prod' to another "
     "host. That needs the right to manage secrets in 'prod' (the ADMIN role). Ask someone who "
     "may manage secrets in 'prod' to change the URL, or to bind the secret elsewhere first: "
-    "lakana secret bind {secret} --env prod (with --index NAME, --repository NAME or --own-env)"
+    "lakana secret bind {secret} --env prod (with --index NAME, --repository NAME, "
+    "--connection NAME or --own-env)"
 )
 
 
@@ -1184,3 +1185,50 @@ def test_an_index_or_repository_use_must_name_its_target(
     """Naming nothing is refused with the command that lists the candidates."""
     with pytest.raises(ValidationError, match=listing):
         resolve_use(session, kind, None)
+
+
+def test_a_refusal_hides_the_name_of_a_connection_the_caller_may_not_read(
+    session: Session, world: dict[str, PrincipalRef]
+) -> None:
+    """An index or repository manager without READ_ENVIRONMENT learns no connection's name.
+
+    The secret named is bound to connection `hidden-crm` of `prod`; the refusal says "a
+    connection of environment 'prod'". An administrator, who may read `prod`, sees the name.
+    """
+    from lakana_core.connections.kinds import ConnectionKind
+    from lakana_core.connections.service import ConnectionService
+
+    _secret(session, "prod", "crm-pw")
+    ConnectionService(session, AllowAllAuthorization(), _KEYS).create(
+        world["admin"],
+        "prod",
+        name="hidden-crm",
+        kind=ConnectionKind.POSTGRESQL,
+        address={"host": "db.example.com", "database": "crm"},
+        settings={"user": "reader"},
+        secret="crm-pw",
+    )
+    indexes = PackageIndexService(session, _auditing(session))
+    indexes.create(world["manager"], name="a", url="https://a.example.org/simple")
+    repositories = _repositories(session)
+
+    refusals = []
+    with pytest.raises(PermissionDenied) as caught:
+        indexes.update(world["manager"], "a", {"credential_secret": "crm-pw"})
+    refusals.append(str(caught.value))
+    with pytest.raises(PermissionDenied) as caught:
+        repositories.create(
+            world["manager"],
+            name="r",
+            kind=RepositoryKind.HTTPS,
+            url="https://git.example.org/r.git",
+            credential_secret="crm-pw",
+        )
+    refusals.append(str(caught.value))
+
+    for text in refusals:
+        assert "hidden-crm" not in text
+        assert "is bound to a connection of environment 'prod'" in text
+    with pytest.raises(PermissionDenied) as admin:
+        indexes.update(world["admin"], "a", {"credential_secret": "crm-pw"})
+    assert "is bound to connection 'hidden-crm'" in str(admin.value)

@@ -347,7 +347,8 @@ def _lineage_from_json(data: dict[str, Any]) -> Lineage:
     ----------
     data
         The decoded `LineageOut` JSON body. `truncated` may be missing from
-        an older server's body and then reads as `False`.
+        an older server's body and then reads as `False`; a node's `connection_kind`, as
+        `None`.
 
     Returns
     -------
@@ -359,7 +360,13 @@ def _lineage_from_json(data: dict[str, Any]) -> Lineage:
         direction=data["direction"],
         depth=data["depth"],
         nodes=[
-            LineageNode(id=n["id"], name=n["name"], kind=n["kind"], dropped=n["dropped"])
+            LineageNode(
+                id=n["id"],
+                name=n["name"],
+                kind=n["kind"],
+                dropped=n["dropped"],
+                connection_kind=n.get("connection_kind"),
+            )
             for n in data["nodes"]
         ],
         edges=[

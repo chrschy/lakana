@@ -8,6 +8,7 @@ disk); HTTPS and SSH fetching are covered by `lakana-worker`'s own tests.
 
 from __future__ import annotations
 
+import base64
 import gzip
 import hashlib
 import io
@@ -15,8 +16,9 @@ import os
 import subprocess
 import tarfile
 import threading
+import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,6 +26,7 @@ import pyarrow as pa
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine, delete, func, select
+from sqlalchemy import text as sql_text
 from sqlalchemy.orm import Session
 from testcontainers.postgres import PostgresContainer
 
@@ -33,11 +36,14 @@ from lakana.errors import Conflict, DeployFailed, PermissionDenied, ValidationEr
 from lakana_core import errors as lakana_core_errors
 from lakana_core.auth import AllowAllAuthorization, PrincipalRef
 from lakana_core.config import DatabaseConfig
+from lakana_core.connections.kinds import ConnectionKind
+from lakana_core.connections.service import ConnectionService
 from lakana_core.db import create_engine
 from lakana_core.errors import ConflictError
 from lakana_core.grants.authorization import GrantAuthorization
 from lakana_core.models import (
     Base,
+    Connection,
     DeployRun,
     DeployStatus,
     Environment,
@@ -48,7 +54,9 @@ from lakana_core.models import (
 )
 from lakana_core.projects.deploys import CONFLICT_MESSAGE, DeployService
 from lakana_core.projects.diff import DeployDiff
+from lakana_core.projects.issues import ProjectValidationError
 from lakana_core.projects.limits import DeployLimits
+from lakana_core.secrets.keys import EnvKeyProvider
 from lakana_server.app import create_app
 from lakana_server.settings import Settings
 from lakana_worker.deploy import DeploySettings, code_path
@@ -767,3 +775,398 @@ def test_a_deploy_keeps_the_job_schedules_in_step_on_postgres(
     assert rows() == {}
     deploy(rollback=True)
     assert rows()["daily"] is not None
+
+
+_CONNECTION_KEYS = EnvKeyProvider(base64.b64encode(b"6" * 32).decode())
+_CUSTOMERS_PATH = "assets/bronze/customers.py"
+
+
+def _customers_manifest(*connections: str) -> dict[str, object]:
+    """Build a manifest whose one Python asset, `bronze.customers`, declares `connections`.
+
+    Parameters
+    ----------
+    *connections
+        The connection names.
+
+    Returns
+    -------
+    dict
+        The manifest.
+    """
+    return {
+        "assets": [
+            {
+                "table": "bronze.customers",
+                "kind": "python",
+                "path": _CUSTOMERS_PATH,
+                "connections": list(connections),
+            }
+        ]
+    }
+
+
+def _admin(engine: Engine) -> PrincipalRef:
+    """Find the bootstrap administrator.
+
+    Parameters
+    ----------
+    engine
+        The shared engine.
+
+    Returns
+    -------
+    PrincipalRef
+        The administrator.
+    """
+    with Session(engine) as session:
+        row = session.query(Principal).filter(Principal.name == "admin").one()
+        return PrincipalRef(id=row.id, name=row.name, type=row.type)
+
+
+def _claim(session: Session, run_id: str, sha: str | None = None) -> DeployRun:
+    """Mark a queued run as running under worker `w1`, as `run_deploy` does.
+
+    Parameters
+    ----------
+    session
+        The session the run is recorded in.
+    run_id
+        The run.
+    sha
+        The resolved commit of a deploy; `None` for a rollback.
+
+    Returns
+    -------
+    DeployRun
+        The claimed run.
+    """
+    run = session.get(DeployRun, uuid.UUID(run_id))
+    assert run is not None
+    run.status, run.worker_id = DeployStatus.RUNNING, "w1"
+    session.commit()
+    if sha is not None:
+        run.resolved_sha = sha
+    return run
+
+
+def _record(engine: Engine, principal: PrincipalRef, run_id: str, sha: str, manifest: dict) -> None:
+    """Record a deploy run with `manifest`, without contention.
+
+    Parameters
+    ----------
+    engine
+        The shared engine.
+    principal
+        The deployer.
+    run_id
+        The queued run.
+    sha
+        A fake commit SHA.
+    manifest
+        The manifest.
+    """
+    with Session(engine) as session:
+        service = DeployService(session, AllowAllAuthorization())
+        run = _claim(session, run_id, sha)
+        current = service.current_job_version(run.environment_id, run.repository_id)
+        service.record_deploy(
+            principal,
+            run,
+            manifest=manifest,
+            code_uri="u",
+            code_sha256="0" * 64,
+            diff=DeployDiff(),
+            expected_job_version_id=current.id if current else None,
+            worker_id="w1",
+        )
+
+
+def _held_at_commit(session: Session, ready: threading.Event, release: threading.Event) -> None:
+    """Make the session's next commit flush, signal `ready`, and wait for `release`.
+
+    Parameters
+    ----------
+    session
+        The session whose transaction is held open with its locks.
+    ready
+        Set once everything is flushed and the transaction holds its locks.
+    release
+        Waited for (10 s at most) before the real commit.
+    """
+    real = session.commit
+
+    def held() -> None:
+        """Flush, hold, then commit."""
+        session.flush()
+        ready.set()
+        release.wait(10)
+        real()
+
+    vars(session)["commit"] = held  # an instance attribute shadows the method
+
+
+def _wait_for_a_lock_wait(engine: Engine) -> None:
+    """Wait (10 s at most) until a backend of this database waits on a lock.
+
+    Parameters
+    ----------
+    engine
+        The shared engine.
+    """
+    for _ in range(200):
+        with Session(engine) as session:
+            waiting = session.scalar(
+                sql_text(
+                    "SELECT count(*) FROM pg_stat_activity "
+                    "WHERE wait_event_type = 'Lock' AND datname = current_database()"
+                )
+            )
+        if waiting:
+            return
+        time.sleep(0.05)
+    pytest.fail("no session ever waited on a lock")
+
+
+@dataclass(frozen=True)
+class _Held:
+    """A step that holds its transaction open at the commit (`_held_at_commit`).
+
+    Parameters
+    ----------
+    step
+        The step.
+    ready
+        Set once the step holds its locks.
+    release
+        Lets the step commit.
+    """
+
+    step: Callable[[], None]
+    ready: threading.Event
+    release: threading.Event
+
+
+def _race(first: _Held, second: Callable[[], None], engine: Engine) -> dict[str, object]:
+    """Run `first` until it holds its commit, then `second` until it blocks, then let both go.
+
+    Parameters
+    ----------
+    first
+        The step that takes its locks first and holds them.
+    second
+        The step that must wait for them.
+    engine
+        The shared engine, to see the wait.
+
+    Returns
+    -------
+    dict
+        ``first`` and ``second``: ``ok`` or the exception each raised.
+    """
+    outcomes: dict[str, object] = {}
+
+    def run(name: str, step: Callable[[], None]) -> None:
+        """Run one step and keep its outcome.
+
+        Parameters
+        ----------
+        name
+            ``first`` or ``second``.
+        step
+            The step.
+        """
+        try:
+            step()
+            outcomes[name] = "ok"
+        except Exception as exc:
+            outcomes[name] = exc
+
+    ready, release = first.ready, first.release
+    holder = threading.Thread(target=run, args=("first", first.step))
+    holder.start()
+    assert ready.wait(10), "the first step never reached its commit"
+    waiter = threading.Thread(target=run, args=("second", second))
+    waiter.start()
+    try:
+        _wait_for_a_lock_wait(engine)
+        assert waiter.is_alive()
+    finally:
+        release.set()
+        holder.join(10)
+        waiter.join(10)
+    assert not holder.is_alive() and not waiter.is_alive()
+    return outcomes
+
+
+def _held_delete(engine: Engine, principal: PrincipalRef, env: str) -> _Held:
+    """Build a step that deletes `crm-db` and holds its transaction at the commit.
+
+    Parameters
+    ----------
+    engine
+        The shared engine.
+    principal
+        The administrator.
+    env
+        The environment.
+
+    Returns
+    -------
+    _Held
+        The step and its events.
+    """
+    ready, release = threading.Event(), threading.Event()
+
+    def delete_connection() -> None:
+        """Delete the connection in a session of its own."""
+        with Session(engine) as session:
+            _held_at_commit(session, ready, release)
+            ConnectionService(session, AllowAllAuthorization(), _CONNECTION_KEYS).delete(
+                principal, env, "crm-db"
+            )
+
+    return _Held(delete_connection, ready, release)
+
+
+def _connection_world(
+    stack: _Stack, client: TestClient, admin: lakana.Client
+) -> tuple[str, str, PrincipalRef]:
+    """Create an environment with connection `crm-db` and a registered repository.
+
+    Parameters
+    ----------
+    stack
+        The services.
+    client
+        The test client, for its engine.
+    admin
+        The admin SDK client.
+
+    Returns
+    -------
+    tuple
+        The environment, the repository and the administrator.
+    """
+    env, repo = _name(), _name()
+    _env(admin, stack, env)
+    _project(stack.roots / repo, {"lakana.yaml": "", "assets/silver/a.sql": "SELECT 1 AS id\n"})
+    admin.repositories.create(repo, "local", str(stack.roots / repo))
+    principal = _admin(client.app.state.engine)
+    with Session(client.app.state.engine) as session:
+        ConnectionService(session, AllowAllAuthorization(), _CONNECTION_KEYS).create(
+            principal,
+            env,
+            name="crm-db",
+            kind=ConnectionKind.DIRECTORY,
+            address={"root": "shared", "path": "crm"},
+            settings={},
+        )
+    return env, repo, principal
+
+
+@pytest.mark.parametrize("kind", ["deploy", "rollback"])
+def test_a_deploy_after_a_concurrent_connection_delete_fails_naming_the_connection(
+    stack: _Stack, sdk: tuple[TestClient, lakana.Client], kind: str
+) -> None:
+    """The delete locks the row first; the record waits on `FOR SHARE`, then finds it gone."""
+    client, admin = sdk
+    engine = client.app.state.engine
+    env, repo, principal = _connection_world(stack, client, admin)
+    runs: list[str] = []
+    if kind == "rollback":
+        runs += [admin.deploys.create(env, repo).id, admin.deploys.create(env, repo).id]
+        _record(engine, principal, runs[0], "1" * 40, _customers_manifest("crm-db"))
+        _record(engine, principal, runs[1], "2" * 40, _customers_manifest())
+        runs.append(admin.deploys.create(env, repo, kind="rollback", to_sha="1" * 40).id)
+    else:
+        runs.append(admin.deploys.create(env, repo).id)
+    before = _job_version_count(engine, env, repo)
+
+    def record() -> None:
+        """Record the run whose version declares `crm-db`."""
+        with Session(engine) as session:
+            service = DeployService(session, AllowAllAuthorization())
+            if kind == "rollback":
+                service.execute_rollback(principal, _claim(session, runs[-1]), worker_id="w1")
+                return
+            service.record_deploy(
+                principal,
+                _claim(session, runs[-1], "3" * 40),
+                manifest=_customers_manifest("crm-db"),
+                code_uri="u",
+                code_sha256="0" * 64,
+                diff=DeployDiff(),
+                expected_job_version_id=None,
+                worker_id="w1",
+            )
+
+    try:
+        outcomes = _race(_held_delete(engine, principal, env), record, engine)
+    finally:
+        _discard_unfinished(engine, runs)
+    assert outcomes["first"] == "ok"
+    refusal = outcomes["second"]
+    assert isinstance(refusal, ProjectValidationError), refusal
+    assert str(refusal) == (
+        f"{_CUSTOMERS_PATH}: Asset `bronze.customers` declares connection `crm-db`, which "
+        f"environment `{env}` does not have. Create it: `lakana connection create crm-db "
+        f"--env {env} --kind <kind> …` (see `lakana connection create --help`)."
+    )
+    assert _job_version_count(engine, env, repo) == before
+    current = admin.deployments.list(env)
+    assert [d.commit_sha for d in current] == (["2" * 40] if kind == "rollback" else [])
+
+
+def test_a_connection_delete_after_a_concurrent_deploy_is_refused_naming_the_asset(
+    stack: _Stack, sdk: tuple[TestClient, lakana.Client]
+) -> None:
+    """The record holds `FOR SHARE`; the delete waits, then sees the version and answers 409."""
+    client, admin = sdk
+    engine = client.app.state.engine
+    env, repo, principal = _connection_world(stack, client, admin)
+    run_id = admin.deploys.create(env, repo).id
+    ready, release = threading.Event(), threading.Event()
+
+    def record() -> None:
+        """Record a version declaring `crm-db`, holding the transaction at its commit."""
+        with Session(engine) as session:
+            run = _claim(session, run_id, "4" * 40)
+            _held_at_commit(session, ready, release)
+            DeployService(session, AllowAllAuthorization()).record_deploy(
+                principal,
+                run,
+                manifest=_customers_manifest("crm-db"),
+                code_uri="u",
+                code_sha256="0" * 64,
+                diff=DeployDiff(),
+                expected_job_version_id=None,
+                worker_id="w1",
+            )
+
+    def delete_connection() -> None:
+        """Delete the connection in a session of its own."""
+        with Session(engine) as session:
+            ConnectionService(session, AllowAllAuthorization(), _CONNECTION_KEYS).delete(
+                principal, env, "crm-db"
+            )
+
+    try:
+        outcomes = _race(_Held(record, ready, release), delete_connection, engine)
+    finally:
+        _discard_unfinished(engine, [run_id])
+    assert outcomes["first"] == "ok"
+    refusal = outcomes["second"]
+    assert isinstance(refusal, ConflictError), refusal
+    assert str(refusal) == (
+        f"connection `crm-db` is used by `{repo}: bronze.customers` in `{env}`; "
+        "deploy a version without it first."
+    )
+    with Session(engine) as session:
+        names = session.scalars(
+            select(Connection.name)
+            .join(Environment, Environment.id == Connection.environment_id)
+            .where(Environment.name == env)
+        ).all()
+    assert names == ["crm-db"]
+    assert [d.commit_sha for d in admin.deployments.list(env)] == ["4" * 40]

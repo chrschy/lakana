@@ -673,3 +673,90 @@ def test_its_iceberg_commit_that_does_not_fit_tells_it_nothing_of_its_own_asset(
         "details need READ on the table."
     )
     assert removals == [200, 200]
+
+
+def _declare_connections(bound: Bound, names: list[str]) -> None:
+    """Make the running attempt's deployed asset declare `names` as its connections.
+
+    Parameters
+    ----------
+    bound
+        The attempt.
+    names
+        The connection names.
+    """
+    with bound.session() as session:
+        task = session.get(TaskRun, bound.task_run_id)
+        assert task is not None
+        run = session.get(Run, task.run_id)
+        assert run is not None
+        version = session.get(JobVersion, run.job_version_id)
+        assert version is not None
+        manifest = dict(version.manifest_json)
+        manifest["version"] = 7
+        manifest["assets"] = [{**manifest["assets"][0], "connections": names}]
+        version.manifest_json = manifest
+        session.commit()
+
+
+def test_its_write_names_the_declared_connections_in_lineage(bound: Bound) -> None:
+    """End to end: the server derives the connection edge from the deployed manifest."""
+    created = bound.client.post(
+        "/api/v1/environments/dev/connections",
+        headers=AUTH_HEADER,
+        json={
+            "name": "crm-db",
+            "kind": "postgresql",
+            "address": {"host": "db.example.com", "database": "crm"},
+            "settings": {"user": "reader"},
+        },
+    )
+    assert created.status_code == 201, created.text
+    _declare_connections(bound, ["crm-db", "gone"])
+
+    assert bound.write("PUT", "gold.scores", "?source=silver.weather") == 200
+
+    response = bound.client.get(
+        "/api/v1/environments/dev/namespaces/gold/tables/scores/lineage", headers=AUTH_HEADER
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    by_id = {node["id"]: node for node in body["nodes"]}
+    [connection] = [node for node in body["nodes"] if node["kind"] == "CONNECTION"]
+    assert (connection["name"], connection["connection_kind"], connection["dropped"]) == (
+        "crm-db",
+        "postgresql",
+        False,
+    )
+    assert {by_id[edge["source_id"]]["name"] for edge in body["edges"]} == {
+        "crm-db",
+        "silver.weather",
+    }
+    assert all(set(edge) >= {"source_id", "target_id"} for edge in body["edges"])
+    assert all("name" not in edge and "source_name" not in edge for edge in body["edges"])
+    assert all(
+        node["connection_kind"] is None for node in body["nodes"] if node["kind"] != "CONNECTION"
+    )
+
+
+def test_a_source_named_like_a_connection_is_refused_as_a_table(bound: Bound) -> None:
+    """A client can never add a connection edge: `source` names tables only."""
+    _declare_connections(bound, [])
+    created = bound.client.post(
+        "/api/v1/environments/dev/connections",
+        headers=AUTH_HEADER,
+        json={
+            "name": "crm-db",
+            "kind": "postgresql",
+            "address": {"host": "db.example.com", "database": "crm"},
+            "settings": {"user": "reader"},
+        },
+    )
+    assert created.status_code == 201, created.text
+
+    assert bound.write("PUT", "gold.scores", "?source=crm-db") in {403, 404, 422}
+
+    response = bound.client.get(
+        "/api/v1/environments/dev/namespaces/gold/tables/scores/lineage", headers=AUTH_HEADER
+    )
+    assert [node["kind"] for node in response.json()["nodes"]] == ["TABLE"]

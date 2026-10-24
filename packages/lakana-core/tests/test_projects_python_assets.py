@@ -834,3 +834,69 @@ def test_a_file_with_a_byte_order_mark_that_reaches_the_parser_is_an_issue() -> 
     """Discovery drops a BOM; one that survives (inside the text) is a syntax error, not a crash."""
     (issue,) = _issues("x = 1\n\ufeffy = 2\n")
     assert issue.message.startswith("the file does not parse")
+
+
+def test_connections_are_read_from_the_decorator_and_default_to_none() -> None:
+    assert _parsed(_GOOD).connections == ()
+    declared = _GOOD.replace("@asset(", '@asset(connections=["crm-db", "files"], ', 1)
+    assert _parsed(declared).connections == ("crm-db", "files")
+    assert _parsed(_GOOD.replace("@asset(", "@asset(connections=[], ", 1)).connections == ()
+    assert _parsed(_GOOD.replace("@asset(", "@asset(connections=None, ", 1)).connections == ()
+
+
+def test_the_most_connections_an_asset_may_declare_is_accepted() -> None:
+    names = ", ".join(f'"c{index}"' for index in range(16))
+    parsed = _parsed(_GOOD.replace("@asset(", f"@asset(connections=[{names}], ", 1))
+    assert parsed.connections == tuple(f"c{index}" for index in range(16))
+
+
+_SEVENTEEN = ", ".join(f'"c{index}"' for index in range(17))
+
+
+@pytest.mark.parametrize(
+    ("argument", "message"),
+    [
+        ('connections="crm-db"', "argument 'connections' must be a list of strings"),
+        ("connections={'a': 'b'}", "argument 'connections' must be a list of strings"),
+        ("connections=[1]", "argument 'connections' must be a literal"),
+        ("connections=NAMES", "argument 'connections' must be a literal"),
+        ('connections=["crm-db", "crm-db"]', "connection `crm-db` is listed twice"),
+        (f"connections=[{_SEVENTEEN}]", "an asset declares at most 16 connections"),
+        (
+            'connections=["CRM"]',
+            "connection names are lower-case letters, digits and '-', starting with a letter, "
+            "at most 63; got 'CRM'",
+        ),
+        (
+            'connections=["1db"]',
+            "connection names are lower-case letters, digits and '-', starting with a letter, "
+            "at most 63; got '1db'",
+        ),
+        (
+            'connections=["' + "a" * 64 + '"]',
+            "connection names are lower-case letters, digits and '-', starting with a letter, "
+            "at most 63; got '" + "a" * 64 + "'",
+        ),
+        (
+            'connections=["crm-db\\n"]',
+            "connection names are lower-case letters, digits and '-', starting with a letter, "
+            "at most 63; got 'crm-db\\n'",
+        ),
+    ],
+)
+def test_a_wrong_connections_is_a_deploy_issue_at_the_decorator(
+    argument: str, message: str
+) -> None:
+    source = _GOOD.replace("@asset(", f"@asset({argument}, ", 1)
+    issues = _issues(source)
+    assert [issue.message for issue in issues] == [message]
+    assert issues[0].line == 5  # the decorator's line in `_GOOD`
+
+
+def test_a_bad_and_a_repeated_connection_are_both_reported() -> None:
+    source = _GOOD.replace("@asset(", '@asset(connections=["Bad", "ok", "ok"], ', 1)
+    assert [issue.message for issue in _issues(source)] == [
+        "connection names are lower-case letters, digits and '-', starting with a letter, "
+        "at most 63; got 'Bad'",
+        "connection `ok` is listed twice",
+    ]

@@ -662,19 +662,24 @@ class LineageNode:
     Parameters
     ----------
     id
-        The table's id.
+        The table's id, or the connection's.
     name
-        Its dotted name.
+        Its dotted name, or the connection's name.
     kind
-        ``TABLE``, ``EXTERNAL``, ``VIEW`` or ``ARTIFACT``; `None` once dropped.
+        ``TABLE``, ``EXTERNAL``, ``VIEW``, ``ARTIFACT`` or ``CONNECTION``; `None` once a
+        table is dropped. A ``CONNECTION`` is a connection the writing asset declared.
     dropped
-        Whether the table no longer exists.
+        Whether the table or connection no longer exists.
+    connection_kind
+        For a ``CONNECTION``, its kind (for example ``postgresql``); `None` otherwise, once
+        the connection is deleted, and from a server that predates the field.
     """
 
     id: str
     name: str
     kind: str | None
     dropped: bool
+    connection_kind: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1347,7 +1352,8 @@ class Secret:
     use_target
         The bound index's or repository's name, when there is one.
     use_target_url
-        Its URL, which is where the secret is sent, when there is one.
+        Its URL, which is where the secret is sent, when there is one (for a connection,
+        every ``host:port`` it sends the secret to, joined by ``, ``).
     """
 
     id: str
@@ -1491,6 +1497,77 @@ class PackageIndex:
     created_by: str | None
     created_at: datetime
     updated_at: datetime
+
+
+@dataclass(frozen=True)
+class DeclaringAsset:
+    """An asset whose deployed version declares a connection.
+
+    Parameters
+    ----------
+    repository
+        The repository's name.
+    asset
+        The asset's name.
+    """
+
+    repository: str
+    asset: str
+
+
+@dataclass(frozen=True)
+class Connection:
+    """A connection of an environment. Carries its secret's name, never a value.
+
+    Parameters
+    ----------
+    name
+        Its name.
+    kind
+        Its kind: ``postgresql``, ``mariadb``, ``sqlite-file``, ``http``, ``s3``, ``gcs``,
+        ``azure``, ``directory`` or ``tcp``.
+    address
+        Where the source is, with defaults filled in.
+    settings
+        How to reach it, with defaults filled in; a CA certificate as its SHA-256
+        fingerprints.
+    secret
+        The name of the secret it uses, or `None`.
+    declared_by
+        The assets whose deployed version declares it.
+    created_by
+        The name of the principal who created it.
+    created_at
+        When it was created.
+    updated_at
+        When it was last changed.
+    """
+
+    name: str
+    kind: str
+    address: dict
+    settings: dict
+    secret: str | None
+    declared_by: list[DeclaringAsset]
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
+class ConnectionPage:
+    """One page of an environment's connections, newest first.
+
+    Parameters
+    ----------
+    items
+        The connections of this page.
+    next_cursor
+        Pass back as `cursor=` to fetch the next page; `None` on the last page.
+    """
+
+    items: list[Connection]
+    next_cursor: str | None
 
 
 @dataclass(frozen=True)

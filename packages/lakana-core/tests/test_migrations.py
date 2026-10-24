@@ -4041,3 +4041,106 @@ def test_0048_adds_empty_size_columns(tmp_path: Path, monkeypatch: pytest.Monkey
     }
     command.downgrade(config, _REVISION_0047)
     assert columns() == {table: {} for table in _SIZE_COLUMNS}
+
+
+_REVISION_0049 = "a7c3e9f1b2d4"
+
+
+def test_0049_adds_connections_and_the_connection_secret_use(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revision `0049`: the connection tables, the secret use `CONNECTION`, `source_kind`.
+
+    Parameters
+    ----------
+    tmp_path
+        Holds the throwaway SQLite file.
+    monkeypatch
+        Points `lakana_core.config.Settings` at that file.
+    """
+    db_path = tmp_path / "migrated.db"
+    monkeypatch.setenv("LAKANA_DATABASE__URL", f"sqlite:///{db_path}")
+    config = Config(str(ALEMBIC_INI))
+    command.upgrade(config, _REVISION_0048)
+    engine = create_engine(f"sqlite:///{db_path}")
+    edge = uuid.uuid4().hex
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                sa.text(
+                    "INSERT INTO lineage_edges (id, environment_id, source_table_id, source_name,"
+                    " target_table_id, target_name, created_at) VALUES (:id, :env, :s, 'a.b',"
+                    " :t, 'c.d', '2026-10-23 00:00:00')"
+                ),
+                {"id": edge, "env": uuid.uuid4().hex, "s": uuid.uuid4().hex, "t": uuid.uuid4().hex},
+            )
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, _REVISION_0049)
+    engine = create_engine(f"sqlite:///{db_path}")
+    target = uuid.uuid4().hex
+    try:
+        inspector = inspect(engine)
+        assert {"connections", "connection_tests"} <= set(inspector.get_table_names())
+        assert {
+            tuple(c["column_names"]) for c in inspector.get_unique_constraints("connections")
+        } == {("environment_id", "name")}
+        assert {
+            (tuple(fk["constrained_columns"]), fk["referred_table"], fk["options"].get("ondelete"))
+            for fk in inspector.get_foreign_keys("connections")
+        } == {
+            (("environment_id",), "environments", "CASCADE"),
+            (("secret_id",), "secrets", "SET NULL"),
+            (("created_by",), "principals", None),
+        }
+        assert {
+            (tuple(fk["constrained_columns"]), fk["referred_table"], fk["options"].get("ondelete"))
+            for fk in inspector.get_foreign_keys("connection_tests")
+        } == {
+            (("connection_id",), "connections", "CASCADE"),
+            (("environment_id",), "environments", "CASCADE"),
+            (("requested_by",), "principals", None),
+        }
+        with engine.begin() as connection:
+            kind = connection.execute(
+                sa.text("SELECT source_kind FROM lineage_edges WHERE id = :id"), {"id": edge}
+            ).scalar_one()
+            bound = _insert_secret(connection, "CONNECTION", target, "bound")
+            connection.execute(
+                sa.text(
+                    "INSERT INTO lineage_edges (id, environment_id, source_kind, source_table_id,"
+                    " source_name, target_table_id, target_name, created_at) VALUES (:id, :env,"
+                    " 'connection', :s, 'crm-db', :t, 'c.d', '2026-10-23 00:00:00')"
+                ),
+                {
+                    "id": uuid.uuid4().hex,
+                    "env": uuid.uuid4().hex,
+                    "s": target,
+                    "t": uuid.uuid4().hex,
+                },
+            )
+        assert kind == "table"
+        with pytest.raises(IntegrityError), engine.begin() as connection:
+            _insert_secret(connection, "CONNECTION", None, "no-target")
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, _REVISION_0048)
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        inspector = inspect(engine)
+        assert not {"connections", "connection_tests"} & set(inspector.get_table_names())
+        assert "source_kind" not in {c["name"] for c in inspector.get_columns("lineage_edges")}
+        with engine.begin() as connection:
+            edges = connection.execute(sa.text("SELECT id FROM lineage_edges")).scalars().all()
+            use = connection.execute(
+                sa.text("SELECT use_kind, use_target_id FROM secrets WHERE id = :id"),
+                {"id": bound},
+            ).one()
+        assert tuple(use) == (None, None)
+        assert edges == [edge]
+        with pytest.raises(IntegrityError), engine.begin() as connection:
+            _insert_secret(connection, "CONNECTION", target, "refused-again")
+    finally:
+        engine.dispose()

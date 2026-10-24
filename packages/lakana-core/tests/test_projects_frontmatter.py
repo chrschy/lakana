@@ -239,8 +239,21 @@ def test_a_comment_in_the_body_carries_no_hint() -> None:
         ("keep_versions", "{a: b}", '@asset(output="artifact", keep_versions=N)'),
         ("decimals", "exact", '@asset(decimals="exact")'),
         ("decimals", "3", '@asset(decimals="exact")'),
+        ("connections", "[crm-db]", '@asset(connections=["crm-db"])'),
+        ("connections", "crm-db", '@asset(connections=["crm-db"])'),
     ],
-    ids=["str", "other-str", "int", "keep-int", "keep-list", "keep-map", "decimals", "dec-int"],
+    ids=[
+        "str",
+        "other-str",
+        "int",
+        "keep-int",
+        "keep-list",
+        "keep-map",
+        "decimals",
+        "dec-int",
+        "connections",
+        "connections-str",
+    ],
 )
 def test_a_python_only_key_in_sql_front_matter_names_the_next_step(
     key: str, value: str, declaration: str

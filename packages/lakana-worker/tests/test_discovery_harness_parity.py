@@ -29,7 +29,8 @@ import pytest
 from lakana import assets as sdk_assets
 from lakana import runner
 from lakana.assets import ASSET_ATTRIBUTE
-from lakana_core.projects.asset_model import MAX_KEEP_VERSIONS, ParsedAsset
+from lakana_core.connections.kinds import NAME
+from lakana_core.projects.asset_model import MAX_CONNECTIONS, MAX_KEEP_VERSIONS, ParsedAsset
 from lakana_core.projects.deploys import ARTIFACT_PARAMETER, _artifact_parameter_issues
 from lakana_core.projects.discovery import DiscoveredAsset
 from lakana_core.projects.project_config import AssetDefaults, normalize_source
@@ -122,6 +123,7 @@ def scores():
 _ACCEPTED = {
     "plain": _PLAIN,
     "artifact-asset": _ARTIFACT,
+    "with-connections": _PLAIN.replace("@asset()", '@asset(connections=["crm-db", "files"])'),
     "module-form": _MODULE_FORM,
     "byte-order-mark": "﻿" + _PLAIN,
     "crlf": _PLAIN.replace("\n", "\r\n"),
@@ -278,6 +280,21 @@ _ARGUMENT_CASES: dict[str, str] = {
     "decimals-none": "decimals=None",
     "decimals-huge": f"decimals={_HUGE}",
     "decimals-variable": "decimals=KIND",
+    "connections-two": 'connections=["crm-db", "files"]',
+    "connections-empty": "connections=[]",
+    "connections-tuple": 'connections=("crm-db",)',
+    "connections-none": "connections=None",
+    "connections-sixteen": "connections=[" + ", ".join(f'"c{i}"' for i in range(16)) + "]",
+    "connections-seventeen": "connections=[" + ", ".join(f'"c{i}"' for i in range(17)) + "]",
+    "connections-a-string": 'connections="crm-db"',
+    "connections-a-dict": 'connections={"crm-db": "x"}',
+    "connections-repeated": 'connections=["crm-db", "crm-db"]',
+    "connections-upper-case": 'connections=["CRM"]',
+    "connections-leading-digit": 'connections=["1db"]',
+    "connections-too-long": 'connections=["' + "a" * 64 + '"]',
+    "connections-longest": 'connections=["' + "a" * 63 + '"]',
+    "connections-trailing-newline": 'connections=["crm-db\\n"]',
+    "connections-underscore": 'connections=["crm_db"]',
 }
 
 
@@ -299,6 +316,17 @@ def _call(source: str) -> str | None:
     except ValueError as exc:
         return str(exc)
     return None
+
+
+def test_the_connection_rules_are_the_same_in_core_and_the_sdk() -> None:
+    assert sdk_assets.CONNECTION_NAME.pattern == NAME.pattern
+    assert sdk_assets.MAX_CONNECTIONS == MAX_CONNECTIONS == 16
+    plain = _discovered(_PLAIN)
+    assert plain is not None
+    assert plain.connections == sdk_assets.AssetSpec.__dataclass_fields__["connections"].default
+    declared = _discovered(_PLAIN.replace("@asset()", '@asset(connections=["crm-db"])'))
+    assert declared is not None
+    assert declared.connections == ("crm-db",)
 
 
 def test_the_retention_bound_is_the_same_in_core_and_the_sdk() -> None:

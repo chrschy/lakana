@@ -36,6 +36,17 @@ limits lie is in [Python assets: what they are for and how far they are trusted]
   double, a decimal column as a decimal. Older Lakana releases always
   handed a Python asset `decimal.Decimal` values; an asset written for them that relies on
   that needs `decimals="exact"` after an upgrade.
+- **Connections.** `connections` names the connections of the environment this asset reads from,
+  for example `@asset(connections=["crm-db"])`; reading them from inside the task arrives in a
+  later release. At most 16, each made of lower-case letters, digits and `-`, starting with a
+  letter, and none listed twice. Each must exist in the environment you deploy to, or the deploy fails naming the
+  `lakana connection create` command that creates it. A rollback to a version whose connection
+  was deleted since fails the same way. While a deployed version declares a connection, the
+  connection cannot be deleted. An asset without `connections` deploys as before. A project
+  version in which an asset declares connections has manifest version 7, so a worker of an
+  earlier release refuses its runs instead of running the asset without them: upgrade the
+  workers first. The kinds of connection and the commands that manage them are in
+  [Connections](connections.md).
 - **Output.** The function returns a `polars.DataFrame`. It replaces the asset's table in one
   snapshot. Zero rows are fine. With `output="artifact"` it returns a `pathlib.Path` inside
   `lakana.output_dir()` instead, and each run stores a new version of the artifact (see the
@@ -47,7 +58,10 @@ limits lie is in [Python assets: what they are for and how far they are trusted]
   must be written out as a literal: strings, numbers, lists and dicts of strings. Variables,
   `**unpacking` and function calls are refused.
 - **Lineage.** A Python asset has dependency lineage (its inputs) and no column lineage. A SQL
-  asset can read a Python asset's table by name; the run orders them as usual.
+  asset can read a Python asset's table by name; the run orders them as usual. A table written
+  by an asset that declares connections shows each connection as a source in its lineage
+  (`lakana table lineage`), recorded by the server from the deployed asset, never from what the
+  task sends. Who sees it: [Connections](connections.md#lineage).
 - **Who sees a dropped table in `table lineage`.** Lineage lists only tables you may read. A table
   that was dropped stays in the history of the tables it fed, marked `dropped`, and is shown only
   to someone who may read its whole namespace (a grant on the namespace, the environment or the
@@ -136,7 +150,10 @@ there is one, the line, as `path:line: message`. Fix the cause and deploy again.
 | `parameter 'x' reads the artifact …, which the task stores in a directory of that name: rename the parameter …` | The parameter that reads an artifact is not letters, digits and underscores, or is longer than 128 characters. | Rename it in the function and in `inputs`. Two such parameters may not differ only in case. |
 | `an artifact asset cannot read its own artifact (x.y); remove it from inputs` | An artifact asset lists itself as an input. | Remove it. |
 | `argument 'output' must be 'table' or 'artifact', got …`, `argument 'keep_versions' must be an integer of at least 1`, `argument 'materialize' does not apply to an artifact asset; remove it` | A wrong value for an artifact option. | See the [reference](artifacts.md). |
-| `` `output` applies only to a Python asset, not to a SQL file; declare the asset in a `.py` file with … `` | `output` or `keep_versions` in the front matter of a SQL file. | Declare the asset in a `.py` file, or remove the key. |
+| `` `output` applies only to a Python asset, not to a SQL file; declare the asset in a `.py` file with … `` | `output`, `keep_versions`, `decimals` or `connections` in the front matter of a SQL file. | Declare the asset in a `.py` file, or remove the key. |
+| ``Asset `x.y` declares connection `c`, which environment `e` does not have. Create it: `lakana connection create c --env e --kind <kind> …` `` | The environment has no connection of that name: it was never created there, or was deleted. A rollback says the same. | Create it with the command the message shows (`lakana connection create --help` lists the kinds), or remove the name from `connections`, then deploy again. |
+| ``Asset `x.y`: the connections this project version declares cannot be read, so they cannot be checked against environment `e`. Deploy the repository again to record a new version.`` | The stored record of a project version was damaged or edited by hand. A rollback to such a version says the same. | Deploy the repository again; roll back only to a version recorded intact. |
+| `argument 'connections' must be a list of strings`, ``connection `c` is listed twice``, `an asset declares at most 16 connections`, `connection names are lower-case letters, digits and '-', …` | A wrong value for `connections`. | Write a list of distinct connection names, such as `connections=["crm-db"]`. |
 | `the file does not parse: …` | A syntax error. | Fix the line it names. |
 | `incremental Python assets are not supported yet (#23)`, `a Python asset supports only materialize 'table', got …` | `materialize` is not `table`. | Remove the argument, or write a SQL asset. |
 | `assets/a.sql and assets/a.py both produce table 'a'` | A SQL file and a Python file for one table. | Keep one. |

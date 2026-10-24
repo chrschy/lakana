@@ -652,6 +652,7 @@ def test_a_read_that_shows_other_peoples_events_is_recorded_once_per_window(
         "view": "audit_log",
         "filters": {
             "event_type": None,
+            "kind": None,
             "environment": None,
             "since": None,
             "until": None,
@@ -746,6 +747,7 @@ def test_the_filters_of_a_read_are_recorded_as_given(session: Session) -> None:
     [row] = _views(session)
     assert row.detail["filters"] == {
         "event_type": "QUERY_COMPLETED",
+        "kind": None,
         "environment": "dev",
         "since": since.isoformat(),
         "until": until.isoformat(),

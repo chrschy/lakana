@@ -1564,7 +1564,7 @@ def test_a_sql_asset_whose_name_is_an_artifact_is_refused_with_the_next_step(wor
     )
 
 
-@pytest.mark.parametrize("declared", [7, "3", 3.0, 0, -1, True])
+@pytest.mark.parametrize("declared", [8, "3", 3.0, 0, -1, True])
 def test_a_sql_task_of_a_manifest_this_worker_cannot_read_fails_permanently(
     world: World, declared: object
 ) -> None:
@@ -1623,12 +1623,13 @@ def test_a_sql_task_of_a_manifest_of_a_version_up_to_the_current_one_still_runs(
 
 
 @pytest.mark.parametrize(
-    ("declared", "status"), [(6, TaskStatus.SUCCEEDED), (7, TaskStatus.FAILED)]
+    ("declared", "status"),
+    [(6, TaskStatus.SUCCEEDED), (7, TaskStatus.SUCCEEDED), (8, TaskStatus.FAILED)],
 )
-def test_a_manifest_of_version_6_is_accepted_and_7_is_refused(
+def test_a_manifest_of_version_7_is_accepted_and_8_is_refused(
     world: World, declared: int, status: TaskStatus
 ) -> None:
-    """Version 6 is the one a project with notifications gets; 7 is a future worker's."""
+    """Version 7 is the one a project with connections gets; 8 is a future worker's."""
     _start(world)
     with world.session() as session:
         version = session.get(JobVersion, world.version_id)

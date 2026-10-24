@@ -873,6 +873,55 @@ def test_table_lineage_prints_a_tree(tmp_path: Path) -> None:
     ]
 
 
+def test_table_lineage_prints_the_declared_connections(tmp_path: Path) -> None:
+    """A connection source prints as `connection <name> (<kind>)`; a deleted one says so."""
+    api = FakeApi()
+    api.on(
+        "GET",
+        f"{_BASE}/customers/lineage",
+        json={
+            "root_id": "t",
+            "direction": "upstream",
+            "depth": 3,
+            "nodes": [
+                {"id": "t", "name": "bronze.customers", "kind": "TABLE", "dropped": False},
+                {
+                    "id": "c",
+                    "name": "crm-db",
+                    "kind": "CONNECTION",
+                    "dropped": False,
+                    "connection_kind": "postgresql",
+                },
+                {"id": "d", "name": "old-files", "kind": "CONNECTION", "dropped": True},
+            ],
+            "edges": [
+                {
+                    "source_id": source,
+                    "target_id": "t",
+                    "source_snapshot_id": None,
+                    "target_snapshot_id": 2,
+                    "query_run_id": None,
+                    "created_at": "2026-10-24T10:00:00Z",
+                }
+                for source in ("c", "d")
+            ],
+            "hidden_nodes": 0,
+            "truncated": False,
+        },
+    )
+
+    result = invoke(
+        make_state(tmp_path, api), "table", "lineage", "bronze.customers", "--env", "dev"
+    )
+
+    assert result.exit_code == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        "bronze.customers",
+        "├── connection crm-db (postgresql)",
+        "└── connection old-files (deleted)",
+    ]
+
+
 def test_table_lineage_passes_direction_and_depth_and_prints_json(tmp_path: Path) -> None:
     """`--downstream --depth N` go to the API; `--output json` prints the graph."""
     api = FakeApi()

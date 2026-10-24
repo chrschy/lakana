@@ -21,8 +21,8 @@ the signature are in the same guide.
 
 ## Bind a secret to its use
 
-A secret has one use: the credential of one package index, of one repository, or its
-environment's own work (storage and webhooks). Lakana refuses it for anything else, so
+A secret has one use: the credential of one package index, of one repository, of one
+connection of its environment, or its environment's own work (storage and webhooks). Lakana refuses it for anything else, so
 someone who may register package indexes cannot send another secret to a host of their choice.
 Under the current runner, someone who also holds `DEPLOY` and `RUN` reads what the worker reads
 anyway, so binding protects against an index manager redirecting a secret, not against code that
@@ -59,12 +59,30 @@ lakana secret list --env dev
 ```
 
 To bind a secret on its own, or to move it, an administrator runs `lakana secret bind` with
-exactly one of `--index NAME`, `--repository NAME` or `--own-env`:
+exactly one of `--index NAME`, `--repository NAME`, `--connection NAME` or `--own-env`:
 
 <!-- source: docs/examples/bind-a-secret/run.sh#bind -->
 ```bash
 lakana secret bind hook --env dev --own-env
 ```
+
+A connection's own secret is usually created with the connection (`lakana connection create …
+--password-stdin`); binding an existing secret to a connection needs the right to manage secrets.
+The bind also makes it the secret the connection uses, in one step, and the connection lets go of
+the secret it used before:
+
+<!-- source: docs/examples/connections/run.sh#bind -->
+```bash
+lakana secret bind crm-reader --env dev --connection crm-db
+```
+
+<!-- output: connections#bind -->
+```text
+Bound secret crm-reader in dev to connection crm-db (db2.example.com:5432); it is now the secret the connection uses
+```
+
+The reference page [Connections](../reference/connections.md) lists who may give a connection
+which secret.
 
 Someone who may only register indexes or repositories (`MANAGE_PACKAGE_INDEX`,
 `MANAGE_REPOSITORY`) can name a secret only if it is already bound to that same index or
@@ -118,7 +136,7 @@ The listing shows, for each secret:
 | `name`, `environment` | Which secret it is. |
 | `format_version` | `2` is the current format. `1` is the original one, from before the format was recorded; Lakana refuses it unless `LAKANA_SECRETS__ACCEPT_FORMAT_1` is on (see below). |
 | `key_id` | Which key provider and which key wrapped the secret's data key: `env:` and 16 characters for a master key from `LAKANA_SECRETS__MASTER_KEY`, or just `env` for a secret stored in the original format. It does not reveal the key. |
-| `use`, `use_target` | What the secret is bound to: `package_index`, `repository` or `environment`, and the name of the index or repository. Both are empty when it is unbound. `use_target` is also empty for `environment`, and for an index or repository that was removed; `use` then still names the kind. |
+| `use`, `use_target` | What the secret is bound to: `package_index`, `repository`, `connection` or `environment`, and the name of the index, repository or connection. Both are empty when it is unbound. `use_target` is also empty for `environment`, and for an index or repository that was removed; `use` then still names the kind. A connection's secret lives in the connection's environment; deleting the connection, or clearing its secret, leaves the secret unbound. |
 | `created_by`, `created_at` | Who created it and when. |
 
 ## Secrets stored in the old format

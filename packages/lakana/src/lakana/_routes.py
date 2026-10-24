@@ -206,6 +206,17 @@ ROUTES: dict[str, Route] = {
     "secrets.bind": Route(
         "PUT", "/api/v1/environments/{environment_name}/secrets/{secret_name}/use"
     ),
+    "connections.create": Route("POST", "/api/v1/environments/{environment_name}/connections"),
+    "connections.list": Route("GET", "/api/v1/environments/{environment_name}/connections"),
+    "connections.get": Route(
+        "GET", "/api/v1/environments/{environment_name}/connections/{connection_name}"
+    ),
+    "connections.update": Route(
+        "PATCH", "/api/v1/environments/{environment_name}/connections/{connection_name}"
+    ),
+    "connections.delete": Route(
+        "DELETE", "/api/v1/environments/{environment_name}/connections/{connection_name}"
+    ),
     "repositories.create": Route("POST", "/api/v1/repositories"),
     "repositories.list": Route("GET", "/api/v1/repositories"),
     "repositories.get": Route("GET", "/api/v1/repositories/{name}"),

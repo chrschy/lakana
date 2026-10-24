@@ -257,20 +257,27 @@ class _Hold:
 
     def __init__(self, seconds: float = 25.0) -> None:
         self.seconds = seconds
+        self.wait = seconds
         self.armed: str | None = None
+        self.status: int | None = None
         self.held = threading.Event()
         self.release = threading.Event()
 
-    def arm(self, name: str) -> None:
+    def arm(self, name: str, seconds: float | None = None) -> None:
         """Hold the next commit of an artifact, or the next replace of a table, of this name.
 
         Parameters
         ----------
         name
             The artifact's or the table's name, without its namespace.
+        seconds
+            The longest this one response waits; `None` keeps the default `seconds`. It must
+            outlast the timeout that is to end the attempt while its reply is held.
         """
         self.held.clear()
         self.release.clear()
+        self.status = None
+        self.wait = self.seconds if seconds is None else seconds
         self.armed = name
 
 
@@ -329,8 +336,9 @@ class _HoldCommit:
                 The ASGI message about to be sent.
             """
             if message["type"] == "http.response.start":
+                self.hold.status = message["status"]
                 self.hold.held.set()
-                for _ in range(int(self.hold.seconds * 10)):
+                for _ in range(int(self.hold.wait * 10)):
                     if self.hold.release.is_set():
                         break
                     await asyncio.sleep(0.1)
@@ -2252,12 +2260,16 @@ def test_the_deploy_refuses_what_an_artifact_cannot_do(stack: _Stack, wheelhouse
     ] == []
 
 
-_WIDE = '''\
+_WIDE_TIMEOUT = 10
+"""Attempt 1's whole budget: the process starts, reads its input and replaces the table within
+it, and then its timeout ends it while the reply is held."""
+
+_WIDE = f'''\
 import polars as pl
 from lakana import asset
 
 
-@asset(inputs={"events": "bronze.events"}, retries=1, timeout="10s")
+@asset(inputs={{"events": "bronze.events"}}, retries=1, timeout="{_WIDE_TIMEOUT}s")
 def wide(events: pl.DataFrame) -> pl.DataFrame:
     """Every event; the check of this table refuses the id 2."""
     return events
@@ -2289,7 +2301,7 @@ def test_a_second_attempts_failed_check_sets_the_table_back_to_before_the_first_
         env, "silver.wide", pa.table({"id": pa.array([7, 8], pa.int64())})
     ).snapshot_id
     assert before is not None
-    stack.hold.arm("wide")
+    stack.hold.arm("wide", seconds=_WIDE_TIMEOUT + 30)
     run = admin.runs.start(env, project.repository)
     during: list[tuple[int | None, int | None]] = []
 
@@ -2318,6 +2330,17 @@ def test_a_second_attempts_failed_check_sets_the_table_back_to_before_the_first_
         stack.hold.held.set()  # lets the watcher end if the upload was never held
         watcher.join(timeout=60)
     assert not watcher.is_alive()
+    assert stack.hold.status == 200, (
+        f"attempt 1 did not replace silver.wide within its {_WIDE_TIMEOUT} s timeout: the "
+        f"reply the test holds back answered {stack.hold.status} (None: no replace arrived), "
+        "so the case under test never happened. The attempts and the task's log say why. "
+        f"Run: {finished}. Attempts: "
+        + "; ".join(
+            f"{a.attempt} {a.outcome} {a.failure_code}: {a.error_message}"
+            for a in _attempts(stack, run.id, "silver.wide")
+        )
+        + f". Log:\n{stack.admin.runs.log(env, run.id, 'silver.wide').text}"
+    )
     # Attempt 1 really committed: while its reply was held the table was at a new snapshot,
     # and that snapshot was the tip of the task run's own writes.
     ((first_snapshot, first_tip),) = during

@@ -8,15 +8,21 @@ import logging
 import pytest
 from test_projects_dag import make_asset
 
+from lakana_core.projects.checks import ParsedCheck, read_manifest_checks
 from lakana_core.projects.dag import build_graph
 from lakana_core.projects.frontmatter import AssetMetadata
 from lakana_core.projects.manifest import (
+    CHECKS_VERSION,
+    CONNECTIONS_VERSION,
     JOBS_VERSION,
     MANIFEST_VERSION,
+    NOTIFY_VERSION,
     VERSION_WITHOUT_CHECKS,
+    EntryConnections,
     JobNotify,
     asset_kind,
     build_manifest,
+    entry_connections,
     entry_decimals,
     entry_input_kinds,
     entry_inputs,
@@ -30,6 +36,7 @@ from lakana_core.projects.manifest import (
     manifest_python,
     manifest_tables,
     python_entry,
+    read_entry_connections,
 )
 from lakana_core.projects.parse import ParsedAsset
 from lakana_core.projects.project_config import ResolvedProjectConfig, parse_project_config
@@ -516,7 +523,7 @@ def test_a_python_entry_records_decimals_and_the_manifest_version_is_unchanged(
     asset = dataclasses.replace(_python_asset(), decimals=decimals)
     manifest = build_manifest([asset], build_graph([asset]), ResolvedProjectConfig())
     assert manifest["version"] == VERSION_WITHOUT_CHECKS == 3
-    assert MANIFEST_VERSION == 6
+    assert MANIFEST_VERSION == 7
     assert manifest["assets"][0]["decimals"] == decimals
 
 
@@ -603,7 +610,7 @@ def _notify_manifest(environment: str) -> dict:
 
 def test_a_manifest_with_notify_is_version_6_and_has_it_resolved_for_the_environment() -> None:
     prod = _notify_manifest("prod")
-    assert prod["version"] == MANIFEST_VERSION == 6
+    assert prod["version"] == NOTIFY_VERSION == 6
     assert prod["jobs"]["daily"]["notify"] == {"webhook": "team-alerts", "format": "slack"}
     assert "notify" not in prod["jobs"]["by_hand"]
     dev = _notify_manifest("dev")
@@ -638,3 +645,131 @@ def test_the_manifest_records_python_only_when_the_project_names_one() -> None:
     assert manifest_python(named) == "3.12"
     assert manifest_python({"python": "3.9"}) is None
     assert manifest_python({}) is None
+
+
+_CHECK = ParsedCheck(
+    name="scores_not_null",
+    table="gold.scores",
+    check="not_null",
+    path="checks/scores_not_null.sql",
+    on_failure="block",
+    description=None,
+    sql="SELECT * FROM gold.scores WHERE score IS NULL",
+    references=("gold.scores",),
+    body_line=1,
+)
+
+
+def _versioned(yaml: str, *, checks: bool, connections: tuple[str, ...] = ()) -> dict:
+    """Build the manifest of `gold.scores` under a `lakana.yaml`, with or without a check.
+
+    Parameters
+    ----------
+    yaml
+        The `lakana.yaml` text, resolved for ``prod``.
+    checks
+        Whether the project has `_CHECK`.
+    connections
+        What the Python asset declares.
+
+    Returns
+    -------
+    dict
+        The manifest.
+    """
+    asset = dataclasses.replace(_python_asset(), connections=connections)
+    config = parse_project_config(yaml).resolved_for("prod")
+    return build_manifest([asset], build_graph([asset]), config, checks=[_CHECK] if checks else ())
+
+
+_PLAIN_JOB = "jobs:\n  daily:\n    select: ['gold.*']\n"
+_NOTIFY_JOB = _PLAIN_JOB + "    notify: { webhook: team-alerts, format: slack }\n"
+
+
+@pytest.mark.parametrize(
+    ("yaml", "checks", "version"),
+    [
+        ("", False, VERSION_WITHOUT_CHECKS),
+        ("", True, CHECKS_VERSION),
+        (_PLAIN_JOB, False, JOBS_VERSION),
+        (_NOTIFY_JOB, True, NOTIFY_VERSION),
+    ],
+    ids=["3", "4", "5", "6"],
+)
+def test_a_project_without_connections_keeps_its_version_and_one_with_any_is_version_7(
+    yaml: str, checks: bool, version: int
+) -> None:
+    plain = _versioned(yaml, checks=checks)
+    assert plain["version"] == version
+    assert plain["assets"][0]["connections"] == []
+    declared = _versioned(yaml, checks=checks, connections=("crm-db", "files"))
+    assert declared["version"] == CONNECTIONS_VERSION == MANIFEST_VERSION == 7
+    assert declared["assets"][0]["connections"] == ["crm-db", "files"]
+    assert isinstance(declared["checks"], list)
+    assert len(declared["checks"]) == (1 if checks else 0)
+
+
+def test_a_version_7_manifest_without_checks_still_reads_as_having_none() -> None:
+    """Version 7 always carries the list, so a missing one reads as a damaged manifest."""
+    manifest = _versioned("", checks=False, connections=("crm-db",))
+    assert manifest["checks"] == []
+    read = read_manifest_checks(manifest)
+    assert (read.specs, read.unplaced) == ((), False)
+    damaged = {key: value for key, value in manifest.items() if key != "checks"}
+    assert read_manifest_checks(damaged).unplaced is True
+
+
+def test_a_sql_entry_has_no_connections_key() -> None:
+    assets = [make_asset("silver.a", ("bronze.events",))]
+    manifest = build_manifest(assets, build_graph(assets), ResolvedProjectConfig())
+    assert "connections" not in manifest["assets"][0]
+
+
+@pytest.mark.parametrize(
+    ("entry", "connections"),
+    [
+        ({"kind": "python", "connections": ["crm-db", "files"]}, ("crm-db", "files")),
+        ({"kind": "python", "connections": []}, ()),
+        ({"kind": "python", "output": "table"}, ()),  # a version 6 entry
+        ({"kind": "sql", "connections": ["crm-db"]}, ()),
+        ({"kind": "python", "connections": "crm-db"}, ()),
+        ({"kind": "python", "connections": ["crm-db", 3]}, ()),
+        ({"kind": "python", "connections": ["CRM"]}, ()),
+        ({"kind": "python", "connections": None}, ()),
+        (None, ()),
+        ("crm-db", ()),
+    ],
+)
+def test_a_stored_entry_reads_connections_defensively(
+    entry: object, connections: tuple[str, ...]
+) -> None:
+    assert entry_connections(entry) == connections
+
+
+def test_a_malformed_connections_entry_is_logged_once(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.WARNING, logger="lakana_core.projects.manifest"):
+        assert entry_connections({"kind": "python", "connections": ["ok", "Not OK", 3]}) == ()
+        assert entry_connections({"kind": "python", "connections": ["ok"]}) == ("ok",)
+        assert entry_connections({"kind": "python"}) == ()
+    (record,) = caplog.records
+    assert "connections" in record.getMessage()
+    assert "Not OK" not in record.getMessage()
+
+
+@pytest.mark.parametrize(
+    ("entry", "names", "readable"),
+    [
+        ({"kind": "python", "connections": ["crm-db", "files"]}, ("crm-db", "files"), True),
+        ({"kind": "python"}, (), True),
+        ({"kind": "sql", "connections": ["crm-db"]}, (), True),
+        ({"kind": "python", "connections": "crm-db"}, ("crm-db",), False),
+        ({"kind": "python", "connections": ["crm-db", 3, "CRM"]}, ("crm-db", "CRM"), False),
+        ({"kind": "python", "connections": ["crm-db", "crm-db"]}, ("crm-db",), False),
+        ({"kind": "python", "connections": {"crm-db": 1}}, (), False),
+    ],
+)
+def test_read_entry_connections_names_every_string_and_says_whether_it_is_readable(
+    entry: dict, names: tuple[str, ...], readable: bool
+) -> None:
+    assert read_entry_connections(entry) == EntryConnections(names, readable)
+    assert entry_connections(entry) == (names if readable else ())

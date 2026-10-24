@@ -42,7 +42,7 @@ cannot differ from what a route decides.
 | Object | `--scope` | Parameters | Actions |
 |---|---|---|---|
 | The instance | left out | none | `MANAGE_ENVIRONMENT` (creating one), `MANAGE_PRINCIPAL`, `MANAGE_GROUP`, `MANAGE_TOKEN`, `MINT_TASK_TOKEN`, `MANAGE_GRANT`, `MANAGE_POLICY`, `READ_AUDIT_LOG`, `READ_QUERY_TEXT`, `MANAGE_REPOSITORY`, `MANAGE_PACKAGE_INDEX` |
-| An environment | `dev` | `environment` | `READ_ENVIRONMENT`, `READ_NAMESPACE`, `SUBMIT_QUERY`, `MANAGE_ENVIRONMENT`, `MANAGE_SECRET`, `DEPLOY`, `RUN` |
+| An environment | `dev` | `environment` | `READ_ENVIRONMENT`, `READ_NAMESPACE`, `SUBMIT_QUERY`, `MANAGE_ENVIRONMENT`, `MANAGE_SECRET`, `MANAGE_CONNECTION`, `DEPLOY`, `RUN` |
 | A namespace | `dev/gold.sales` | `environment`, `namespace` | `READ_NAMESPACE`, `CREATE_NAMESPACE`, `MANAGE_NAMESPACE`, `DROP_NAMESPACE`, `CREATE_TABLE` |
 | A table | `dev/gold.sales/orders` | `environment`, `namespace`, `table` | `READ_TABLE`, `WRITE_TABLE`, `CREATE_TABLE`, `DROP_TABLE`, `MAINTAIN_TABLE` |
 
@@ -83,6 +83,13 @@ What the answer takes into account:
   watermark of an incremental write), which otherwise show as a SHA-256 and length (query
   text) or as `{"hidden": true}` (a watermark)
   ([Other people's query text and column values](lists.md#other-peoples-query-text-and-column-values-in-the-audit-log)).
+- **`MANAGE_CONNECTION`** creates, changes and deletes the connections of an environment (the
+  source systems its assets read); reading them needs only `READ_ENVIRONMENT`. The roles
+  `DATA_ENGINEER` and `ADMIN` carry it. It may give a connection a new secret or keep the one
+  bound to it; naming any other secret also needs `MANAGE_SECRET`, which only `ADMIN` carries. So
+  does changing, on a connection that has a secret, its address or how the secret is sent (TLS
+  weakened, CA certificate, `auth`, `api_key_in`), unless the same change gives a new secret.
+  A task's token never has it.
 - **`MINT_TASK_TOKEN`** is the right to mint a task token for oneself. Minting one for another
   principal needs the `ADMIN` role on the instance too.
 - **Task tokens** may not ask, not even about their own principal: a task's token can do less

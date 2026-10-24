@@ -36,6 +36,7 @@ from lakana_core.projects.issues import ProjectIssue, ProjectValidationError
 from lakana_core.projects.limits import DeployLimits
 from lakana_core.projects.manifest import (
     CHECKS_VERSION,
+    CONNECTIONS_VERSION,
     JOBS_VERSION,
     NOTIFY_VERSION,
     manifest_assets,
@@ -784,9 +785,9 @@ def read_manifest_checks(manifest: object) -> ManifestChecks:
         return ManifestChecks((), frozenset(), unplaced=False)
     raw = manifest.get("checks")
     version = manifest.get("version")
-    # A version 4 manifest exists because it has checks; a version 5 or 6 one may have only jobs,
-    # so it must carry the list but may leave it empty.
-    means_checks = version in (CHECKS_VERSION, JOBS_VERSION, NOTIFY_VERSION)
+    # A version 4 manifest exists because it has checks; a version 5, 6 or 7 one may have only
+    # jobs or connections, so it must carry the list but may leave it empty.
+    means_checks = version in (CHECKS_VERSION, JOBS_VERSION, NOTIFY_VERSION, CONNECTIONS_VERSION)
     if "checks" not in manifest and not means_checks:
         return ManifestChecks((), frozenset(), unplaced=False)
     if not isinstance(raw, list) or (version == CHECKS_VERSION and not raw):

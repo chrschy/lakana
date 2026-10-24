@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Annotated
 
 import typer
@@ -28,6 +29,12 @@ _EVENT_DROPPABLE = [
     "principal_id",
 ]
 """What the audit listing leaves out first: the time and the kind of event always stay."""
+
+
+class EventKind(StrEnum):
+    """The values `--kind` accepts: a group of event types."""
+
+    connection = "connection"
 
 
 def parse_timestamp(value: str | None, flag: str) -> datetime | None:
@@ -65,6 +72,10 @@ def list_events(
     event_type: Annotated[
         str | None, typer.Option("--event-type", help="e.g. GRANT_CREATED")
     ] = None,
+    kind: Annotated[
+        EventKind | None,
+        typer.Option("--kind", help="Only events of this kind: connection is every CONNECTION_*."),
+    ] = None,
     env: Annotated[str | None, typer.Option("--env", help="Only this environment.")] = None,
     principal_id: Annotated[
         str | None, typer.Option("--principal-id", help="Only this principal's events.")
@@ -95,6 +106,8 @@ def list_events(
         The Typer context.
     event_type
         Only events of this type.
+    kind
+        Only events of this kind (``connection``); combines with the other filters.
     env
         Only events in this environment.
     principal_id
@@ -120,6 +133,7 @@ def list_events(
         raise CliError("--cursor and --all can't be combined")
     filters = {
         "event_type": event_type,
+        "kind": None if kind is None else kind.value,
         "environment": env,
         "principal_id": principal_id,
         "since": parse_timestamp(since, "--since"),

@@ -205,6 +205,7 @@ class AuditService:
         until: datetime | None = None,
         limit: int = 100,
         cursor: AuditCursor | None = None,
+        kind: str | None = None,
     ) -> AuditPage:
         """Read one page of audit events, most recently occurred first.
 
@@ -242,6 +243,10 @@ class AuditService:
             order, if given — the last event of the previous page. Keyset
             paging on `(occurred_at, id)`: a later write never shifts a page
             boundary, since it sorts before any cursor already handed out.
+        kind
+            Only return events of this kind, if given: ``connection`` is every
+            ``CONNECTION_*`` type. It combines with `event_type`, which must then be of the
+            kind. A new kind is added in `EVENT_KINDS`.
 
         Returns
         -------
@@ -252,7 +257,7 @@ class AuditService:
         ------
         ValidationError
             If this `AuditService` was constructed with no
-            `AuthorizationService`.
+            `AuthorizationService`, `kind` is not a kind, or `event_type` is not of `kind`.
         PermissionDenied
             If `p` may not read the audit log.
         AuditUnavailableError
@@ -265,6 +270,14 @@ class AuditService:
             )
         self._authz.authorize(p, Action.READ_AUDIT_LOG, Securable.instance_scope())
         stmt = select(AuditEvent)
+        if kind is not None:
+            types = _kind_types(kind)
+            if event_type is not None and event_type not in types:
+                raise ValidationError(
+                    f"event_type {event_type.value} is not of kind {kind}; leave out one of the "
+                    "two filters"
+                )
+            stmt = stmt.where(AuditEvent.event_type.in_(types))
         if event_type is not None:
             stmt = stmt.where(AuditEvent.event_type == event_type)
         if environment is not None:
@@ -290,6 +303,7 @@ class AuditService:
             rows,
             filters={
                 "event_type": None if event_type is None else event_type.value,
+                "kind": kind,
                 "environment": environment,
                 "since": None if since is None else since.isoformat(),
                 "until": None if until is None else until.isoformat(),
@@ -348,6 +362,36 @@ class AuditService:
             ),
             config=self._view_audit,
         )
+
+
+EVENT_KINDS: dict[str, frozenset[AuditEventType]] = {
+    "connection": frozenset(t for t in AuditEventType if t.name.startswith("CONNECTION_")),
+}
+"""The kinds `AuditService.query` filters by, each a set of event types; new kinds go here."""
+
+
+def _kind_types(kind: str) -> frozenset[AuditEventType]:
+    """Name the event types of a kind.
+
+    Parameters
+    ----------
+    kind
+        The kind, as a caller wrote it.
+
+    Returns
+    -------
+    frozenset of AuditEventType
+        Its event types.
+
+    Raises
+    ------
+    ValidationError
+        If `kind` is not one of `EVENT_KINDS`.
+    """
+    types = EVENT_KINDS.get(kind)
+    if types is None:
+        raise ValidationError(f"kind must be {' or '.join(sorted(EVENT_KINDS))}")
+    return types
 
 
 def _shown(

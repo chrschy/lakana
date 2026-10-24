@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -248,3 +248,41 @@ def test_output_dir_exists_only_inside_an_artifact_task(tmp_path: Path) -> None:
     lakana.assets._set_output_dir(None)
     with pytest.raises(RuntimeError):
         lakana.output_dir()
+
+
+def test_connections_default_to_none_and_are_stored_as_a_tuple() -> None:
+    @lakana.asset()
+    def plain() -> None:
+        return None
+
+    @lakana.asset(connections=["crm-db", "files"])
+    def declared() -> None:
+        return None
+
+    assert getattr(plain, ASSET_ATTRIBUTE).connections == ()
+    assert getattr(declared, ASSET_ATTRIBUTE).connections == ("crm-db", "files")
+    assert getattr(lakana.asset(connections=("a",))(plain), ASSET_ATTRIBUTE).connections == ("a",)
+
+
+_RULE = (
+    "connection names are lower-case letters, digits and '-', starting with a letter, "
+    "at most 63; got "
+)
+
+
+@pytest.mark.parametrize(
+    ("connections", "message"),
+    [
+        ("crm-db", "connections must be a list of strings"),
+        ({"crm-db": "x"}, "connections must be a list of strings"),
+        ([1], "connections must be a list of strings"),
+        (["crm-db", "crm-db"], "connection `crm-db` is listed twice"),
+        ([f"c{index}" for index in range(17)], "an asset declares at most 16 connections"),
+        (["CRM"], _RULE + "'CRM'"),
+        (["crm-db\n"], _RULE + "'crm-db\\n'"),
+    ],
+)
+def test_a_wrong_connections_is_refused(connections: object, message: str) -> None:
+    with pytest.raises(ValueError) as info:
+        lakana.asset(connections=cast(Any, connections))
+    assert str(info.value) == message

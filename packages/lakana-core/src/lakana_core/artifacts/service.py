@@ -135,6 +135,7 @@ from lakana_core.artifacts.store import (
 )
 from lakana_core.audit.service import AuditService
 from lakana_core.auth import Action, AuthorizationService, PrincipalRef, RunContext, Securable
+from lakana_core.catalog.connection_lineage import connection_edges, connection_sources
 from lakana_core.catalog.identity import resolve_environment_id, resolve_table_id
 from lakana_core.catalog.service import CatalogService
 from lakana_core.catalog.writes import MAX_SOURCE_NAME, MAX_SOURCE_VERSIONS
@@ -1985,6 +1986,17 @@ class ArtifactService:
                         created_at=now,
                     )
                 )
+            self._session.add_all(
+                connection_edges(
+                    connection_sources(self._session, p, environment_id),
+                    environment_id=environment_id,
+                    target_id=artifact_id,
+                    target_name=ref.dotted(),
+                    target_snapshot_id=number,
+                    query_run_id=None,
+                    created_at=now,
+                )
+            )
             AuditService(self._session).record(
                 p.id,
                 AuditEventType.ARTIFACT_VERSION_ADDED,

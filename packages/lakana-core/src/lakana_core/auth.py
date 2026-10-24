@@ -54,6 +54,17 @@ class BoundTask:
     keep_versions
         How many live versions an artifact asset keeps; `None` keeps all.
         Applied by the server at commit.
+    connections
+        The connections the asset declares in the project version manifest, in declared
+        order (`lakana_core.projects.manifest.read_entry_connections`); empty when it declares
+        none or when the stored value cannot be read. A write by this task records one lineage
+        edge per connection, derived here and never from what the task sends.
+    connections_readable
+        Whether the manifest's `connections` value could be read; `False` for a damaged entry,
+        which then declares none.
+    repository
+        The name of the repository the run's project version was deployed from; empty when
+        that row is gone.
     """
 
     task_run_id: uuid.UUID
@@ -63,6 +74,9 @@ class BoundTask:
     readable: tuple[str, ...]
     output: str = "table"
     keep_versions: int | None = None
+    connections: tuple[str, ...] = ()
+    connections_readable: bool = True
+    repository: str = ""
 
 
 @dataclass(frozen=True)
@@ -305,6 +319,10 @@ class Action(enum.StrEnum):
     MANAGE_SECRET = "MANAGE_SECRET"  # nosec B105 -- an Action enum label, not a credential
     """Create, list, rotate, or revoke a secret, or reference one by name in
     an environment's storage config. Environment-scoped."""
+    MANAGE_CONNECTION = "MANAGE_CONNECTION"
+    """Create, change, delete or test a connection of an environment. Environment-scoped;
+    reading connections is `READ_ENVIRONMENT`. Not a task-token action: a task fetches a
+    connection by its bound token's own binding, never by a grant."""
     READ_AUDIT_LOG = "READ_AUDIT_LOG"
     """Read the audit log. Instance-scoped — a security-review/compliance
     function reserved for organization-wide admins, not delegated

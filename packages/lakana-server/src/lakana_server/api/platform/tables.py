@@ -1180,8 +1180,10 @@ def get_table_lineage(
     """Show a table's lineage.
 
     Walks the recorded lineage of the table: the tables it was derived from and the tables
-    derived from it. Needs `READ_TABLE` on the table itself. Answers 404 when the table does
-    not exist.
+    derived from it. A table or artifact written by a Python asset that declares connections
+    also lists each connection as a source (`kind` ``CONNECTION``), shown only to a caller who
+    may read the environment's connections. Needs `READ_TABLE` on the table itself. Answers
+    404 when the table does not exist.
 
     Parameters
     ----------
@@ -1219,7 +1221,13 @@ def get_table_lineage(
         direction=graph.direction.value,
         depth=graph.depth,
         nodes=[
-            LineageNodeOut(id=str(n.id), name=n.name, kind=n.kind, dropped=n.dropped)
+            LineageNodeOut(
+                id=str(n.id),
+                name=n.name,
+                kind=n.kind,
+                dropped=n.dropped,
+                connection_kind=n.connection_kind,
+            )
             for n in graph.nodes
         ],
         edges=[

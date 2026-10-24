@@ -30,6 +30,7 @@ from lakana_core.models import (
     AuditEventType,
     JobVersion,
     Principal,
+    Repository,
     Run,
     RunStatus,
     Table,
@@ -173,6 +174,7 @@ def test_verify_resolves_the_bound_task_from_the_manifest(
         asset="gold.scores",
         inputs=("bronze.stations", "silver.weather"),
         readable=("bronze.stations", "silver.weather"),
+        repository=_repository_name(session, task),
     )
 
 
@@ -702,3 +704,64 @@ def test_a_sql_entry_never_resolves_to_an_artifact_scope(
         session, principal.id, asset="models.churn", kind="sql", extra={"output": "artifact"}
     )
     assert _resolve_bound(session, task.id, 1, "dev") is None
+
+
+def _repository_name(session: Session, task: TaskRun) -> str:
+    """Read the name of the repository a task's run was deployed from.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    task
+        The task run.
+
+    Returns
+    -------
+    str
+        The repository's name.
+    """
+    run = session.get(Run, task.run_id)
+    assert run is not None
+    repository = session.get(Repository, run.repository_id)
+    assert repository is not None
+    return repository.name
+
+
+@pytest.mark.parametrize(
+    ("extra", "connections", "readable"),
+    [
+        ({"connections": ["crm-db"]}, ("crm-db",), True),
+        ({"connections": ["crm-db", "files"]}, ("crm-db", "files"), True),
+        ({}, (), True),
+        ({"connections": []}, (), True),
+        ({"connections": "crm-db"}, (), False),
+        ({"connections": ["crm-db", 3]}, (), False),
+        ({"connections": ["Not A Name"]}, (), False),
+        ({"connections": {"crm-db": 1}}, (), False),
+    ],
+)
+def test_a_bound_scope_carries_the_declared_connections_and_the_repository(
+    session: Session,
+    dev: None,
+    principal: PrincipalRef,
+    extra: dict[str, object],
+    connections: tuple[str, ...],
+    readable: bool,
+) -> None:
+    """Connections come from the deployed manifest, read fail-safe; never from the token."""
+    ensure_table(session, "dev", "silver", "rows")
+    task = python_task_run(
+        session, principal.id, asset="bronze.customers", inputs={"rows": "silver.rows"}, extra=extra
+    )
+    bound = _resolve_bound(session, task.id, 1, "dev")
+    assert bound is not None
+    assert bound.connections == connections
+    assert bound.connections_readable is readable
+    assert bound.repository == _repository_name(session, task)
+
+
+def test_a_bound_scope_defaults_to_no_connections_and_no_repository() -> None:
+    """A `BoundTask` built without them (older callers, tests) declares nothing."""
+    bound = BoundTask(uuid.uuid4(), 1, "gold.t", (), ())
+    assert (bound.connections, bound.connections_readable, bound.repository) == ((), True, "")

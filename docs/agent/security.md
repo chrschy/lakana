@@ -3569,9 +3569,23 @@ that uses it. User reference: `docs/site/reference/package-indexes.md`; how-to:
 `docs/site/how-to/private-package-index.md`.
 
 - **A secret has one use, and only `MANAGE_SECRET` binds it.** A secret is bound to a named
-  package index, a named repository, or its own environment (storage and webhooks); the
+  package index, a named repository, a connection of its own environment (migration 0049), or its
+  own environment (storage and webhooks); the
   use is `secrets.use_kind` and `secrets.use_target_id`, and the CHECK `ck_secrets_use_consistent`
-  (migration 0035) keeps the pair unset together, environment-only, or kind plus id. The four places that decrypt a secret
+  (migration 0035, widened by 0049) keeps the pair unset together, environment-only, or kind plus
+  id. The one exception for connections (S1): `MANAGE_CONNECTION` may create a new secret born
+  bound to its connection (`<name>-connection`), set that secret's values again, or keep the
+  secret already bound; naming any other secret, or a change `moves_secret` reports (address,
+  weaker TLS, CA certificate, `auth`, `api_key_in`) without new values, also needs
+  `MANAGE_SECRET` (`lakana_core.connections.service`). A connection keeps one bound secret: taking
+  a secret (in `ConnectionService`, or `SecretService.create`/`bind` with a connection use, which
+  also set `Connection.secret_id`) unbinds every other one bound to it, and clearing its secret or deleting it unbinds
+  them (unbound, so only `MANAGE_SECRET` binds them again). `lock_entry` refuses a connection of
+  another environment than the secret's. A bind that moves a secret away from a connection empties
+  that connection's `secret_id` (both connections locked by id before the secret, so two moves in
+  opposite directions do not deadlock; a deadlock or serialization failure that still happens is a
+  409 to retry, `db.refuse_concurrent_change`), and a `secret_id` whose secret is not bound to that
+  connection counts as no secret. A secret is refused for a connection that takes none. The four places that decrypt a secret
   for an index, a repository, storage or a webhook check the use first and refuse another one,
   with the command that moves it. `MANAGE_PACKAGE_INDEX` and `MANAGE_REPOSITORY` are not
   `MANAGE_SECRET`: their holder can name only a secret already bound to that same entry, and

@@ -1872,8 +1872,28 @@ def test_the_docker_isolation_tests_have_a_step_of_their_own_that_needs_docker()
     assert '-m "integration and not docker"' in first["run"]
     assert docker["env"] == {"LAKANA_TEST_DOCKER": "1"}
     assert docker["if"] == "${{ !cancelled() }}"
-    assert docker["run"] == "uv run pytest -m docker packages/lakana-worker/tests"
+    assert docker["run"] == (
+        'uv run pytest -m docker --basetemp "$RUNNER_TEMP/pytest-docker" '
+        "packages/lakana-worker/tests"
+    )
     assert steps.index(docker) == steps.index(first) + 1
+
+
+def test_every_integration_pytest_keeps_its_temp_files_off_the_runners_tmp() -> None:
+    """Each pytest of the integration job puts its base temp directory under `$RUNNER_TEMP`.
+
+    `/tmp` on GitHub's hosted runners can have a disk quota: the Python-asset tests copy the
+    wheel directory into every project and attempt and build a venv per project, and the last
+    venv build of the module failed with "Disk quota exceeded" there. `$RUNNER_TEMP` is on the
+    work disk, where the wheel directory and uv's cache already live.
+    """
+    steps = _jobs("ci.yml")["integration"]["steps"]
+    pytests = [step for step in steps if "pytest" in step.get("run", "")]
+
+    assert len(pytests) == 3
+    for step in pytests:
+        assert '--basetemp "$RUNNER_TEMP/pytest-' in step["run"], step["name"]
+    assert len({step["run"].split("--basetemp ")[1].split()[0] for step in pytests}) == 3
 
 
 def test_the_integration_job_has_room_for_the_docker_isolation_tests() -> None:

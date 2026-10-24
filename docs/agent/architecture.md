@@ -269,7 +269,12 @@ missing table.
 
 Views are `tables` rows with `table_type = VIEW` and a `view_definition`; `mode: view` plans them
 in the worker (`describe_query`) and stores them without running them. `LineageService` walks
-`lineage_edges`. Maintenance is a `QueryRun` with `write_mode = MAINTAIN`: the worker calls
+`lineage_edges`. An edge with `source_kind = connection` (migration 0049) names a connection in
+`source_table_id`/`source_name`: a write by a bound task token (`append`, `write_batches`, an
+artifact commit) adds one per connection in `BoundTask.connections`, the deployed manifest's
+list read by `_resolve_bound` through `read_entry_connections`, never from request input
+(`catalog.connection_lineage`). The walk shows it as a `CONNECTION` node only to a
+`READ_ENVIRONMENT` holder without a task token, and never walks past it. Maintenance is a `QueryRun` with `write_mode = MAINTAIN`: the worker calls
 `CatalogService.maintain`, which expires snapshots through `commit_table(action=MAINTAIN_TABLE)`
 and deletes confined orphans older than `older_than_hours` (default 72, at most 87600)
 (`catalog.maintenance`). Expiry is pinned to the metadata it read, so a concurrent change aborts

@@ -15,11 +15,13 @@ import warnings
 import pydantic
 
 from lakana_core.artifacts.manifest import shown
+from lakana_core.connections.kinds import NAME
 from lakana_core.errors import ValidationError
 from lakana_core.identifiers import TableRef
 from lakana_core.projects.asset_model import (
     DECIMALS_MODES,
     DEFAULT_DECIMALS,
+    MAX_CONNECTIONS,
     MAX_KEEP_VERSIONS,
     ParsedAsset,
 )
@@ -49,6 +51,7 @@ _KNOWN = (
     "output",
     "keep_versions",
     "decimals",
+    "connections",
 )
 _SHAPES: dict[str, tuple[type, str]] = {
     "inputs": (dict, "a dict of strings"),
@@ -59,6 +62,7 @@ _SHAPES: dict[str, tuple[type, str]] = {
     "materialize": (str, "a string"),
     "output": (str, "a string"),
     "decimals": (str, "a string"),
+    "connections": (list, "a list of strings"),
 }
 _ALIAS_HINT = (
     "the decorator must be lakana.asset: use `from lakana import asset` with `@asset(...)`, "
@@ -397,6 +401,50 @@ def _decimals(values: dict[str, object], path: str, line: int, issues: list[Proj
     return DEFAULT_DECIMALS
 
 
+def _connections(
+    values: dict[str, object], path: str, line: int, issues: list[ProjectIssue]
+) -> tuple[str, ...]:
+    """Read the connections the asset declares.
+
+    Parameters
+    ----------
+    values
+        `_arguments`' first result; a `connections` of the wrong shape never reaches it.
+    path
+        Repository-relative path, for issues.
+    line
+        The decorator's line.
+    issues
+        Collects issues.
+
+    Returns
+    -------
+    tuple of str
+        The names in the order given; empty when the argument is absent.
+    """
+    declared = values.get("connections")
+    names: list[str] = declared if isinstance(declared, list) else []
+    if len(names) > MAX_CONNECTIONS:
+        issues.append(
+            ProjectIssue(path, line, f"an asset declares at most {MAX_CONNECTIONS} connections")
+        )
+    seen: set[str] = set()
+    for name in names:
+        if not NAME.match(name):
+            issues.append(
+                ProjectIssue(
+                    path,
+                    line,
+                    "connection names are lower-case letters, digits and '-', starting with "
+                    f"a letter, at most 63; got {_quoted(name)}",
+                )
+            )
+        elif name in seen:
+            issues.append(ProjectIssue(path, line, f"connection `{name}` is listed twice"))
+        seen.add(name)
+    return tuple(names)
+
+
 def _parameters(function: _Function, path: str, issues: list[ProjectIssue]) -> list[str]:
     """List the function's parameters, refusing every shape the harness cannot call.
 
@@ -468,7 +516,7 @@ def _metadata(
     AssetMetadata or None
         The metadata with ``materialize: table``, or `None` after an issue.
     """
-    left_out = ("inputs", "materialize", "output", "keep_versions", "decimals")
+    left_out = ("inputs", "materialize", "output", "keep_versions", "decimals", "connections")
     raw = {name: value for name, value in values.items() if name not in left_out}
     if artifact:
         raw.pop("columns", None)
@@ -684,6 +732,7 @@ def parse_python_asset(
     inputs = _inputs(values, parameters, function, path, line, issues)
     output, keep = _output(values, dropped, path, line, issues)
     decimals = _decimals(values, path, line, issues)
+    connections = _connections(values, path, line, issues)
     own = _metadata(
         values, ast.get_docstring(function), path, line, issues, artifact=output == "artifact"
     )
@@ -715,4 +764,5 @@ def parse_python_asset(
         output=output,
         keep_versions=keep,
         decimals=decimals,
+        connections=connections,
     )

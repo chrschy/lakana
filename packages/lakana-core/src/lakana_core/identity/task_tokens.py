@@ -36,6 +36,7 @@ from lakana_core.models import (
     JobVersion,
     Namespace,
     Principal,
+    Repository,
     Run,
     RunStatus,
     Table,
@@ -44,7 +45,12 @@ from lakana_core.models import (
     TaskStatus,
     TaskToken,
 )
-from lakana_core.projects.manifest import entry_keep_versions, entry_output, python_entry
+from lakana_core.projects.manifest import (
+    entry_keep_versions,
+    entry_output,
+    python_entry,
+    read_entry_connections,
+)
 
 _DEFAULT_MAX_TTL_SECONDS = 86_400
 """Default cap on a minted task token's `ttl_seconds`.
@@ -348,6 +354,10 @@ def _resolve_bound(
     entry = python_entry(version.manifest_json, task.asset)
     if inputs is None or entry is None:
         return None
+    # Read fail-safe and without logging: this runs on every request of the task. A write logs
+    # an unreadable value once (`lakana_core.catalog.connection_lineage`).
+    connections = read_entry_connections(entry)
+    repository = session.get(Repository, version.repository_id)
     return BoundTask(
         task_run_id=task.id,
         claim=claim,
@@ -356,6 +366,9 @@ def _resolve_bound(
         readable=_readable_tables(session, environment, inputs),
         output=entry_output(entry),
         keep_versions=entry_keep_versions(entry),
+        connections=connections.names if connections.readable else (),
+        connections_readable=connections.readable,
+        repository="" if repository is None else repository.name,
     )
 
 

@@ -37,9 +37,10 @@ from lakana_core.ci_oidc.scope import (
     refuse_ci_token,
     use_ci_token,
 )
+from lakana_core.connections.service import missing_connections
 from lakana_core.db import db_now
 from lakana_core.errors import ConflictError, NotFoundError, ValidationError
-from lakana_core.identifiers import TableRef
+from lakana_core.identifiers import TableRef, shown
 from lakana_core.jobs.audit import start_detail
 from lakana_core.jobs.cron import next_fire_after
 from lakana_core.models import (
@@ -67,7 +68,7 @@ from lakana_core.projects.checks import ParsedCheck, check_sql_references, may_r
 from lakana_core.projects.dag import ProjectGraph
 from lakana_core.projects.diff import DeployDiff, diff_manifests
 from lakana_core.projects.git_input import is_full_sha, validate_ref
-from lakana_core.projects.issues import ProjectIssue
+from lakana_core.projects.issues import ProjectIssue, ProjectValidationError
 from lakana_core.projects.lookups import deployment_row, environment_by_name, repository_by_name
 from lakana_core.projects.manifest import (
     entry_output,
@@ -76,6 +77,7 @@ from lakana_core.projects.manifest import (
     manifest_assets,
     manifest_jobs,
     manifest_tables,
+    read_entry_connections,
 )
 from lakana_core.projects.parse import ParsedAsset
 from lakana_core.runs.kept import kept_tables
@@ -102,6 +104,134 @@ DEPLOY_ENDED_MESSAGE = (
 Neutral on purpose: the run may have succeeded, been ended by the scheduler because its worker
 was lost, or belong to another worker. `{id}` is the run's id. Raised as `ConflictError`; the
 worker logs it and records nothing."""
+
+UNKNOWN_CONNECTION_MESSAGE = (
+    "Asset `{asset}` declares connection `{name}`, which environment `{environment}` does not "
+    "have. Create it: `lakana connection create {name} --env {environment} --kind <kind> …` "
+    "(see `lakana connection create --help`)."
+)
+"""Why a deploy or rollback stops: an asset declares a connection its environment lacks."""
+
+
+@dataclass(frozen=True)
+class DeclaredConnections:
+    """The connections one asset declares, and where an issue about them points.
+
+    Parameters
+    ----------
+    asset
+        The asset's dotted table name.
+    path
+        Its repository-relative file.
+    line
+        The decorator's line, or `None` when only a manifest entry is at hand.
+    names
+        The connection names, as declared.
+    """
+
+    asset: str
+    path: str
+    line: int | None
+    names: tuple[str, ...]
+
+
+def connection_issues(
+    session: Session,
+    environment_id: uuid.UUID,
+    environment_name: str,
+    declared: Iterable[DeclaredConnections],
+    *,
+    lock: bool,
+) -> list[ProjectIssue]:
+    """Name every declared connection the environment does not have, one issue each.
+
+    One query reads every name the assets declare.
+
+    Parameters
+    ----------
+    session
+        Database session.
+    environment_id
+        The environment.
+    environment_name
+        Its name, for the message.
+    declared
+        What each asset declares.
+    lock
+        Read the found rows ``FOR SHARE`` until the transaction ends (`missing_connections`),
+        so a concurrent delete waits for this transaction or comes first and is seen.
+
+    Returns
+    -------
+    list of ProjectIssue
+        Sorted by asset, the names in the order declared; empty when every one exists.
+    """
+    assets = sorted(declared, key=lambda item: item.asset)
+    wanted = sorted({name for item in assets for name in item.names})
+    if not wanted:
+        return []
+    missing = set(missing_connections(session, environment_id, wanted, lock=lock))
+    return [
+        ProjectIssue(
+            item.path,
+            item.line,
+            UNKNOWN_CONNECTION_MESSAGE.format(
+                asset=item.asset, name=name, environment=environment_name
+            ),
+        )
+        for item in assets
+        for name in item.names
+        if name in missing
+    ]
+
+
+UNREADABLE_CONNECTIONS_MESSAGE = (
+    "Asset `{asset}`: the connections this project version declares cannot be read, so they "
+    "cannot be checked against environment `{environment}`. Deploy the repository again to "
+    "record a new version."
+)
+"""Why a deploy or rollback stops: a manifest entry's `connections` is malformed."""
+
+
+def _manifest_connections(
+    manifest: object, environment_name: str
+) -> tuple[list[DeclaredConnections], list[ProjectIssue]]:
+    """Read what each asset of a manifest declares.
+
+    Parameters
+    ----------
+    manifest
+        A manifest; untrusted when stored (a rollback's target).
+    environment_name
+        For the message about an entry that cannot be read.
+
+    Returns
+    -------
+    tuple
+        One `DeclaredConnections` per asset that declares any (the path is ``""`` when the
+        entry has none), and one issue per entry whose `connections` cannot be read: such an
+        entry is refused, never skipped.
+    """
+    found: list[DeclaredConnections] = []
+    unreadable: list[ProjectIssue] = []
+    for table, entry in sorted(manifest_assets(manifest).items()):
+        read = read_entry_connections(entry)
+        path = entry.get("path")
+        shown_path = path if isinstance(path, str) else ""
+        if not read.readable:
+            unreadable.append(
+                ProjectIssue(
+                    shown_path,
+                    None,
+                    UNREADABLE_CONNECTIONS_MESSAGE.format(
+                        asset=shown(table), environment=environment_name
+                    ),
+                )
+            )
+        elif read.names:
+            found.append(DeclaredConnections(table, shown_path, None, read.names))
+    return found, unreadable
+
 
 _KIND_PHRASES = {
     TableType.ICEBERG: "a table",
@@ -774,6 +904,38 @@ class DeployService:
         if clashes:
             self._session.rollback()
             raise ValidationError("; ".join(clashes))
+
+    def _require_connections(
+        self, environment_id: uuid.UUID, environment_name: str, manifest: object
+    ) -> None:
+        """Refuse a manifest that declares a connection the environment does not have.
+
+        Validation checked the same long before the record; a connection deleted in between
+        is caught here. The found rows stay locked ``FOR SHARE`` until the transaction ends,
+        so a delete of one waits for this deploy and then sees the version it made current.
+
+        Parameters
+        ----------
+        environment_id
+            The environment.
+        environment_name
+            Its name, for the message.
+        manifest
+            The manifest about to become current.
+
+        Raises
+        ------
+        ProjectValidationError
+            Naming each missing connection, and each asset whose stored connections cannot be
+            read; the transaction is rolled back first.
+        """
+        declared, issues = _manifest_connections(manifest, environment_name)
+        issues += connection_issues(
+            self._session, environment_id, environment_name, declared, lock=True
+        )
+        if issues:
+            self._session.rollback()
+            raise ProjectValidationError(issues)
 
     def _ownership_clashes(
         self,
@@ -2750,6 +2912,10 @@ class DeployService:
             If another repository's current project version now produces one of the
             manifest's tables (checked under a per-environment lock, so two
             repositories cannot both claim a new table); nothing is written.
+        ProjectValidationError
+            If an asset declares a connection the environment no longer has (read
+            ``FOR SHARE``, so a concurrent delete is ordered before or after); nothing is
+            written.
         NotFoundError
             If the repository or environment was deleted meanwhile.
         """
@@ -2760,6 +2926,7 @@ class DeployService:
         sha = run.resolved_sha
         assert sha is not None  # nosec B101 -- set by the worker before recording
         self._claim_tables(environment_id, repository_id, manifest_tables(manifest), names[0])
+        self._require_connections(environment_id, names[0], manifest)
         version = self._existing_job_version(environment_id, repository_id, sha)
         if version is None:
             version = JobVersion(
@@ -2778,13 +2945,14 @@ class DeployService:
                 self._session.flush()
             except IntegrityError:
                 self._session.rollback()
-                # The rollback released the run's lock and the ownership lock; take both
-                # again (run first, as above) and re-check before the pointer swap below
-                # commits anything.
+                # The rollback released the run's lock, the ownership lock and the connection
+                # rows' share locks; take them again (run first, as above) and re-check before
+                # the pointer swap below commits anything.
                 self._hold(run, worker_id)
                 self._claim_tables(
                     environment_id, repository_id, manifest_tables(manifest), names[0]
                 )
+                self._require_connections(environment_id, names[0], manifest)
                 version = self._existing_job_version(environment_id, repository_id, sha)
                 if version is None:
                     raise NotFoundError(_GONE_MESSAGE) from None
@@ -2882,7 +3050,8 @@ class DeployService:
         ValidationError
             If the run is not a rollback, the target is gone or belongs to
             another environment or repository, or the target's tables are now
-            produced by another repository.
+            produced by another repository; a `ProjectValidationError` if the target
+            declares a connection the environment no longer has.
         ConflictError
             If the run is no longer `running` under `worker_id` (`DEPLOY_ENDED_MESSAGE`),
             another deploy moved the pointer first, or a `to_previous`
@@ -2917,6 +3086,7 @@ class DeployService:
         self._claim_tables(
             environment_id, repository_id, manifest_tables(target.manifest_json), names[0]
         )
+        self._require_connections(environment_id, names[0], target.manifest_json)
         current = self.current_job_version(environment_id, repository_id)
         diff = diff_manifests(
             current.manifest_json if current is not None else None,

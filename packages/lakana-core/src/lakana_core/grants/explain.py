@@ -28,6 +28,7 @@ _ENVIRONMENT_ACTIONS = (
     Action.SUBMIT_QUERY,
     Action.MANAGE_ENVIRONMENT,
     Action.MANAGE_SECRET,
+    Action.MANAGE_CONNECTION,
     Action.DEPLOY,
     Action.RUN,
 )

@@ -1032,7 +1032,9 @@ def lineage_tree(lineage: Lineage) -> list[str]:
 
     A node is expanded once, at its first occurrence; later occurrences
     (a self-edge, a diamond, a shared ancestor) print as ``(see above)``, so
-    the output is linear in the edges however the graph converges.
+    the output is linear in the edges however the graph converges. A connection the
+    writing asset declared prints as ``connection <name> (<kind>)``, or
+    ``(deleted)`` once it no longer exists.
 
     Parameters
     ----------
@@ -1056,6 +1058,9 @@ def lineage_tree(lineage: Lineage) -> list[str]:
 
     def label(node_id: str) -> str:
         node = nodes[node_id]
+        if node.kind == "CONNECTION":
+            detail = "deleted" if node.dropped else node.connection_kind or "connection"
+            return f"connection {node.name} ({detail})"
         text = node.name
         if node.kind not in (None, "TABLE"):
             text += f" [{node.kind.lower()}]"

@@ -22,6 +22,7 @@ from lakana_core.ci_oidc.exchange import TOKEN_PREFIX as CI_TOKEN_PREFIX
 from lakana_core.ci_oidc.exchange import CiTokenService
 from lakana_core.ci_oidc.rules import CiTrustRuleService
 from lakana_core.config import ViewAuditConfig
+from lakana_core.connections.service import ConnectionService
 from lakana_core.errors import AuthenticationError
 from lakana_core.grants.authorization import GrantAuthorization
 from lakana_core.grants.service import GrantService
@@ -735,6 +736,30 @@ def get_secret_service(
         A service using real authorization.
     """
     return SecretService(session, authz, key_provider)
+
+
+def get_connection_service(
+    session: Session = Depends(get_session),
+    authz: AuthorizationService = Depends(get_grant_authorization),
+    key_provider: KeyProvider = Depends(get_key_provider),
+) -> ConnectionService:
+    """Build a ConnectionService for the current request.
+
+    Parameters
+    ----------
+    session
+        The current request's database session.
+    authz
+        The real, grant-backed authorization service.
+    key_provider
+        Encrypts a secret created from new values; never used to decrypt.
+
+    Returns
+    -------
+    ConnectionService
+        A service using real authorization.
+    """
+    return ConnectionService(session, authz, key_provider)
 
 
 def get_audit_service(

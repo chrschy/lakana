@@ -3005,7 +3005,7 @@
           "tables"
         ],
         "summary": "Show a table's lineage",
-        "description": "Walks the recorded lineage of the table: the tables it was derived from and the tables derived from it. Needs `READ_TABLE` on the table itself. Answers 404 when the table does not exist.",
+        "description": "Walks the recorded lineage of the table: the tables it was derived from and the tables derived from it. A table or artifact written by a Python asset that declares connections also lists each connection as a source (`kind` ``CONNECTION``), shown only to a caller who may read the environment's connections. Needs `READ_TABLE` on the table itself. Answers 404 when the table does not exist.",
         "operationId": "get_table_lineage_api_v1_environments__env__namespaces__path__tables__name__lineage_get",
         "parameters": [
           {
@@ -9491,6 +9491,564 @@
         }
       }
     },
+    "/api/v1/environments/{environment_name}/connections": {
+      "post": {
+        "tags": [
+          "connections"
+        ],
+        "summary": "Create a connection",
+        "description": "Creates a connection of the environment: its kind, address and settings, and its secret, either new values (stored as a new secret `<name>-connection`, or the next free `<name>-connection-N` when a secret holds that name, born bound to it, never shown again) or the name of an existing secret. Needs `MANAGE_CONNECTION` in the environment, checked before anything in the body; naming a secret that is not bound to this connection also needs `MANAGE_SECRET`. Answers 403 without the right, 404 when the environment or the named secret does not exist, 409 when the name is taken (or every secret name up to `<name>-connection-100` is), and 422 for a name, kind, address, settings or secret keys that are not valid, naming the field. Answers 500 when the instance has no secrets master key.",
+        "operationId": "create_connection_api_v1_environments__environment_name__connections_post",
+        "parameters": [
+          {
+            "name": "environment_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Environment Name"
+            },
+            "description": "The environment."
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
+              "title": "Authorization"
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectionCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionOut"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in: the token is missing, wrong, expired or revoked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but not allowed to do this. The refusal is recorded in the audit log.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "What the request names does not exist, or the caller may not know that it does.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state; the message says what to change.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "connections"
+        ],
+        "summary": "List the connections of an environment",
+        "description": "Lists one page of connections, newest first, with the assets that declare each. Needs `READ_ENVIRONMENT` in the environment; a task token is refused with 403. Answers 404 when the environment does not exist and 422 for a cursor this list did not issue.",
+        "operationId": "list_connections_api_v1_environments__environment_name__connections_get",
+        "parameters": [
+          {
+            "name": "environment_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Environment Name"
+            },
+            "description": "The environment."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            },
+            "description": "Most connections returned (1 to 200)."
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 512
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            },
+            "description": "The `next_cursor` of the previous page."
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
+              "title": "Authorization"
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionPage"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in: the token is missing, wrong, expired or revoked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but not allowed to do this. The refusal is recorded in the audit log.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "What the request names does not exist, or the caller may not know that it does.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/environments/{environment_name}/connections/{connection_name}": {
+      "get": {
+        "tags": [
+          "connections"
+        ],
+        "summary": "Show a connection",
+        "description": "Shows its address, settings (a CA certificate as its SHA-256 fingerprint), the name of its secret and the assets that declare it. Needs `READ_ENVIRONMENT` in the environment; a task token is refused with 403, naming no connection. Answers 404 when the environment or the connection does not exist; the answer names no other connection.",
+        "operationId": "get_connection_api_v1_environments__environment_name__connections__connection_name__get",
+        "parameters": [
+          {
+            "name": "environment_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Environment Name"
+            },
+            "description": "The environment."
+          },
+          {
+            "name": "connection_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Connection Name"
+            },
+            "description": "The connection's name."
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
+              "title": "Authorization"
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionOut"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in: the token is missing, wrong, expired or revoked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but not allowed to do this. The refusal is recorded in the audit log.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "What the request names does not exist, or the caller may not know that it does.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "connections"
+        ],
+        "summary": "Change a connection",
+        "description": "Changes its address, settings or secret; its name and kind never change. New secret values set its own secret again (or create the next free `<name>-connection`); `clear` with `secret` stops using the secret and unbinds it. Needs `MANAGE_CONNECTION` in the environment, and also `MANAGE_SECRET` to name a secret not bound to it, or for a change that could send its secret somewhere new (its address, a weaker TLS, another CA certificate, another way of sending it) without new values. Answers 403 without the rights, 404 when the environment, the connection or the named secret does not exist, 409 when every secret name up to `<name>-connection-100` is taken or the connection changed at the same time, and 422 when nothing is given or the result is not valid, naming the field.",
+        "operationId": "update_connection_api_v1_environments__environment_name__connections__connection_name__patch",
+        "parameters": [
+          {
+            "name": "environment_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Environment Name"
+            },
+            "description": "The environment."
+          },
+          {
+            "name": "connection_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Connection Name"
+            },
+            "description": "The connection's name."
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
+              "title": "Authorization"
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectionUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionOut"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in: the token is missing, wrong, expired or revoked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but not allowed to do this. The refusal is recorded in the audit log.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "What the request names does not exist, or the caller may not know that it does.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state; the message says what to change.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "connections"
+        ],
+        "summary": "Delete a connection",
+        "description": "Deletes it and unbinds its secret, which stays in the environment. Needs `MANAGE_CONNECTION` in the environment. Answers 404 when the environment or the connection does not exist, and 409, naming a declaring asset, while a deployed project version declares it: deploy a version without it first.",
+        "operationId": "delete_connection_api_v1_environments__environment_name__connections__connection_name__delete",
+        "parameters": [
+          {
+            "name": "environment_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Environment Name"
+            },
+            "description": "The environment."
+          },
+          {
+            "name": "connection_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Connection Name"
+            },
+            "description": "The connection's name."
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
+              "title": "Authorization"
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "Not signed in: the token is missing, wrong, expired or revoked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but not allowed to do this. The refusal is recorded in the audit log.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "What the request names does not exist, or the caller may not know that it does.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state; the message says what to change.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/repositories": {
       "post": {
         "tags": [
@@ -13501,7 +14059,7 @@
           "audit"
         ],
         "summary": "List audit events",
-        "description": "Lists one page of audit events, newest first, with optional filters. The cursor of the next page is in the `X-Next-Cursor` response header. Needs `READ_AUDIT_LOG` on the instance. Another principal's query text and column values are hidden unless the caller also has `READ_QUERY_TEXT`. Answers 422 for a malformed cursor, and 503 when the read had to be recorded in the audit log and could not be; no events are returned then.",
+        "description": "Lists one page of audit events, newest first, with optional filters. The cursor of the next page is in the `X-Next-Cursor` response header. Needs `READ_AUDIT_LOG` on the instance. Another principal's query text and column values are hidden unless the caller also has `READ_QUERY_TEXT`. Answers 422 for a malformed cursor, a `kind` other than `connection`, or an `event_type` that is not of `kind`, and 503 when the read had to be recorded in the audit log and could not be; no events are returned then.",
         "operationId": "list_audit_events_api_v1_audit_events_get",
         "parameters": [
           {
@@ -13520,6 +14078,25 @@
               "title": "Event Type"
             },
             "description": "Only return events of this type, if given."
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 64
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Only events of this kind: `connection` is every CONNECTION_* type.",
+              "title": "Kind"
+            },
+            "description": "Only events of this kind: `connection` is every CONNECTION_* type."
           },
           {
             "name": "environment",
@@ -14641,6 +15218,7 @@
           "MANAGE_GRANT",
           "MANAGE_POLICY",
           "MANAGE_SECRET",
+          "MANAGE_CONNECTION",
           "READ_AUDIT_LOG",
           "READ_QUERY_TEXT",
           "DEPLOY",
@@ -15422,6 +16000,12 @@
           "SECRET_ROTATED",
           "SECRET_REVOKED",
           "SECRET_BOUND",
+          "CONNECTION_CREATED",
+          "CONNECTION_UPDATED",
+          "CONNECTION_DELETED",
+          "CONNECTION_TESTED",
+          "CONNECTION_CREDENTIAL_FETCHED",
+          "CONNECTION_CREDENTIAL_REFUSED",
           "QUERY_COMPLETED",
           "QUERY_CANCELLED",
           "ROW_FILTER_CREATED",
@@ -16428,6 +17012,258 @@
         ],
         "title": "ColumnOut",
         "description": "One column of a table's schema, in the JSON column form.\n\nParameters\n----------\nname\n    Column name.\ntype\n    The Iceberg type in the JSON form (`\"long\"`, `\"decimal(10,2)\"`, ...),\n    or the Iceberg string for a nested type.\nnullable\n    Whether the column accepts nulls.\ndescription\n    The column's description: the edit when it has one, else the project's text; `None`\n    when there is none.\ndescription_source\n    ``edited`` or ``project``; `None` when there is no description."
+      },
+      "ConnectionCreate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "postgresql",
+              "mariadb",
+              "sqlite-file",
+              "http",
+              "s3",
+              "gcs",
+              "azure",
+              "directory",
+              "tcp"
+            ],
+            "title": "Kind",
+            "description": "The kind of source."
+          },
+          "address": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Address"
+          },
+          "settings": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Settings"
+          },
+          "secret": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Secret"
+          },
+          "secret_values": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string",
+                  "format": "password",
+                  "writeOnly": true
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Secret Values"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name",
+          "kind",
+          "address"
+        ],
+        "title": "ConnectionCreate",
+        "description": "Request body for creating a connection.\n\n`kind`, `address` and `settings` are judged by the service after the right is checked, so a\ncaller without `MANAGE_CONNECTION` learns nothing from a 422.\n\nParameters\n----------\nname\n    Lower-case letters, digits and ``-``, starting with a letter, at most 63; unique in\n    the environment. Never changes.\nkind\n    ``postgresql``, ``mariadb``, ``sqlite-file``, ``http``, ``s3``, ``gcs``, ``azure``,\n    ``directory`` or ``tcp``. Never changes.\naddress\n    Where the source is, by kind (``host``, ``port``, ``database``; ``base_url``; ...).\nsettings\n    How to reach it, by kind (``user``, ``tls``, ``ca_certificate``; ``auth``; ...).\nsecret\n    The name of an existing secret of the environment to use.\nsecret_values\n    Values of a new secret ``<name>-connection`` (or the next free\n    ``<name>-connection-N``), born bound to the connection. Never echoed. At most one of\n    `secret` and `secret_values`."
+      },
+      "ConnectionOut": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "address": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Address"
+          },
+          "settings": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Settings"
+          },
+          "secret": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Secret"
+          },
+          "declared_by": {
+            "items": {
+              "$ref": "#/components/schemas/DeclaringAssetOut"
+            },
+            "type": "array",
+            "title": "Declared By"
+          },
+          "created_by": {
+            "type": "string",
+            "title": "Created By"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "kind",
+          "address",
+          "settings",
+          "secret",
+          "declared_by",
+          "created_by",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "ConnectionOut",
+        "description": "Response body for a connection. Carries its secret's name, never a value.\n\nParameters\n----------\nname\n    Its name.\nkind\n    Its kind.\naddress\n    Its address, with defaults filled in.\nsettings\n    Its settings, with defaults filled in; a ``ca_certificate`` is shown as its SHA-256\n    fingerprints (``sha256:<hex>``), never as the certificate.\nsecret\n    The name of the secret it uses, or `null`.\ndeclared_by\n    The assets whose deployed version declares it; a delete is refused while any does.\ncreated_by\n    The name of the principal who created it.\ncreated_at\n    When it was created.\nupdated_at\n    When it was last changed."
+      },
+      "ConnectionPage": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ConnectionOut"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "title": "ConnectionPage",
+        "description": "One page of an environment's connections, newest first.\n\nParameters\n----------\nitems\n    The connections of this page.\nnext_cursor\n    Pass back as `?cursor=` to fetch the next page; `null` on the last page."
+      },
+      "ConnectionUpdate": {
+        "properties": {
+          "address": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Address"
+          },
+          "settings": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Settings"
+          },
+          "secret": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Secret"
+          },
+          "secret_values": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string",
+                  "format": "password",
+                  "writeOnly": true
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Secret Values"
+          },
+          "clear": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Clear"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ConnectionUpdate",
+        "description": "Request body for changing a connection; only what is given changes.\n\nParameters\n----------\naddress\n    Address keys to change; a key set to `null` is removed.\nsettings\n    Settings keys to change; a key set to `null` is removed.\nsecret\n    The name of a secret of the environment to use instead.\nsecret_values\n    New values: they set the connection's own secret again, or create\n    ``<name>-connection`` (or the next free name) when it has none. Never echoed.\nclear\n    ``secret`` (stop using the secret and unbind it) and settings keys to remove."
+      },
+      "DeclaringAssetOut": {
+        "properties": {
+          "repository": {
+            "type": "string",
+            "title": "Repository"
+          },
+          "asset": {
+            "type": "string",
+            "title": "Asset"
+          }
+        },
+        "type": "object",
+        "required": [
+          "repository",
+          "asset"
+        ],
+        "title": "DeclaringAssetOut",
+        "description": "An asset whose deployed version declares a connection.\n\nParameters\n----------\nrepository\n    The repository's name.\nasset\n    The asset's name."
       },
       "DeliveryOut": {
         "properties": {
@@ -17890,6 +18726,17 @@
           "dropped": {
             "type": "boolean",
             "title": "Dropped"
+          },
+          "connection_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Connection Kind"
           }
         },
         "type": "object",
@@ -17900,7 +18747,7 @@
           "dropped"
         ],
         "title": "LineageNodeOut",
-        "description": "One node of a lineage graph.\n\nParameters\n----------\nid\n    The table's id.\nname\n    Its dotted name.\nkind\n    ``TABLE``, ``EXTERNAL``, ``VIEW`` or ``ARTIFACT``; `None` once dropped.\ndropped\n    Whether the table no longer exists."
+        "description": "One node of a lineage graph.\n\nParameters\n----------\nid\n    The table's id, or the connection's.\nname\n    Its dotted name, or the connection's name.\nkind\n    ``TABLE``, ``EXTERNAL``, ``VIEW``, ``ARTIFACT`` or ``CONNECTION``; `None` once a\n    table is dropped. A ``CONNECTION`` is a connection the writing asset declared, shown\n    only to a reader of the environment's connections.\ndropped\n    Whether the table or connection no longer exists.\nconnection_kind\n    For a ``CONNECTION``, its kind (for example ``postgresql``); `None` otherwise and once\n    the connection is deleted."
       },
       "LineageOut": {
         "properties": {
@@ -19994,6 +20841,7 @@
             "enum": [
               "package_index",
               "repository",
+              "connection",
               "environment"
             ],
             "title": "Kind"
@@ -20016,7 +20864,7 @@
           "kind"
         ],
         "title": "SecretBind",
-        "description": "Request body for binding a secret to its use.\n\nParameters\n----------\nkind\n    ``package_index``, ``repository`` or ``environment``.\ntarget\n    The index's or repository's name; absent or null for the environment."
+        "description": "Request body for binding a secret to its use.\n\nParameters\n----------\nkind\n    ``package_index``, ``repository``, ``connection`` or ``environment``.\ntarget\n    The index's, repository's or connection's name; absent or null for the environment."
       },
       "SecretCreate": {
         "properties": {
@@ -20128,7 +20976,7 @@
           "key_id"
         ],
         "title": "SecretOut",
-        "description": "Response body for a secret. Structurally cannot carry a value or ciphertext field.\n\nParameters\n----------\nid\n    The secret's id.\nname\n    The secret's name.\nenvironment\n    The environment this secret belongs to.\ncreated_by\n    The principal who created this secret.\ncreated_at\n    When this secret was created.\nformat_version\n    How the stored secret is encrypted. 1 is the original format; a\n    secret still at 1 becomes the current format when it is set again.\nkey_id\n    Which key provider and key wrapped the secret's data key. Safe to\n    show: it does not reveal the key.\nuse\n    What the secret is bound to: ``package_index``, ``repository``, ``environment``, or\n    `None` for an unbound secret.\nuse_target\n    The index's or repository's name; `None` otherwise, also when that entry was removed.\nuse_target_url\n    Its URL, which is where the secret is sent; `None` when `use_target` is."
+        "description": "Response body for a secret. Structurally cannot carry a value or ciphertext field.\n\nParameters\n----------\nid\n    The secret's id.\nname\n    The secret's name.\nenvironment\n    The environment this secret belongs to.\ncreated_by\n    The principal who created this secret.\ncreated_at\n    When this secret was created.\nformat_version\n    How the stored secret is encrypted. 1 is the original format; a\n    secret still at 1 becomes the current format when it is set again.\nkey_id\n    Which key provider and key wrapped the secret's data key. Safe to\n    show: it does not reveal the key.\nuse\n    What the secret is bound to: ``package_index``, ``repository``, ``environment``, or\n    `None` for an unbound secret.\nuse_target\n    The index's or repository's name; `None` otherwise, also when that entry was removed.\nuse_target_url\n    Its URL, which is where the secret is sent (for a connection, every ``host:port`` it\n    sends the secret to, joined by ``, ``); `None` when `use_target` is."
       },
       "SecretRotate": {
         "properties": {

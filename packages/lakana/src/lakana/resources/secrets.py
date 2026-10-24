@@ -199,9 +199,10 @@ class Secrets:
         name
             The secret's name.
         kind
-            ``package_index``, ``repository`` or ``environment``.
+            ``package_index``, ``repository``, ``connection`` or ``environment``. A connection's
+            secret becomes the one the connection uses.
         target
-            The index's or repository's name; `None` for the environment.
+            The index's, repository's or connection's name; `None` for the environment.
 
         Returns
         -------
