@@ -2018,7 +2018,16 @@ update follows the same rule**, decided by one helper, `CatalogService._may_see_
   absent keys from a `remove-properties` update first, so both succeed, as in the Iceberg reference
   implementation.
 
-A bound task token on its own asset is a non-reader like any other.
+A bound task token on its own asset is a non-reader like any other, with one exception: a
+**merge** into it. `check_can_merge` skips its `READ_TABLE` step for a bound token whose asset is
+the target (`_bound_to_own_asset`), because materialising that asset is the task's whole job and
+a merge cannot be done without comparing against it; `WRITE_TABLE` (held on the own asset only,
+compared by parts) and the write guard's own-asset rule (`WriteOperation.MERGE`) still confine it
+to that one table, and every other table stays refused. What the merge's counts and refusals
+reveal is about rows the task is about to overwrite anyway. The row filter and column mask
+refusal still runs against the principal the task acts for, so a task of a filtered or masked
+principal cannot merge (`test_a_task_of_a_filtered_principal_may_not_merge_into_its_own_asset`,
+core and server).
 
 **An Iceberg REST commit never removes snapshots** (`_NO_SNAPSHOT_REMOVAL`, 403 for every caller).
 `commit_table` refuses `remove-snapshots`, and `remove-snapshot-ref` for a ref named
@@ -4185,7 +4194,8 @@ exit criterion is being re-run after the M3f fixes above — see
   the caller**: the watermark comes from Iceberg manifest statistics over every row, including rows
   the caller can't see.
 - **A merge (`CatalogService.merge`, `POST …/tables/{name}/merge`) needs `READ_TABLE` as well as
-  `WRITE_TABLE`, and is refused while a row filter or column mask on its target applies to the
+  `WRITE_TABLE` (except for a bound task token on its own asset, see "A bound task token on its
+  own asset is a non-reader"), and is refused while a row filter or column mask on its target applies to the
   caller** (`check_can_merge`, run as the route's precheck and again by `merge`). A merge reads
   the target's rows that the batch's keys match and compares them: `rows_updated` against
   `rows_inserted`, the "key repeats in N rows of the table" refusal and a no-op that commits

@@ -976,6 +976,30 @@ def _layout_switch(update: TableUpdate) -> tuple[str, int] | None:
     return None
 
 
+def _bound_to_own_asset(p: PrincipalRef, ref: TableRef) -> bool:
+    """Tell whether `p` is a task attempt's bound token and `ref` is that task's own asset.
+
+    The names are compared as dotted strings, which a legacy name with a dot inside one of its
+    parts could make equal for two tables; `WRITE_TABLE`, authorized first, compares the parts
+    and refuses the other table.
+
+    Parameters
+    ----------
+    p
+        The acting principal.
+    ref
+        The table.
+
+    Returns
+    -------
+    bool
+        `True` only for a bound token on its own asset.
+    """
+    scope = p.task_scope
+    bound = None if scope is None else scope.bound
+    return bound is not None and bound.asset == ref.dotted()
+
+
 @dataclass(frozen=True)
 class Rollback:
     """What `CatalogService.roll_back` did.
@@ -4977,6 +5001,14 @@ class CatalogService:
         counts and refusals tell what it found. For the same reason a merge is refused while a
         row filter or column mask on the table applies to `p`, as `read_watermark` is.
 
+        One exception to the `READ_TABLE` step: a task attempt's bound token merging into its
+        own asset. Such a token may read only the task's declared inputs, never its own asset,
+        but writing that asset is the task's job; `WRITE_TABLE` (which the token holds on its
+        own asset only) and the write guard's own-asset rule (`WriteOperation.MERGE`) still
+        hold it to that one table. The row filter and column mask refusal still runs, against
+        the principal the task acts for, so a task of a filtered or masked principal cannot
+        merge either.
+
         Parameters
         ----------
         p
@@ -5005,7 +5037,7 @@ class CatalogService:
             expected_snapshot_id,
             artifact_operation="merging rows",
             unmanaged="Merges are only supported on managed (Iceberg) tables.",
-            read=True,
+            read=not _bound_to_own_asset(p, ref),
         )
         if row is None:
             return

@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import dataclasses
+import uuid
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 
@@ -20,7 +21,14 @@ from pyiceberg.types import LongType, NestedField, StringType, TimestampType
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from lakana_core.auth import Action, AllowAllAuthorization, PrincipalRef
+from lakana_core.auth import (
+    Action,
+    AllowAllAuthorization,
+    BoundTask,
+    PrincipalRef,
+    SecurableKind,
+    TaskScope,
+)
 from lakana_core.catalog import merge as merge_module
 from lakana_core.catalog import service as service_module
 from lakana_core.catalog.merge import COMPOSITE_KEY_MAX_ROWS, MergeResult, check_merge_batch
@@ -32,8 +40,10 @@ from lakana_core.errors import (
     PermissionDenied,
     ValidationError,
 )
+from lakana_core.grants.authorization import GrantAuthorization
+from lakana_core.grants.roles import Role
 from lakana_core.identifiers import NamespacePath, TableRef
-from lakana_core.models import AuditEvent, AuditEventType, LineageEdge
+from lakana_core.models import AuditEvent, AuditEventType, Grant, LineageEdge
 from lakana_core.policy.column_masks import ColumnMaskService
 from lakana_core.policy.row_filters import RowFilterService
 from lakana_core.runs.lockdown import PROTECTED_MESSAGE
@@ -1070,3 +1080,92 @@ def test_a_commit_that_landed_although_it_raised_is_reported_as_committed(cat: C
     assert result.rows_updated == 1
     assert cat.metadata("bronze.customers").current_snapshot_id == result.snapshot_id
     assert cat.rows("bronze.customers") == [(1, "z", T1)]
+
+
+def _bound_task(cat: Cat) -> tuple[CatalogService, PrincipalRef]:
+    """Act as the bound task token of asset `bronze.customers`, which reads only `bronze.raw`.
+
+    The run principal holds `DATA_ENGINEER` on the instance; the token narrows it to the task.
+
+    Parameters
+    ----------
+    cat
+        The helpers.
+
+    Returns
+    -------
+    tuple
+        A catalog with real grant checks, and the principal as the token authenticates it.
+    """
+    cat.session.add(
+        Grant(
+            id=uuid.uuid4(),
+            principal_id=cat.admin.id,
+            role=Role.DATA_ENGINEER,
+            kind=SecurableKind.INSTANCE,
+            granted_by=cat.admin.id,
+            granted_at=datetime.now(UTC),
+        )
+    )
+    cat.session.commit()
+    bound = BoundTask(
+        task_run_id=uuid.uuid4(),
+        claim=1,
+        asset="bronze.customers",
+        inputs=("bronze.raw",),
+        readable=("bronze.raw",),
+    )
+    task = dataclasses.replace(
+        cat.admin,
+        task_scope=TaskScope(environment="dev", asset_scope=[], token_id=uuid.uuid4(), bound=bound),
+    )
+    governed = CatalogService(
+        cat.session, StorageResolver(cat.session), GrantAuthorization(cat.session)
+    )
+    return governed, task
+
+
+def test_a_task_merges_into_its_own_asset_without_reading_it(cat: Cat) -> None:
+    """A bound token may not READ its own asset, yet merges into it: the one exception."""
+    cat.append("bronze.customers", [(1, "a", T0)])
+    governed, task = _bound_task(cat)
+
+    result = governed.merge(
+        task, cat.ref("bronze.customers"), cat.arrow([(1, "z", T1), (2, "b", T1)]), key=["id"]
+    )
+
+    assert (result.rows_inserted, result.rows_updated) == (1, 1)
+    with pytest.raises(PermissionDenied, match="may read only its declared inputs"):
+        governed.load_table(task, cat.ref("bronze.customers"))
+
+
+def test_a_task_may_not_merge_into_another_table(cat: Cat) -> None:
+    """The exemption is for the own asset only: another table stays refused."""
+    cat.service.create_table(
+        cat.admin,
+        cat.ref("bronze.other"),
+        schema=cat.metadata("bronze.customers").schema(),
+    )
+    governed, task = _bound_task(cat)
+
+    with pytest.raises(PermissionDenied, match="may write only its own asset"):
+        governed.merge(task, cat.ref("bronze.other"), cat.arrow([(1, "a", T0)]), key=["id"])
+
+
+def test_a_task_of_a_filtered_principal_may_not_merge_into_its_own_asset(cat: Cat) -> None:
+    """The policy refusal still runs, against the principal the task acts for."""
+    cat.append("bronze.customers", [(1, "a", T0)])
+    RowFilterService(cat.session, AllowAllAuthorization(), cat.service).create(
+        cat.admin,
+        principal="admin",
+        environment="dev",
+        namespace="bronze",
+        table="customers",
+        expression="id < 3",
+    )
+    governed, task = _bound_task(cat)
+
+    with pytest.raises(ValidationError) as info:
+        governed.merge(task, cat.ref("bronze.customers"), cat.arrow([(1, "z", T1)]), key=["id"])
+
+    assert str(info.value) == _HIDDEN

@@ -87,11 +87,15 @@ same limits as an append: `LAKANA_APPEND__MAX_BYTES` (256 MiB by default),
 `WRITE_TABLE` and `READ_TABLE` on the table: a merge compares your rows with the table's, and
 its counts and refusals tell you what it found, so it needs the right to read them. Creating a
 missing table with `expected_snapshot_id="none"` needs `CREATE_TABLE` as well. A task may merge
-into its own asset, as it may append to it.
+into its own asset, as it may append to it, although its token may read only the task's inputs:
+merging into its own asset is the one place the task's token does not need to read the table.
+It may not merge into any other table.
 
 A merge is refused while a row filter or column mask on the table applies to you, for the same
-reason: it would compare your rows with rows or values you can't see. Someone the table is not
-filtered or masked for can run it, or an owner can lift the filter or mask for you.
+reason: it would compare your rows with rows or values you can't see. This holds for a task
+too: a task acts for its run's principal, and a filter or mask for that principal refuses the
+task's merge. Someone the table is not filtered or masked for can run it, or an owner can lift
+the filter or mask for you.
 
 ## Errors
 
