@@ -93,8 +93,8 @@ output blocks in the documentation are checked (#54). The next element was the m
 until at least October 2027 (#96 is closed). A few SQL forms behave differently; see the
 [notes for 0.19.0](upgrades.md). The query sandbox was hardened for DuckDB 2. A store
 certificate that cannot be verified now fails at once with a message that says why (#277). The
-next elements were M7b, task isolation (#38), then M6, data modelling, the web interface and
-the public beta (M7c, #33).
+next elements were M7b, task isolation (#38), then M6 and the public beta (M7c,
+#33).
 
 0.20.0 (2026-10-23) completed M7b, task isolation (#38 is closed). Each Python task runs in a
 container of its own, started by a launcher that alone holds the Docker socket. An environment
@@ -147,8 +147,8 @@ the beta ships with the ingestion helpers and named connections.
    asset's helper does the reading. Done when a new team loads data from each kind of source
    with a short asset, merges a changing source into a table, or loads a local file with
    `lakana load`.
-5. **M8d, data modelling (epic #249).** Decided on 2026-10-20 and built before the public beta,
-    after M6 and before M7. Opinionated support for medallion layers (bronze, silver, gold) and
+5. **M8d, data modelling (epic #249).** Decided on 2026-10-20; on 2026-10-24 it moved before
+    the public beta, after M6 and before M7. Opinionated support for medallion layers (bronze, silver, gold) and
     Kimball-lite star schemas, with optional wide tables. The parts: model metadata in the asset
     header (#250); translated labels and descriptions with a main language (#251); layer rules,
     first opt-in and then enforced (#252); the write mode `history` (SCD type 2) (#253); `merge`
@@ -163,7 +163,8 @@ the beta ships with the ingestion helpers and named connections.
    a one-query SQL editor, administration of users, groups, grants, tokens and connections,
    loading a file, and a first-run tour. No file browser, dashboards or notebooks. The Compose
    bundle can set up a TLS proxy, because passkeys need HTTPS. Done when a new user can sign in and answer a question
-   without the CLI. A second security review is due when the interface and sign-in arrive. After
+   without the CLI. A second security review is due when the interface and sign-in arrive. M7 is designed first (#66): a spec and its slices come before any screen, built around what the
+   first audience needs, and the private test round checks it before the public beta. After
    M7, a small private test round on a hosted instance comes before the beta.
 7. **M7c, public beta.** The repository is open and the packages are on PyPI as a pre-beta from
    0.12.0; the beta is the 0.x release that says it is ready to try, planned for about February 2027.

@@ -94,7 +94,8 @@ How the larger pieces are meant to work:
 - **Web interface.** There is none yet. It is built after ingestion (M6) and data modelling
   (M8d) and before the public beta, because the first audience, teams without a senior data
   engineer, needs it and real sign-in from the start, and because it then shows model metadata
-  from its first version. A small private test round on a hosted instance follows before the
+  from its first version. It is designed first (#66), before any screen, around what that audience
+  needs, and the private test round on a hosted instance checks it before the
   beta. The interface (M7) is the project's first front-end code. A second security review is
   due when it and sign-in arrive.
 - **BI tools.** Before v1.0.0, a read-only SQL endpoint that speaks the PostgreSQL wire protocol,
