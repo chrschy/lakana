@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -413,3 +414,42 @@ def test_refusals_are_recorded_through_the_denial_limiter(world: World) -> None:
             world.fetch(p, "nope-db", limiter)
     (event,) = world.events(_REFUSED)
     assert event.detail["reason"] == "not_declared"
+
+
+def test_a_secret_of_another_environment_counts_as_none(world: World) -> None:
+    """A `secret_id` that points into another environment: fail closed, no 500, no name."""
+    prod_secret = world.session.execute(
+        select(Secret.id)
+        .join(Environment, Environment.id == Secret.environment_id)
+        .where(Environment.name == "prod", Secret.name == "crm-db-connection")
+    ).scalar_one()
+    world.session.execute(
+        update(Connection)
+        .where(Connection.name == "crm-db", Connection.secret_id != prod_secret)
+        .values(secret_id=prod_secret)
+    )
+    world.session.commit()
+
+    found = world.fetch(world.principal(), "crm-db")
+
+    assert found.secret is None
+    (event,) = world.events(_FETCHED)
+    assert event.detail["reason"] == "secret_not_bound"
+    assert _PROD_PASSWORD not in world.all_details()
+
+
+def test_each_reason_records_its_first_refusal_and_a_suppressed_one_is_logged(
+    world: World, caplog: pytest.LogCaptureFixture
+) -> None:
+    limiter = DenialAuditLimiter(1)
+    p = world.principal()
+    for name in ("nope-db", "gone-db", "nope-db"):
+        with caplog.at_level(logging.INFO), pytest.raises(PermissionDenied):
+            world.fetch(p, name, limiter)
+    reasons = [event.detail["reason"] for event in world.events(_REFUSED)]
+    assert reasons == ["not_declared", "not_in_environment"]
+    (line,) = [r.getMessage() for r in caplog.records if "not recorded" in r.getMessage()]
+    assert "reason=not_declared" in line
+    assert "connection=nope-db" in line
+    assert "asset=gold.scores" in line
+    assert f"task_run_id={world.task.id}" in line

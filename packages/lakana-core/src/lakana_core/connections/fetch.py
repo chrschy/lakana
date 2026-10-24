@@ -52,7 +52,8 @@ NOT_IN_ENVIRONMENT = "connection `{name}` is not in environment `{environment}`"
 """The refusal for a declared name the task's environment has no connection of."""
 
 FETCH_ACTION = "FETCH_CONNECTION"
-"""The action name the denial limiter counts refusals under."""
+"""The prefix of the action names the denial limiter counts refusals under:
+``FETCH_CONNECTION:<reason>``, so that the first refusal of each reason is recorded."""
 
 
 @dataclass(frozen=True)
@@ -112,7 +113,9 @@ def connection_secret(
         return None, None
     try:
         require_use(session, secret, SecretUse.connection(row), environment_name=environment_name)
-    except SecretUseRefused:
+    except (SecretUseRefused, ValueError):
+        # `ValueError`: the secret belongs to another environment. Either way it is not this
+        # connection's: fail closed, with no value and no secret name in the answer.
         logger.warning(
             "connection %s of environment %s names a secret that is not bound to it; "
             "it is used as if it had none",
@@ -197,7 +200,7 @@ def _refuse(
     PermissionDenied
         Always, with `message`.
     """
-    admitted, suppressed = limiter.admit(str(p.id), FETCH_ACTION)
+    admitted, suppressed = limiter.admit(str(p.id), f"{FETCH_ACTION}:{reason}")
     if admitted:
         recorded = {**detail, "reason": reason}
         if suppressed:
@@ -215,9 +218,13 @@ def _refuse(
     else:
         logger.info(
             "CONNECTION_CREDENTIAL_REFUSED not recorded in the audit table, because principal "
-            "%s is over LAKANA_DENIAL_AUDIT__PER_PRINCIPAL_PER_MINUTE: reason=%s",
+            "%s is over LAKANA_DENIAL_AUDIT__PER_PRINCIPAL_PER_MINUTE: reason=%s connection=%s "
+            "asset=%s task_run_id=%s",
             p.id,
             reason,
+            detail.get("connection"),
+            detail.get("asset"),
+            detail.get("task_run_id"),
         )
     raise PermissionDenied(message)
 
