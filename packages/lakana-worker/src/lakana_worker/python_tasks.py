@@ -1174,7 +1174,8 @@ class PythonRuntime:
         2. A ``succeeded`` record is a claim: the attempt succeeded only if
            the worker itself finds the table there and changed (or, for an append or a
            merge, unchanged with a record of no rows and no snapshot: its source had nothing
-           new), and then
+           new; its `written` still names what an earlier attempt of the task run wrote, so a
+           failed check sets that back), and then
            whatever stopped the process afterwards does not matter. The outcome
            carries what the worker read before and after as `written`:
            for an asset with checks the task runner stamps the task run with it
@@ -1251,10 +1252,10 @@ class PythonRuntime:
             except TaskFailure:
                 _refuse_if_stopped(session, keeper, claimed.run_id)
                 raise
+            start = baseline or Baseline(
+                before.snapshot_id, before.table_id is None or before.unpublished
+            )
             if after != before and after.table_id is not None:
-                start = baseline or Baseline(
-                    before.snapshot_id, before.table_id is None or before.unpublished
-                )
                 return ended(
                     None,
                     None,
@@ -1282,7 +1283,25 @@ class PythonRuntime:
                 # Nothing new since the last run: an append or merge that writes nothing has
                 # done its work. A record can claim this without running the asset, which then
                 # left the table as it was, the outcome a run that found nothing has.
-                return ended(None, None, rows=0)
+                earlier = baseline is not None and (
+                    start.publishes or start.snapshot_id != after.snapshot_id
+                )
+                # An earlier attempt of this task run wrote (and created the table, when the
+                # baseline publishes): the check phase must still know that write, to set it
+                # back or leave the table unpublished when a check fails.
+                return ended(
+                    None,
+                    None,
+                    rows=0,
+                    written=Written(
+                        after.table_id,
+                        start.snapshot_id,
+                        after.snapshot_id,
+                        publishes=start.publishes,
+                    )
+                    if earlier
+                    else None,
+                )
         stop = cancel_kind(session, keeper, claimed.run_id)
         if stop is not None:
             return ended(stop[0], _stop_text(stop), failure_code=stop_code(stop[0]))

@@ -97,10 +97,12 @@ A function that has a parameter named `ctx` receives the context of its run ther
 today is `ctx.watermark(default=None)`: the largest value of the asset's `watermark` column that
 its table holds, as an `int`, a `decimal.Decimal`, a `datetime.date` or a `datetime.datetime`
 (naive for a `timestamp` column, in UTC for a `timestamptz` one). On a first run the table has
-no rows yet and `ctx.watermark()` returns `default`, so give the earliest value you want to load:
+no rows yet and `ctx.watermark()` returns `default`, so give the earliest value you want to load,
+of the column's kind: a naive `datetime` for a `timestamp` column, one with `tzinfo=UTC` for a
+`timestamptz` column (polars `Datetime` with a time zone), as here:
 
 ```python
-import datetime
+from datetime import UTC, datetime
 
 import polars as pl
 from lakana import asset
@@ -108,7 +110,7 @@ from lakana import asset
 
 @asset(write="append", watermark="updated_at")
 def orders(ctx) -> pl.DataFrame:
-    since = ctx.watermark(default=datetime.datetime(2020, 1, 1))
+    since = ctx.watermark(default=datetime(2020, 1, 1, tzinfo=UTC))
     rows = pl.read_parquet("exports/orders.parquet")
     return rows.filter(pl.col("updated_at") > since)
 ```

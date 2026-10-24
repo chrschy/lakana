@@ -7625,6 +7625,95 @@ def test_an_empty_append_is_a_success(py: PyWorld, write: str) -> None:
     assert _ids(py.world, "gold.scores") == [1]
 
 
+def _nothing_new(task: PythonTask, on_log: Callable[[bytes], None], stop: StopSignal) -> RunOutcome:
+    """Report what an append or merge whose source had nothing new reports.
+
+    Parameters
+    ----------
+    task
+        The task.
+    on_log
+        The log sink.
+    stop
+        The stop signal.
+
+    Returns
+    -------
+    RunOutcome
+        Success with no rows and no snapshot.
+    """
+    return RunOutcome(succeeded=True, snapshot_id=None, rows=0)
+
+
+def test_an_empty_retry_after_an_attempt_that_wrote_is_set_back_when_its_check_fails(
+    py: PyWorld,
+) -> None:
+    """Attempt 1 appended and failed, attempt 2 found nothing new, and its check failed.
+
+    The table goes back to before attempt 1: the empty success still names what the run wrote.
+    """
+    py.deploy(write="append", watermark="id", write_mode="append")
+    _published_before(py)
+    _with_checks(py, _NO_ROWS)
+    engine = py.engine(_writes_then_fails(py.world, rows=2))
+    first = py.claim_python(engine)
+    run_claimed(engine, first)
+    assert _ids(py.world, "gold.scores") == [0, 1]
+    with py.world.session() as session:
+        baseline = read_baseline(session, first.task_run_id)
+    assert baseline is not None and baseline.publishes is False
+
+    second = _next_attempt(py)
+    run_claimed(py.engine(_nothing_new), second)
+
+    task = _task(py.world, "gold.scores")
+    assert (task.status, task.attempt) == (TaskStatus.FAILED, 2)
+    assert task.error_message is not None and _SET_BACK in task.error_message
+    assert _ids(py.world, "gold.scores") == [0]
+    (rolled,) = _rollbacks(py)
+    assert (rolled["outcome"], rolled["before"]) == ("rolled_back", baseline.snapshot_id)
+
+
+def test_an_empty_retry_after_an_attempt_that_created_the_table_ends_not_published(
+    py: PyWorld,
+) -> None:
+    """The table did not exist before the task run: nothing that failed its check is published."""
+    py.deploy(write="append", watermark="id", write_mode="append")
+    _with_checks(py, _NO_ROWS)
+    engine = py.engine(_writes_then_fails(py.world, rows=2))
+    first = py.claim_python(engine)
+    run_claimed(engine, first)
+    with py.world.session() as session:
+        assert read_baseline(session, first.task_run_id) == Baseline(None, True)
+
+    second = _next_attempt(py)
+    run_claimed(py.engine(_nothing_new), second)
+
+    task = _task(py.world, "gold.scores")
+    assert task.status is TaskStatus.FAILED
+    assert task.error_message is not None and _NOT_PUBLISHED in task.error_message
+    assert _marked_by(py) == second.run_id
+    (rolled,) = _rollbacks(py)
+    assert (rolled["outcome"], rolled["before"]) == ("unpublished", None)
+
+
+def test_an_empty_success_of_a_run_that_wrote_nothing_has_nothing_to_set_back(
+    py: PyWorld,
+) -> None:
+    """Without an earlier write in the run the empty success names no write.
+
+    The checks run on the table as it is.
+    """
+    py.deploy(write="append", watermark="id", write_mode="append")
+    _published_before(py)
+    _with_checks(py, _NO_NULLS)
+    claimed = _rerun(py, py.engine(_nothing_new))
+    assert _task(py.world, "gold.scores").status is TaskStatus.SUCCEEDED
+    assert _attempts(py.world, claimed.task_run_id)[0].rows_written == 0
+    assert _ids(py.world, "gold.scores") == [0]
+    assert _rollbacks(py) == []
+
+
 @pytest.mark.parametrize(
     "claim",
     [

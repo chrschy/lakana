@@ -4137,3 +4137,44 @@ def test_the_task_state_outlives_a_failure_until_the_record_is_written(
     assert isinstance(state, runner.context._TaskState)
     assert state.secrets == {"hunter2-secret"}
     assert runner.context._state is None
+
+
+def test_a_merge_with_null_keys_is_left_to_the_server_which_names_the_nulls(world: _World) -> None:
+    """Nulls are not "repeats": the server's null message comes first, not the unique() advice."""
+    world.client.tables.merged = ValidationError("key column `id` is null in 2 rows", status=422)
+    record = _failing(
+        world,
+        "return pl.DataFrame({'id': [None, None, 1]}, schema={'id': pl.Int64})",
+        **_v3("merge", key=["id"]),
+    )
+    assert record["error_type"] == "UploadRefused"
+    assert record["message"] == "key column `id` is null in 2 rows"
+    (call,) = world.client.tables.calls
+    assert call["method"] == "merge"
+
+
+@pytest.mark.parametrize(
+    ("overrides", "fragment"),
+    [
+        ({"key": ["id\n"]}, "key must name the columns of a merge"),
+        ({"key": ["i\u202ed"]}, "key must name the columns of a merge"),
+        ({"watermark": {"column": "at\x00", "value": None}}, "watermark must be null or"),
+        ({"watermark": {"column": "a\u2028t", "value": None}}, "watermark must be null or"),
+    ],
+)
+def test_key_and_watermark_columns_must_be_identifiers(
+    world: _World, overrides: dict[str, object], fragment: str
+) -> None:
+    """The rule of a deploy: no control, format or surrogate character, no line separator."""
+    fields = {**_v3("merge", key=["id"], watermark=_WATERMARK_ID), **overrides}
+    with pytest.raises(ValueError, match=fragment):
+        parse_description(world.description(**fields))
+
+
+def test_a_spaced_key_and_watermark_parse(world: _World) -> None:
+    description = parse_description(
+        world.description(
+            **_v3("merge", key=["order id"], watermark={"column": "län", "value": None})
+        )
+    )
+    assert (description.key, description.watermark_column) == (("order id",), "län")

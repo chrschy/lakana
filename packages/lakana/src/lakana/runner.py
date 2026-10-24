@@ -92,7 +92,7 @@ from lakana._artifact_manifest import (
     shown,
 )
 from lakana._models import ArtifactVersion
-from lakana.assets import ASSET_ATTRIBUTE, DECIMALS_MODES, WRITE_CHOICES, AssetSpec
+from lakana.assets import ASSET_ATTRIBUTE, DECIMALS_MODES, WRITE_CHOICES, AssetSpec, _unsafe
 from lakana.client import Client
 from lakana.context import WATERMARK_TAGS, AssetContext, WatermarkValue, decode_watermark
 from lakana.errors import (
@@ -599,7 +599,7 @@ def _write_fields(document: dict[str, object]) -> _Writes:
     key = document.get("key")
     if (
         not isinstance(key, list)
-        or not all(isinstance(column, str) and column for column in key)
+        or not all(isinstance(column, str) and column and not _unsafe(column) for column in key)
         or bool(key) != (write == "merge")
     ):
         raise ValueError(
@@ -612,7 +612,12 @@ def _write_fields(document: dict[str, object]) -> _Writes:
         named = watermark.get("column") if isinstance(watermark, dict) else None
         raw = watermark.get("value") if isinstance(watermark, dict) else None
         try:
-            if not isinstance(named, str) or not named or not isinstance(raw, (str, type(None))):
+            if (
+                not isinstance(named, str)
+                or not named
+                or _unsafe(named)
+                or not isinstance(raw, (str, type(None)))
+            ):
                 raise ValueError
             column, value = named, None if raw is None else decode_watermark(raw)
         except ValueError:
@@ -1402,8 +1407,8 @@ def _check_merge_rows(table: pa.Table, key: tuple[str, ...]) -> None:
     """Refuse a merge the server would refuse, with advice a Python asset can follow.
 
     The server checks the same and stays the authority; it words its refusals for a caller
-    that sends batches. Key columns the result does not have, null keys and nested key types
-    are left to the server.
+    that sends batches. Key columns the result does not have, null keys (the server counts them
+    before it looks for repeats) and nested key types are left to the server.
 
     Parameters
     ----------
@@ -1428,6 +1433,8 @@ def _check_merge_rows(table: pa.Table, key: tuple[str, ...]) -> None:
         )
     if not set(key) <= set(table.column_names) or table.num_rows < 2:
         return
+    if any(table.column(column).null_count for column in key):
+        return  # the server names null keys first, with their count
     try:
         groups = table.select(list(key)).group_by(list(key)).aggregate([([], "count_all")])
     except (pa.ArrowNotImplementedError, pa.ArrowInvalid, pa.ArrowTypeError):
@@ -1842,7 +1849,9 @@ def run_asset(description: TaskDescription, client: Client, root: Path) -> dict[
         replaces = description.write == "replace"
         arrow = _to_arrow(result, columns_optional=not replaces)
         if not replaces and arrow.num_rows == 0 and description.expected_snapshot_id != "none":
-            # Nothing new since the last run: the table stays as it is.
+            # Nothing new since the last run: the table stays as it is. The watermark column is
+            # not checked here (an empty result may have no columns at all), so an empty result
+            # with a wrongly typed watermark column passes; the next run that has rows fails.
             return {"status": "succeeded", "snapshot_id": None, "rows": 0}
         if arrow.num_columns == 0:
             raise InvalidResult(_NOTHING_TO_CREATE.format(table=description.table))
