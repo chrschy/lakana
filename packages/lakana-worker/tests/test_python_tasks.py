@@ -17,6 +17,7 @@ import gzip
 import hashlib
 import io
 import json
+import logging
 import os
 import re
 import sys
@@ -74,6 +75,7 @@ from lakana_core.catalog.service import ROLLBACK_NOT_KNOWN_REASON, CatalogServic
 from lakana_core.catalog.writes import ExpectedSnapshot, WriteResult
 from lakana_core.config import DatabaseConfig, StorageConfig
 from lakana_core.connections.kinds import ConnectionKind
+from lakana_core.connections.service import ConnectionService
 from lakana_core.db import create_engine
 from lakana_core.errors import (
     ConflictError,
@@ -7835,3 +7837,77 @@ def test_a_declared_connection_that_is_gone_fails_naming_it(py: PyWorld) -> None
         "deploy again"
     )
     assert py.runner.tasks == []
+
+
+_CONNECTION_PASSWORD = "crm-db-pa55word"
+
+
+def _connection_with_secret(py: PyWorld, name: str = "crm-db") -> None:
+    """Add a `tcp` connection to `dev` with its own secret, under the engine's test key.
+
+    Parameters
+    ----------
+    py
+        The world.
+    name
+        Its name.
+    """
+    with py.world.session() as session:
+        owner = session.get(Principal, py.world.admin.id)
+        assert owner is not None
+        ConnectionService(session, AllowAllAuthorization(), _INDEX_KEY).create(
+            PrincipalRef(id=owner.id, name=owner.name, type=owner.type),
+            "dev",
+            name=name,
+            kind=ConnectionKind.TCP,
+            address={"host": "db.example.com", "port": 5432},
+            settings={},
+            secret_values={"user": "abc", "password": _CONNECTION_PASSWORD},
+        )
+
+
+def test_the_declared_connections_secrets_are_hidden_from_the_tasks_output(py: PyWorld) -> None:
+    """Decrypted with `require_use` and given to the runner only; values under 4 are not."""
+    _connection_with_secret(py)
+    py.deploy(connections=["crm-db"])
+    engine = _with_key(py.engine(_writer(py.world)))
+    run_claimed(engine, py.claim_python(engine))
+    (task,) = py.runner.tasks
+    assert task.hidden == (_CONNECTION_PASSWORD,)
+    assert _CONNECTION_PASSWORD not in repr(task)
+    assert _task(py.world, "gold.scores").status is TaskStatus.SUCCEEDED
+
+
+def test_a_secret_bound_elsewhere_is_not_decrypted_and_the_attempt_still_runs(
+    py: PyWorld, caplog: pytest.LogCaptureFixture
+) -> None:
+    _connection_with_secret(py)
+    with py.world.session() as session:
+        session.execute(
+            update(Secret)
+            .where(Secret.name == "crm-db-connection")
+            .values(use_target_id=uuid.uuid4())
+        )
+        session.commit()
+    py.deploy(connections=["crm-db"])
+    engine = _with_key(py.engine(_writer(py.world)))
+    with caplog.at_level(logging.WARNING):
+        run_claimed(engine, py.claim_python(engine))
+    assert py.runner.tasks[0].hidden == ()
+    assert _task(py.world, "gold.scores").status is TaskStatus.SUCCEEDED
+    assert "crm-db" in caplog.text
+    assert _CONNECTION_PASSWORD not in caplog.text
+
+
+def test_without_a_master_key_nothing_is_decrypted_and_the_attempt_still_runs(
+    py: PyWorld, caplog: pytest.LogCaptureFixture
+) -> None:
+    _connection_with_secret(py)
+    py.deploy(connections=["crm-db"])
+    engine = py.engine(_writer(py.world))
+    engine.key_provider = None
+    with caplog.at_level(logging.WARNING):
+        run_claimed(engine, py.claim_python(engine))
+    assert py.runner.tasks[0].hidden == ()
+    assert _task(py.world, "gold.scores").status is TaskStatus.SUCCEEDED
+    assert "master key" in caplog.text

@@ -989,7 +989,7 @@ class LocalProcessRunner:
                 retryable=False,
                 failure_code=FailureCode.BUILD_FAILED,
             )
-        secrets_to_hide = token_secrets(task.token)
+        secrets_to_hide = token_secrets(task.token) + list(task.hidden)
         document = task_description(
             task,
             result_path=str(result_path),
@@ -1397,7 +1397,7 @@ class DockerRunner:
                 error_message=f"could not prepare the task directory: {exc.strerror or exc}",
                 failure_code=FailureCode.INTERNAL,
             )
-        secrets_to_hide = token_secrets(task.token)
+        secrets_to_hide = token_secrets(task.token) + list(task.hidden)
         if stop.is_set():  # a cancel, lost lease or drain before the container exists
             return _outcome_from(
                 None,

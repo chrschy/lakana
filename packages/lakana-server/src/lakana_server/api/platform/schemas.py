@@ -2289,6 +2289,55 @@ class ConnectionPage(BaseModel):
     next_cursor: str | None
 
 
+class EndpointOut(BaseModel):
+    """One host and port a connection reaches.
+
+    Parameters
+    ----------
+    host
+        The host, lower case.
+    port
+        The port.
+    role
+        ``service`` (the data) or ``token`` (where an OAuth2 token is fetched).
+    """
+
+    host: str
+    port: int
+    role: str
+
+
+class TaskConnectionOut(BaseModel):
+    """Response body of a running task's fetch of one of its connections.
+
+    The only answer of the API that carries a secret's values. It is sent only to a bound task
+    token of a running attempt, for a connection its deployed asset declares, with
+    ``Cache-Control: no-store``; the helper keeps it in memory for the attempt.
+
+    Parameters
+    ----------
+    name
+        The connection's name.
+    kind
+        Its kind.
+    address
+        Its address, with defaults filled in.
+    settings
+        Its settings, with defaults filled in; a ``ca_certificate`` in full.
+    endpoints
+        Every host and port it reaches, in order.
+    secret
+        The values of its secret; `null` when it has none it may use.
+    """
+
+    name: str
+    kind: str
+    address: dict[str, Any]
+    settings: dict[str, Any]
+    endpoints: list[EndpointOut]
+    secret: dict[str, str] | None
+
+
 class DeployCreate(BaseModel):
     """Request body for a deploy, dry run or rollback.
 

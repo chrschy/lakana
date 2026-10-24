@@ -370,8 +370,8 @@ def asset(
         decimal identifier or a wide sum. What the function returns is stored as it is.
     connections
         Names of connections of the environment the asset reads from; each must exist when
-        you deploy. Reading them from inside the task arrives in a later release. At most
-        16, each lower-case letters, digits and ``-``, starting with a letter.
+        you deploy. Inside the task, `lakana.ingest.connections.get` reads one, with its
+        secret. At most 16, each lower-case letters, digits and ``-``, starting with a letter.
     write
         ``replace`` (the default): every run replaces the table's rows with what the
         function returns.

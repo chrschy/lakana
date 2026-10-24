@@ -2474,3 +2474,64 @@ def test_python_assets_append_past_the_watermark_and_merge_on_their_key(
     assert "watermark: long:3" in nothing
     assert "rows: 0" in nothing
     assert "snapshot:" not in nothing
+
+
+_CRM_PASSWORD = "crm-e2e-s3cr3t"
+
+_CRM_ROWS = '''\
+import polars as pl
+from lakana import asset
+from lakana.ingest import connections
+
+
+@asset(connections=["crm-db"])
+def crm_rows() -> pl.DataFrame:
+    """Fetch the declared connection, print its password, and record what it said."""
+    crm = connections.get("crm-db")
+    print("password:", crm.secret["password"])
+    print("secret:", crm.secret)
+    return pl.DataFrame({"host": [crm.address["host"]], "kind": [crm.kind]})
+'''
+
+
+def test_a_python_asset_declaring_a_connection_records_it_in_lineage(
+    stack: _Stack, wheelhouse: Path
+) -> None:
+    """Deploy, run with the real harness: the task fetches its secret, the log hides it.
+
+    The write records the declared connection as a source; the admin sees it in lineage.
+    """
+    admin, env = stack.admin, unique_name()
+    stack.services.environment(admin, env)
+    admin.connections.create(
+        env,
+        "crm-db",
+        kind="postgresql",
+        address={"host": "db.example.com", "database": "crm"},
+        settings={"user": "reader"},
+        secret_values={"password": _CRM_PASSWORD},
+    )
+    project = _deploy(stack, wheelhouse, {"assets/bronze/crm_rows.py": _CRM_ROWS}, environment=env)
+
+    run = admin.runs.start(env, project.repository)
+    stack.succeed(env, run.id)
+
+    assert stack.sql("SELECT host, kind FROM bronze.crm_rows", env) == [
+        {"host": "db.example.com", "kind": "postgresql"}
+    ]
+    log = admin.runs.log(env, run.id, "bronze.crm_rows").text
+    assert "password: ***" in log
+    assert "secret: {'password': '***'}" in log
+    assert _CRM_PASSWORD not in log
+    lineage = admin.tables.lineage(env, "bronze.crm_rows")
+    (node,) = [n for n in lineage.nodes if n.kind == "CONNECTION"]
+    assert (node.name, node.connection_kind, node.dropped) == ("crm-db", "postgresql", False)
+    with Session(stack.db) as session:
+        fetched = session.execute(
+            select(AuditEvent).where(
+                AuditEvent.event_type == AuditEventType.CONNECTION_CREDENTIAL_FETCHED,
+                AuditEvent.securable_environment == env,
+            )
+        ).scalar_one()
+    assert fetched.detail["asset"] == "bronze.crm_rows"
+    assert _CRM_PASSWORD not in json.dumps(fetched.detail)

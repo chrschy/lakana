@@ -40,8 +40,9 @@ limits lie is in [Python assets: what they are for and how far they are trusted]
   handed a Python asset `decimal.Decimal` values; an asset written for them that relies on
   that needs `decimals="exact"` after an upgrade.
 - **Connections.** `connections` names the connections of the environment this asset reads from,
-  for example `@asset(connections=["crm-db"])`; reading them from inside the task arrives in a
-  later release. At most 16, each made of lower-case letters, digits and `-`, starting with a
+  for example `@asset(connections=["crm-db"])`; inside the task, `lakana.ingest.connections.get`
+  reads one with its secret
+  ([How a task gets its credential](connections.md#how-a-task-gets-its-credential)). At most 16, each made of lower-case letters, digits and `-`, starting with a
   letter, and none listed twice. Each must exist in the environment you deploy to, or the deploy fails naming the
   `lakana connection create` command that creates it. A rollback to a version whose connection
   was deleted since fails the same way. While a deployed version declares a connection, the

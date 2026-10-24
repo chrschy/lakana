@@ -10,10 +10,12 @@ record and the trace of a failure), so the values to hide are still known then.
 from __future__ import annotations
 
 import datetime as dt
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING
+from urllib.parse import quote
 
 if TYPE_CHECKING:
     from lakana.client import Client
@@ -142,8 +144,27 @@ def current() -> _TaskState:
     return _state
 
 
+def secret_forms(value: str) -> set[str]:
+    """List the forms of a credential that text can carry it in.
+
+    Parameters
+    ----------
+    value
+        The credential.
+
+    Returns
+    -------
+    set of str
+        The value itself, and as it appears inside a Python `repr`, a JSON string and a URL
+        (percent-encoded), each when it differs; forms shorter than `MIN_SECRET_CHARS` are
+        left out.
+    """
+    forms = {value, repr(value)[1:-1], json.dumps(value)[1:-1], quote(value, safe="")}
+    return {form for form in forms if len(form) >= MIN_SECRET_CHARS}
+
+
 def register_secret(value: str) -> None:
-    """Have the harness mask a value in every text it writes.
+    """Have the harness mask a value, in each of its `secret_forms`, in every text it writes.
 
     Parameters
     ----------
@@ -152,7 +173,7 @@ def register_secret(value: str) -> None:
         mask ordinary text), and so is every value outside a running task.
     """
     if _state is not None and len(value) >= MIN_SECRET_CHARS:
-        _state.secrets.add(value)
+        _state.secrets.update(secret_forms(value))
 
 
 def _set(state: _TaskState | None) -> None:

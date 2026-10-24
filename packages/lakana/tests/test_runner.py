@@ -4178,3 +4178,116 @@ def test_a_spaced_key_and_watermark_parse(world: _World) -> None:
         )
     )
     assert (description.key, description.watermark_column) == (("order id",), "län")
+
+
+_FETCHED_PASSWORD = "fetched-pa55word"
+
+
+class _FetchedConnections:
+    """A fake `client.task_connections` that answers `crm-db` with a password.
+
+    Parameters
+    ----------
+    password
+        The secret's password.
+    """
+
+    def __init__(self, password: str = _FETCHED_PASSWORD) -> None:
+        self.password = password
+        self.asked: list[str] = []
+
+    def get(self, name: str) -> dict[str, object]:
+        """Answer one fetch.
+
+        Parameters
+        ----------
+        name
+            The connection's name.
+
+        Returns
+        -------
+        dict
+            A `TaskConnectionOut` body.
+        """
+        self.asked.append(name)
+        return {
+            "name": name,
+            "kind": "postgresql",
+            "address": {"host": "db.example.com", "port": 5432, "database": "crm"},
+            "settings": {"user": "reader"},
+            "endpoints": [{"host": "db.example.com", "port": 5432, "role": "service"}],
+            "secret": {"password": self.password},
+        }
+
+
+_CRM = {"crm-db": {"kind": "postgresql"}}
+
+
+def test_a_fetched_password_in_an_exception_is_masked_in_the_record_and_the_trace(
+    world: _World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The harness masks what it writes; what the asset prints itself is the worker's to mask."""
+    world.client.task_connections = _FetchedConnections()  # ty: ignore[unresolved-attribute]
+    record = _failing(
+        world,
+        "from lakana.ingest import connections\n"
+        "password = connections.get('crm-db').secret['password']\n"
+        "print('password is', password)\n"
+        "raise ValueError(f'could not log in with {password!r} or {password}')",
+        **_v3("replace", connections=_CRM, expected=41),
+    )
+    assert record["message"] == "ValueError: could not log in with '***' or ***"
+    assert record["retryable"] is True
+    err = capsys.readouterr().err
+    assert "ValueError: could not log in with '***' or ***" in err
+    assert _FETCHED_PASSWORD not in err
+    assert runner.context._state is None
+
+
+def test_a_fetched_password_in_the_name_of_an_exception_type_is_masked(world: _World) -> None:
+    world.client.task_connections = _FetchedConnections()  # ty: ignore[unresolved-attribute]
+    record = _failing(
+        world,
+        "from lakana.ingest import connections\n"
+        "password = connections.get('crm-db').secret['password']\n"
+        "raise type(password, (Exception,), {})('x')",
+        **_v3("replace", connections=_CRM, expected=41),
+    )
+    assert record["error_type"] == "***"
+    assert record["message"] == "***: x"
+    assert _FETCHED_PASSWORD not in json.dumps(record)
+
+
+def test_the_fetched_connections_are_forgotten_when_the_attempt_ends(world: _World) -> None:
+    from lakana.ingest import _connections
+
+    fake = _FetchedConnections()
+    world.client.task_connections = fake  # ty: ignore[unresolved-attribute]
+    _write_asset(
+        world,
+        "from lakana.ingest import connections\n"
+        "connections.get('crm-db')\nconnections.get('crm-db')\nreturn obs",
+    )
+    assert world.run(**_v3("replace", connections=_CRM, expected=41)) == 0
+    assert fake.asked == ["crm-db"]
+    assert _connections._CACHE == {}
+
+
+@pytest.mark.parametrize(
+    ("raised", "retryable"),
+    [
+        ("from lakana.ingest import ConnectionNotDeclared as E", False),
+        ("from lakana.ingest import ConnectionRefused as E", False),
+        ("from lakana.ingest import CapExceeded as E", False),
+        ("from lakana.ingest import ConnectionChanged as E", True),
+        ("from lakana.ingest import SourceError as E", True),
+        ("class E(Exception):\n    retryable = False", True),
+    ],
+    ids=["not-declared", "refused", "cap", "changed", "source", "user-attribute"],
+)
+def test_an_ingest_error_says_whether_another_attempt_could_help(
+    world: _World, raised: str, retryable: bool
+) -> None:
+    """Only `lakana.ingest`'s own errors are read: a user's attribute decides nothing."""
+    record = _failing(world, f"{raised}\nraise E('no')")
+    assert (record["phase"], record["retryable"]) == ("function", retryable)

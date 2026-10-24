@@ -10292,6 +10292,90 @@
         }
       }
     },
+    "/api/v1/tasks/self/connections/{name}": {
+      "get": {
+        "tags": [
+          "connections"
+        ],
+        "summary": "Fetch a connection the running task's asset declares, with its secret",
+        "description": "For the helpers of `lakana.ingest` inside a Lakana task; nothing else needs it. Answers only the task's own token while its attempt runs, for a connection its deployed asset declares in `@asset(connections=[...])`, in the task's environment. Every call is in the audit log: `CONNECTION_CREDENTIAL_FETCHED` (committed before the answer is sent) or `CONNECTION_CREDENTIAL_REFUSED`. Answers 403 with \"only a running task can fetch a connection\" for any other token, \"connection `NAME` is not declared by asset `ASSET`\" for a name the asset does not declare (whether or not a connection of that name exists), and \"connection `NAME` is not in environment `ENV`\" for a declared name the environment lacks; 401 for a token whose attempt has ended or was claimed again. The answer is never cached (`Cache-Control: no-store`, `Pragma: no-cache`).",
+        "operationId": "get_task_connection_api_v1_tasks_self_connections__name__get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 63,
+              "description": "The connection's name.",
+              "title": "Name"
+            },
+            "description": "The connection's name."
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token.",
+              "title": "Authorization"
+            },
+            "description": "The credential: `Bearer <token>` with a personal access token, task token or CI token."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskConnectionOut"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in: the token is missing, wrong, expired or revoked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but not allowed to do this. The refusal is recorded in the audit log.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/repositories": {
       "post": {
         "tags": [
@@ -17977,6 +18061,30 @@
         "title": "DroppedTableOut",
         "description": "One dropped table whose files are not deleted yet.\n\nParameters\n----------\nname\n    The table's name when it was dropped.\nnamespace\n    Dot-joined namespace path it was dropped from.\nuuid\n    The table's id, which a restore keeps.\nkind\n    ``TABLE``: only managed tables can be restored.\ndropped_at\n    When it was dropped.\npurge_after\n    From when on the worker's sweep deletes its files; it can be restored until then.\nrestorable\n    Whether `POST .../tables/{name}/undrop` would still restore it: `false` once\n    `purge_after` has passed or the sweep has started deleting its files."
       },
+      "EndpointOut": {
+        "properties": {
+          "host": {
+            "type": "string",
+            "title": "Host"
+          },
+          "port": {
+            "type": "integer",
+            "title": "Port"
+          },
+          "role": {
+            "type": "string",
+            "title": "Role"
+          }
+        },
+        "type": "object",
+        "required": [
+          "host",
+          "port",
+          "role"
+        ],
+        "title": "EndpointOut",
+        "description": "One host and port a connection reaches.\n\nParameters\n----------\nhost\n    The host, lower case.\nport\n    The port.\nrole\n    ``service`` (the data) or ``token`` (where an OAuth2 token is fetched)."
+      },
       "EnvironmentCreate": {
         "properties": {
           "name": {
@@ -21869,6 +21977,60 @@
         ],
         "title": "TaskAttemptOut",
         "description": "One attempt of a task run.\n\nParameters\n----------\nattempt\n    Attempt number.\nworker\n    Worker id.\nstarted_at\n    Start.\nfinished_at\n    End.\noutcome\n    How it ended.\nrows_written\n    Rows written.\nerror_message\n    Why it failed, as free text.\nfailure\n    The code, cause and next step of an attempt that did not succeed (`FailureOut`);\n    `null` for an attempt that succeeded or is running."
+      },
+      "TaskConnectionOut": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "address": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Address"
+          },
+          "settings": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Settings"
+          },
+          "endpoints": {
+            "items": {
+              "$ref": "#/components/schemas/EndpointOut"
+            },
+            "type": "array",
+            "title": "Endpoints"
+          },
+          "secret": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Secret"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "kind",
+          "address",
+          "settings",
+          "endpoints",
+          "secret"
+        ],
+        "title": "TaskConnectionOut",
+        "description": "Response body of a running task's fetch of one of its connections.\n\nThe only answer of the API that carries a secret's values. It is sent only to a bound task\ntoken of a running attempt, for a connection its deployed asset declares, with\n``Cache-Control: no-store``; the helper keeps it in memory for the attempt.\n\nParameters\n----------\nname\n    The connection's name.\nkind\n    Its kind.\naddress\n    Its address, with defaults filled in.\nsettings\n    Its settings, with defaults filled in; a ``ca_certificate`` in full.\nendpoints\n    Every host and port it reaches, in order.\nsecret\n    The values of its secret; `null` when it has none it may use."
       },
       "TaskLogOut": {
         "properties": {

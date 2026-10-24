@@ -57,6 +57,7 @@ from lakana_core.catalog.identity import resolve_table_id
 from lakana_core.catalog.metadata import read_metadata
 from lakana_core.catalog.service import CatalogService
 from lakana_core.catalog.writes import SnapshotPin, target_changed_message
+from lakana_core.connections.fetch import connection_secret
 from lakana_core.connections.kinds import ConnectionKind
 from lakana_core.errors import ConflictError, LakanaError, NotFoundError, ValidationError
 from lakana_core.identifiers import TableRef
@@ -605,6 +606,70 @@ class _Prepared:
     connections: dict[str, dict[str, object]] = field(default_factory=dict)
 
 
+def _connection_secrets(
+    session: Session, key_provider: KeyProvider | None, prepared: _Prepared
+) -> tuple[str, ...]:
+    """Decrypt the secrets of the connections the asset declares, to hide them in its output.
+
+    The task fetches these values itself at run time (`lakana_core.connections.fetch`); the
+    worker only needs them to mask them in the log it captures and in the failure message.
+    Each secret is decrypted through `lakana_core.connections.fetch.connection_secret`, so only
+    a secret bound to that very connection is. A refusal or an unreadable secret does not fail
+    the attempt (the task's own fetch reports it); it is logged with the connection's name only.
+    This decryption is not audited: no value leaves the worker.
+
+    Parameters
+    ----------
+    session
+        The supervisor's session; rolled back afterwards.
+    key_provider
+        The worker's key provider; `None` without a master key, which decrypts nothing.
+    prepared
+        The attempt's plan, with the declared connections.
+
+    Returns
+    -------
+    tuple of str
+        Every value of at least four characters, in declared order.
+    """
+    if not prepared.connections:
+        return ()
+    if key_provider is None:
+        logger.warning(
+            "no secrets master key is configured, so the secrets of connections %s are not "
+            "hidden from the task's log",
+            ", ".join(prepared.connections),
+        )
+        return ()
+    rows = {
+        row.name: row
+        for row in session.execute(
+            select(Connection)
+            .join(Environment, Environment.id == Connection.environment_id)
+            .where(
+                Environment.name == prepared.environment,
+                LIVE_ENVIRONMENT,
+                Connection.name.in_(list(prepared.connections)),
+            )
+        ).scalars()
+    }
+    hidden: list[str] = []
+    for name in prepared.connections:
+        row = rows.get(name)
+        if row is None:
+            continue
+        values, why = connection_secret(session, key_provider, row, prepared.environment)
+        if why is not None:
+            logger.warning(
+                "the secret of connection %s could not be read to hide it from the task's log (%s)",
+                name,
+                why,
+            )
+        hidden += [value for value in (values or {}).values() if len(value) >= 4]
+    session.rollback()
+    return tuple(dict.fromkeys(hidden))
+
+
 @dataclass
 class _Shown:
     """What the attempt's log block says about the write, filled in as the attempt learns it.
@@ -1119,6 +1184,7 @@ class PythonRuntime:
                 )
             shown.watermark = self._watermark(session, engine, prepared, before)
             _refuse_if_stopped(session, keeper, claimed.run_id)
+            hidden = _connection_secrets(session, engine.key_provider, prepared)
             token, key_id = self._mint(session, tokens, keeper, claimed, prepared)
             cleanup.callback(self._revoke, session, tokens, key_id)
             outcome = self.runner.run(
@@ -1148,6 +1214,7 @@ class PythonRuntime:
                     watermark_column=prepared.watermark_column,
                     watermark=shown.watermark,
                     connections=prepared.connections,
+                    hidden=hidden,
                 ),
                 sink,
                 stop,

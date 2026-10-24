@@ -78,7 +78,10 @@ SHOWN_FIELDS: frozenset[str] = frozenset(
         "address",
         "artifact",
         "artifact_id",
+        # the asset (table) of a task attempt, and the attempt's claim counter
+        "asset",
         "asset_scope",
+        "attempt",
         "check",
         "check_result_id",
         "checks",
@@ -87,6 +90,8 @@ SHOWN_FIELDS: frozenset[str] = frozenset(
         # (a repository id, a ref, an environment name); configuration, never data.
         "conditions",
         "column",
+        # a connection's name, as a task asked for it
+        "connection",
         "credential_secret",
         "delivery_id",
         "deploy_id",

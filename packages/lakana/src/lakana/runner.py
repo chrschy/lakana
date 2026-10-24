@@ -105,6 +105,8 @@ from lakana.errors import (
     QueryFailed,
     ValidationError,
 )
+from lakana.ingest import _connections
+from lakana.ingest._errors import IngestError
 
 if TYPE_CHECKING:
     import polars as pl  # lazy: the SDK works without the assets extra
@@ -227,13 +229,17 @@ def _retryable(phase: str, cause: BaseException) -> bool:
         whose stored manifest the client rejects (`_STORED_MANIFEST_REFUSALS`), a 413 (the
         operator's size limit).
         A `TypeError` (or a subclass) raised out of the asset's function is a mistake in
-        its code that every attempt repeats; no other exception type of the function is
+        its code that every attempt repeats; an error of `lakana.ingest` says itself whether
+        another attempt could help (`IngestError.retryable`: a connection the asset does not
+        declare, or the server refused, repeats); no other exception type of the function is
         judged by its class. A 404 on the download of an artifact input is the exception
         among refused requests: the version may have been pruned since the worker resolved it, so
         another attempt, which resolves again, can end differently (the retries are
         bounded, and the worker fails an input with no live version for good).
     """
     origin = cause.__cause__ if isinstance(cause, InputError) else cause
+    if phase == "function" and isinstance(cause, IngestError) and cause.retryable is not None:
+        return cause.retryable
     if isinstance(origin, MemoryError) or (phase == "function" and isinstance(cause, TypeError)):
         return False
     permanent = (InvalidResult, AssetLoadError, UploadRefused, WorkspaceError)
@@ -1963,6 +1969,29 @@ def _upload(client: Client, description: TaskDescription, arrow: pa.Table) -> di
 _CONTROL_ESCAPES = {0x2028, 0x2029}
 
 
+def _mask(text: str, token: str) -> str:
+    """Replace the task token and every value registered to hide with ``***``.
+
+    Parameters
+    ----------
+    text
+        Any text the harness is about to write.
+    token
+        The task token; empty when the caller removed it already.
+
+    Returns
+    -------
+    str
+        The text, the longest value replaced first, so that one value inside another never
+        leaves the rest of the longer one behind.
+    """
+    state = context._state
+    hidden = {token, *(state.secrets if state is not None else ())} - {""}
+    for value in sorted(hidden, key=len, reverse=True):
+        text = text.replace(value, "***")
+    return text
+
+
 def _clean(text: str) -> str:
     r"""Make text safe for a result record, a database column and a log line.
 
@@ -1974,13 +2003,13 @@ def _clean(text: str) -> str:
     Returns
     -------
     str
-        The text with control characters (except newline and tab), surrogates,
-        format characters (bidi overrides, zero-width; not the joiners) and the
-        Unicode line and paragraph separators written as ``\xNN`` or
-        ``\uNNNN``.
+        The text with every value registered to hide masked (`_mask`), then control
+        characters (except newline and tab), surrogates, format characters (bidi overrides,
+        zero-width; not the joiners) and the Unicode line and paragraph separators written as
+        ``\xNN`` or ``\uNNNN``.
     """
     out = []
-    for char in text:
+    for char in _mask(text, ""):
         code = ord(char)
         category = unicodedata.category(char)
         if (
@@ -2074,7 +2103,8 @@ def _failure_record(exc: BaseException, token: str) -> dict[str, object]:
     exc
         A `Failure`, or anything raised outside the phases.
     token
-        The task token, removed from every text.
+        The task token, removed from every text with every value registered to hide
+        (`_mask`).
 
     Returns
     -------
@@ -2090,7 +2120,7 @@ def _failure_record(exc: BaseException, token: str) -> dict[str, object]:
         text = f"{name}: {text}"
     if isinstance(cause, MemoryError):
         text = f"{text or name}.{_TASK_MEMORY_HINT}"
-    message = _clean((text or name).replace(token, "***"))
+    message = _clean(_mask(text or name, token))
     if phase == "function" and isinstance(cause, TypeError):
         # The advice must survive the bound on the message: cut the exception's text instead.
         room = MAX_ERROR_MESSAGE_CHARS - len(_TYPE_ERROR_HINT)
@@ -2099,7 +2129,7 @@ def _failure_record(exc: BaseException, token: str) -> dict[str, object]:
         message += _TYPE_ERROR_HINT
     return {
         "status": "failed",
-        "error_type": _clean(name.replace(token, "***")),
+        "error_type": _clean(_mask(name, token)),
         "message": message[:MAX_ERROR_MESSAGE_CHARS],
         "retryable": _retryable(phase, cause),
         "phase": phase,
@@ -2137,6 +2167,7 @@ def main(stdin: TextIO | None = None, client_factory: Callable[..., Client] | No
     finally:
         # Only now: the record and the trace are written, so what they hide was known then.
         context._set(None)
+        _connections.clear()
 
 
 def _run_described(
@@ -2182,7 +2213,7 @@ def _run_described(
             trace = "".join(traceback.format_exception(shown))
         except Exception:
             trace = _clean(_safe(lambda: type(shown).__name__, "Exception")) + "\n"
-        _stderr(trace.replace(token, "***"))
+        _stderr(_mask(trace, token))
         return 1
     return 0 if _write_record(description.result_path, record) else 1
 

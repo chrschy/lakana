@@ -1028,6 +1028,25 @@ def test_a_token_straddling_the_forced_flush_boundary_is_hidden(harness: Harness
     assert harness.output().count("***") == 3
 
 
+def test_a_declared_connections_secret_is_hidden_even_split_across_two_writes(
+    harness: Harness,
+) -> None:
+    """`PythonTask.hidden` joins the token in the redaction of the log and the message."""
+    harness.fields["hidden"] = ("conn-s3cr3t-value",)
+    outcome = harness.run(
+        "sys.stdout.write('password conn-s3cr')\n"
+        "sys.stdout.flush()\n"
+        "time.sleep(0.15)\n"
+        "sys.stdout.write('3t-value\\n')\n"
+        "sys.stdout.flush()\n"
+        "write({'status': 'failed', 'error_type': 'E', 'message': 'login conn-s3cr3t-value',"
+        " 'retryable': True})\nsys.exit(1)\n"
+    )
+    assert "s3cr3t" not in harness.output()
+    assert harness.output().startswith("password ***\n")
+    assert outcome.error_message == "login ***"
+
+
 def test_the_token_is_only_on_stdin(harness: Harness) -> None:
     harness.run(
         "print(json.dumps({'argv': sys.orig_argv, 'env': dict(os.environ)}))\n"

@@ -220,6 +220,7 @@ ROUTES: dict[str, Route] = {
     "connections.delete": Route(
         "DELETE", "/api/v1/environments/{environment_name}/connections/{connection_name}"
     ),
+    "task_connections.get": Route("GET", "/api/v1/tasks/self/connections/{name}"),
     "repositories.create": Route("POST", "/api/v1/repositories"),
     "repositories.list": Route("GET", "/api/v1/repositories"),
     "repositories.get": Route("GET", "/api/v1/repositories/{name}"),
