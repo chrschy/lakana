@@ -480,18 +480,19 @@ def _read_record(path: Path, expected_output: str) -> dict[str, object] | None:
 
 
 def _clean(text: str, secrets_to_hide: list[str], limit: int) -> str:
-    """Make record text safe to store: printable, redacted, bounded.
+    """Make record text safe to store: redacted, printable, bounded.
 
-    Control, format, surrogate and private-use characters become ``?``
-    first, so a secret cannot be hidden from the redaction by splitting it
-    with one; the text is then redacted and only then cut.
+    The text is redacted as it was written first, so a secret that holds a character that is
+    not printable (a no-break space, a zero-width space, an escape) is still found. Control,
+    format, surrogate and private-use characters then become ``?`` (never deleted, which could
+    join the halves of a secret), and the text is redacted again and only then cut.
 
     Parameters
     ----------
     text
         Text from the result record.
     secrets_to_hide
-        The task token and its secret part.
+        The task token, its secret part and the forms of the connections' secrets.
     limit
         Most characters kept.
 
@@ -500,12 +501,32 @@ def _clean(text: str, secrets_to_hide: list[str], limit: int) -> str:
     str
         The cleaned text.
     """
-    printable = "".join(c if c.isprintable() or c in "\n\t" else "?" for c in text)
+    raw = _redacted(text.encode("utf-8", "surrogatepass"), secrets_to_hide)
+    written = raw.decode("utf-8", "surrogatepass")
+    printable = "".join(c if c.isprintable() or c in "\n\t" else "?" for c in written)
+    return _redacted(printable.encode("utf-8"), secrets_to_hide).decode("utf-8")[:limit]
+
+
+def _redacted(data: bytes, secrets_to_hide: list[str]) -> bytes:
+    """Mask every secret in one piece of text, as the log stream masks it.
+
+    Parameters
+    ----------
+    data
+        The text as bytes.
+    secrets_to_hide
+        The values to mask.
+
+    Returns
+    -------
+    bytes
+        The text with each value replaced by ``***``.
+    """
     redacted: list[bytes] = []
-    redactor = OutputRedactor(secrets_to_hide, redacted.append, max_line=len(printable) * 4 + 1)
-    redactor.feed(printable.encode("utf-8"))
+    redactor = OutputRedactor(secrets_to_hide, redacted.append, max_line=len(data) + 1)
+    redactor.feed(data)
     redactor.close()
-    return b"".join(redacted).decode("utf-8")[:limit]
+    return b"".join(redacted)
 
 
 def _leader_exited(process: subprocess.Popen[bytes]) -> bool:

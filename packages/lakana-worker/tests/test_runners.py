@@ -2077,3 +2077,19 @@ def test_the_timeout_message_keeps_a_fraction_of_a_second(seconds: float, text: 
     """A timeout under a second no longer reads "0s"."""
     outcome = _outcome(None, code=-9, stopped=True, timed_out=True, timeout_seconds=seconds)
     assert outcome.error_message == f"timed out after {text}"
+
+
+@pytest.mark.parametrize(
+    "value", ["pass\xa0word123", "pass​word123", "pass\x1bword123", "pässword123"]
+)
+def test_a_secret_with_a_character_that_is_not_printable_is_hidden_in_the_record(
+    value: str,
+) -> None:
+    """Redaction sees the text as written; only then are such characters replaced with `?`."""
+    hidden = sorted(secret_forms(value))
+    cleaned = runners_module._clean(f"connect failed for {value} at host", hidden, 2000)
+    assert cleaned == "connect failed for *** at host"
+
+
+def test_a_lone_surrogate_in_a_record_is_still_replaced() -> None:
+    assert runners_module._clean("bad \ud800 text \x00", [], 2000) == "bad ? text ?"
