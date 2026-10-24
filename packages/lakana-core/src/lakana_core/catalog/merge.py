@@ -38,7 +38,10 @@ COMPOSITE_KEY_MAX_ROWS = 5_000
 """Most rows a merge on a key of several columns takes per batch.
 
 pyiceberg's upsert matches such a key with one filter term per row, and its time grows with the
-square of the batch: 5,000 rows take about ten seconds, 20,000 more than five minutes.
+square of the batch: 5,000 rows take about ten seconds, 20,000 more than five minutes. It also
+grows with the table: each scan applies that filter to every row that file pruning cannot skip,
+about 1.5 seconds per million such rows for a full batch (5,000 rows into 5 million took about
+12 seconds), so the cap bounds the batch, not the whole cost.
 """
 
 

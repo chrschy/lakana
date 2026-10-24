@@ -152,5 +152,8 @@ The first merge, which creates the table, records the event of a create (`detail
   about 4 seconds and raised the server's memory by about 300 MiB.
 - A key of several columns takes at most 5,000 rows per batch; a larger batch is refused before
   anything is read or written. Such a key is much slower: the time grows with the square of the
-  batch's rows, and 5,000 rows took about 12 seconds. A key of one column has no such limit, so
+  batch's rows, and 5,000 rows took about 12 seconds. The time also grows with the table: every
+  row of the table that the merge cannot skip by its files' key ranges is compared with each row
+  of the batch, about 1.5 seconds per million rows for a batch of 5,000 (5,000 rows into a table
+  of 5 million took about 12 seconds). A key of one column has no such limit, so
   give the table one column that holds the whole key, or send batches of at most 5,000 rows.
