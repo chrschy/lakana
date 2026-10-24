@@ -5001,13 +5001,15 @@ class CatalogService:
         counts and refusals tell what it found. For the same reason a merge is refused while a
         row filter or column mask on the table applies to `p`, as `read_watermark` is.
 
-        One exception to the `READ_TABLE` step: a task attempt's bound token merging into its
-        own asset. Such a token may read only the task's declared inputs, never its own asset,
-        but writing that asset is the task's job; `WRITE_TABLE` (which the token holds on its
-        own asset only) and the write guard's own-asset rule (`WriteOperation.MERGE`) still
-        hold it to that one table. The row filter and column mask refusal still runs, against
-        the principal the task acts for, so a task of a filtered or masked principal cannot
-        merge either.
+        One exception in how the `READ_TABLE` step is checked: a task attempt's bound token
+        merging into its own asset. Such a token may read only the task's declared inputs,
+        never its own asset, but writing that asset is the task's job. So for it, `READ_TABLE`
+        is checked against the principal's own grants without the token's narrowing (the
+        principal must still hold it, as its personal token would need to), after
+        `WRITE_TABLE` has held the token to its environment and its own asset; the write
+        guard's own-asset rule (`WriteOperation.MERGE`) holds it there too. The row filter and
+        column mask refusal runs against the same principal, so a task of a filtered or masked
+        principal cannot merge either.
 
         Parameters
         ----------
@@ -5037,7 +5039,7 @@ class CatalogService:
             expected_snapshot_id,
             artifact_operation="merging rows",
             unmanaged="Merges are only supported on managed (Iceberg) tables.",
-            read=not _bound_to_own_asset(p, ref),
+            read_as=replace(p, task_scope=None) if _bound_to_own_asset(p, ref) else p,
         )
         if row is None:
             return
@@ -5058,7 +5060,7 @@ class CatalogService:
         *,
         artifact_operation: str,
         unmanaged: str,
-        read: bool = False,
+        read_as: PrincipalRef | None = None,
     ) -> Table | None:
         """Run the pre-check of a write that may create its target.
 
@@ -5074,8 +5076,9 @@ class CatalogService:
             What was attempted, for `artifact_refusal`.
         unmanaged
             The refusal for a table that is neither managed nor an artifact.
-        read
-            Authorize `READ_TABLE` too, right after `WRITE_TABLE`.
+        read_as
+            Authorize `READ_TABLE` too, right after `WRITE_TABLE`, for this principal (`p`, or
+            `p` without its task token's narrowing).
 
         Returns
         -------
@@ -5095,8 +5098,8 @@ class CatalogService:
         """
         securable = Securable.table_scope(ref.environment, ref.namespace, ref.name)
         self._authz.authorize(p, Action.WRITE_TABLE, securable)
-        if read:
-            self._authz.authorize(p, Action.READ_TABLE, securable)
+        if read_as is not None:
+            self._authz.authorize(read_as, Action.READ_TABLE, securable)
         row = self._existing_table(ref)
         if row is None:
             if expected_snapshot_id is None:

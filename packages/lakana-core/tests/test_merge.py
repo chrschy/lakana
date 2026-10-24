@@ -1082,29 +1082,38 @@ def test_a_commit_that_landed_although_it_raised_is_reported_as_committed(cat: C
     assert cat.rows("bronze.customers") == [(1, "z", T1)]
 
 
-def _bound_task(cat: Cat) -> tuple[CatalogService, PrincipalRef]:
+def _bound_task(
+    cat: Cat, actions: tuple[Action, ...] | None = None
+) -> tuple[CatalogService, PrincipalRef]:
     """Act as the bound task token of asset `bronze.customers`, which reads only `bronze.raw`.
 
-    The run principal holds `DATA_ENGINEER` on the instance; the token narrows it to the task.
+    The run principal holds `DATA_ENGINEER` on the instance, or only `actions`; the token
+    narrows that to the task.
 
     Parameters
     ----------
     cat
         The helpers.
+    actions
+        Grant the run principal only these actions, instead of the role.
 
     Returns
     -------
     tuple
         A catalog with real grant checks, and the principal as the token authenticates it.
     """
-    cat.session.add(
+    cat.session.add_all(
         Grant(
             id=uuid.uuid4(),
             principal_id=cat.admin.id,
-            role=Role.DATA_ENGINEER,
+            role=role,
+            action=action,
             kind=SecurableKind.INSTANCE,
             granted_by=cat.admin.id,
             granted_at=datetime.now(UTC),
+        )
+        for role, action in (
+            [(Role.DATA_ENGINEER, None)] if actions is None else [(None, a) for a in actions]
         )
     )
     cat.session.commit()
@@ -1169,3 +1178,34 @@ def test_a_task_of_a_filtered_principal_may_not_merge_into_its_own_asset(cat: Ca
         governed.merge(task, cat.ref("bronze.customers"), cat.arrow([(1, "z", T1)]), key=["id"])
 
     assert str(info.value) == _HIDDEN
+
+
+def test_a_task_of_a_write_only_principal_may_not_merge_as_its_token_may_not(cat: Cat) -> None:
+    """The token's input narrowing is waived on its own asset; the principal's READ is not."""
+    cat.append("bronze.customers", [(1, "a", T0)])
+    governed, task = _bound_task(cat, (Action.WRITE_TABLE,))
+    location = cat.metadata_location("bronze.customers")
+    as_itself = dataclasses.replace(task, task_scope=None)
+
+    with pytest.raises(PermissionDenied) as by_task:
+        governed.merge(task, cat.ref("bronze.customers"), cat.arrow([(1, "z", T1)]), key=["id"])
+    with pytest.raises(PermissionDenied) as by_pat:
+        governed.merge(
+            as_itself, cat.ref("bronze.customers"), cat.arrow([(1, "z", T1)]), key=["id"]
+        )
+
+    assert str(by_task.value) == str(by_pat.value)
+    assert "READ_TABLE" in str(by_task.value)
+    assert cat.metadata_location("bronze.customers") == location
+
+
+def test_a_task_of_a_reading_and_writing_principal_merges(cat: Cat) -> None:
+    """READ_TABLE and WRITE_TABLE held by the principal: its task merges into its own asset."""
+    cat.append("bronze.customers", [(1, "a", T0)])
+    governed, task = _bound_task(cat, (Action.WRITE_TABLE, Action.READ_TABLE))
+
+    result = governed.merge(
+        task, cat.ref("bronze.customers"), cat.arrow([(1, "z", T1)]), key=["id"]
+    )
+
+    assert result.rows_updated == 1

@@ -2019,12 +2019,17 @@ update follows the same rule**, decided by one helper, `CatalogService._may_see_
   implementation.
 
 A bound task token on its own asset is a non-reader like any other, with one exception: a
-**merge** into it. `check_can_merge` skips its `READ_TABLE` step for a bound token whose asset is
-the target (`_bound_to_own_asset`), because materialising that asset is the task's whole job and
-a merge cannot be done without comparing against it; `WRITE_TABLE` (held on the own asset only,
-compared by parts) and the write guard's own-asset rule (`WriteOperation.MERGE`) still confine it
-to that one table, and every other table stays refused. What the merge's counts and refusals
-reveal is about rows the task is about to overwrite anyway. The row filter and column mask
+**merge** into it. For a bound token whose asset is the target (`_bound_to_own_asset`),
+`check_can_merge` checks `READ_TABLE` against the run principal's own grants with the token's
+narrowing to its inputs removed (`replace(p, task_scope=None)`), after `WRITE_TABLE` has held the
+token to its environment and its own asset (compared by parts). Only that narrowing is waived:
+materialising the asset is the task's whole job and a merge cannot be done without comparing
+against it. The principal itself must still hold `READ_TABLE`, so a task of a write-only
+principal is refused exactly as that principal's personal token is
+(`test_a_task_of_a_write_only_principal_may_not_merge`, core and server); otherwise the merge's
+counts would tell such a task the asset's keys. The write guard's own-asset rule
+(`WriteOperation.MERGE`) still confines the token to that one table, and every other table stays
+refused. The row filter and column mask
 refusal still runs against the principal the task acts for, so a task of a filtered or masked
 principal cannot merge (`test_a_task_of_a_filtered_principal_may_not_merge_into_its_own_asset`,
 core and server).

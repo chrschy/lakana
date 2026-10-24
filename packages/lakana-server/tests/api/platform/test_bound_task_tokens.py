@@ -815,3 +815,55 @@ def test_a_task_of_a_filtered_principal_may_not_merge_into_its_own_asset(bound: 
 
     assert status == 422, body
     assert "row filter or column mask applies to you" in str(body["detail"])
+
+
+def _only_actions(bound: Bound, actions: list[str]) -> None:
+    """Replace `etl`'s role on `dev` with grants of exactly `actions`.
+
+    Parameters
+    ----------
+    bound
+        The attempt.
+    actions
+        The actions `etl` keeps on `dev`.
+    """
+    grants = bound.client.get(
+        "/api/v1/grants",
+        headers=AUTH_HEADER,
+        params={"principal_name": "etl", "environment": "dev"},
+    ).json()
+    for grant in grants:
+        revoked = bound.client.delete(f"/api/v1/grants/{grant['id']}", headers=AUTH_HEADER)
+        assert revoked.status_code == 204, revoked.text
+    for action in actions:
+        granted = bound.client.post(
+            "/api/v1/grants",
+            headers=AUTH_HEADER,
+            json={
+                "principal": "etl",
+                "action": action,
+                "kind": "ENVIRONMENT",
+                "environment": "dev",
+            },
+        )
+        assert granted.status_code < 300, granted.text
+
+
+def test_a_task_of_a_write_only_principal_may_not_merge(bound: Bound) -> None:
+    """Only the token's narrowing is waived on the own asset; the principal still needs READ."""
+    _only_actions(bound, ["WRITE_TABLE"])
+
+    status, body = _merge(bound, "gold.scores")
+
+    assert status == 403, body
+    assert "READ_TABLE" in str(body["detail"])
+    assert bound.write("POST", "gold.scores") == 200
+
+
+def test_a_task_of_a_reading_and_writing_principal_merges(bound: Bound) -> None:
+    """READ_TABLE and WRITE_TABLE alone are enough for the task's merge."""
+    _only_actions(bound, ["WRITE_TABLE", "READ_TABLE"])
+
+    status, body = _merge(bound, "gold.scores")
+
+    assert status == 200, body
