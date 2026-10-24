@@ -138,7 +138,8 @@ Each cell is a summary. The page named in the last column has the detail. The ch
 A parameter named `ctx` now receives the asset's context and is never an input. A project whose
 asset reads a table into a parameter `ctx` (`inputs={"ctx": "silver.orders"}`) fails its deploy
 with ``` `ctx` is the asset's context; give the input another parameter name ```: rename the
-parameter and its entry in `inputs`, then deploy again.
+parameter and its entry in `inputs`, then deploy again. A project version deployed before the
+upgrade keeps reading that input into `ctx` until you deploy a new one.
 
 ### Assets append and merge with `write:`
 
@@ -149,6 +150,15 @@ An asset says how a run writes its table with `write: replace` (the default), `a
 `merge` has manifest version 8, which a worker of an earlier release refuses: upgrade the workers
 before you deploy such a project. A Python asset's `materialize="incremental"` is now refused
 with a message that points at `write="append"`.
+
+A Python asset that appends, merges or declares a connection receives a newer task description,
+which only the `lakana` package of this release reads: its project must be locked with this
+release's `lakana`, as after every upgrade (see the lock row of
+[Failure, retry and cancel](../reference/python-assets.md#failure-retry-and-cancel)). Until then
+such an asset fails with `the task process exited with status 2 without a result: the harness
+refuses a task description it does not understand …`; an asset that replaces and declares no
+connection runs as before. A Python asset that appends must
+return only the rows past `ctx.watermark()`: see [The asset's context](../reference/python-assets.md#the-assets-context).
 
 ### Builds reach a package index on any port
 

@@ -31,7 +31,12 @@ from lakana_core.auth import (
 )
 from lakana_core.catalog import merge as merge_module
 from lakana_core.catalog import service as service_module
-from lakana_core.catalog.merge import COMPOSITE_KEY_MAX_ROWS, MergeResult, check_merge_batch
+from lakana_core.catalog.merge import (
+    COMPOSITE_KEY_MAX_ROWS,
+    SQL_ADVICE,
+    MergeResult,
+    check_merge_batch,
+)
 from lakana_core.catalog.service import CatalogService
 from lakana_core.catalog.writes import SnapshotPin
 from lakana_core.errors import (
@@ -1250,3 +1255,45 @@ def test_a_pin_of_another_table_or_snapshot_is_a_conflict_and_the_current_one_co
     assert (result.rows_updated, result.table_id) == (1, table_id)
     event = cat.events(AuditEventType.TABLE_WRITE)[-1]
     assert (event.detail["run_id"], event.detail["watermark"]) == (str(run_id), "long:1")
+
+
+def test_a_sql_assets_repeated_key_is_refused_with_advice_for_its_select() -> None:
+    """A SQL asset cannot call `unique`: the advice is a QUALIFY for its SELECT."""
+    data = pa.table({"id": [1, 1, 2], "day": [1, 1, 1]})
+
+    with pytest.raises(ValidationError) as info:
+        check_merge_batch(
+            data,
+            ["id", "day"],
+            table_columns=["id", "day"],
+            table_name="silver.orders",
+            advice=SQL_ADVICE,
+        )
+
+    assert str(info.value) == (
+        "key `id`, `day` repeats in 2 rows of the asset's result; keep one row per key in its "
+        "SELECT, for example with `QUALIFY ROW_NUMBER() OVER (PARTITION BY id, day ORDER BY "
+        "<the column that says which row is newest> DESC) = 1`"
+    )
+
+
+def test_a_sql_assets_composite_key_over_the_cap_is_refused_with_advice_for_its_runs() -> None:
+    """A SQL asset sends no batches: the advice is one key column, or a watermark."""
+    rows = COMPOSITE_KEY_MAX_ROWS + 1
+    data = pa.table({"id": list(range(rows)), "day": [1] * rows})
+
+    with pytest.raises(ValidationError) as info:
+        check_merge_batch(
+            data,
+            ["id", "day"],
+            table_columns=["id", "day"],
+            table_name="silver.orders",
+            advice=SQL_ADVICE,
+        )
+
+    assert str(info.value) == (
+        "A merge on a key of several columns takes at most 5,000 rows per run, and the asset's "
+        "result has 5,001. Merge on one key column (a column that holds the whole key), or give "
+        "the asset a `watermark:` so that each run merges only the rows changed since the last "
+        "one; a first run reads every row, so load the history in parts of at most 5,000 rows."
+    )

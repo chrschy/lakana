@@ -89,6 +89,7 @@ from lakana_core.catalog.maintenance import (
     DEFAULT_ORPHAN_AGE_HOURS,
     MaintenanceStopped,
 )
+from lakana_core.catalog.merge import SQL_ADVICE
 from lakana_core.catalog.schema_compat import SchemaDiff, arrow_to_iceberg_schema, view_columns
 from lakana_core.catalog.service import CatalogService
 from lakana_core.catalog.watermark import check_incremental_key, wrap_incremental
@@ -2225,6 +2226,7 @@ def _merge_result(
         pin=None if creates else pin,
         query_run_id=run.id,
         watermark=watermark,
+        advice=SQL_ADVICE,
     )
     if merged.table_id is None:  # pragma: no cover - `merge` always names the table
         raise LakanaError("A merge returned no table.")

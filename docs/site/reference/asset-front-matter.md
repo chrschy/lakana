@@ -57,7 +57,11 @@ inside a string or scalar (when the leftover text then fails to parse, the error
 ## Write modes
 
 `write:` says what each run does to the asset's table. The same three modes, with the same rules,
-are the `write=`, `key=` and `watermark=` arguments of a Python asset's `@asset(...)`.
+are the `write=`, `key=` and `watermark=` arguments of a Python asset's `@asset(...)`, with one
+difference: the platform filters a SQL asset's rows on the watermark, but not the rows a Python
+function returns. A Python asset that appends must return only the rows past `ctx.watermark()`
+(and `ctx.watermark(default=...)` gives the first run its start), see
+[The asset's context](python-assets.md#the-assets-context).
 
 | `write:` | What a run does | Needs |
 |---|---|---|
@@ -132,10 +136,13 @@ The same two runs leave one row per customer:
 Each run commits one new snapshot, so a reader sees the table before or after the merge, never
 half of it, and running the same merge again changes nothing. Every run checks the rows first,
 the first one too: a run whose result has a null key, or a key in more than one row, fails and
-writes nothing (``key `id` repeats in 2 rows of this batch; …``); make the `SELECT` return one row
-per key, for example with `QUALIFY row_number() OVER (PARTITION BY id ORDER BY updated_at DESC) = 1`.
+writes nothing (``key `id` repeats in 2 rows of the asset's result; keep one row per key in its
+SELECT, …``); make the `SELECT` return one row per key, for example with
+`QUALIFY row_number() OVER (PARTITION BY id ORDER BY updated_at DESC) = 1`.
 A key of several columns (`key: [id, region]`) takes at most 5,000 rows per run; on one column
-there is no such cap. A merge compares the rows with the table's, so the run's principal needs
+there is no such cap. A merge holds its whole result in the worker's memory while it compares it
+with the table (at most `LAKANA_QUERY_LIMITS__MAX_WRITE_ROWS` rows), so a large one counts against
+the worker's memory limit (`LAKANA_WORKER__MEMORY_LIMIT`). A merge compares the rows with the table's, so the run's principal needs
 `READ_TABLE` on the table as well as the right to write it, and a merge is refused while a row
 filter or column mask on the table applies to that principal. The details, the counts and the
 audit event are in [Merging rows into a table](merge.md).

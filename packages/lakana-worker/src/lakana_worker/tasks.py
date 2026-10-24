@@ -368,6 +368,46 @@ def _close_write(session: Session, query_run_id: uuid.UUID, message: str) -> Non
     session.commit()
 
 
+def checked_write(
+    entry: Mapping[str, object], asset: str
+) -> tuple[str, tuple[str, ...], str | None]:
+    """Read how a run writes an asset's table, refusing what no run may do.
+
+    Parameters
+    ----------
+    entry
+        The asset's manifest entry; untrusted.
+    asset
+        The asset, for the message.
+
+    Returns
+    -------
+    tuple
+        ``(write, key, watermark)`` as `entry_write` reads them.
+
+    Raises
+    ------
+    TaskFailure
+        Permanent for a write mode this release does not know (never run as a replace,
+        which would drop rows) and for a merge without a key.
+    """
+    written, merge_key, watermark = entry_write(entry)
+    if written not in WRITE_CHOICES:
+        raise TaskFailure(
+            FailureKind.PERMANENT,
+            f"the project version's write mode {written!r} for {asset} is not valid; "
+            "deploy it again with this release",
+            FailureCode.CODE_CHANGED,
+        )
+    if written == "merge" and not merge_key:
+        raise TaskFailure(
+            FailureKind.PERMANENT,
+            f"the project version merges {asset} without a key; deploy it again with this release",
+            FailureCode.CODE_CHANGED,
+        )
+    return written, merge_key, watermark
+
+
 def ensure_namespaces(
     session: Session,
     catalog: CatalogService,
@@ -574,21 +614,7 @@ def _prepare(session: Session, engine: RunEngine, claimed: ClaimedTask) -> _Prep
             f"the project version's write mode {mode_name!r} for {claimed.asset} is not valid",
             FailureCode.CODE_CHANGED,
         ) from None
-    written, merge_key, watermark = entry_write(entry)
-    if written not in WRITE_CHOICES:
-        raise TaskFailure(
-            FailureKind.PERMANENT,
-            f"the project version's write mode {written!r} for {claimed.asset} is not valid; "
-            "deploy it again with this release",
-            FailureCode.CODE_CHANGED,
-        )
-    if written == "merge" and not merge_key:
-        raise TaskFailure(
-            FailureKind.PERMANENT,
-            f"the project version merges {claimed.asset} without a key; deploy it again with "
-            "this release",
-            FailureCode.CODE_CHANGED,
-        )
+    written, merge_key, watermark = checked_write(entry, claimed.asset)
     if written == "merge" and mode not in (WriteMode.MERGE, WriteMode.CREATE):
         # `write` and `write_mode` disagree: never run a merge asset as a replace or append.
         raise TaskFailure(

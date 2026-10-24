@@ -18,7 +18,7 @@ stays as described in [Projects and deploys](../how-to/projects.md), "Python ass
 
 | Option | Values | Default | Meaning |
 |---|---|---|---|
-| `output` | `"table"` or `"artifact"` | `"table"` | `"table"`: the function returns a `polars.DataFrame` that becomes the table. `"artifact"`: the function writes files into `lakana.output_dir()` and returns a path, and each run stores one new version of the artifact. |
+| `output` | `"table"` or `"artifact"` | `"table"` | `"table"`: the function returns a `polars.DataFrame` (or a `pyarrow.Table`) that becomes the table. `"artifact"`: the function writes files into `lakana.output_dir()` and returns a path, and each run stores one new version of the artifact. |
 | `keep_versions` | an integer from 1 to 2147483647 | not set: keep every version | Only with `output="artifact"`. After a run stores a new version, versions beyond the newest `keep_versions` are deleted. See [Limit how many versions are kept](../how-to/limit-artifact-versions.md). |
 | `decimals` | `"float"` or `"exact"` | `"float"` | For every Python asset, table or artifact. `"float"`: a SQL decimal column of an input table reaches the function as a `Float64` column. `"exact"`: it arrives as a `Decimal` column of `decimal.Decimal` values. See [Python assets](../how-to/projects.md#python-assets). |
 

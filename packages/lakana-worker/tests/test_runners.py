@@ -811,6 +811,104 @@ def test_the_sdk_parses_the_description_of_an_artifact_task(harness: Harness) ->
     assert parsed.work_dir == str(harness.attempt)
 
 
+def _description(harness: Harness, **fields: object) -> dict[str, object]:
+    """Write the description of a task directly, without a process.
+
+    Parameters
+    ----------
+    harness
+        The harness, for its task.
+    **fields
+        Fields of `PythonTask` to replace.
+
+    Returns
+    -------
+    dict
+        The decoded document.
+    """
+    document = runners_module.task_description(
+        dataclasses.replace(harness.task(), **fields),
+        result_path="/r/result.json",
+        work_dir="/r",
+        parent_pid=None,
+    )
+    return json.loads(document)
+
+
+def test_a_replace_without_connections_keeps_description_version_2(harness: Harness) -> None:
+    """A harness of the previous release reads it: no key of version 3 is sent."""
+    description = _description(harness, hidden=("s3cr3t",))
+    assert description["version"] == 2
+    assert not {"write", "key", "watermark", "connections", "hidden"} & set(description)
+
+
+@pytest.mark.parametrize(
+    ("fields", "expected"),
+    [
+        (
+            {"write": "append", "watermark_column": "ts", "watermark": "long:41"},
+            {
+                "write": "append",
+                "key": [],
+                "watermark": {"column": "ts", "value": "long:41"},
+                "connections": {},
+            },
+        ),
+        (
+            {"write": "append", "watermark_column": "ts"},
+            {
+                "write": "append",
+                "key": [],
+                "watermark": {"column": "ts", "value": None},
+                "connections": {},
+            },
+        ),
+        (
+            {"write": "merge", "key": ("id", "day")},
+            {"write": "merge", "key": ["id", "day"], "watermark": None, "connections": {}},
+        ),
+        (
+            {"connections": {"crm-db": {"kind": "postgresql"}}},
+            {
+                "write": "replace",
+                "key": [],
+                "watermark": None,
+                "connections": {"crm-db": {"kind": "postgresql"}},
+            },
+        ),
+    ],
+    ids=["append", "append-first-run", "merge", "replace-with-connections"],
+)
+def test_an_asset_that_uses_its_fields_gets_description_version_3(
+    harness: Harness, fields: dict[str, object], expected: dict[str, object]
+) -> None:
+    description = _description(harness, **fields)
+    assert description["version"] == 3
+    assert {key: description[key] for key in expected} == expected
+    assert "hidden" not in description
+
+
+def test_the_sdk_parses_a_version_3_description(harness: Harness) -> None:
+    """I4 for version 3: the harness reads what the runner writes."""
+    harness.fields = {
+        "write": "merge",
+        "key": ("id",),
+        "watermark_column": "at",
+        "watermark": "timestamptz:2026-10-22T08:00:00+00:00",
+        "connections": {"crm-db": {"kind": "postgresql"}},
+        "expected_snapshot_id": 17,
+    }
+    parsed = _real_parse(harness)
+    assert (parsed.write, parsed.key, parsed.watermark_column) == ("merge", ("id",), "at")
+    assert parsed.watermark is not None
+    assert parsed.connections == {"crm-db": {"kind": "postgresql"}}
+    assert parsed.expected_snapshot_id == 17
+
+
+def test_the_secret_values_to_hide_stay_out_of_the_repr(harness: Harness) -> None:
+    assert "s3cr3t" not in repr(harness.task(hidden=("s3cr3t",)))
+
+
 def _failed(**fields: object) -> str:
     """Build the harness body that writes a failed record and exits 1.
 

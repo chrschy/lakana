@@ -43,6 +43,53 @@ square of the batch: 5,000 rows take about ten seconds, 20,000 more than five mi
 
 
 @dataclass(frozen=True)
+class MergeAdvice:
+    """What a refused merge tells its caller to do: each kind of caller sends its rows its own way.
+
+    Parameters
+    ----------
+    repeats
+        A key that repeats in the rows; formatted with ``key`` (the columns named),
+        ``rows`` (the count), ``subset`` (the columns as Python strings) and ``columns`` (the
+        bare names).
+    too_many
+        A key of several columns with more rows than `COMPOSITE_KEY_MAX_ROWS`; formatted with
+        ``cap`` and ``rows``, both with thousands separators.
+    """
+
+    repeats: str
+    too_many: str
+
+
+SDK_ADVICE = MergeAdvice(
+    repeats=(
+        "key {key} repeats in {rows} rows of this batch; make it unique "
+        "(for example with `unique(subset=[{subset}], keep='last')`)"
+    ),
+    too_many=(
+        "A merge on a key of several columns takes at most {cap} rows per batch, and this batch "
+        "has {rows}. Merge on one key column (a column that holds the whole key), or send batches "
+        "of at most {cap} rows."
+    ),
+)
+"""For a caller of the SDK, the CLI or the REST API: it builds and sends the batches."""
+SQL_ADVICE = MergeAdvice(
+    repeats=(
+        "key {key} repeats in {rows} rows of the asset's result; keep one row per key in its "
+        "SELECT, for example with `QUALIFY ROW_NUMBER() OVER (PARTITION BY {columns} ORDER BY "
+        "<the column that says which row is newest> DESC) = 1`"
+    ),
+    too_many=(
+        "A merge on a key of several columns takes at most {cap} rows per run, and the asset's "
+        "result has {rows}. Merge on one key column (a column that holds the whole key), or give "
+        "the asset a `watermark:` so that each run merges only the rows changed since the last "
+        "one; a first run reads every row, so load the history in parts of at most {cap} rows."
+    ),
+)
+"""For a SQL asset: its SELECT is the batch, one per run."""
+
+
+@dataclass(frozen=True)
 class MergeCounts:
     """What a merge changed.
 
@@ -145,7 +192,12 @@ def _repeated_rows(data: pa.Table, key: Sequence[str]) -> int:
 
 
 def check_merge_batch(
-    data: pa.Table, key: Sequence[str], *, table_columns: Collection[str], table_name: str
+    data: pa.Table,
+    key: Sequence[str],
+    *,
+    table_columns: Collection[str],
+    table_name: str,
+    advice: MergeAdvice = SDK_ADVICE,
 ) -> None:
     """Refuse a batch a merge cannot apply, naming counts and never values.
 
@@ -159,6 +211,8 @@ def check_merge_batch(
         The target's column names.
     table_name
         The target's dotted name, for the message.
+    advice
+        How the caller is told to fix a repeated key or too many rows.
 
     Raises
     ------
@@ -187,10 +241,7 @@ def check_merge_batch(
             )
     if len(key) > 1 and data.num_rows > COMPOSITE_KEY_MAX_ROWS:
         raise ValidationError(
-            f"A merge on a key of several columns takes at most {COMPOSITE_KEY_MAX_ROWS:,} rows "
-            f"per batch, and this batch has {data.num_rows:,}. Merge on one key column (a column "
-            f"that holds the whole key), or send batches of at most {COMPOSITE_KEY_MAX_ROWS:,} "
-            "rows."
+            advice.too_many.format(cap=f"{COMPOSITE_KEY_MAX_ROWS:,}", rows=f"{data.num_rows:,}")
         )
     for column in key:
         nulls = data.column(column).null_count
@@ -198,10 +249,13 @@ def check_merge_batch(
             raise ValidationError(f"key column `{column}` is null in {nulls} rows")
     rows = _repeated_rows(data, key)
     if rows:
-        subset = ", ".join(repr(column) for column in key)
         raise ValidationError(
-            f"key {_shown(key)} repeats in {rows} rows of this batch; make it unique "
-            f"(for example with `unique(subset=[{subset}], keep='last')`)"
+            advice.repeats.format(
+                key=_shown(key),
+                rows=rows,
+                subset=", ".join(repr(column) for column in key),
+                columns=", ".join(key),
+            )
         )
 
 

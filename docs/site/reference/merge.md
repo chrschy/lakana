@@ -121,6 +121,11 @@ the filter or mask for you.
 | `409` | `expected_snapshot_id` no longer matches, or another writer committed first | ``bronze.customers changed during the write; retry.`` |
 | `413`, `408`, `503` | the body is over the limit, arrives too slowly, or the server is busy with other uploads | as for an append |
 
+The repeated-key and 5,000-row messages above are written for someone who sends the rows. An
+asset that merges is told what to change in its own code instead: a SQL asset to keep one row per
+key in its `SELECT` (with a `QUALIFY`), a Python asset to return one row per key, and both to
+merge on one key column or to use a watermark (see [Write modes](asset-front-matter.md#write-modes)).
+
 The messages give counts, never the values of a key. In the SDK each status is the usual error
 from `lakana.errors` (`ValidationError`, `NotFound`, `PermissionDenied`, `Conflict`).
 

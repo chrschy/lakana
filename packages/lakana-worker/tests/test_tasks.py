@@ -2219,8 +2219,33 @@ def test_the_first_run_of_a_merge_asset_refuses_a_repeated_key_and_creates_nothi
     task = _task(world, "silver.orders")
     assert task.status is TaskStatus.FAILED
     assert task.error_message is not None
-    assert "key `id` repeats in 2 rows of this batch" in task.error_message
+    assert "key `id` repeats in 2 rows of the asset's result; keep one row per key in its " in (
+        task.error_message
+    )
+    assert "QUALIFY ROW_NUMBER() OVER (PARTITION BY id ORDER BY" in task.error_message
+    assert "unique(subset" not in task.error_message
     assert not _exists(world, "silver.orders")
+
+
+def test_a_later_run_of_a_merge_asset_refuses_a_repeated_key_with_advice_for_its_select(
+    world: World,
+) -> None:
+    _outside_table(world, "bronze.events", [1, 2])
+    _merging(world, retries=0)
+    _start(world)
+    _drain(world)
+    assert _task(world, "silver.orders").status is TaskStatus.SUCCEEDED
+    _append_ids(world, "bronze.events", [2])
+
+    _start(world)
+    _drain(world)
+
+    task = _task(world, "silver.orders")
+    assert task.status is TaskStatus.FAILED
+    assert task.error_message is not None
+    assert "key `id` repeats in 2 rows of the asset's result" in task.error_message
+    assert "QUALIFY ROW_NUMBER()" in task.error_message
+    assert _ids(world, "silver.orders") == [1, 2]
 
 
 @pytest.mark.parametrize(

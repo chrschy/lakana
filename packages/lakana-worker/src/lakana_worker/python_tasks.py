@@ -56,12 +56,15 @@ from lakana_core.auth import PrincipalRef, RunContext
 from lakana_core.catalog.identity import resolve_table_id
 from lakana_core.catalog.metadata import read_metadata
 from lakana_core.catalog.service import CatalogService
+from lakana_core.catalog.writes import SnapshotPin, target_changed_message
+from lakana_core.connections.kinds import ConnectionKind
 from lakana_core.errors import ConflictError, LakanaError, NotFoundError, ValidationError
 from lakana_core.identifiers import TableRef
 from lakana_core.identity.task_tokens import TaskTokenService
 from lakana_core.kept_mark import KeptSeen
 from lakana_core.models import (
     LIVE_ENVIRONMENT,
+    Connection,
     Environment,
     JobVersion,
     Principal,
@@ -85,10 +88,10 @@ from lakana_core.projects.lockfile import (
 )
 from lakana_core.projects.manifest import (
     asset_kind,
+    entry_connections,
     entry_decimals,
     entry_input_kinds,
     entry_output,
-    entry_write,
     manifest_lock_sha256,
     manifest_python,
 )
@@ -150,6 +153,7 @@ from lakana_worker.task_outcome import (
 from lakana_worker.tasks import (
     RunEngine,
     check_integrity,
+    checked_write,
     ensure_namespaces,
     manifest_entry,
     may_read_name,
@@ -567,6 +571,16 @@ class _Prepared:
         The manifest's `python`, if the project names one.
     project_id
         `environment_owner` of the project version: whose environments the task may use.
+    principal
+        The run principal, bound to this attempt; reads the watermark.
+    write
+        ``replace``, ``append`` or ``merge`` (always ``replace`` for an artifact asset).
+    key
+        The merge key's columns.
+    watermark_column
+        The asset's `watermark` column, if it has one.
+    connections
+        Each connection the asset declares to its ``kind``, in the order declared.
     """
 
     environment: str
@@ -584,6 +598,33 @@ class _Prepared:
     python: str
     named_python: str | None
     project_id: uuid.UUID
+    principal: PrincipalRef
+    write: str = "replace"
+    key: tuple[str, ...] = ()
+    watermark_column: str | None = None
+    connections: dict[str, dict[str, object]] = field(default_factory=dict)
+
+
+@dataclass
+class _Shown:
+    """What the attempt's log block says about the write, filled in as the attempt learns it.
+
+    Parameters
+    ----------
+    output
+        ``table`` until the manifest entry is read, then what the asset produces.
+    write
+        The asset's write mode.
+    watermark
+        The encoded watermark sent to the task, if any.
+    """
+
+    output: str = "table"
+    write: str = "replace"
+    watermark: str | None = None
+
+
+_LOGGED_MODES = {"replace": WriteMode.REPLACE, "append": WriteMode.APPEND, "merge": WriteMode.MERGE}
 
 
 @dataclass
@@ -874,7 +915,7 @@ class PythonRuntime:
         """
         buffer = bytearray()
         sink = CappedSink(buffer.extend, MAX_TASK_OUTPUT_BYTES)
-        produces = ["table"]
+        shown = _Shown()
 
         def ended(
             kind: FailureKind | None,
@@ -921,7 +962,8 @@ class PythonRuntime:
                 kind,
                 _safe_message(message),
                 environment,
-                None if produces[0] == "artifact" else WriteMode.REPLACE,
+                None if shown.output == "artifact" else _LOGGED_MODES.get(shown.write),
+                watermark=shown.watermark,
                 rows=rows,
                 output=_safe_output(buffer),
                 snapshot_id=snapshot_id,
@@ -935,7 +977,7 @@ class PythonRuntime:
         try:
             with engine.session_factory() as session:
                 try:
-                    return self._supervise(session, engine, claimed, keeper, sink, ended, produces)
+                    return self._supervise(session, engine, claimed, keeper, sink, ended, shown)
                 except LeaseLost:
                     return None
                 except TaskFailure as failure:
@@ -968,7 +1010,7 @@ class PythonRuntime:
         keeper: LeaseKeeper,
         sink: Callable[[bytes], None],
         ended: Callable[..., TaskOutcome],
-        produces: list[str],
+        shown: _Shown,
     ) -> TaskOutcome | None:
         """Prepare, run the process, clean up on every path, then classify.
 
@@ -991,10 +1033,9 @@ class PythonRuntime:
             Receives the venv build's and the process's output; one cap covers both.
         ended
             Builds the outcome to record.
-        produces
-            One element, ``table`` until the manifest entry is read, then what the
-            asset produces: `ended` leaves the write mode out of the log of an
-            artifact asset, which has none.
+        shown
+            What `ended` logs about the write: what the asset produces (an artifact asset has
+            no write mode), its write mode and the watermark sent to the task.
 
         Returns
         -------
@@ -1009,10 +1050,11 @@ class PythonRuntime:
         LeaseLost
             If the attempt was superseded before its token could be minted.
         LakanaError
-            From namespace creation or unreadable table metadata.
+            From namespace creation or unreadable table metadata; `ConflictError` when the
+            table changed between the worker's read of it and of its watermark.
         """
         prepared, tarball = self._prepare(session, engine, claimed)
-        produces[0] = prepared.output
+        shown.output, shown.write = prepared.output, prepared.write
         server_url = self.support.server_url
         assert server_url is not None  # nosec B101 -- `support.reason()` was None in `_prepare`
         session.rollback()
@@ -1075,6 +1117,7 @@ class PythonRuntime:
                     "deploy the self-reading version",
                     FailureCode.BUILD_FAILED,
                 )
+            shown.watermark = self._watermark(session, engine, prepared, before)
             _refuse_if_stopped(session, keeper, claimed.run_id)
             token, key_id = self._mint(session, tokens, keeper, claimed, prepared)
             cleanup.callback(self._revoke, session, tokens, key_id)
@@ -1100,6 +1143,11 @@ class PythonRuntime:
                     task_run_id=claimed.task_run_id,
                     environment_key=lease.key,
                     python=prepared.python,
+                    write=prepared.write,
+                    key=prepared.key,
+                    watermark_column=prepared.watermark_column,
+                    watermark=shown.watermark,
+                    connections=prepared.connections,
                 ),
                 sink,
                 stop,
@@ -1124,7 +1172,9 @@ class PythonRuntime:
 
         1. A lost lease records nothing.
         2. A ``succeeded`` record is a claim: the attempt succeeded only if
-           the worker itself finds the table there and changed, and then
+           the worker itself finds the table there and changed (or, for an append or a
+           merge, unchanged with a record of no rows and no snapshot: its source had nothing
+           new), and then
            whatever stopped the process afterwards does not matter. The outcome
            carries what the worker read before and after as `written`:
            for an asset with checks the task runner stamps the task run with it
@@ -1222,6 +1272,17 @@ class PythonRuntime:
                         else None
                     ),
                 )
+            if (
+                after == before
+                and after.table_id is not None
+                and prepared.write in ("append", "merge")
+                and outcome.rows == 0
+                and outcome.snapshot_id is None
+            ):
+                # Nothing new since the last run: an append or merge that writes nothing has
+                # done its work. A record can claim this without running the asset, which then
+                # left the table as it was, the outcome a run that found nothing has.
+                return ended(None, None, rows=0)
         stop = cancel_kind(session, keeper, claimed.run_id)
         if stop is not None:
             return ended(stop[0], _stop_text(stop), failure_code=stop_code(stop[0]))
@@ -1302,16 +1363,18 @@ class PythonRuntime:
                 FailureKind.PERMANENT, self._bad_inputs(claimed.asset), FailureCode.CODE_CHANGED
             )
         output = self._output_of(entry, claimed.asset)
-        written = entry_write(entry)[0]
-        if output == "table" and written != "replace":
-            # Never run an asset that appends or merges as a replace, which would drop rows.
+        write, key, watermark_column = (
+            checked_write(entry, claimed.asset) if output == "table" else ("replace", (), None)
+        )
+        if write == "append" and watermark_column is None:
+            # Never append every row the asset returns again and again.
             raise TaskFailure(
                 FailureKind.PERMANENT,
-                f"{claimed.asset} is written with `write: {ascii(written)[1:-1][:40]}`, which "
-                "this worker cannot run for a Python asset; upgrade the worker to the "
-                "platform's version",
+                f"the project version appends to {claimed.asset} without a watermark; deploy it "
+                "again with this release",
                 FailureCode.CODE_CHANGED,
             )
+        connections = self._connections(session, env, entry, claimed.asset)
         reason = self.support.reason()
         if reason is not None:
             raise TaskFailure(
@@ -1415,8 +1478,63 @@ class PythonRuntime:
             python=named or own,
             named_python=named,
             project_id=environment_owner(version.repository_id, version.environment_id),
+            principal=principal,
+            write=write,
+            key=key,
+            watermark_column=watermark_column,
+            connections=connections,
         )
         return prepared, tarball
+
+    @staticmethod
+    def _connections(
+        session: Session, env: Environment, entry: Mapping[str, object], asset: str
+    ) -> dict[str, dict[str, object]]:
+        """Read the kind of every connection the asset declares.
+
+        Parameters
+        ----------
+        session
+            The supervisor's session.
+        env
+            The run's environment.
+        entry
+            The asset's manifest entry; untrusted.
+        asset
+            The asset, for the message.
+
+        Returns
+        -------
+        dict
+            Each declared name to ``{"kind": ...}``, in the order declared; empty for an asset
+            that declares none.
+
+        Raises
+        ------
+        TaskFailure
+            Permanent when the environment no longer has one of them (a deploy checks this,
+            so only a change since can cause it).
+        """
+        names = entry_connections(entry)
+        if not names:
+            return {}
+        kinds = dict(
+            session.execute(
+                select(Connection.name, Connection.kind).where(
+                    Connection.environment_id == env.id, Connection.name.in_(names)
+                )
+            ).all()
+        )
+        for name in names:
+            if name not in kinds:
+                raise TaskFailure(
+                    FailureKind.PERMANENT,
+                    f"{asset} declares the connection `{name}`, which environment {env.name} "
+                    "does not have; create it (lakana connection create) or remove it from the "
+                    "asset's connections, then deploy again",
+                    FailureCode.NOT_FOUND,
+                )
+        return {name: {"kind": ConnectionKind(kinds[name]).value} for name in names}
 
     @staticmethod
     def _output_of(entry: Mapping[str, object], asset: str) -> str:
@@ -2018,6 +2136,58 @@ class PythonRuntime:
             )
         finally:
             session.rollback()
+
+    @staticmethod
+    def _watermark(
+        session: Session, engine: RunEngine, prepared: _Prepared, before: _TargetState
+    ) -> str | None:
+        """Read the watermark an append or a merge filters on, as the run principal.
+
+        The watermark comes with the snapshot it was read from (`read_watermark`). That must be
+        the state the attempt is judged against (`before`), whose snapshot the task's upload is
+        pinned to: a write in between would otherwise count as this attempt's.
+
+        Parameters
+        ----------
+        session
+            The supervisor's session; rolled back before and after.
+        engine
+            The run engine.
+        prepared
+            The prepared attempt.
+        before
+            The target's state as the worker read it.
+
+        Returns
+        -------
+        str or None
+            The encoded watermark; `None` for an asset without one, a table that does not exist
+            yet or has no rows.
+
+        Raises
+        ------
+        ConflictError
+            If the table changed after `before` was read: a conflict, retried once for free.
+        """
+        if prepared.write == "replace" or prepared.watermark_column is None:
+            return None
+        if before.table_id is None:
+            return None
+        session.rollback()
+        try:
+            catalog = CatalogService(
+                session,
+                StorageResolver(session, engine.key_provider),
+                engine.authz_factory(session),
+            )
+            watermark, pin = catalog.read_watermark(
+                prepared.principal, prepared.ref, prepared.watermark_column
+            )
+        finally:
+            session.rollback()
+        if pin != SnapshotPin(before.table_id, before.snapshot_id):
+            raise ConflictError(target_changed_message(prepared.ref.dotted()))
+        return None if watermark is None else watermark.encode()
 
     def _mint(
         self,

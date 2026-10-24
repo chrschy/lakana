@@ -128,7 +128,13 @@ from lakana_core.catalog.maintenance import (
     select_expired_snapshots,
     select_orphans,
 )
-from lakana_core.catalog.merge import MergeResult, check_merge_batch, stage_upsert
+from lakana_core.catalog.merge import (
+    SDK_ADVICE,
+    MergeAdvice,
+    MergeResult,
+    check_merge_batch,
+    stage_upsert,
+)
 from lakana_core.catalog.metadata import (
     apply_updates,
     build_table_metadata,
@@ -5418,6 +5424,7 @@ class CatalogService:
         pin: SnapshotPin | None = None,
         query_run_id: uuid.UUID | None = None,
         watermark: str | None = None,
+        advice: MergeAdvice = SDK_ADVICE,
     ) -> MergeResult:
         """Update the rows whose key matches, insert the rest, in one commit (`tables.merge`).
 
@@ -5461,6 +5468,9 @@ class CatalogService:
             The run merging, for the audit event and the lineage edges.
         watermark
             The encoded watermark the run filtered on, for the audit event.
+        advice
+            How a refusal of the rows tells the caller to fix them: `SDK_ADVICE` for a caller
+            that sends batches, `SQL_ADVICE` for a SQL asset's run.
 
         Returns
         -------
@@ -5494,7 +5504,13 @@ class CatalogService:
         data = strip_field_metadata(data)
         key = list(key)
         if self._existing_table(ref) is None and expected_snapshot_id == "none":
-            check_merge_batch(data, key, table_columns=data.column_names, table_name=ref.dotted())
+            check_merge_batch(
+                data,
+                key,
+                table_columns=data.column_names,
+                table_name=ref.dotted(),
+                advice=advice,
+            )
             try:
                 created = self.write_batches(
                     p,
@@ -5540,6 +5556,7 @@ class CatalogService:
             key,
             table_columns=[column.name for column in schema.fields],
             table_name=ref.dotted(),
+            advice=advice,
         )
         validate_arrow_schema(schema, data)
         if data.num_rows == 0:
