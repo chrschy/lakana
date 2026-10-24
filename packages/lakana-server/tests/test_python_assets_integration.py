@@ -2334,7 +2334,12 @@ def test_a_second_attempts_failed_check_sets_the_table_back_to_before_the_first_
     assert stack.hold.status == 200, (
         f"attempt 1 did not replace silver.wide within its {_WIDE_TIMEOUT} s timeout: the "
         f"reply the test holds back answered {stack.hold.status} (None: no replace arrived), "
-        "so the case under test never happened. Is the runner slower than the timeout allows?"
+        "so the case under test never happened. Is the runner slower than the timeout allows? "
+        f"Run: {finished}. Attempts: "
+        + "; ".join(
+            f"{a.attempt} {a.outcome} {a.failure_code}: {a.error_message}"
+            for a in _attempts(stack, run.id, "silver.wide")
+        )
     )
     # Attempt 1 really committed: while its reply was held the table was at a new snapshot,
     # and that snapshot was the tip of the task run's own writes.
