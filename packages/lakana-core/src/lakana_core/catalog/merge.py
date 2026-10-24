@@ -1,0 +1,377 @@
+"""Merge: update the rows whose key matches, insert the rest, in one governed commit.
+
+pyiceberg's `Transaction.upsert` decides what changes: it reads the target's rows whose key
+the batch has into this process, compares them, rewrites the data files that hold the matched
+rows and writes the updated and the new rows. It stages that as up to three snapshots, each
+moving `main`, and the first of them is a table without the updated rows. `stage_upsert` folds
+them into one snapshot on the target's current one, from the data files pyiceberg wrote, so
+`CatalogService.merge` commits one snapshot through the governed compare-and-swap: a reader
+sees the table before or after, never a half, and no in-between snapshot exists to travel back
+to. No row is deleted.
+"""
+
+from __future__ import annotations
+
+import functools
+from collections.abc import Collection, Sequence
+from dataclasses import dataclass
+
+import pyarrow as pa
+from pyiceberg.catalog.noop import NoopCatalog
+from pyiceberg.expressions import And, In
+from pyiceberg.io import FileIO
+from pyiceberg.manifest import DataFile
+from pyiceberg.table import DataScan, StaticTable
+from pyiceberg.table.metadata import TableMetadata
+from pyiceberg.table.snapshots import Snapshot
+from pyiceberg.table.update import AddSnapshotUpdate, TableRequirement, TableUpdate
+from pyiceberg.table.upsert_util import create_match_filter
+
+from lakana_core.catalog.append import new_data_file_paths, new_manifest_paths
+from lakana_core.errors import ValidationError
+
+
+@dataclass(frozen=True)
+class MergeCounts:
+    """What a merge changed.
+
+    Parameters
+    ----------
+    rows_inserted
+        Rows whose key the table did not have.
+    rows_updated
+        Rows whose key matched and whose values changed.
+    """
+
+    rows_inserted: int
+    rows_updated: int
+
+
+@dataclass(frozen=True)
+class StagedMerge:
+    """A merge staged against a table, ready for `CatalogService.commit_table`.
+
+    Parameters
+    ----------
+    requirements
+        What must still hold at the commit.
+    updates
+        At most one `AddSnapshotUpdate` and the move of `main` to it; empty when nothing
+        changed.
+    counts
+        The rows inserted and updated.
+    discarded
+        Files pyiceberg wrote for the snapshots that were folded into one: no snapshot of the
+        commit names them, and they are deleted whether or not it lands.
+    """
+
+    requirements: Sequence[TableRequirement]
+    updates: Sequence[TableUpdate]
+    counts: MergeCounts
+    discarded: Sequence[str] = ()
+
+
+@dataclass(frozen=True)
+class MergeResult:
+    """What `CatalogService.merge` committed.
+
+    Parameters
+    ----------
+    snapshot_id
+        The new current snapshot; `None` when nothing changed.
+    rows_inserted
+        Rows whose key the table did not have.
+    rows_updated
+        Rows whose key matched and whose values changed.
+    created
+        Whether the merge created the table.
+    """
+
+    snapshot_id: int | None
+    rows_inserted: int
+    rows_updated: int
+    created: bool = False
+
+
+def _shown(key: Sequence[str]) -> str:
+    """Name key columns for a message.
+
+    Parameters
+    ----------
+    key
+        The key columns.
+
+    Returns
+    -------
+    str
+        Each in backticks, comma-separated.
+    """
+    return ", ".join(f"`{column}`" for column in key)
+
+
+def _repeated_rows(data: pa.Table, key: Sequence[str]) -> int:
+    """Count the rows whose key another row has too.
+
+    Parameters
+    ----------
+    data
+        The rows; carries every key column.
+    key
+        The key columns.
+
+    Returns
+    -------
+    int
+        The rows in groups of two or more.
+    """
+    if data.num_rows == 0:
+        return 0
+    counts = data.select(list(key)).group_by(list(key)).aggregate([([], "count_all")])
+    return sum(count for count in counts.column("count_all").to_pylist() if count > 1)
+
+
+def check_merge_batch(
+    data: pa.Table, key: Sequence[str], *, table_columns: Collection[str], table_name: str
+) -> None:
+    """Refuse a batch a merge cannot apply, naming counts and never values.
+
+    Parameters
+    ----------
+    data
+        The rows.
+    key
+        The key columns.
+    table_columns
+        The target's column names.
+    table_name
+        The target's dotted name, for the message.
+
+    Raises
+    ------
+    ValidationError
+        For an empty key, a column named twice in it, a key column missing from the table or
+        the data, a key column of a nested type, a null key, or a key that repeats within the
+        batch.
+    """
+    if not key:
+        raise ValidationError("A merge needs at least one key column.")
+    for column in key:
+        if list(key).count(column) > 1:
+            raise ValidationError(f"key column `{column}` is named twice")
+        if column not in table_columns:
+            raise ValidationError(f"key column `{column}` is not a column of {table_name}")
+        indices = data.schema.get_all_field_indices(column)
+        if not indices:
+            raise ValidationError(f"key column `{column}` is not a column of the rows sent")
+        if len(indices) > 1:
+            raise ValidationError(f"Column {column!r} appears more than once in the data.")
+        kind = data.schema.field(indices[0]).type
+        if pa.types.is_nested(kind):
+            raise ValidationError(
+                f"key column `{column}` has type {kind}; a key column must hold single values "
+                "(a number, a string, a date or a timestamp)"
+            )
+    for column in key:
+        nulls = data.column(column).null_count
+        if nulls:
+            raise ValidationError(f"key column `{column}` is null in {nulls} rows")
+    rows = _repeated_rows(data, key)
+    if rows:
+        subset = ", ".join(repr(column) for column in key)
+        raise ValidationError(
+            f"key {_shown(key)} repeats in {rows} rows of this batch; make it unique "
+            f"(for example with `unique(subset=[{subset}], keep='last')`)"
+        )
+
+
+def _check_target_keys(
+    metadata: TableMetadata,
+    file_io: FileIO,
+    data: pa.Table,
+    key: Sequence[str],
+    table_name: str,
+) -> None:
+    """Refuse a merge whose keys match more than one row of the table.
+
+    pyiceberg would delete every matched row and write one, collapsing the repeats without a
+    word (and it checks only within each batch it reads). Only the key columns of the matched
+    rows are read.
+
+    Parameters
+    ----------
+    metadata
+        The target's current metadata.
+    file_io
+        The environment's `FileIO`.
+    data
+        The batch, checked by `check_merge_batch`.
+    key
+        The key columns.
+    table_name
+        The target's dotted name, for the message.
+
+    Raises
+    ------
+    ValidationError
+        If a key of the batch matches two or more rows of the table.
+    """
+    if metadata.current_snapshot_id is None:
+        return
+    columns = list(key)
+    if len(columns) == 1:
+        matched = DataScan(
+            table_metadata=metadata,
+            io=file_io,
+            row_filter=create_match_filter(data, columns),
+            selected_fields=tuple(columns),
+        ).to_arrow()
+    else:
+        # One `In` per column selects a superset of the matched rows and the join keeps the
+        # exact matches: pyiceberg's own filter for a key of several columns, one `And` per
+        # row, takes time that grows with the square of the batch.
+        candidates = DataScan(
+            table_metadata=metadata,
+            io=file_io,
+            row_filter=functools.reduce(
+                And,
+                (In(term=column, literals=data[column].unique().to_pylist()) for column in columns),
+            ),
+            selected_fields=tuple(columns),
+        ).to_arrow()
+        wanted = data.select(columns).group_by(columns).aggregate([])
+        matched = candidates.join(
+            wanted.cast(candidates.select(columns).schema), keys=columns, join_type="left semi"
+        )
+    rows = _repeated_rows(matched, key)
+    if rows:
+        listed = ", ".join(key)
+        # The SELECT is advice for the reader of the message; nothing runs it.
+        raise ValidationError(
+            f"key {_shown(key)} repeats in {rows} rows of {table_name} that this batch matches; "  # nosec B608
+            "a merge needs one row per key. Find them with "
+            f"`SELECT {listed}, count(*) FROM {table_name} GROUP BY {listed} "
+            "HAVING count(*) > 1` and remove the repeats (for example by replacing the table) "
+            "before you merge."
+        )
+
+
+def _live_files(metadata: TableMetadata, file_io: FileIO) -> dict[str, DataFile]:
+    """List the data files of a table's current snapshot.
+
+    Parameters
+    ----------
+    metadata
+        The metadata.
+    file_io
+        To read the manifests.
+
+    Returns
+    -------
+    dict
+        Each live data file by its path.
+    """
+    snapshot = metadata.current_snapshot()
+    if snapshot is None:
+        return {}
+    return {
+        entry.data_file.file_path: entry.data_file
+        for manifest in snapshot.manifests(file_io)
+        for entry in manifest.fetch_manifest_entry(file_io, discard_deleted=True)
+    }
+
+
+def _static(metadata: TableMetadata, metadata_location: str, file_io: FileIO) -> StaticTable:
+    """Wrap metadata in a `StaticTable` that cannot commit.
+
+    Parameters
+    ----------
+    metadata
+        The metadata.
+    metadata_location
+        Its location; an identifier here.
+    file_io
+        The environment's `FileIO`.
+
+    Returns
+    -------
+    StaticTable
+        The table.
+    """
+    return StaticTable(
+        identifier=("lakana", metadata_location),
+        metadata=metadata,
+        metadata_location=metadata_location,
+        io=file_io,
+        catalog=NoopCatalog("lakana"),
+    )
+
+
+def stage_upsert(
+    metadata: TableMetadata,
+    metadata_location: str,
+    file_io: FileIO,
+    data: pa.Table,
+    key: Sequence[str],
+    *,
+    table_name: str,
+) -> StagedMerge:
+    """Stage a merge as one snapshot, without a catalog behind it.
+
+    pyiceberg's upsert runs first and stages up to three snapshots. When it staged more than
+    one, the data files of its last snapshot are compared with the target's: one overwrite on
+    the target's current snapshot deletes the files that went and adds the ones that came. The
+    files of the folded snapshots (their manifests, manifest lists and any data file the last
+    one does not keep) are returned as `discarded`. Reads `Transaction`'s private
+    `_requirements`/`_updates`, as `build_transaction` and `stage_snapshot` do, because a
+    `StaticTable`'s `NoopCatalog` refuses to commit.
+
+    Parameters
+    ----------
+    metadata
+        The target's current metadata.
+    metadata_location
+        Its location; an identifier here.
+    file_io
+        The environment's `FileIO`.
+    data
+        Rows `check_merge_batch` accepted, metadata stripped, schema validated.
+    key
+        The key columns.
+    table_name
+        The target's dotted name, for messages.
+
+    Returns
+    -------
+    StagedMerge
+        What to commit, the counts, and the files to delete afterwards.
+
+    Raises
+    ------
+    ValidationError
+        If a key of the batch matches two or more rows of the table.
+    """
+    _check_target_keys(metadata, file_io, data, key, table_name)
+    tx = _static(metadata, metadata_location, file_io).transaction()
+    result = tx.upsert(data, join_cols=list(key))
+    counts = MergeCounts(rows_inserted=result.rows_inserted, rows_updated=result.rows_updated)
+    staged: list[Snapshot] = [u.snapshot for u in tx._updates if isinstance(u, AddSnapshotUpdate)]
+    if len(staged) <= 1:
+        return StagedMerge(requirements=tx._requirements, updates=tx._updates, counts=counts)
+
+    before, after = _live_files(metadata, file_io), _live_files(tx.table_metadata, file_io)
+    folded = _static(metadata, metadata_location, file_io).transaction()
+    with folded.update_snapshot().overwrite() as overwrite:
+        for path in before.keys() - after.keys():
+            overwrite.delete_data_file(before[path])
+        for path in after.keys() - before.keys():
+            overwrite.append_data_file(after[path])
+    discarded: list[str] = []
+    for snapshot in staged:
+        discarded.extend(new_manifest_paths(snapshot, file_io))
+        discarded.extend(p for p in new_data_file_paths(snapshot, file_io) if p not in after)
+    return StagedMerge(
+        requirements=folded._requirements,
+        updates=folded._updates,
+        counts=counts,
+        discarded=discarded,
+    )

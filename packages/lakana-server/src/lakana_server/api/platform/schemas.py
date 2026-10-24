@@ -745,6 +745,25 @@ class AppendOut(BaseModel):
     snapshot_id: int | None
 
 
+class MergeOut(BaseModel):
+    """Response body for a governed Arrow merge.
+
+    Parameters
+    ----------
+    snapshot_id
+        The snapshot the merge committed, or `None` when it changed nothing (no rows, or every
+        row equal to the table's).
+    rows_inserted
+        Rows whose key the table did not have.
+    rows_updated
+        Rows whose key matched and whose values changed.
+    """
+
+    snapshot_id: int | None
+    rows_inserted: int
+    rows_updated: int
+
+
 class ReplaceOut(BaseModel):
     """The outcome of an Arrow replace.
 

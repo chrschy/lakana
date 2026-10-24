@@ -55,6 +55,7 @@ class WriteMode(enum.StrEnum):
     CREATE = "create"
     REPLACE = "replace"
     APPEND = "append"
+    MERGE = "merge"
     VIEW = "view"
     MAINTAIN = "maintain"
 

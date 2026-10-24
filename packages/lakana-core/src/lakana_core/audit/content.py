@@ -101,6 +101,8 @@ SHOWN_FIELDS: frozenset[str] = frozenset(
         "issuer",
         "job",
         "jti_sha256",
+        # a merge's key: column names, as `column` and a schema diff hold
+        "key",
         "key_id",
         "kind",
         "kinds",
@@ -207,7 +209,9 @@ SHOWN_FIELDS: frozenset[str] = frozenset(
         "revoked_policies",
         "row_count",
         "rows",
+        "rows_inserted",
         "rows_shown",
+        "rows_updated",
         "scheduled_for",
         "size_bytes",
         "snapshot_id",
