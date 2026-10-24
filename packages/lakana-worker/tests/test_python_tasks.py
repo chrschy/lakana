@@ -7512,6 +7512,19 @@ def test_an_appending_python_asset_gets_its_watermark_and_the_pin(py: PyWorld) -
     assert "write mode: replace" not in _log(py.world, first.run_id, "gold.scores")
 
 
+def test_a_table_without_a_snapshot_is_sent_as_an_existing_table(py: PyWorld) -> None:
+    """A first run of zero rows created the table without a snapshot; the next run is no first."""
+    py.deploy(write="append", watermark="id", write_mode="append")
+    engine = py.engine(_harness_writes(py.world, [], [1]))
+    run_claimed(engine, py.claim_python(engine))
+    assert _snapshot(py.world) is None
+    _rerun(py, engine)
+
+    first, second = py.runner.tasks
+    assert (first.table_exists, first.expected_snapshot_id) == (False, "none")
+    assert (second.table_exists, second.expected_snapshot_id) == (True, "none")
+
+
 def test_a_merging_python_asset_gets_its_key(py: PyWorld) -> None:
     py.deploy(write="merge", key=["id"], write_mode="merge")
     engine = py.engine(_harness_writes(py.world, [1, 2], [2, 3]))
@@ -7704,7 +7717,7 @@ def test_an_empty_retry_after_an_attempt_that_created_the_table_ends_not_publish
 def test_an_empty_success_over_rows_that_fail_a_check_says_nothing_was_set_back(
     py: PyWorld,
 ) -> None:
-    """The check fails on rows an earlier run wrote; this run wrote nothing, so nothing goes back."""
+    """The check fails on rows of an earlier run; this run wrote nothing, so nothing goes back."""
     py.deploy(write="append", watermark="id", write_mode="append")
     _published_before(py)
     _with_checks(py, _NO_ROWS)

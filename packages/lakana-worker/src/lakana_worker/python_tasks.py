@@ -1256,6 +1256,7 @@ class PythonRuntime:
                     watermark_column=prepared.watermark_column,
                     watermark=shown.watermark,
                     connections=prepared.connections,
+                    table_exists=before.table_id is not None,
                     hidden=hidden,
                 ),
                 sink,

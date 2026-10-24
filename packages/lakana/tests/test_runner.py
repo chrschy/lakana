@@ -3730,6 +3730,7 @@ def _v3(
         "watermark": None if watermark is None else dict(watermark),
         "connections": dict(connections or {}),
         "expected_snapshot_id": expected,
+        "table_exists": expected != "none",
     }
 
 
@@ -4303,3 +4304,36 @@ def test_overlapping_occurrences_of_a_value_are_masked_whole(world: _World) -> N
         "raise ValueError('ababab and cdcd-longcdcd-long and xabab')",
     )
     assert record["message"] == "ValueError: *** and *** and x***"
+
+
+@pytest.mark.parametrize(
+    "body", ["return pl.DataFrame()", "return obs.clear()"], ids=["no-columns", "no-rows"]
+)
+def test_an_empty_result_for_an_existing_table_without_a_snapshot_succeeds(
+    world: _World, body: str
+) -> None:
+    """A first run of zero rows created the table without a snapshot; it exists all the same."""
+    _write_asset(world, body)
+    overrides = {**_v3(watermark={"column": "id", "value": None}, expected="none")}
+    overrides["table_exists"] = True
+    assert world.run(**overrides) == 0
+    assert world.record() == {"status": "succeeded", "snapshot_id": None, "rows": 0}
+    assert world.client.tables.calls == []
+
+
+def test_an_existing_table_without_a_snapshot_gets_its_rows_appended(world: _World) -> None:
+    _write_asset(world, "return obs")
+    overrides = {**_v3(watermark={"column": "id", "value": None}, expected="none")}
+    overrides["table_exists"] = True
+    assert world.run(**overrides) == 0
+    (call,) = world.client.tables.calls
+    assert (call["method"], call["expected_snapshot_id"]) == ("append", "none")
+
+
+@pytest.mark.parametrize("value", [None, "yes", 1])
+def test_a_version_3_description_says_whether_the_table_exists(
+    world: _World, value: object
+) -> None:
+    fields = {**_v3(watermark=_WATERMARK_ID), "table_exists": value}
+    with pytest.raises(ValueError, match="table_exists must be true or false"):
+        parse_description(world.description(**fields))

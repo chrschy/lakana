@@ -847,12 +847,18 @@ def test_a_replace_without_connections_keeps_description_version_2(harness: Harn
     ("fields", "expected"),
     [
         (
-            {"write": "append", "watermark_column": "ts", "watermark": "long:41"},
+            {
+                "write": "append",
+                "watermark_column": "ts",
+                "watermark": "long:41",
+                "table_exists": True,
+            },
             {
                 "write": "append",
                 "key": [],
                 "watermark": {"column": "ts", "value": "long:41"},
                 "connections": {},
+                "table_exists": True,
             },
         ),
         (
@@ -862,6 +868,7 @@ def test_a_replace_without_connections_keeps_description_version_2(harness: Harn
                 "key": [],
                 "watermark": {"column": "ts", "value": None},
                 "connections": {},
+                "table_exists": False,
             },
         ),
         (

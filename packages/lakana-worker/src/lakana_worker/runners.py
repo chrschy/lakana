@@ -213,6 +213,9 @@ class PythonTask:
         has none yet.
     connections
         Each connection the asset declares to what the harness needs about it (its ``kind``).
+    table_exists
+        Whether the asset's table existed when the worker read it (one created by a first run
+        of zero rows has no snapshot and still exists).
     hidden
         Secret values the log redactor masks in the task's output. Left out of `repr` and never
         sent to the harness.
@@ -241,6 +244,7 @@ class PythonTask:
     watermark_column: str | None = None
     watermark: str | None = None
     connections: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
+    table_exists: bool = False
     hidden: tuple[str, ...] = field(default=(), repr=False)
 
 
@@ -747,6 +751,7 @@ def task_description(
             if task.watermark_column is None
             else {"column": task.watermark_column, "value": task.watermark}
         )
+        document["table_exists"] = task.table_exists
         document["connections"] = {
             name: dict(routing) for name, routing in task.connections.items()
         }

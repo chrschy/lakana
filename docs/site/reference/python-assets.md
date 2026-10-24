@@ -121,8 +121,9 @@ def orders(ctx) -> pl.DataFrame:
   that returns all rows on every run adds them all again.
 - **Nothing new is fine.** A run that finds nothing new returns an empty table and succeeds
   without writing; the table, and so the next run's watermark, stay as they are. An empty
-  `polars.DataFrame()` without columns is fine too, except on the first run: a table needs its
-  columns, so that run fails with
+  `polars.DataFrame()` without columns is fine too, except on the first run, before the table
+  exists (one a run created without rows exists): a table needs its columns, so that run fails
+  with
   ``the asset returned no columns, so there is nothing to create bronze.orders from; its source had no data yet (check the pattern or the query); the first run must find data``.
 - **At least once.** `append` is at-least-once: a run whose answer is lost (the worker stopped
   after the upload, before it could record it) runs again, and rows it returns again that are not

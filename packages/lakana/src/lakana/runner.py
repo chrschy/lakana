@@ -372,6 +372,10 @@ class TaskDescription:
         `None` when there is none yet. What `ctx.watermark()` returns.
     connections
         Each declared connection's name to what the worker sent about it (its ``kind``).
+    table_exists
+        Whether the table existed when the worker read it: one created by a first run of zero
+        rows has no snapshot (`expected_snapshot_id` ``"none"``) and still exists. Version 2
+        documents leave it out; then ``"none"`` means a first run.
     """
 
     server_url: str
@@ -394,6 +398,7 @@ class TaskDescription:
     watermark_column: str | None = None
     watermark: WatermarkValue | None = None
     connections: dict[str, dict[str, object]] = field(default_factory=dict)
+    table_exists: bool = False
 
 
 def _text(document: dict[str, object], key: str) -> str:
@@ -570,6 +575,8 @@ class _Writes:
         Its decoded value, if any.
     connections
         Each declared connection's routing.
+    table_exists
+        Whether the asset's table existed when the worker read it.
     """
 
     write: str = "replace"
@@ -577,6 +584,7 @@ class _Writes:
     watermark_column: str | None = None
     watermark: WatermarkValue | None = None
     connections: dict[str, dict[str, object]] = field(default_factory=dict)
+    table_exists: bool = False
 
 
 def _write_fields(document: dict[str, object]) -> _Writes:
@@ -643,7 +651,11 @@ def _write_fields(document: dict[str, object]) -> _Writes:
             "task description: connections must map each declared connection to an object "
             "with its kind"
         )
+    table_exists = document.get("table_exists")
+    if not isinstance(table_exists, bool):
+        raise ValueError("task description: table_exists must be true or false")
     return _Writes(
+        table_exists=table_exists,
         write=write,
         key=tuple(key),
         watermark_column=column,
@@ -733,6 +745,7 @@ def parse_description(text: str) -> TaskDescription:
         watermark_column=writes.watermark_column,
         watermark=writes.watermark,
         connections=writes.connections,
+        table_exists=writes.table_exists,
     )
 
 
@@ -1854,7 +1867,7 @@ def run_asset(description: TaskDescription, client: Client, root: Path) -> dict[
     with _Phase("validate"):
         replaces = description.write == "replace"
         arrow = _to_arrow(result, columns_optional=not replaces)
-        if not replaces and arrow.num_rows == 0 and description.expected_snapshot_id != "none":
+        if not replaces and arrow.num_rows == 0 and _table_exists(description):
             # Nothing new since the last run: the table stays as it is. The watermark column is
             # not checked here (an empty result may have no columns at all), so an empty result
             # with a wrongly typed watermark column passes; the next run that has rows fails.
@@ -1867,6 +1880,22 @@ def run_asset(description: TaskDescription, client: Client, root: Path) -> dict[
             _check_merge_rows(arrow, description.key)
     with _Phase("upload"):
         return _upload(client, description, arrow)
+
+
+def _table_exists(description: TaskDescription) -> bool:
+    """Say whether the asset's table existed when the worker read it.
+
+    Parameters
+    ----------
+    description
+        The task description.
+
+    Returns
+    -------
+    bool
+        True when the worker read a snapshot, or said the table exists without one.
+    """
+    return description.table_exists or description.expected_snapshot_id != "none"
 
 
 def _takes_context(function: Callable[..., object], description: TaskDescription) -> bool:
@@ -1939,7 +1968,7 @@ def _upload(client: Client, description: TaskDescription, arrow: pa.Table) -> di
             )
             rows = merged.rows_inserted + merged.rows_updated
             return {"status": "succeeded", "snapshot_id": merged.snapshot_id, "rows": rows}
-        if description.write == "append" and expected != "none":
+        if description.write == "append" and _table_exists(description):
             appended = client.tables.append(
                 description.environment,
                 description.table,
