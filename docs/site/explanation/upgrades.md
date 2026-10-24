@@ -139,7 +139,10 @@ A parameter named `ctx` now receives the asset's context and is never an input. 
 asset reads a table into a parameter `ctx` (`inputs={"ctx": "silver.orders"}`) fails its deploy
 with ``` `ctx` is the asset's context; give the input another parameter name ```: rename the
 parameter and its entry in `inputs`, then deploy again. A project version deployed before the
-upgrade keeps reading that input into `ctx` until you deploy a new one.
+upgrade keeps reading that input into `ctx` until you deploy a new one. An asset whose function
+has a parameter `ctx` but whose project is still locked to an earlier `lakana` fails with a
+`TypeError` (the missing argument `ctx`), because that release's harness never passes it: lock
+the project again with this release's `lakana` and deploy.
 
 ### Assets append and merge with `write:`
 
