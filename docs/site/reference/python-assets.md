@@ -12,7 +12,10 @@ limits lie is in [Python assets: what they are for and how far they are trusted]
   code at the repository root or under `src/`; both are importable at run time. A helper module
   that has the same name as an installed package or a standard library module cannot be
   imported under that name, because the repository is searched last.
-- **Inputs.** `inputs` maps each parameter of the function to a table or an artifact. A parameter
+- **Inputs.** `inputs` maps each parameter of the function to a table or an artifact, except a
+  parameter named `ctx`: `ctx` is not an input, it is reserved for the asset's context (what
+  `ctx.watermark()` returns comes in the next section), so `def customers(ctx):` needs no
+  `inputs`, and `inputs` may not name it. A parameter
   that names a table receives the whole table as a `polars.DataFrame` (a table in memory). A
   parameter that names an artifact receives a `pathlib.Path` to a read-only copy of its files (see
   the [reference](artifacts.md)). It is read as the run principal,
@@ -43,12 +46,22 @@ limits lie is in [Python assets: what they are for and how far they are trusted]
   `lakana connection create` command that creates it. A rollback to a version whose connection
   was deleted since fails the same way. While a deployed version declares a connection, the
   connection cannot be deleted. An asset without `connections` deploys as before. A project
-  version in which an asset declares connections has manifest version 7, so a worker of an
-  earlier release refuses its runs instead of running the asset without them: upgrade the
-  workers first. The kinds of connection and the commands that manage them are in
+  version in which an asset declares connections has manifest version 7 (8 when an asset also
+  appends or merges), so a worker of an earlier release refuses its runs instead of running the
+  asset without them: upgrade the workers first. The kinds of connection and the commands that manage them are in
   [Connections](connections.md).
-- **Output.** The function returns a `polars.DataFrame`. It replaces the asset's table in one
-  snapshot. Zero rows are fine. With `output="artifact"` it returns a `pathlib.Path` inside
+- **Write modes.** `write`, `key` and `watermark` say what a run does to the table, with the
+  rules of SQL front-matter (see [Write modes](asset-front-matter.md#write-modes)):
+  `write="replace"` (the default) replaces every row with what the function returns;
+  `write="append", watermark="updated_at"` creates the table on the first run and adds the rows
+  of each later run; `write="merge", key=["id"]` updates the rows whose key the table has and
+  adds the others, deleting none (`watermark` is optional). A key of several columns takes at
+  most 5,000 rows per run. `materialize="incremental"` is refused with
+  ``a Python asset appends with write="append" and watermark="<column>", not materialize='incremental'``.
+  A project version in which an asset appends or merges has manifest version 8: a worker of an
+  earlier release refuses it instead of replacing the table.
+- **Output.** The function returns a `polars.DataFrame`. It is written into the asset's table
+  in one snapshot, as `write` says. Zero rows are fine. With `output="artifact"` it returns a `pathlib.Path` inside
   `lakana.output_dir()` instead, and each run stores a new version of the artifact (see the
   [reference](artifacts.md)).
 - **Metadata.** `description` (default: the first paragraph of the docstring), `owner`, `tags`,
@@ -109,7 +122,8 @@ Spilling to disk, the one thing Polars 2 does that can use the worker's disk, is
 
 ## What Python assets do not do (yet)
 
-- `materialize: table` only. `incremental` is not supported (#23), and `view` is refused too.
+- A Python asset is a table (or an artifact), never a view. It appends with
+  `write="append", watermark=...`, not with `materialize="incremental"`.
 - Table inputs and a table output are whole DataFrames in memory. There is no streaming (#22), so
   the worker needs memory for your inputs, your output and your own work. An artifact is a file on
   disk and is not held in memory by Lakana.
@@ -155,7 +169,10 @@ there is one, the line, as `path:line: message`. Fix the cause and deploy again.
 | ``Asset `x.y`: the connections this project version declares cannot be read, so they cannot be checked against environment `e`. Deploy the repository again to record a new version.`` | The stored record of a project version was damaged or edited by hand. A rollback to such a version says the same. | Deploy the repository again; roll back only to a version recorded intact. |
 | `argument 'connections' must be a list of strings`, ``connection `c` is listed twice``, `an asset declares at most 16 connections`, `connection names are lower-case letters, digits and '-', …` | A wrong value for `connections`. | Write a list of distinct connection names, such as `connections=["crm-db"]`. |
 | `the file does not parse: …` | A syntax error. | Fix the line it names. |
-| `incremental Python assets are not supported yet (#23)`, `a Python asset supports only materialize 'table', got …` | `materialize` is not `table`. | Remove the argument, or write a SQL asset. |
+| ``a Python asset appends with write="append" and watermark="<column>", not materialize='incremental'`` | `materialize="incremental"`. | Write `write="append", watermark="<column>"`. |
+| `a Python asset supports only materialize 'table', got …` | `materialize` is neither `table` nor `incremental`. | Remove the argument, or write a SQL asset. |
+| ``write must be one of replace, append, merge; got '…'``, ``` `write: append` needs `watermark:` … ```, ``` `write: merge` needs `key:` … ```, ``` `write: replace` takes neither `key:` nor `watermark:` ```, ``key column `id` is listed twice`` | A wrong write model. | See [Write modes](asset-front-matter.md#write-modes); the rules are the same as in SQL front-matter. |
+| `` `ctx` is the asset's context; give the input another parameter name `` | `inputs` names a parameter `ctx`. | Rename the parameter and its entry in `inputs`. |
 | `assets/a.sql and assets/a.py both produce table 'a'` | A SQL file and a Python file for one table. | Keep one. |
 | `every .py file under assets/ is an asset; put helper code outside assets/ …` | `__init__.py` or a helper module under `assets/`. | Move helper code to the repository root or `src/`. |
 | `symlinks are not allowed in a repository with Python assets` | A symlink anywhere in the repository. | Replace it with a copy of the file. |

@@ -88,6 +88,7 @@ from lakana_core.projects.manifest import (
     entry_decimals,
     entry_input_kinds,
     entry_output,
+    entry_write,
     manifest_lock_sha256,
     manifest_python,
 )
@@ -1301,6 +1302,16 @@ class PythonRuntime:
                 FailureKind.PERMANENT, self._bad_inputs(claimed.asset), FailureCode.CODE_CHANGED
             )
         output = self._output_of(entry, claimed.asset)
+        written = entry_write(entry)[0]
+        if output == "table" and written != "replace":
+            # Never run an asset that appends or merges as a replace, which would drop rows.
+            raise TaskFailure(
+                FailureKind.PERMANENT,
+                f"{claimed.asset} is written with `write: {ascii(written)[1:-1][:40]}`, which "
+                "this worker cannot run for a Python asset; upgrade the worker to the "
+                "platform's version",
+                FailureCode.CODE_CHANGED,
+            )
         reason = self.support.reason()
         if reason is not None:
             raise TaskFailure(

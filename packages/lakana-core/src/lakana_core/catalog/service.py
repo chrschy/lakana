@@ -5415,6 +5415,9 @@ class CatalogService:
         sources: Sequence[str] = (),
         source_versions: Mapping[str, int] | None = None,
         expected_snapshot_id: ExpectedSnapshot | None = None,
+        pin: SnapshotPin | None = None,
+        query_run_id: uuid.UUID | None = None,
+        watermark: str | None = None,
     ) -> MergeResult:
         """Update the rows whose key matches, insert the rest, in one commit (`tables.merge`).
 
@@ -5449,6 +5452,15 @@ class CatalogService:
         expected_snapshot_id
             The table's current snapshot as the caller read it, or ``none``; the merge commits
             only while that still holds, and ``none`` on a missing table creates it.
+        pin
+            The table and snapshot a worker's merge run computed its rows from (a SQL asset's
+            watermark, or a SELECT of its own target), as for `write_batches`: the merge
+            commits only while the table is still that table at that snapshot. `None` for a
+            merge whose rows do not depend on the table; ignored where the merge creates it.
+        query_run_id
+            The run merging, for the audit event and the lineage edges.
+        watermark
+            The encoded watermark the run filtered on, for the audit event.
 
         Returns
         -------
@@ -5470,7 +5482,8 @@ class CatalogService:
             table that is not managed, or a row filter or column mask on it that applies to
             `p` (see `check_can_merge`).
         ConflictError
-            If another writer committed first, or `expected_snapshot_id` no longer matches.
+            If another writer committed first, or `expected_snapshot_id` or `pin` no longer
+            matches.
         """
         self._commit_sent = False
         self.check_can_merge(p, ref, expected_snapshot_id=expected_snapshot_id)
@@ -5490,6 +5503,7 @@ class CatalogService:
                     schema=data.schema,
                     batches=data.to_batches(),
                     sources=lineage,
+                    query_run_id=query_run_id,
                 )
             except AlreadyExistsError as exc:
                 raise ConflictError(target_changed_message(ref.dotted())) from exc
@@ -5498,6 +5512,7 @@ class CatalogService:
                 rows_inserted=created.rows,
                 rows_updated=0,
                 created=True,
+                table_id=created.table_id,
             )
 
         securable = Securable.table_scope(ref.environment, ref.namespace, ref.name)
@@ -5515,6 +5530,10 @@ class CatalogService:
             if current.current_snapshot_id != wanted:
                 raise ConflictError(target_changed_message(ref.dotted()))
             pins.append(AssertRefSnapshotId(ref="main", snapshot_id=wanted))
+        if pin is not None:
+            if pin != SnapshotPin(table_id, current.current_snapshot_id):
+                raise ConflictError(target_changed_message(ref.dotted()))
+            pins.append(AssertRefSnapshotId(ref="main", snapshot_id=pin.snapshot_id))
         schema = current.schema()
         check_merge_batch(
             data,
@@ -5524,7 +5543,7 @@ class CatalogService:
         )
         validate_arrow_schema(schema, data)
         if data.num_rows == 0:
-            return MergeResult(snapshot_id=None, rows_inserted=0, rows_updated=0)
+            return MergeResult(snapshot_id=None, rows_inserted=0, rows_updated=0, table_id=table_id)
 
         resolved = self._storage.for_environment(ref.environment)
         staged = stage_upsert(
@@ -5532,7 +5551,7 @@ class CatalogService:
         )
         added = [u.snapshot for u in staged.updates if isinstance(u, AddSnapshotUpdate)]
         if not added:
-            return MergeResult(snapshot_id=None, rows_inserted=0, rows_updated=0)
+            return MergeResult(snapshot_id=None, rows_inserted=0, rows_updated=0, table_id=table_id)
         snapshot = added[0]
         # Listed before the try, as in `append`: a failure reading them back aborts directly.
         written_paths = new_data_file_paths(snapshot, resolved.file_io)
@@ -5555,8 +5574,8 @@ class CatalogService:
                     snapshot_id=snapshot.snapshot_id,
                     schema_diff=SchemaDiff(),
                 ),
-                None,
-                None,
+                query_run_id,
+                watermark,
                 lineage,
                 environment_id,
                 snapshot_before=current.current_snapshot_id,
@@ -5593,6 +5612,7 @@ class CatalogService:
             snapshot_id=snapshot.snapshot_id,
             rows_inserted=counts.rows_inserted,
             rows_updated=counts.rows_updated,
+            table_id=table_id,
         )
 
     def resolve_lineage_sources(

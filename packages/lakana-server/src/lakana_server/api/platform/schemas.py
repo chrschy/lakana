@@ -428,7 +428,8 @@ class WriteTargetIn(BaseModel):
     table
         The target's dotted name.
     mode
-        `create`, `replace`, `append` or `view`.
+        `create`, `replace`, `append` or `view`. `merge` is accepted only to be refused with
+        what merges instead (an asset with `write: merge`, or `tables.merge`).
     incremental_key
         The key column, `append` only.
     evolve_schema
@@ -438,7 +439,7 @@ class WriteTargetIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     table: str = Field(min_length=1, max_length=1024)
-    mode: Literal["create", "replace", "append", "view"]
+    mode: Literal["create", "replace", "append", "view", "merge"]
     incremental_key: str | None = Field(default=None, max_length=255)
     evolve_schema: bool = False
 

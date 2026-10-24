@@ -33,6 +33,7 @@ from lakana_core.catalog import merge as merge_module
 from lakana_core.catalog import service as service_module
 from lakana_core.catalog.merge import COMPOSITE_KEY_MAX_ROWS, MergeResult, check_merge_batch
 from lakana_core.catalog.service import CatalogService
+from lakana_core.catalog.writes import SnapshotPin
 from lakana_core.errors import (
     AlreadyExistsError,
     ConflictError,
@@ -385,7 +386,10 @@ def test_unchanged_rows_commit_nothing(cat: Cat) -> None:
         cat.admin, cat.ref("bronze.customers"), cat.arrow([(1, "a", T0)]), key=["id"]
     )
 
-    assert result == MergeResult(snapshot_id=None, rows_inserted=0, rows_updated=0)
+    table_id = cat.service.load_table(cat.admin, cat.ref("bronze.customers")).uuid
+    assert result == MergeResult(
+        snapshot_id=None, rows_inserted=0, rows_updated=0, table_id=table_id
+    )
     assert cat.metadata_location("bronze.customers") == location
     assert len(cat.events(AuditEventType.TABLE_WRITE)) == writes
 
@@ -396,7 +400,10 @@ def test_zero_rows_commit_nothing(cat: Cat) -> None:
 
     result = cat.service.merge(cat.admin, cat.ref("bronze.customers"), cat.arrow([]), key=["id"])
 
-    assert result == MergeResult(snapshot_id=None, rows_inserted=0, rows_updated=0)
+    table_id = cat.service.load_table(cat.admin, cat.ref("bronze.customers")).uuid
+    assert result == MergeResult(
+        snapshot_id=None, rows_inserted=0, rows_updated=0, table_id=table_id
+    )
     assert cat.metadata_location("bronze.customers") == location
 
 
@@ -1209,3 +1216,37 @@ def test_a_task_of_a_reading_and_writing_principal_merges(cat: Cat) -> None:
     )
 
     assert result.rows_updated == 1
+
+
+def test_a_pin_of_another_table_or_snapshot_is_a_conflict_and_the_current_one_commits(
+    cat: Cat,
+) -> None:
+    """A worker's pin names the table too: a namesake created again does not match."""
+    current = cat.append("bronze.customers", [(1, "a", T0)])
+    table_id = cat.service.load_table(cat.admin, cat.ref("bronze.customers")).uuid
+    location, parquet = cat.metadata_location("bronze.customers"), cat.files(".parquet")
+    for pin in (SnapshotPin(uuid.uuid4(), current), SnapshotPin(table_id, None)):
+        with pytest.raises(ConflictError, match="changed"):
+            cat.service.merge(
+                cat.admin,
+                cat.ref("bronze.customers"),
+                cat.arrow([(1, "z", T1)]),
+                key=["id"],
+                pin=pin,
+            )
+        _nothing_written(cat, location, parquet)
+
+    run_id = uuid.uuid4()
+    result = cat.service.merge(
+        cat.admin,
+        cat.ref("bronze.customers"),
+        cat.arrow([(1, "z", T1)]),
+        key=["id"],
+        pin=SnapshotPin(table_id, current),
+        query_run_id=run_id,
+        watermark="long:1",
+    )
+
+    assert (result.rows_updated, result.table_id) == (1, table_id)
+    event = cat.events(AuditEventType.TABLE_WRITE)[-1]
+    assert (event.detail["run_id"], event.detail["watermark"]) == (str(run_id), "long:1")

@@ -5,6 +5,10 @@ other row is added. Nothing is deleted. Use it to keep a table in step with a so
 changed rows again, such as a customer list exported each night with its changes. To add rows
 without matching, use an append; to swap every row, use a replace.
 
+This page is about merging rows you send. An asset that merges its own result on every run says
+`write: merge` with `key:` in its header; see
+[Write modes](asset-front-matter.md#write-modes).
+
 ## What a merge does
 
 - **One snapshot.** The merge commits one new snapshot of the table. A reader sees the table

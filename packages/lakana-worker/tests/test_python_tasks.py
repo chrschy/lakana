@@ -3521,7 +3521,7 @@ def test_an_output_this_worker_does_not_know_fails_permanently_and_runs_nothing(
     assert _versions(py) == []
 
 
-@pytest.mark.parametrize("version", [8, 99, "3", 3.0, True, [3], 0, -1, 10**30])
+@pytest.mark.parametrize("version", [9, 99, "3", 3.0, True, [3], 0, -1, 10**30])
 def test_a_manifest_this_worker_cannot_read_fails_permanently(py: PyWorld, version: object) -> None:
     py.deploy()
 
@@ -7382,3 +7382,37 @@ def test_a_python_task_with_checks_of_a_protected_environment_is_refused_on_the_
     assert stamps == []
     with py.world.session() as session:
         assert results_of_task(session, claimed.task_run_id) == []
+
+
+@pytest.mark.parametrize("write", ["append", "merge", "upsert"])
+def test_a_python_asset_that_does_not_replace_is_never_run_as_a_replace(
+    py: PyWorld, write: str
+) -> None:
+    """Until the harness writes appends and merges, such an asset fails instead of replacing."""
+    py.deploy()
+
+    def change(session: Session) -> None:
+        """Mark the asset's entry with a write mode other than replace.
+
+        Parameters
+        ----------
+        session
+            A session.
+        """
+        row = session.get(JobVersion, py.world.version_id)
+        assert row is not None
+        assets = [
+            {**entry, "write": write, "key": ["id"], "watermark": "id"}
+            for entry in row.manifest_json["assets"]
+        ]
+        row.manifest_json = {**row.manifest_json, "assets": assets}
+        flag_modified(row, "manifest_json")
+        session.commit()
+
+    task, message = _fails_after_claim(py, py.engine(_writer(py.world)), change)
+    assert (task.status, task.attempt) == (TaskStatus.FAILED, 1)
+    assert message == (
+        f"gold.scores is written with `write: {write}`, which this worker cannot run for a "
+        "Python asset; upgrade the worker to the platform's version"
+    )
+    assert py.runner.tasks == []

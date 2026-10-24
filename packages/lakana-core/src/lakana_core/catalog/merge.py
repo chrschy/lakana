@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import uuid
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 
@@ -95,12 +96,15 @@ class MergeResult:
         Rows whose key matched and whose values changed.
     created
         Whether the merge created the table.
+    table_id
+        The table's id; `None` only where a caller built the result itself.
     """
 
     snapshot_id: int | None
     rows_inserted: int
     rows_updated: int
     created: bool = False
+    table_id: uuid.UUID | None = None
 
 
 def _shown(key: Sequence[str]) -> str:

@@ -28,8 +28,10 @@ Options that do not apply to an artifact asset:
   artifact asset; remove it` (or `columns does not apply ...`). A deploy says `argument
   'materialize' does not apply to an artifact asset; remove it` (or `'columns'`), naming the file
   and line.
-- `incremental_key` is not an `@asset` argument at all (it is a SQL front-matter key), so a deploy
-  refuses it as `unknown argument 'incremental_key'`.
+- `write`, `key` and `watermark` are refused the same way (`argument 'write' does not apply to an
+  artifact asset; remove it`), except `write="replace"` and `key=[]`, which change nothing: each
+  run stores a new version of the artifact. `incremental_key` is not an `@asset` argument at all,
+  so a deploy refuses it as `unknown argument 'incremental_key'`.
 - `keep_versions` on an asset without `output="artifact"` is refused. The decorator raises
   `keep_versions applies only to an asset with output="artifact"`. A deploy says `argument
   'keep_versions' applies only to an asset with output="artifact"; remove it or set

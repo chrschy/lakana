@@ -22633,7 +22633,8 @@
               "create",
               "replace",
               "append",
-              "view"
+              "view",
+              "merge"
             ],
             "title": "Mode"
           },
@@ -22662,7 +22663,7 @@
           "mode"
         ],
         "title": "WriteTargetIn",
-        "description": "Where a write run puts its result.\n\nParameters\n----------\ntable\n    The target's dotted name.\nmode\n    `create`, `replace`, `append` or `view`.\nincremental_key\n    The key column, `append` only.\nevolve_schema\n    Let the target adopt the result's schema, `replace`/`append` only."
+        "description": "Where a write run puts its result.\n\nParameters\n----------\ntable\n    The target's dotted name.\nmode\n    `create`, `replace`, `append` or `view`. `merge` is accepted only to be refused with\n    what merges instead (an asset with `write: merge`, or `tables.merge`).\nincremental_key\n    The key column, `append` only.\nevolve_schema\n    Let the target adopt the result's schema, `replace`/`append` only."
       }
     }
   }

@@ -133,6 +133,23 @@ Each cell is a summary. The page named in the last column has the detail. The ch
 
 ## Notes for the next release
 
+### A Python asset's parameter `ctx` is not an input
+
+A parameter named `ctx` now receives the asset's context and is never an input. A project whose
+asset reads a table into a parameter `ctx` (`inputs={"ctx": "silver.orders"}`) fails its deploy
+with ``` `ctx` is the asset's context; give the input another parameter name ```: rename the
+parameter and its entry in `inputs`, then deploy again.
+
+### Assets append and merge with `write:`
+
+An asset says how a run writes its table with `write: replace` (the default), `append` (with
+`watermark:`) or `merge` (with `key:`); see [Write modes](../reference/asset-front-matter.md#write-modes).
+`materialize: incremental` with `incremental_key:` keeps working as the older spelling of
+`write: append`, and a deploy prints a hint. A project version that spells `write: append` or
+`merge` has manifest version 8, which a worker of an earlier release refuses: upgrade the workers
+before you deploy such a project. A Python asset's `materialize="incremental"` is now refused
+with a message that points at `write="append"`.
+
 ### Builds reach a package index on any port
 
 Under the docker runner a build now reaches each package index on the port of its URL, with a
